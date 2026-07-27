@@ -150,11 +150,12 @@ def create_app(env: LiveEnv | None = None) -> FastAPI:
             ) from e
         except RuntimeError as e:
             # Pool exhausted or sampler error.
+            LOG.warning("environment unavailable during reset: %s", e)
             raise HTTPException(
                 status_code=503,
                 detail={
                     "error": "env_unavailable",
-                    "message": str(e),
+                    "message": "Environment unavailable",
                 },
             ) from e
         except Exception as e:
@@ -163,7 +164,7 @@ def create_app(env: LiveEnv | None = None) -> FastAPI:
                 status_code=500,
                 detail={
                     "error": "internal_error",
-                    "message": str(e),
+                    "message": "Internal server error",
                 },
             ) from e
         return ResetResponse(episode_id=meta.episode_id, observation=obs, meta=meta)
@@ -190,11 +191,12 @@ def create_app(env: LiveEnv | None = None) -> FastAPI:
                 },
             ) from e
         except RuntimeError as e:
+            LOG.warning("invalid episode state during step: %s", e)
             raise HTTPException(
                 status_code=409,
                 detail={
                     "error": "step_invalid_state",
-                    "message": str(e),
+                    "message": "Episode is not in a step-able state",
                 },
             ) from e
         except Exception as e:
@@ -203,7 +205,7 @@ def create_app(env: LiveEnv | None = None) -> FastAPI:
                 status_code=500,
                 detail={
                     "error": "internal_error",
-                    "message": str(e),
+                    "message": "Internal server error",
                 },
             ) from e
         return StepResponse(observation=obs, reward=reward, done=done, info=info)

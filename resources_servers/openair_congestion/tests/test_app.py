@@ -17,8 +17,10 @@
 # modeled on resources_servers/blackjack/tests/test_app.py (direct
 # reset()/step() calls with a mock ServerClient).
 #
+import asyncio
 import json
 import math
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -185,6 +187,17 @@ class TestReset:
         assert reset_info["action_affects_observation"] is True
         assert reset_info["reward_profile"] == "openair_t2_v3"
         assert reset_info["observation_render"] == "t2_compact_pipe_v2"
+        assert reset_info["tool_contract"] == {
+            "allowed_names": ["noop", "set_prb_cap"],
+            "parameter_overrides": {
+                "set_prb_cap": {
+                    "cell_id": {"minimum": 0, "maximum": 2},
+                    "target": {"enum": ["ue"]},
+                    "target_id": {"minimum": 0, "maximum": 7},
+                    "max_prb": {"minimum": 200, "maximum": 273},
+                }
+            },
+        }
         assert reset_info["reward_weights"] == {
             "w_sla": 1.0,
             "w_tput": 2.0,
@@ -217,6 +230,7 @@ class TestReset:
             "reward_profile",
             "reward_weights",
             "observation_render",
+            "tool_contract",
         ):
             assert step_info[key] == reset_info[key]
 
@@ -318,6 +332,32 @@ class TestReset:
 
 
 class TestStep:
+    @pytest.mark.asyncio
+    async def test_blocking_backend_step_is_offloaded_from_event_loop(self, monkeypatch):
+        env = _make_env()
+        await env.reset(dict(_TASK_METADATA), session_id="sid")
+        original = env.backend.step
+        release = threading.Event()
+        timed_out = threading.Event()
+
+        def blocking_step(*args, **kwargs):
+            if not release.wait(timeout=0.5):
+                timed_out.set()
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(env.backend, "step", blocking_step)
+
+        async def let_backend_continue():
+            await asyncio.sleep(0.01)
+            release.set()
+
+        await asyncio.gather(
+            env.step(_tool_response("noop", {}), {}, session_id="sid"),
+            let_backend_continue(),
+        )
+
+        assert not timed_out.is_set()
+
     @pytest.mark.asyncio
     async def test_none_session_is_rejected_before_step(self):
         env = _make_env()

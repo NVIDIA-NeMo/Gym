@@ -16,10 +16,10 @@
 """Capability sweep: profile how the environment attributes reward across policies.
 
 Environment sanity check, run before any training: drive seeded episodes over
-the real HTTP surface for a ladder of scripted anchor policies of known
-quality (congestion relief > noop > random-valid > catastrophic) and,
+the real HTTP surface for scripted anchor policies with a known partial
+order (relief beats noop and random-valid; both beat catastrophic play) and,
 optionally, ranked OpenAI-compatible chat-completions models. The scripted
-ladder is a deterministic correctness gate. The model ladder is an empirical
+anchor check is a deterministic correctness gate. The model ladder is an empirical
 gate: if a declared frontier model does not beat a smaller model on complete
 paired profiles, investigate the prompt, task coverage, and reward before
 training rather than assuming either the environment or model is correct.
@@ -269,10 +269,19 @@ _ANCHORS: dict[str, Callable[[], Callable[[str, int, random.Random], dict[str, A
     "anchor:noop": lambda: _noop,
     "anchor:catastrophic": lambda: _catastrophic,
 }
-# The known quality ordering for the persistent synthetic replay dynamics
-# (best to worst).  Guardrail-valid random control is intentionally not
-# treated as beneficial control.
+# Display order for the four scripted anchors.
 _ANCHOR_ORDER = ("anchor:relief", "anchor:noop", "anchor:random-valid", "anchor:catastrophic")
+# This is intentionally a partial order. In a genuinely congested
+# environment, random guardrail-valid control can occasionally help by
+# accident, so requiring noop > random-valid would reward an inert simulator.
+# Intentional relief must beat both; catastrophic rejected play must lose to
+# both.
+_ANCHOR_CONSTRAINTS = (
+    ("anchor:relief", "anchor:noop"),
+    ("anchor:relief", "anchor:random-valid"),
+    ("anchor:noop", "anchor:catastrophic"),
+    ("anchor:random-valid", "anchor:catastrophic"),
+)
 
 
 @dataclass
@@ -942,8 +951,33 @@ async def _sweep(
         table.append(entry)
     table.sort(key=lambda r: r["mean_return"] if r["mean_return"] is not None else -math.inf, reverse=True)
 
-    anchor_means = {label: results[label].row(label)["mean_return"] for label in _ANCHOR_ORDER}
-    ordered = all(anchor_means[a] > anchor_means[b] for a, b in zip(_ANCHOR_ORDER, _ANCHOR_ORDER[1:]))
+    anchor_rows = {label: results[label].row(label) for label in _ANCHOR_ORDER}
+    anchor_returns = {
+        label: {str(record["pair_key"]): float(record["return"]) for record in row["episode_records"]}
+        for label, row in anchor_rows.items()
+    }
+    anchor_comparisons: list[dict[str, Any]] = []
+    for comparison_index, (better, worse) in enumerate(_ANCHOR_CONSTRAINTS):
+        pair_keys = sorted(set(anchor_returns[better]) & set(anchor_returns[worse]))
+        deltas = [anchor_returns[better][key] - anchor_returns[worse][key] for key in pair_keys]
+        mean_delta = statistics.fmean(deltas)
+        ci95_low, ci95_high = _paired_bootstrap_ci(
+            deltas,
+            seed=10_000 + comparison_index,
+        )
+        passed = mean_delta > 0.0 and ci95_low > 0.0
+        anchor_comparisons.append(
+            {
+                "better": better,
+                "worse": worse,
+                "pairs": len(deltas),
+                "mean_delta": round(mean_delta, 6),
+                "ci95_low": round(ci95_low, 6),
+                "ci95_high": round(ci95_high, 6),
+                "status": "PASS" if passed else "FAIL",
+            }
+        )
+    ordered = all(comparison["status"] == "PASS" for comparison in anchor_comparisons)
     model_ordering = _evaluate_model_ordering(
         table,
         specs,
@@ -970,6 +1004,8 @@ async def _sweep(
         "profile": table,
         "anchor_ordering_ok": ordered,
         "anchor_order_expected": list(_ANCHOR_ORDER),
+        "anchor_order_constraints": [list(pair) for pair in _ANCHOR_CONSTRAINTS],
+        "anchor_ordering_comparisons": anchor_comparisons,
         "model_ordering": model_ordering,
         "model_ordering_ok": (
             model_ordering["status"] == "PASS" if model_ordering["status"] in {"PASS", "FAIL"} else None
@@ -997,7 +1033,9 @@ def _print_report(report: dict[str, Any]) -> None:
             f"{r['invalid_calls']:>8} {r['parse_failures']:>11} {r['infra_errors']:>6} {r['episodes']:>4}"
         )
     verdict = "PASS" if report["anchor_ordering_ok"] else "FAIL"
-    print(f"\nanchor ordering (relief > noop > random-valid > catastrophic): {verdict}")
+    print(
+        f"\nanchor partial order (relief > noop, relief > random-valid, noop/random-valid > catastrophic): {verdict}"
+    )
     if not report["anchor_ordering_ok"]:
         print("a broken anchor ordering means reward attribution is suspect -- investigate before training.")
     model_ordering = report["model_ordering"]

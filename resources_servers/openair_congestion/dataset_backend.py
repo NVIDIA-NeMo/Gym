@@ -67,6 +67,7 @@ from resources_servers.openair_congestion.backends import Backend
 # isort: split
 from openair_congestion import guardrail as _guardrail
 from openair_congestion import rewards as _rewards
+from openair_congestion.reward_profiles import select_reward_profile
 from openair_congestion.schemas import (
     AgentAux,
     EpisodeMeta,
@@ -881,6 +882,7 @@ class DatasetReplayBackend(Backend):
             capacity = (
                 episode.cell_capacity_mbps if episode.cell_capacity_mbps is not None else self.cell_capacity_mbps
             )
+            reward_profile = select_reward_profile(episode.meta.tier)
             reward_breakdown = _rewards.compute_breakdown(
                 prev_obs=prev_obs,
                 curr_obs=new_obs,
@@ -888,6 +890,8 @@ class DatasetReplayBackend(Backend):
                 rejected=rejected,
                 cell_capacity_mbps=capacity,
                 weights=self.reward_weights,
+                prb_pressure_threshold=reward_profile.prb_pressure_threshold,
+                reward_version=reward_profile.version,
             )
             reward = float(reward_breakdown["total"])
 
@@ -916,6 +920,7 @@ class DatasetReplayBackend(Backend):
                 "kpi_source": "dataset_replay",
                 "reward_measurements": reward_breakdown["measurements"],
                 "reward_terms": reward_breakdown["terms"],
+                "reward_version": reward_profile.version,
                 **self.capabilities(),
             }
             assert math.isfinite(reward), "reward must be finite"

@@ -19,8 +19,14 @@ import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
+from responses_api_agents.gymnasium_agent.app import (
+    GymnasiumAgent,
+    GymnasiumAgentConfig,
+    GymnasiumAgentRunRequest,
+    _apply_tool_contract,
+)
 
 
 def _make_agent(max_steps=10, observability=True):
@@ -139,6 +145,43 @@ class TestConfig:
 
     def test_default_max_steps(self):
         assert _make_agent().config.max_steps == 10
+
+    def test_tool_contract_cannot_loosen_task_schema(self):
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {
+                "input": "x",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "set_prb_cap",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "max_prb": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 273,
+                                }
+                            },
+                        },
+                        "strict": False,
+                    }
+                ],
+            }
+        )
+
+        with pytest.raises(ValueError, match="may not loosen"):
+            _apply_tool_contract(
+                body,
+                {
+                    "allowed_names": ["set_prb_cap"],
+                    "parameter_overrides": {
+                        "set_prb_cap": {
+                            "max_prb": {"maximum": 300},
+                        }
+                    },
+                },
+            )
 
 
 class TestRun:
@@ -273,6 +316,91 @@ class TestRun:
         ), f"turn-1 output not preserved in structured form: {assistant_items}"
         # obs-1 appended as a user message after turn-1
         assert any(getattr(m, "role", None) == "user" and getattr(m, "content", "") == "obs-1" for m in turn2_input)
+
+    @pytest.mark.asyncio
+    async def test_reset_tool_contract_filters_and_tightens_model_tools(self):
+        agent = _make_agent(max_steps=1)
+        tool_parameters = {
+            "additionalProperties": False,
+            "properties": {
+                "cell_id": {"type": "integer", "minimum": 0, "maximum": 3},
+                "target": {"type": "string", "enum": ["ue"]},
+                "target_id": {"type": "integer", "minimum": 0, "maximum": 23},
+                "max_prb": {"type": "integer", "minimum": 0, "maximum": 273},
+            },
+            "required": ["cell_id", "target", "target_id", "max_prb"],
+            "type": "object",
+        }
+        call_log = _wire_mock_client(
+            agent,
+            {
+                "/reset": [
+                    {
+                        "observation": "start",
+                        "info": {
+                            "tool_contract": {
+                                "allowed_names": ["noop", "set_prb_cap"],
+                                "parameter_overrides": {
+                                    "set_prb_cap": {
+                                        "cell_id": {"minimum": 0, "maximum": 2},
+                                        "max_prb": {"minimum": 200, "maximum": 273},
+                                    }
+                                },
+                            }
+                        },
+                    }
+                ],
+                "/v1/responses": [_model_response("turn")],
+                "/step": [
+                    {
+                        "observation": None,
+                        "reward": 0.0,
+                        "terminated": True,
+                        "truncated": False,
+                        "info": {},
+                    }
+                ],
+            },
+        )
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "x"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "set_scheduler_policy",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": False,
+                    },
+                    {
+                        "type": "function",
+                        "name": "set_prb_cap",
+                        "parameters": tool_parameters,
+                        "strict": False,
+                    },
+                    {
+                        "type": "function",
+                        "name": "noop",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                        "strict": False,
+                    },
+                ],
+            }
+        )
+
+        await agent.run(req, body)
+
+        model_body = next(payload for _server, url, payload in call_log if url == "/v1/responses")
+        assert [tool["name"] for tool in model_body.tools] == ["set_prb_cap", "noop"]
+        properties = model_body.tools[0]["parameters"]["properties"]
+        assert properties["cell_id"]["maximum"] == 2
+        assert properties["max_prb"]["minimum"] == 200
 
     @pytest.mark.asyncio
     async def test_max_steps_sets_truncated(self):

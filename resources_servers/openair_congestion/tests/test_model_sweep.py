@@ -27,6 +27,7 @@ from aiohttp import web
 
 from resources_servers.openair_congestion.client import _free_port
 from resources_servers.openair_congestion.model_sweep import (
+    _ANCHOR_CONSTRAINTS,
     _ANCHOR_ORDER,
     ModelSpec,
     _evaluate_model_ordering,
@@ -56,8 +57,14 @@ def test_anchor_sweep_orders_policies_and_reports_profile():
     # The known quality ladder must hold on the deterministic replay tasks,
     # and the report must say so itself.
     assert report["anchor_ordering_ok"] is True
-    means = [by_policy[label]["mean_return"] for label in _ANCHOR_ORDER]
-    assert means == sorted(means, reverse=True)
+    assert all(
+        by_policy[better]["mean_return"] > by_policy[worse]["mean_return"] for better, worse in _ANCHOR_CONSTRAINTS
+    )
+    assert len(report["anchor_ordering_comparisons"]) == len(_ANCHOR_CONSTRAINTS)
+    assert all(
+        comparison["status"] == "PASS" and comparison["ci95_low"] > 0.0
+        for comparison in report["anchor_ordering_comparisons"]
+    )
 
     # Catastrophic play is rejected every step; valid play never is.
     assert by_policy["anchor:catastrophic"]["rejection_rate"] == 1.0
@@ -473,7 +480,11 @@ def test_llm_policies_end_to_end_against_mock_endpoint():
     assert rambler["parse_failures"] == 1
     assert rambler["noop_rate"] == 0.0
     assert rambler["tool_metrics"]["<parse_failure>"]["calls"] == 1
-    assert rambler["mean_return"] < cooperative["mean_return"]
+    assert rambler["usable_episodes"] == 0
+    # A terminal protocol penalty and a multi-step valid return are not
+    # comparable on magnitude; usability, not score ordering, excludes the
+    # malformed response from capability comparisons.
+    assert rambler["episode_records"][0]["usable"] is False
 
     # LLM rows carry the reward-ceiling reference; noop-playing models must
     # match the noop anchor's return on the same paired task.

@@ -17,9 +17,9 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 973.0,
-        "Min": 973.0,
-        "Max": 973.0,
+        "Average": 1096.0,
+        "Min": 1096.0,
+        "Max": 1096.0,
         "Standard deviation": 0.0
     },
     "Number of turns": {
@@ -36,13 +36,6 @@
         "Max": 0.0,
         "Standard deviation": 0.0
     },
-    "seed": {
-        "Total # non-null values": 5,
-        "Average": 7003.0,
-        "Min": 7001.0,
-        "Max": 7005.0,
-        "Standard deviation": 1.58
-    },
     "difficulty": {
         "Total # non-null values": 5,
         "Average": 0.6,
@@ -50,19 +43,26 @@
         "Max": 0.7,
         "Standard deviation": 0.071
     },
-    "scenario_id": {
-        "unique_count": 5,
-        "total_count": 5
-    },
-    "tier": {
-        "unique_count": 1,
-        "total_count": 5
-    },
     "max_steps": {
         "Total # non-null values": 5,
         "Average": 16.0,
         "Min": 16.0,
         "Max": 16.0,
         "Standard deviation": 0.0
+    },
+    "scenario_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "seed": {
+        "Total # non-null values": 5,
+        "Average": 7003.0,
+        "Min": 7001.0,
+        "Max": 7005.0,
+        "Standard deviation": 1.58
+    },
+    "tier": {
+        "unique_count": 1,
+        "total_count": 5
     }
 }

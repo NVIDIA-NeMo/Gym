@@ -535,6 +535,45 @@ class TestDatasetReplayBackend:
         summary = backend.close(meta.episode_id)
         assert summary == {"ok": True, "n_steps": 3}
 
+    def test_t2_dataset_uses_t2_reward_profile(self, tmp_path):
+        path = tmp_path / "t2.jsonl"
+        rows = []
+        for step, delivered in enumerate((10.0, 8.0)):
+            rows.append(
+                {
+                    "episode_id": "t2_recording",
+                    "step": step,
+                    "global": {"tier": "T2"},
+                    "cells": [
+                        {
+                            "cell_id": 0,
+                            "prb_util_dl_p50": 0.9,
+                            "ues": [
+                                {
+                                    "ue_id": 0,
+                                    "offered_mbps": 20.0,
+                                    "delivered_mbps": delivered,
+                                    "bler": 0.1,
+                                    "sinr_db": 5.0,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        backend = _make_backend(dataset_path=path)
+        _, meta = backend.reset({"scenario_id": "t2_recording"})
+        _, _, _, info = backend.step(meta.episode_id, NOOP)
+        backend.close(meta.episode_id)
+
+        assert meta.tier == "T2"
+        assert info["reward_version"] == "openair_t2_v3"
+        assert info["reward_terms"]["delta_sla"] == 0.0
+        assert info["reward_terms"]["delta_tput"] == 0.0
+        assert "delivery_gap" in info["reward_terms"]
+
     def test_reward_exception_leaves_episode_state_unchanged(self, monkeypatch):
         backend = _make_backend()
         _, meta = backend.reset({"scenario_id": "lab_run_a"})

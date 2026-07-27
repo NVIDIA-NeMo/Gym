@@ -162,7 +162,7 @@ def _t2_policy_guardrail(
         )
     if action.name == "set_prb_cap":
         max_prb = action.arguments.get("max_prb")
-        if not isinstance(max_prb, int) or max_prb < 200:
+        if not isinstance(max_prb, int) or max_prb < 200 or max_prb > 273:
             return _guardrail.GuardrailResult(
                 accepted=False,
                 reason=(f"T2 service floor requires set_prb_cap.max_prb in [200,273], got {max_prb!r}"),
@@ -216,14 +216,30 @@ def _sample_scenario(
             n_ues_total,
         )
         fp.cell_capacity_mbps = 60.0
+        normalized_difficulty = max(0.0, min(1.0, float(difficulty)))
+        regime = fp.regime_mix
         for cell_id in range(n_cells):
             ues_in_cell = max(1, n_ues_total // max(1, n_cells))
+            # A clean NeMo Gym checkout does not ship congestion_gen, so the
+            # fallback must be a useful control environment on its own. Keep
+            # low difficulty below capacity, but make the checked-in
+            # medium/high-difficulty examples genuinely oversubscribed.
+            load_ratio = 0.55 + 0.7 * normalized_difficulty
+            load_ratio += 0.15 * float(regime.get("prb_exhaustion", 0.0))
+            load_ratio += 0.08 * float(regime.get("bursty", 0.0))
+            load_ratio += 0.03 * float(regime.get("qos_competition", 0.0))
+            offered_per_ue = fp.cell_capacity_mbps * load_ratio / ues_in_cell
             for ue_idx in range(ues_in_cell):
                 key = (cell_id, ue_idx)
-                offered = 5.0 + 5.0 * difficulty
+                # QoS competition needs heterogeneous demand and service
+                # classes. Alternating 0.6/1.4 factors preserve the cell total
+                # while creating an observable fairness decision.
+                qos_weight = float(regime.get("qos_competition", 0.0))
+                skew = (0.6 if ue_idx % 2 == 0 else 1.4) if qos_weight > 0.0 else 1.0
+                offered = offered_per_ue * (1.0 + qos_weight * (skew - 1.0))
                 fp.requested_mbps[key] = offered
                 fp.offered_mbps[key] = offered
-                fp.qos_5qi[key] = 9
+                fp.qos_5qi[key] = 1 if qos_weight > 0.0 and ue_idx % 2 == 0 else 9
         return fp
 
     sampler = CongestionScenarioSampler(
@@ -526,16 +542,13 @@ def _build_observation(
             ue_ids_in_cell = [0]
 
         prach_collision_rate = 0.0 if snap_n_ues < 8 else min(0.5, 0.01 * (snap_n_ues - 8) ** 2)
-        if fp.tier.upper() == "T2":
-            prach_weight = max(
-                0.0,
-                min(1.0, float(fp.regime_mix.get("prach_storm", 0.0))),
-            )
+        prach_weight = max(
+            0.0,
+            min(1.0, float(fp.regime_mix.get("prach_storm", 0.0))),
+        )
+        if prach_weight > 0.0:
             planned_arrivals = int(8 + 24 * float(episode.meta.difficulty))
-            planned_pressure = min(
-                0.5,
-                0.01 * max(0, planned_arrivals - 8) ** 2,
-            )
+            planned_pressure = min(0.5, 0.01 * max(0, planned_arrivals - 8) ** 2)
             prach_collision_rate = max(
                 prach_collision_rate,
                 prach_weight * planned_pressure,

@@ -33,6 +33,7 @@ server, so a clean NeMo Gym checkout is self-contained.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -100,16 +101,45 @@ _TOOL_ARGUMENT_VALIDATORS = {
 _DEFAULT_OBSERVATION_RENDER = "openair_natural_language_v1"
 
 
-def _episode_contract(capabilities: dict[str, Any], tier: str) -> dict[str, Any]:
+def _episode_contract(
+    capabilities: dict[str, Any],
+    tier: str,
+    *,
+    n_cells: int,
+    max_target_id: int,
+) -> dict[str, Any]:
     """Return the explicit contract consumed by external rollout trainers."""
 
     profile = select_reward_profile(tier)
-    return {
+    contract = {
         **capabilities,
         "reward_profile": profile.version,
         "reward_weights": asdict(DEFAULT_WEIGHTS),
         "observation_render": (T2_OBSERVATION_RENDER if tier.upper() == "T2" else _DEFAULT_OBSERVATION_RENDER),
     }
+    if tier.upper() == "T2":
+        # The shared Gymnasium agent consumes this optional contract before
+        # the first model turn. It makes the model-facing tool schemas match
+        # the narrow service-safe T2 runtime guardrail instead of advertising
+        # six actions that T2 deliberately rejects.
+        contract["tool_contract"] = {
+            "allowed_names": ["noop", "set_prb_cap"],
+            "parameter_overrides": {
+                "set_prb_cap": {
+                    "cell_id": {
+                        "minimum": 0,
+                        "maximum": max(0, int(n_cells) - 1),
+                    },
+                    "target": {"enum": ["ue"]},
+                    "target_id": {
+                        "minimum": 0,
+                        "maximum": max(0, int(max_target_id)),
+                    },
+                    "max_prb": {"minimum": 200, "maximum": 273},
+                }
+            },
+        }
+    return contract
 
 
 class OpenAirCongestionResourcesServerConfig(BaseResourcesServerConfig):
@@ -214,7 +244,7 @@ class OpenAirCongestionEnv(GymnasiumServer):
         """Episode ids currently owned by live sessions (for the leak reaper)."""
         return {state["episode_id"] for state in self.session_state.values()}
 
-    def _reap_expired_sessions(self) -> None:
+    async def _reap_expired_sessions(self) -> None:
         """Release state left behind by clients that can no longer call /close."""
 
         now = time.monotonic()
@@ -228,7 +258,7 @@ class OpenAirCongestionEnv(GymnasiumServer):
             if state is None:
                 continue
             try:
-                self.backend.close(state["episode_id"])
+                await asyncio.to_thread(self.backend.close, state["episode_id"])
             except KeyError:
                 pass
 
@@ -249,14 +279,14 @@ class OpenAirCongestionEnv(GymnasiumServer):
             if requested_max_steps < 1:
                 raise ValueError("max_steps must be a positive integer")
 
-        self._reap_expired_sessions()
+        await self._reap_expired_sessions()
 
         # A client retry can POST /reset twice with the same session cookie.
         # Close the previous episode first or its backend slot leaks forever.
         stale = self.session_state.pop(session_id, None)
         if stale is not None:
             try:
-                self.backend.close(stale["episode_id"])
+                await asyncio.to_thread(self.backend.close, stale["episode_id"])
             except KeyError:
                 pass  # already closed inside the env
 
@@ -266,8 +296,20 @@ class OpenAirCongestionEnv(GymnasiumServer):
             for key in ("seed", "difficulty", "regime_mix", "scenario_id", "tier", "max_steps")
             if metadata.get(key) is not None
         }
-        first_obs, meta = self.backend.reset(task_params, live_episode_ids=self._live_episode_ids())
-        contract = _episode_contract(self.backend.capabilities(), meta.tier)
+        first_obs, meta = await asyncio.to_thread(
+            self.backend.reset,
+            task_params,
+            live_episode_ids=self._live_episode_ids(),
+        )
+        contract = _episode_contract(
+            self.backend.capabilities(),
+            meta.tier,
+            n_cells=first_obs.global_.n_cells,
+            max_target_id=max(
+                (ue.ue_id for cell in first_obs.cells for ue in cell.ues),
+                default=0,
+            ),
+        )
         self.session_state[session_id] = {
             "episode_id": meta.episode_id,
             "contract": contract,
@@ -365,7 +407,11 @@ class OpenAirCongestionEnv(GymnasiumServer):
 
         # One env step. In-range-but-rejected actions (guardrail) come back as
         # accepted=False with the env's own penalty reward, never an exception.
-        next_obs, reward, done, step_info = self.backend.step(state["episode_id"], tool_call)
+        next_obs, reward, done, step_info = await asyncio.to_thread(
+            self.backend.step,
+            state["episode_id"],
+            tool_call,
+        )
         step_info.update(state["contract"])
 
         # The server returns the per-step reward; gymnasium_agent sums the
@@ -454,7 +500,10 @@ class OpenAirCongestionEnv(GymnasiumServer):
         if state is None:
             return {"ok": True, "already_closed": True, "summary": {}}
         try:
-            summary = self.backend.close(state["episode_id"])
+            summary = await asyncio.to_thread(
+                self.backend.close,
+                state["episode_id"],
+            )
         except KeyError:
             # The underlying env can close an episode on a terminal step.  It
             # is still safe to consume our session state exactly once.

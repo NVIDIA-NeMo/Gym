@@ -356,8 +356,10 @@ def compute_terms(
     cell_capacity_mbps: float = 60.0,
     buffer_capacity_kb: float = 1024.0,
     prb_pressure_threshold: float = 0.85,
+    service_accounting: Mapping[str, Any] | None = None,
+    reward_version: str = "openair_v1",
 ) -> dict[str, float]:
-    """Return per-term reward components for calibration diagnostics."""
+    """Return versioned per-term reward components for calibration diagnostics."""
     breakdown = compute_breakdown(
         prev_obs,
         curr_obs,
@@ -367,6 +369,8 @@ def compute_terms(
         cell_capacity_mbps=cell_capacity_mbps,
         buffer_capacity_kb=buffer_capacity_kb,
         prb_pressure_threshold=prb_pressure_threshold,
+        service_accounting=service_accounting,
+        reward_version=reward_version,
     )
     return breakdown["terms"]  # type: ignore[return-value]
 
@@ -381,8 +385,10 @@ def compute(
     cell_capacity_mbps: float = 60.0,
     buffer_capacity_kb: float = 1024.0,
     prb_pressure_threshold: float = 0.85,
+    service_accounting: Mapping[str, Any] | None = None,
+    reward_version: str = "openair_v1",
 ) -> float:
-    """Compute the per-step reward. See module docstring for the formula."""
+    """Compute the versioned per-step reward. See the module formula."""
     terms = compute_terms(
         prev_obs,
         curr_obs,
@@ -392,6 +398,8 @@ def compute(
         cell_capacity_mbps=cell_capacity_mbps,
         buffer_capacity_kb=buffer_capacity_kb,
         prb_pressure_threshold=prb_pressure_threshold,
+        service_accounting=service_accounting,
+        reward_version=reward_version,
     )
     return terms["total"]
 

@@ -6,7 +6,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-from openair_congestion.replay_env import ReplayActionState, ReplayEnv, apply_action_effect
+from openair_congestion.render import to_policy_text
+from openair_congestion.replay_env import (
+    ReplayActionState,
+    ReplayEnv,
+    apply_action_effect,
+    build_trajectory,
+)
 from openair_congestion.schemas import Observation, ToolCall
 
 
@@ -53,6 +59,31 @@ def _cell_payload(observation: Observation, cell_id: int = 0) -> dict:
 def _cell_delivery(observation: Observation, cell_id: int = 0) -> float:
     cell = next(cell for cell in observation.cells if cell.cell_id == cell_id)
     return sum(float(ue.delivered_mbps) for ue in cell.ues)
+
+
+def test_self_contained_replay_examples_are_congested_and_regime_distinct():
+    """The fallback used by a clean checkout must exercise all example regimes."""
+
+    regimes = (
+        "prb_exhaustion",
+        "bursty",
+        "interference",
+        "prach_storm",
+        "qos_competition",
+    )
+    first_policy_text: dict[str, str] = {}
+    for regime in regimes:
+        observations, _ = build_trajectory(
+            seed=7001,
+            difficulty=0.6,
+            regime_mix={regime: 1.0},
+            tier="replay",
+            n_steps=4,
+        )
+        assert max(cell.prb_util_dl_p99 for observation in observations for cell in observation.cells) >= 0.85
+        first_policy_text[regime] = to_policy_text(observations[0])
+
+    assert len(set(first_policy_text.values())) == len(regimes)
 
 
 def test_scheduler_policies_expose_real_tradeoffs():
