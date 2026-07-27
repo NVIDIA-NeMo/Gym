@@ -486,10 +486,12 @@ class EnrootProvider:
             argv += ["-e", f"{key}={value}"]
         # Clear the Docker ENTRYPOINT so images with a non-shell entrypoint
         # (e.g. ENTRYPOINT ["python"]) don't wrap the init and exit immediately.
-        # Enroot exposes the entrypoint via ENROOT_ENTRYPOINT; passing an empty
-        # value overrides whatever the imported image config stored.
+        # Enroot bakes the ENTRYPOINT into /etc/rc inside the rootfs during
+        # `enroot create`; the only way to bypass it at start time is --rc,
+        # which replaces /etc/rc entirely. We pass an empty script so the init
+        # command (argv after the container name) runs directly.
         if self._create_config.bypass_entrypoint:
-            argv += ["-e", "ENROOT_ENTRYPOINT="]
+            argv += ["--rc", "/dev/null"]
         argv += list(self._create_config.extra_start_args)
         # Tag the init with the (unique) container name so the nested-in-pyxis PID
         # fallback can find THIS container's init process in /proc unambiguously. The
