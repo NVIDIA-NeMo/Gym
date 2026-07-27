@@ -58,7 +58,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
-    ROLLOUT_ID_KEY,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_PATH_PREFIX,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -614,12 +614,12 @@ repr(e): {repr(e)}"""
 
     @staticmethod
     def _get_rollout_id(request: Request) -> Optional[str]:
-        if ROLLOUT_ID_KEY in request.session:
-            return request.session[ROLLOUT_ID_KEY]
+        if ROLLOUT_ID_KEY_NAME in request.session:
+            return request.session[ROLLOUT_ID_KEY_NAME]
 
         # Lazily grab the rollout_id here after the route handler has run to populate the path_params
-        request.session[ROLLOUT_ID_KEY] = request.path_params.get(ROLLOUT_ID_KEY)
-        return request.session[ROLLOUT_ID_KEY]
+        request.session[ROLLOUT_ID_KEY_NAME] = request.path_params.get(ROLLOUT_ID_KEY_NAME)
+        return request.session[ROLLOUT_ID_KEY_NAME]
 
     def resolve_call_path(self, base_url_or_path: str, request: Request) -> str:
         if not self._capture_config.should_capture_calls:

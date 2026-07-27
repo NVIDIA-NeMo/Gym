@@ -793,4 +793,4 @@ class AggregateMetrics(BaseModel):
 # Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
 # the capture middleware in base_responses_api_model.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
-ROLLOUT_ID_KEY = "rollout_id"
+ROLLOUT_ID_KEY_NAME = "rollout_id"
