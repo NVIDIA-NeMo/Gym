@@ -43,17 +43,23 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import ServerClient
 from resources_servers.spartqa import app as spartqa_app
 from resources_servers.spartqa.app import (
+    BOTH_LABEL,
+    NONE_LABEL,
     PROMPT,
+    SimpleResourcesServer,
     SpartqaResourcesServer,
     SpartqaResourcesServerConfig,
     SpartqaVerifyRequest,
     SpartqaVerifyResponse,
-    SimpleResourcesServer,
     _clean_candidate,
     _extract_answer,
+    _label_key,
     _normalize,
     _strip_reasoning,
+    candidate_labels,
+    match_label,
 )
+
 
 # ── Paths (relative to this test file) ─────────────────────────────────────
 
@@ -92,15 +98,17 @@ def _config() -> SpartqaResourcesServerConfig:
     return SpartqaResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="spartqa")
 
 
-def _make_request(
-    text: str, *, target: str = "", all_targets: list[str] | None = None
-) -> SpartqaVerifyRequest:
+def _make_request(text: str, *, target: str = "", options: list[str] | None = None) -> SpartqaVerifyRequest:
     return SpartqaVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         response=_make_response(text),
         target=target,
-        all_targets=all_targets or [],
+        options=options or [],
     )
+
+
+# A representative CO row: two story objects plus the two fixed labels.
+_OPTIONS = ["a big blue square", "a small blue square"]
 
 
 def _server() -> SpartqaResourcesServer:
@@ -142,7 +150,9 @@ class TestAcServerContract:
         assert issubclass(SpartqaResourcesServer, SimpleResourcesServer)
 
     async def test_ac_verify_is_async_and_returns_reward(self) -> None:
-        result = await _server().verify(_make_request("Final answer: yes", target="yes"))
+        result = await _server().verify(
+            _make_request(f"Final answer: {BOTH_LABEL}", target=BOTH_LABEL, options=_OPTIONS)
+        )
         assert isinstance(result, SpartqaVerifyResponse)
         assert hasattr(result, "reward")
         assert result.reward == approx(1.0)
@@ -150,27 +160,34 @@ class TestAcServerContract:
 
 # ── AC2: scoring correctness ─────────────────────────────────────────────────
 
-# Shared fixtures: (response_text, target, all_targets, expected_correct).
+# Shared fixtures: (response_text, gold_label, options, expected_correct).
 _PARITY_FIXTURES: list[tuple[str, str, list[str], bool]] = [
-    ("Final answer: green cup", "green cup", ["green cup"], True),
-    ("Final answer: the green cup on the table", "green cup", ["green cup"], True),
-    ("Final answer: red ball", "green cup", ["green cup"], False),
-    (
-        "Final answer: under the circle",
-        "below the circle",
-        ["below the circle", "under the circle"],
-        True,
-    ),
-    ("   ", "green cup", ["green cup"], False),
-    ("<think>the star is north</think>Final answer: yes", "yes", ["yes"], True),
+    # Verbatim candidate.
+    ("Final answer: a big blue square", _OPTIONS[0], _OPTIONS, True),
+    # Candidate recovered from a longer sentence.
+    ("Final answer: it is a big blue square.", _OPTIONS[0], _OPTIONS, True),
+    # The other candidate.
+    ("Final answer: a small blue square", _OPTIONS[0], _OPTIONS, False),
+    # "both of them" gold is NOT earned by naming one object.
+    (f"Final answer: {_OPTIONS[0]}", BOTH_LABEL, _OPTIONS, False),
+    # Echoing the question's options is ambiguous.
+    (f"Final answer: {_OPTIONS[0]} or {_OPTIONS[1]}", _OPTIONS[0], _OPTIONS, False),
+    # Aliases of the two fixed labels.
+    ("Final answer: Both", BOTH_LABEL, _OPTIONS, True),
+    ("Final answer: neither", NONE_LABEL, _OPTIONS, True),
+    ("   ", _OPTIONS[0], _OPTIONS, False),
+    (f"<think>reasoning</think>Final answer: {BOTH_LABEL}", BOTH_LABEL, _OPTIONS, True),
 ]
 
 
 class TestAcMetricParity:
     def test_ac_prompt_text_contract(self) -> None:
-        assert "Final answer: <answer phrase>" in PROMPT
-        assert PROMPT.startswith("Answer the spatial reasoning query below.")
-        assert PROMPT.rstrip().endswith("{question}")
+        assert "Final answer: <candidate answer>" in PROMPT
+        assert PROMPT.startswith("Answer the spatial reasoning question below.")
+        assert "{question}" in PROMPT
+        # The four candidates must be rendered, else "both of them" / "none of
+        # them" are unreachable answers.
+        assert PROMPT.rstrip().endswith("{candidates}")
 
     def test_ac_normalize_logic(self) -> None:
         assert _normalize("  The  Big, BLACK Square!! ") == "the big black square"
@@ -189,13 +206,9 @@ class TestAcMetricParity:
         assert _extract_answer("<think>x</think>Final answer: yes") == "yes"
         assert _extract_answer("   ") == ""
 
-    @pytest.mark.parametrize("text,target,all_targets,expected", _PARITY_FIXTURES)
-    async def test_ac_scoring_correctness(
-        self, text: str, target: str, all_targets: list[str], expected: bool
-    ) -> None:
-        result = await _server().verify(
-            _make_request(text, target=target, all_targets=all_targets)
-        )
+    @pytest.mark.parametrize("text,target,options,expected", _PARITY_FIXTURES)
+    async def test_ac_scoring_correctness(self, text: str, target: str, options: list[str], expected: bool) -> None:
+        result = await _server().verify(_make_request(text, target=target, options=options))
         assert bool(result.reward) is expected
 
 
@@ -204,55 +217,46 @@ class TestAcMetricParity:
 
 class TestAcBinaryReward:
     @pytest.mark.parametrize(
-        "text,target,all_targets",
-        [
-            ("Final answer: green cup", "green cup", ["green cup"]),
-            ("Final answer: the green cup on the table", "green cup", ["green cup"]),
-            ("Final answer: red ball", "green cup", ["green cup"]),
-            ("", "green cup", ["green cup"]),
-            ("no marker at all", "green cup", ["green cup"]),
-            ("Final answer: under the circle", "below the circle", ["below the circle", "under the circle"]),
-        ],
+        "text,target,options",
+        [(f[0], f[1], f[2]) for f in _PARITY_FIXTURES]
+        + [("no marker at all", _OPTIONS[0], _OPTIONS), ("", _OPTIONS[0], _OPTIONS)],
     )
-    async def test_ac_reward_is_binary(
-        self, text: str, target: str, all_targets: list[str]
-    ) -> None:
-        result = await _server().verify(
-            _make_request(text, target=target, all_targets=all_targets)
-        )
+    async def test_ac_reward_is_binary(self, text: str, target: str, options: list[str]) -> None:
+        result = await _server().verify(_make_request(text, target=target, options=options))
         assert result.reward in {0.0, 1.0}
 
 
-# ── AC4: all_targets read from field; falls back to [target] ────────────────
+# ── AC4: options read from field / verifier_metadata; falls back to [target] ─
 
 
-class TestAcAllTargets:
-    async def test_ac_uses_all_targets_field(self) -> None:
-        # target does not match; a non-first accepted phrase does.
+class TestAcCandidateSet:
+    async def test_ac_uses_options_field(self) -> None:
+        # The non-gold option must resolve to itself, not to the gold.
         result = await _server().verify(
-            _make_request(
-                "Final answer: under the circle",
-                target="something else",
-                all_targets=["something else", "under the circle"],
-            )
+            _make_request(f"Final answer: {_OPTIONS[1]}", target=_OPTIONS[0], options=_OPTIONS)
         )
-        assert result.reward == approx(1.0)
+        assert result.reward == approx(0.0)
+        assert result.predicted_label == _OPTIONS[1]
 
-    async def test_ac_falls_back_to_target_when_all_targets_empty(self) -> None:
-        result = await _server().verify(
-            _make_request("Final answer: yes", target="yes", all_targets=[])
-        )
-        assert result.reward == approx(1.0)
-
-    async def test_ac_falls_back_to_target_when_all_targets_absent(self) -> None:
-        # all_targets defaults to [] when not supplied -> uses [target].
+    async def test_ac_reads_options_from_verifier_metadata(self) -> None:
+        # The native driver drops list fields; verifier_metadata is the fallback.
         request = SpartqaVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            response=_make_response("Final answer: green cup"),
-            target="green cup",
+            response=_make_response(f"Final answer: {BOTH_LABEL}"),
+            target="",
+            verifier_metadata={"target": BOTH_LABEL, "options": _OPTIONS},
         )
         result = await _server().verify(request)
-        assert result.all_targets == []
+        assert result.reward == approx(1.0)
+
+    async def test_ac_falls_back_to_target_when_options_absent(self) -> None:
+        request = SpartqaVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_make_response(f"Final answer: {_OPTIONS[0]}"),
+            target=_OPTIONS[0],
+        )
+        result = await _server().verify(request)
+        assert result.options == []
         assert result.reward == approx(1.0)
 
 
@@ -262,15 +266,20 @@ class TestAcAllTargets:
 class TestAcExtraFields:
     async def test_ac_extra_fields_present(self) -> None:
         result = await _server().verify(
-            _make_request("Final answer: green cup", target="green cup")
+            _make_request(f"Final answer: {_OPTIONS[0]}", target=_OPTIONS[0], options=_OPTIONS)
         )
         assert result.exact is True
         assert result.parsed is True
-        assert result.extracted == "green cup"
+        assert result.extracted == _OPTIONS[0]
+        assert result.predicted_label == _OPTIONS[0]
 
-    async def test_ac_exact_false_on_contains_only(self) -> None:
+    async def test_ac_exact_false_when_recovered_from_a_sentence(self) -> None:
         result = await _server().verify(
-            _make_request("Final answer: the green cup on the table", target="green cup")
+            _make_request(
+                f"Final answer: it is {_OPTIONS[0]} on the left.",
+                target=_OPTIONS[0],
+                options=_OPTIONS,
+            )
         )
         assert result.reward == approx(1.0)
         assert result.exact is False
@@ -283,7 +292,7 @@ class TestAcExtraFields:
 class TestAcEmptyOutput:
     @pytest.mark.parametrize("text", ["", "   ", "\n\t "])
     async def test_ac_empty_output_scores_zero(self, text: str) -> None:
-        result = await _server().verify(_make_request(text, target="green cup"))
+        result = await _server().verify(_make_request(text, target=_OPTIONS[0], options=_OPTIONS))
         assert result.reward == approx(0.0)
         assert result.parsed is False
         assert result.exact is False
@@ -302,8 +311,15 @@ class TestAcExampleDataset:
             assert isinstance(messages, list) and messages
             assert any(m.get("role") == "user" for m in messages)
             assert isinstance(row["target"], str) and row["target"]
-            assert isinstance(row["all_targets"], list) and row["all_targets"]
+            assert isinstance(row["options"], list) and len(row["options"]) == 2
+            assert row["verifier_metadata"]["options"] == row["options"]
             assert row["agent_ref"]["name"] == "spartqa_simple_agent"
+            # The four candidates must be visible to the model.
+            content = messages[0]["content"]
+            for label in [*row["options"], BOTH_LABEL, NONE_LABEL]:
+                assert label in content
+            # The gold must be one of the four candidates.
+            assert _label_key(row["target"]) in {_label_key(c) for c in candidate_labels(row["options"])}
 
 
 # ── AC8: config wires server + agent ────────────────────────────────────────
@@ -327,6 +343,26 @@ class TestAcPrepareScript:
         prepare = _load_prepare_module()
         assert callable(prepare.build_records)
         assert callable(prepare._unique_preserve_order)
+        assert callable(prepare.parse_options)
+        assert callable(prepare.resolve_gold)
+
+    def test_ac_parse_options_splits_the_question_tail(self) -> None:
+        prepare = _load_prepare_module()
+        question = "Block A is above block B. What is below the circle? a big square or a small square?"
+        assert prepare.parse_options(question) == ["a big square", "a small square"]
+        assert prepare.parse_options("A statement with no alternatives.") is None
+
+    def test_ac_resolve_gold_unflattens_the_retrieval_qrels(self) -> None:
+        prepare = _load_prepare_module()
+        options = ["a big square", "a small square"]
+        # qrels marks all three phrases -> the single label is "both of them".
+        assert prepare.resolve_gold([BOTH_LABEL, *options], options) == BOTH_LABEL
+        # Two objects and no sentinel is still "both of them".
+        assert prepare.resolve_gold(options, options) == BOTH_LABEL
+        assert prepare.resolve_gold([NONE_LABEL], options) == NONE_LABEL
+        # A single object gold snaps to the option's own wording.
+        assert prepare.resolve_gold(["big square"], options) == "a big square"
+        assert prepare.resolve_gold(["a green cup"], options) is None
 
     def test_ac_unique_preserve_order_dedupes_casefold_preserving_order(self) -> None:
         prepare = _load_prepare_module()
@@ -349,7 +385,7 @@ class TestAcRoundTrip:
                 _make_request(
                     f"Final answer: {row['target']}",
                     target=row["target"],
-                    all_targets=row["all_targets"],
+                    options=row["options"],
                 )
             )
             assert result.reward == approx(1.0), row["target"]
@@ -365,13 +401,12 @@ class TestAcRolloutsSelfConsistent:
         assert rows
         for row in rows:
             text = row["response"]["output"][0]["content"][0]["text"]
-            result = await server.verify(
-                _make_request(text, target=row["target"], all_targets=row["all_targets"])
-            )
+            result = await server.verify(_make_request(text, target=row["target"], options=row["options"]))
             assert result.reward == approx(row["reward"]), text
             assert result.exact is row["exact"]
             assert result.parsed is row["parsed"]
             assert result.extracted == row["extracted"]
+            assert result.predicted_label == row["predicted_label"]
 
 
 # ── Story edge cases ────────────────────────────────────────────────────────
@@ -381,38 +416,47 @@ class TestEdgeCases:
     async def test_edge_reasoning_wrapped_output_is_stripped_and_scores(self) -> None:
         result = await _server().verify(
             _make_request(
-                "<think>the star is north of the moon</think>Final answer: yes",
-                target="yes",
+                f"<think>the star is north of the moon</think>Final answer: {BOTH_LABEL}",
+                target=BOTH_LABEL,
+                options=_OPTIONS,
             )
         )
         assert result.reward == approx(1.0)
-        assert result.extracted == "yes"
+        assert result.extracted == BOTH_LABEL
 
-    async def test_edge_multiple_answers_any_match_scores_one(self) -> None:
+    async def test_edge_single_object_never_satisfies_a_both_gold(self) -> None:
+        for option in _OPTIONS:
+            result = await _server().verify(
+                _make_request(f"Final answer: {option}", target=BOTH_LABEL, options=_OPTIONS)
+            )
+            assert result.reward == approx(0.0), option
+
+    async def test_edge_ambiguous_answer_resolves_to_no_label(self) -> None:
         result = await _server().verify(
             _make_request(
-                "Final answer: above and to the right",
-                target="upper right",
-                all_targets=["upper right", "above and to the right"],
+                f"Final answer: {_OPTIONS[0]} or {_OPTIONS[1]}",
+                target=BOTH_LABEL,
+                options=_OPTIONS,
             )
         )
-        assert result.reward == approx(1.0)
+        assert result.reward == approx(0.0)
+        assert result.predicted_label == ""
 
-    async def test_edge_exact_true_only_on_strict_equality(self) -> None:
+    async def test_edge_nested_options_pick_the_most_specific(self) -> None:
+        options = ["a triangle in block B", "a big blue triangle in block B"]
+        assert match_label(options[1], candidate_labels(options)) == options[1]
+
+    async def test_edge_exact_true_only_on_verbatim_answer(self) -> None:
         strict = await _server().verify(
-            _make_request(
-                "Final answer: above and to the right",
-                target="upper right",
-                all_targets=["upper right", "above and to the right"],
-            )
+            _make_request(f"Final answer: {_OPTIONS[0]}", target=_OPTIONS[0], options=_OPTIONS)
         )
         assert strict.exact is True
 
         loose = await _server().verify(
             _make_request(
-                "Final answer: it is above and to the right of the cat",
-                target="upper right",
-                all_targets=["upper right", "above and to the right"],
+                f"Final answer: I believe it is {_OPTIONS[0]}.",
+                target=_OPTIONS[0],
+                options=_OPTIONS,
             )
         )
         assert loose.reward == approx(1.0)

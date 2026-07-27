@@ -17,7 +17,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 from pytest import approx
 
 from nemo_gym.openai_utils import (
@@ -28,13 +27,18 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.spartqa.app import (
+    BOTH_LABEL,
+    NONE_LABEL,
     SpartqaResourcesServer,
     SpartqaResourcesServerConfig,
     SpartqaVerifyRequest,
     _extract_answer,
+    _label_key,
     _normalize,
     _response_text,
     _strip_reasoning,
+    candidate_labels,
+    match_label,
 )
 
 
@@ -70,16 +74,20 @@ def _make_request(
     text: str,
     *,
     target: str = "",
-    all_targets: list[str] | None = None,
+    options: list[str] | None = None,
     verifier_metadata: dict | None = None,
 ) -> SpartqaVerifyRequest:
     return SpartqaVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         response=_make_response(text),
         target=target,
-        all_targets=all_targets or [],
+        options=options or [],
         verifier_metadata=verifier_metadata,
     )
+
+
+# A representative CO row: two story objects plus the two fixed labels.
+_OPTIONS = ["a big blue square", "a small blue square"]
 
 
 def _server() -> SpartqaResourcesServer:
@@ -91,9 +99,7 @@ def _server() -> SpartqaResourcesServer:
 
 class TestExtractAnswer:
     def test_pulls_phrase_after_final_answer(self) -> None:
-        assert _extract_answer("Reasoning here.\nFinal answer: below the circle") == (
-            "below the circle"
-        )
+        assert _extract_answer("Reasoning here.\nFinal answer: below the circle") == ("below the circle")
 
     def test_strips_think_reasoning(self) -> None:
         text = "<think>the star is north</think>Final answer: yes"
@@ -129,85 +135,136 @@ class TestNormalize:
 
 
 class TestVerify:
-    async def test_exact_match(self) -> None:
+    async def test_verbatim_gold_scores_one_and_exact(self) -> None:
         result = await _server().verify(
-            _make_request("Final answer: green cup", target="green cup")
+            _make_request("Final answer: a big blue square", target=_OPTIONS[0], options=_OPTIONS)
         )
         assert result.reward == approx(1.0)
         assert result.exact is True
         assert result.parsed is True
-        assert result.extracted == "green cup"
+        assert result.extracted == "a big blue square"
+        assert result.predicted_label == _OPTIONS[0]
 
-    async def test_contains_match_not_exact(self) -> None:
+    async def test_gold_inside_a_sentence_scores_one_but_not_exact(self) -> None:
         result = await _server().verify(
-            _make_request("Final answer: the green cup on the table", target="green cup")
+            _make_request(
+                "Final answer: it must be a big blue square.",
+                target=_OPTIONS[0],
+                options=_OPTIONS,
+            )
         )
         assert result.reward == approx(1.0)
         assert result.exact is False
+        assert result.predicted_label == _OPTIONS[0]
 
-    async def test_no_match(self) -> None:
+    async def test_wrong_option_scores_zero(self) -> None:
         result = await _server().verify(
-            _make_request("Final answer: red ball", target="green cup")
+            _make_request("Final answer: a small blue square", target=_OPTIONS[0], options=_OPTIONS)
         )
         assert result.reward == approx(0.0)
-        assert result.exact is False
-        assert result.parsed is True
+        assert result.predicted_label == _OPTIONS[1]
+
+    async def test_both_of_them_gold(self) -> None:
+        result = await _server().verify(
+            _make_request(f"Final answer: {BOTH_LABEL}", target=BOTH_LABEL, options=_OPTIONS)
+        )
+        assert result.reward == approx(1.0)
+        assert result.exact is True
+
+    async def test_none_of_them_gold(self) -> None:
+        result = await _server().verify(
+            _make_request(f"Final answer: {NONE_LABEL}", target=NONE_LABEL, options=_OPTIONS)
+        )
+        assert result.reward == approx(1.0)
+
+    async def test_article_difference_still_matches(self) -> None:
+        # qrels phrases and the story wording disagree on leading articles.
+        result = await _server().verify(
+            _make_request(
+                "Final answer: the big blue square",
+                target="a big blue square",
+                options=_OPTIONS,
+            )
+        )
+        assert result.reward == approx(1.0)
+        assert result.exact is True
+
+    async def test_alias_resolves_to_fixed_label(self) -> None:
+        for alias, gold in (("Both", BOTH_LABEL), ("Neither", NONE_LABEL), ("DK", NONE_LABEL)):
+            result = await _server().verify(_make_request(f"Final answer: {alias}", target=gold, options=_OPTIONS))
+            assert result.reward == approx(1.0), alias
+            assert result.exact is False, alias
+
+    async def test_naming_a_single_option_does_not_earn_a_both_gold(self) -> None:
+        # Regression: the retrieval qrels list "both of them" alongside each
+        # object, so any-of matching used to credit this.
+        for option in _OPTIONS:
+            result = await _server().verify(
+                _make_request(f"Final answer: {option}", target=BOTH_LABEL, options=_OPTIONS)
+            )
+            assert result.reward == approx(0.0), option
+
+    async def test_echoing_both_options_is_ambiguous_and_scores_zero(self) -> None:
+        # Regression: "X or Y" copied straight out of the question used to score
+        # 1.0 on ~95% of the corpus via substring matching.
+        text = f"Final answer: {_OPTIONS[0]} or {_OPTIONS[1]}"
+        for gold in (_OPTIONS[0], _OPTIONS[1], BOTH_LABEL):
+            result = await _server().verify(_make_request(text, target=gold, options=_OPTIONS))
+            assert result.reward == approx(0.0), gold
+            assert result.predicted_label == ""
+
+    async def test_nested_options_resolve_to_the_most_specific(self) -> None:
+        options = ["a triangle that is in block B", "a big blue triangle that is in block B"]
+        result = await _server().verify(
+            _make_request(
+                "Final answer: a big blue triangle that is in block B",
+                target=options[1],
+                options=options,
+            )
+        )
+        assert result.reward == approx(1.0)
+        assert result.predicted_label == options[1]
 
     async def test_empty_output_reward_zero_no_raise(self) -> None:
-        result = await _server().verify(_make_request("   ", target="green cup"))
+        result = await _server().verify(_make_request("   ", target=_OPTIONS[0], options=_OPTIONS))
         assert result.reward == approx(0.0)
         assert result.parsed is False
+        assert result.predicted_label == ""
 
-    async def test_all_targets_empty_falls_back_to_target(self) -> None:
-        result = await _server().verify(
-            _make_request("Final answer: yes", target="yes", all_targets=[])
-        )
-        assert result.reward == approx(1.0)
-
-    async def test_multiple_targets_any_match(self) -> None:
-        result = await _server().verify(
-            _make_request(
-                "Final answer: under the circle",
-                target="below the circle",
-                all_targets=["below the circle", "under the circle"],
-            )
-        )
-        assert result.reward == approx(1.0)
-        assert result.exact is True
-
-    async def test_empty_targets_are_skipped(self) -> None:
-        result = await _server().verify(
-            _make_request("Final answer: yes", target="", all_targets=["", "   "])
-        )
+    async def test_empty_target_scores_zero(self) -> None:
+        result = await _server().verify(_make_request("Final answer: yes", target="", options=[]))
         assert result.reward == approx(0.0)
 
-    async def test_all_targets_from_verifier_metadata(self) -> None:
-        # The native driver drops the top-level ``all_targets`` list; the full
-        # accepted set must be recoverable from verifier_metadata.
+    async def test_fields_from_verifier_metadata(self) -> None:
+        # The native driver drops the top-level ``options`` list; the candidate
+        # set must be recoverable from verifier_metadata.
         result = await _server().verify(
             _make_request(
-                "Final answer: under the circle",
-                target="below the circle",
-                all_targets=[],
-                verifier_metadata={
-                    "target": "below the circle",
-                    "all_targets": ["below the circle", "under the circle"],
-                },
-            )
-        )
-        assert result.reward == approx(1.0)
-        assert result.exact is True
-
-    async def test_target_from_verifier_metadata_when_top_level_missing(self) -> None:
-        result = await _server().verify(
-            _make_request(
-                "Final answer: yes",
+                f"Final answer: {BOTH_LABEL}",
                 target="",
-                all_targets=[],
-                verifier_metadata={"target": "yes"},
+                options=[],
+                verifier_metadata={"target": BOTH_LABEL, "options": _OPTIONS},
             )
         )
         assert result.reward == approx(1.0)
+
+    async def test_options_missing_falls_back_to_target_only(self) -> None:
+        result = await _server().verify(_make_request("Final answer: a big blue square", target=_OPTIONS[0]))
+        assert result.reward == approx(1.0)
+
+
+class TestLabelMatching:
+    def test_candidate_labels_appends_fixed_labels_and_dedupes(self) -> None:
+        assert candidate_labels(_OPTIONS) == [*_OPTIONS, BOTH_LABEL, NONE_LABEL]
+        assert candidate_labels([BOTH_LABEL]) == [BOTH_LABEL, NONE_LABEL]
+
+    def test_label_key_strips_articles_and_punctuation(self) -> None:
+        assert _label_key("  The Big, BLUE Square! ") == "big blue square"
+        assert _label_key("") == ""
+
+    def test_match_label_returns_none_when_nothing_matches(self) -> None:
+        assert match_label("a green cup", candidate_labels(_OPTIONS)) is None
+        assert match_label("", candidate_labels(_OPTIONS)) is None
 
 
 # ── compute_metrics() / get_key_metrics() ──────────────────────────────────
@@ -216,16 +273,35 @@ class TestVerify:
 class TestComputeMetrics:
     def test_mean_and_rates(self) -> None:
         tasks = [
-            [{"reward": 1.0, "exact": True, "parsed": True}],
-            [{"reward": 0.0, "exact": False, "parsed": True}],
-            [{"reward": 1.0, "exact": False, "parsed": True}],
-            [{"reward": 0.0, "exact": False, "parsed": False}],
+            [{"reward": 1.0, "exact": True, "parsed": True, "target": BOTH_LABEL, "predicted_label": BOTH_LABEL}],
+            [
+                {
+                    "reward": 0.0,
+                    "exact": False,
+                    "parsed": True,
+                    "target": BOTH_LABEL,
+                    "predicted_label": "a big blue square",
+                }
+            ],
+            [
+                {
+                    "reward": 1.0,
+                    "exact": False,
+                    "parsed": True,
+                    "target": "a big blue square",
+                    "predicted_label": "a big blue square",
+                }
+            ],
+            [{"reward": 0.0, "exact": False, "parsed": False, "target": NONE_LABEL, "predicted_label": ""}],
         ]
         metrics = _server().compute_metrics(tasks)
         assert metrics["mean_reward"] == approx(0.5)
         assert metrics["count"] == 4
         assert metrics["exact_match_rate"] == approx(0.25)
         assert metrics["parse_rate"] == approx(0.75)
+        assert metrics["label_resolve_rate"] == approx(0.75)
+        assert metrics["accuracy_both_of_them"] == approx(0.5)
+        assert metrics["accuracy_none_of_them"] == approx(0.0)
 
     def test_empty(self) -> None:
         assert _server().compute_metrics([]) == {}
@@ -233,9 +309,7 @@ class TestComputeMetrics:
 
 class TestGetKeyMetrics:
     def test_selects_headline(self) -> None:
-        out = _server().get_key_metrics(
-            {"mean_reward": 0.5, "exact_match_rate": 0.25, "parse_rate": 0.75, "count": 4}
-        )
+        out = _server().get_key_metrics({"mean_reward": 0.5, "exact_match_rate": 0.25, "parse_rate": 0.75, "count": 4})
         assert out == {"mean_reward": approx(0.5), "exact_match_rate": approx(0.25)}
 
 
@@ -265,18 +339,32 @@ class TestResponseText:
 
 
 class TestAcceptance:
-    async def test_each_example_target_scores_one(self) -> None:
+    async def test_each_example_gold_scores_one(self) -> None:
         server = _server()
-        rows = [
-            json.loads(line) for line in _EXAMPLE_JSONL.read_text().splitlines() if line.strip()
-        ]
+        rows = [json.loads(line) for line in _EXAMPLE_JSONL.read_text().splitlines() if line.strip()]
         assert len(rows) >= 5
         for row in rows:
-            resp_text = f"Final answer: {row['target']}"
             result = await server.verify(
                 _make_request(
-                    resp_text, target=row["target"], all_targets=row.get("all_targets", [])
+                    f"Final answer: {row['target']}",
+                    target=row["target"],
+                    options=row["options"],
                 )
             )
-            assert result.reward == approx(1.0)
+            assert result.reward == approx(1.0), row["target"]
 
+    async def test_example_rows_cover_both_and_none_golds(self) -> None:
+        rows = [json.loads(line) for line in _EXAMPLE_JSONL.read_text().splitlines() if line.strip()]
+        golds = {row["target"] for row in rows}
+        assert BOTH_LABEL in golds
+        assert NONE_LABEL in golds
+        # Every row must offer exactly two story objects to choose between.
+        assert all(len(row["options"]) == 2 for row in rows)
+
+    async def test_echoing_the_question_options_never_scores(self) -> None:
+        server = _server()
+        rows = [json.loads(line) for line in _EXAMPLE_JSONL.read_text().splitlines() if line.strip()]
+        for row in rows:
+            text = f"Final answer: {row['options'][0]} or {row['options'][1]}"
+            result = await server.verify(_make_request(text, target=row["target"], options=row["options"]))
+            assert result.reward == approx(0.0), row["target"]

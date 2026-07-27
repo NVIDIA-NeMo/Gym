@@ -17,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 99.0,
-        "Min": 83.0,
-        "Max": 113.0,
-        "Standard deviation": 11.489
+        "Average": 179.4,
+        "Min": 171.0,
+        "Max": 184.0,
+        "Standard deviation": 5.367
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -36,11 +36,13 @@
         "Max": 0.0,
         "Standard deviation": 0.0
     },
-    "Number of accepted answers (all_targets)": {
+    "Number of candidate answers": {
         "Total # non-null values": 5,
-        "Average": 1.4,
-        "Min": 1.0,
-        "Max": 2.0,
-        "Standard deviation": 0.548
-    }
+        "Average": 4.0,
+        "Min": 4.0,
+        "Max": 4.0,
+        "Standard deviation": 0.0
+    },
+    "Number of 'both of them' golds": 2,
+    "Number of 'none of them' golds": 1
 }

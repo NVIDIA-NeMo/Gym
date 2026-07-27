@@ -12,18 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""SpartQA resources server — spatial reasoning as direct answer generation.
+"""SpartQA resources server — the CO (choose-object) question type.
 
-The MTEB ``mteb/SpartQA`` retrieval dataset is joined at prep time
-(``prepare_spartqa.py``) into one row per query whose ``target`` is the
-accepted answer phrase (all accepted phrases in ``all_targets``). The model is
-shown the query and must return the matching answer phrase, ending with a
-``Final answer: <phrase>`` line.
+``mteb/SpartQA`` is the MTEB retrieval form of SpartQA (Mirzaee et al., NAACL
+2021) and contains CO questions only: a story plus "… <object X> or <object
+Y>?". Per the paper (Table 8 fn.), CO is a **four-label single-choice** task —
+``X``, ``Y``, ``both of them``, ``none of them`` — and the metric is accuracy
+over that label set.
 
-The per-sample reward is ``1.0`` on an exact-or-answer-containing match against
-any accepted answer, else ``0.0`` — so ``compute_metrics``'s mean-of-rewards
-equals corpus accuracy. ``exact`` (strict match) and ``parsed`` (a non-empty
-answer was extracted) ride on each row for downstream inspection.
+``prepare_spartqa.py`` recovers that label set from the retrieval qrels (which
+flatten "both of them" into three relevant documents), renders the four
+candidates into the prompt, and stores the single gold label in ``target`` and
+the two object labels in ``options``.
+
+The per-sample reward is ``1.0`` iff the model's answer resolves to the gold
+label, else ``0.0`` — so ``compute_metrics``'s mean-of-rewards equals CO
+accuracy. Resolution is a verbatim match against one candidate, or a
+containment match when it is *unambiguous*: a response naming two candidates
+(e.g. echoing "X or Y" back) resolves to nothing and scores 0.0. Scoring any of
+the three flattened qrels phrases as correct would let that echo score ~95%.
 """
 
 from __future__ import annotations
@@ -45,16 +52,43 @@ from nemo_gym.openai_utils import NeMoGymResponse
 
 
 PROMPT = """\
-Answer the spatial reasoning query below.
-Return one concise final answer phrase. If the query gives answer options,
-copy the matching option phrase exactly when possible.
+Answer the spatial reasoning question below.
+Choose exactly one of the candidate answers and copy it verbatim. Answer
+"both of them" if both listed objects satisfy the question, and "none of them"
+if neither of them does.
 
 End your response with one line in this exact format:
-Final answer: <answer phrase>
+Final answer: <candidate answer>
 
-Query:
+Story and question:
 {question}
+
+Candidate answers:
+{candidates}
 """
+
+# The two story-independent CO labels. Aliases let a model phrase them its own
+# way; each alias maps to exactly one label, so this adds no leniency across
+# labels.
+BOTH_LABEL = "both of them"
+NONE_LABEL = "none of them"
+
+_BOTH_ALIASES = frozenset({"both", "both of them", "both objects", "both of the objects", "both of these"})
+# The paper treats DK / None / [] alike: none of the candidate objects hold.
+_NONE_ALIASES = frozenset(
+    {
+        "none",
+        "none of them",
+        "none of the objects",
+        "neither",
+        "neither of them",
+        "neither object",
+        "no object",
+        "dk",
+        "do not know",
+        "dont know",
+    }
+)
 
 
 # ── Answer extraction + normalization ───────────────────────────────────────
@@ -96,9 +130,7 @@ def _extract_answer(text: str) -> str:
     ]
     extracted = None
     for pattern in patterns:
-        matches = list(
-            re.finditer(pattern, text, flags=re.IGNORECASE | re.DOTALL | re.MULTILINE)
-        )
+        matches = list(re.finditer(pattern, text, flags=re.IGNORECASE | re.DOTALL | re.MULTILINE))
         if matches:
             extracted = matches[-1].group(1).strip()
             break
@@ -106,21 +138,65 @@ def _extract_answer(text: str) -> str:
         text = extracted
 
     lines = [_clean_candidate(line) for line in text.splitlines() if line.strip()]
-    lines = [
-        line
-        for line in lines
-        if line and _normalize(line) not in {"final answer", "answer"}
-    ]
+    lines = [line for line in lines if line and _normalize(line) not in {"final answer", "answer"}]
     if not lines:
         return ""
 
     if extracted is None and len(lines) > 1:
         first = _normalize(lines[0])
-        if first.startswith(
-            ("thinking process", "analysis", "the user wants", "we need")
-        ):
+        if first.startswith(("thinking process", "analysis", "the user wants", "we need")):
             return lines[-1]
     return lines[0]
+
+
+def _label_key(text: str) -> str:
+    """Normalize a candidate label or a prediction for comparison.
+
+    Article-insensitive, because the qrels phrases and the story's own wording
+    disagree on leading articles ("medium yellow square …" vs "the medium
+    yellow square …").
+    """
+    return re.sub(r"^(?:a|an|the)\s+", "", _normalize(text)).strip()
+
+
+def candidate_labels(options: List[str]) -> List[str]:
+    """The four CO labels: the two story objects, then ``both`` / ``none``."""
+    labels: List[str] = []
+    seen: set[str] = set()
+    for label in [*options, BOTH_LABEL, NONE_LABEL]:
+        key = _label_key(str(label))
+        if key and key not in seen:
+            seen.add(key)
+            labels.append(str(label).strip())
+    return labels
+
+
+def match_label(prediction: str, labels: List[str]) -> Optional[str]:
+    """Resolve a free-text answer to exactly one candidate label, or ``None``.
+
+    Verbatim (article-insensitive) equality wins outright. Otherwise the answer
+    must *contain* exactly one label — a response naming two of them is
+    ambiguous and resolves to ``None`` rather than being credited for whichever
+    one happens to be gold.
+    """
+    key = _label_key(prediction)
+    if not key:
+        return None
+
+    by_key = {_label_key(label): label for label in labels}
+    if key in by_key:
+        return by_key[key]
+    if key in _BOTH_ALIASES and BOTH_LABEL in by_key.values():
+        return by_key[_label_key(BOTH_LABEL)]
+    if key in _NONE_ALIASES and NONE_LABEL in by_key.values():
+        return by_key[_label_key(NONE_LABEL)]
+
+    hits = [label_key for label_key in by_key if label_key and label_key in key]
+    # One option can nest inside the other ("a triangle in block B" inside "a
+    # big blue triangle in block B"); the most specific match is the intended
+    # one, so drop labels wholly contained in another hit.
+    hits = [h for h in hits if not any(other != h and h in other for other in hits)]
+    return by_key[hits[0]] if len(hits) == 1 else None
 
 
 def _response_text(response: NeMoGymResponse) -> str:
@@ -153,14 +229,15 @@ class SpartqaResourcesServerConfig(BaseResourcesServerConfig):
 class SpartqaRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
-    # The first accepted answer phrase, and all accepted phrases. ``target``
-    # (a scalar) survives the nemo-evaluator ``gym://...protocol=native`` driver,
-    # which forwards a row's top-level scalar fields onto ``/verify`` but DROPS
-    # list/dict fields (``all_targets`` never arrives that way). The full accepted
-    # set therefore also rides in ``verifier_metadata``, which the driver forwards
-    # intact; verify() falls back to it so all phrases are always available.
+    # ``target`` is the single gold CO label; ``options`` are the two story
+    # objects offered by the question. ``target`` (a scalar) survives the
+    # nemo-evaluator ``gym://...protocol=native`` driver, which forwards a row's
+    # top-level scalar fields onto ``/verify`` but DROPS list/dict fields
+    # (``options`` never arrives that way). The options therefore also ride in
+    # ``verifier_metadata``, which the driver forwards intact; verify() falls
+    # back to it so the full candidate set is always available.
     target: str = ""
-    all_targets: List[str] = Field(default_factory=list)
+    options: List[str] = Field(default_factory=list)
     verifier_metadata: Optional[Dict[str, Any]] = None
 
 
@@ -174,6 +251,7 @@ class SpartqaVerifyResponse(BaseVerifyResponse):
     exact: bool = False
     parsed: bool = False
     extracted: str = ""
+    predicted_label: str = ""
 
 
 class SpartqaResourcesServer(SimpleResourcesServer):
@@ -181,33 +259,26 @@ class SpartqaResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: SpartqaVerifyRequest) -> SpartqaVerifyResponse:
         prediction = _extract_answer(_response_text(body.response))
-        prediction_norm = _normalize(prediction)
-        # Prefer the explicit list; fall back to verifier_metadata (the only path
-        # that survives the native driver) and finally the scalar target.
+        # Prefer the explicit fields; fall back to verifier_metadata, the only
+        # path that survives the native driver.
         meta = body.verifier_metadata or {}
-        targets = body.all_targets or meta.get("all_targets") or [
-            body.target or meta.get("target", "")
-        ]
+        gold = body.target or str(meta.get("target", ""))
+        options = body.options or list(meta.get("options") or [])
 
-        exact = False
-        contains = False
-        for target in targets:
-            target_norm = _normalize(str(target))
-            if not target_norm:
-                continue
-            if prediction_norm == target_norm:
-                exact = True
-                contains = True
-                break
-            if target_norm in prediction_norm:
-                contains = True
+        labels = candidate_labels(options) if options else candidate_labels([gold])
+        predicted = match_label(prediction, labels)
+        gold_key = _label_key(gold)
+        correct = bool(gold_key) and predicted is not None and _label_key(predicted) == gold_key
 
         return SpartqaVerifyResponse(
             **body.model_dump(),
-            reward=1.0 if (exact or contains) else 0.0,
-            exact=exact,
-            parsed=bool(prediction_norm),
+            reward=1.0 if correct else 0.0,
+            # ``exact`` means the gold label was copied verbatim, as instructed,
+            # rather than recovered from a longer sentence.
+            exact=correct and _label_key(prediction) == gold_key,
+            parsed=bool(_normalize(prediction)),
             extracted=prediction[:200],
+            predicted_label=predicted or "",
         )
 
     # --- aggregation -----------------------------------------------------
@@ -224,14 +295,21 @@ class SpartqaResourcesServer(SimpleResourcesServer):
             metrics["count"] = len(rewards)
         metrics["exact_match_rate"] = sum(1 for r in rows if r.get("exact")) / len(rows)
         metrics["parse_rate"] = sum(1 for r in rows if r.get("parsed")) / len(rows)
+        # Fraction of answers that resolved to some candidate label at all; a low
+        # value means the model is not following the copy-a-candidate format.
+        metrics["label_resolve_rate"] = sum(1 for r in rows if r.get("predicted_label")) / len(rows)
+        # Accuracy split by gold label. A model that ignores "both of them" —
+        # the gold for 44% of the corpus — shows up here as a near-zero slice
+        # even when the headline number looks healthy.
+        for label in (BOTH_LABEL, NONE_LABEL):
+            slice_rows = [r for r in rows if _label_key(str(r.get("target", ""))) == _label_key(label)]
+            if slice_rows:
+                key = label.replace(" ", "_")
+                metrics[f"accuracy_{key}"] = sum(1 for r in slice_rows if r.get("reward") == 1.0) / len(slice_rows)
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            k: agent_metrics[k]
-            for k in ("mean_reward", "exact_match_rate")
-            if k in agent_metrics
-        }
+        return {k: agent_metrics[k] for k in ("mean_reward", "exact_match_rate") if k in agent_metrics}
 
 
 if __name__ == "__main__":

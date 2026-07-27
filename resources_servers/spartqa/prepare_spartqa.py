@@ -14,11 +14,21 @@
 # limitations under the License.
 """Build the SpartQA Gym dataset from the public ``mteb/SpartQA`` HF dataset.
 
-Joins the MTEB ``queries`` / ``corpus`` / ``qrels`` splits into one row per
-query whose ``target`` is the accepted answer phrase (all accepted phrases in
-``all_targets``), then renders the shared ``PROMPT`` and writes a Gym task per
-query. ``target`` / ``all_targets`` ride along as extra fields consumed by
-``app.py``'s verify().
+``mteb/SpartQA`` holds SpartQA's CO (choose-object) questions in retrieval
+form. Per the paper, CO is a four-label single-choice task — the two objects
+named in the question, ``both of them``, and ``none of them`` — but the
+retrieval encoding has no way to express "both", so a "both of them" gold is
+flattened into *three* relevant documents (the ``both of them`` phrase plus
+each object). This script undoes that flattening:
+
+* ``options``  — the two objects, parsed from the question's "… X or Y?" tail.
+* ``target``   — the single gold label: ``both of them`` when qrels marks the
+  pair, ``none of them`` when qrels says so, else the one gold object (snapped
+  to the option's own wording so the label set is self-consistent).
+
+The four candidates are rendered into the prompt so ``both of them`` and
+``none of them`` are actually reachable answers; ``target`` / ``options`` ride
+along as extra fields consumed by ``app.py``'s verify().
 
 Requires the ``datasets`` package (HF) at prep time only.
 
@@ -32,10 +42,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
-from app import PROMPT
+from app import BOTH_LABEL, NONE_LABEL, PROMPT, _label_key
 
 
 _HF_DATASET = "mteb/SpartQA"
@@ -65,6 +76,34 @@ def _unique_preserve_order(values: List[str]) -> List[str]:
     return result
 
 
+def parse_options(question: str) -> Optional[List[str]]:
+    """Parse the two candidate objects out of a CO question's "… X or Y?" tail.
+
+    Returns ``None`` when the final sentence does not offer exactly two
+    alternatives, so the caller can drop the row rather than guess.
+    """
+    last_sentence = re.split(r"(?<=[.?])\s+", question.strip())[-1].strip().rstrip("?")
+    parts = [part.strip() for part in last_sentence.split(" or ")]
+    if len(parts) != 2 or not all(parts):
+        return None
+    return parts
+
+
+def resolve_gold(answers: List[str], options: List[str]) -> Optional[str]:
+    """Collapse the flattened qrels phrases back into one CO label."""
+    keys = {_label_key(a) for a in answers}
+    if _label_key(BOTH_LABEL) in keys or len(keys & {_label_key(o) for o in options}) >= 2:
+        return BOTH_LABEL
+    if _label_key(NONE_LABEL) in keys:
+        return NONE_LABEL
+    for option in options:
+        if _label_key(option) in keys:
+            # Snap to the option's own wording: qrels and the story disagree on
+            # leading articles, and the prompt shows the option text.
+            return option
+    return None
+
+
 def build_records(split: str = _DEFAULT_SPLIT) -> List[dict[str, Any]]:
     """Join the MTEB ``queries`` / ``corpus`` / ``qrels`` splits into rows."""
     corpus = {
@@ -90,36 +129,33 @@ def build_records(split: str = _DEFAULT_SPLIT) -> List[dict[str, Any]]:
 
     records: List[dict[str, Any]] = []
     for query_id in sorted(queries):
-        answer_ids = [
-            doc_id for doc_id in qrels_by_query.get(query_id, []) if doc_id in corpus
-        ]
+        question = queries[query_id]
+        answer_ids = [doc_id for doc_id in qrels_by_query.get(query_id, []) if doc_id in corpus]
         answers = _unique_preserve_order([corpus[doc_id] for doc_id in answer_ids])
-        if not answers:
+        options = parse_options(question)
+        if not answers or not options:
             continue
-        records.append(
-            {
-                "question": queries[query_id],
-                "target": answers[0],
-                "all_targets": answers,
-            }
-        )
+        target = resolve_gold(answers, options)
+        if not target:
+            continue
+        records.append({"question": question, "target": target, "options": options})
     return records
 
 
 def _to_task(record: dict[str, Any]) -> dict[str, Any]:
+    candidates = "\n".join(f"- {label}" for label in [*record["options"], BOTH_LABEL, NONE_LABEL])
+    content = PROMPT.format(question=record["question"], candidates=candidates)
     return {
-        "responses_create_params": {
-            "input": [{"role": "user", "content": PROMPT.format(question=record["question"])}]
-        },
+        "responses_create_params": {"input": [{"role": "user", "content": content}]},
         "target": record["target"],
-        "all_targets": record["all_targets"],
-        # ``all_targets`` is a list and is dropped by the nemo-evaluator
+        "options": record["options"],
+        # ``options`` is a list and is dropped by the nemo-evaluator
         # ``gym://...protocol=native`` driver (it forwards only top-level scalar
-        # fields to /verify). Mirror the full accepted set into verifier_metadata,
-        # which the driver forwards intact, so verify() sees every phrase.
+        # fields to /verify). Mirror the candidate set into verifier_metadata,
+        # which the driver forwards intact, so verify() sees every label.
         "verifier_metadata": {
             "target": record["target"],
-            "all_targets": record["all_targets"],
+            "options": record["options"],
         },
         "agent_ref": _AGENT,
     }
