@@ -47,6 +47,8 @@ class AgentInvocation(ObservationModel):
     status: Literal["completed", "failed", "incomplete", "unknown"] = Field(
         default="unknown", description="Harness-reported invocation outcome; unknown when not explicit."
     )
+    duration_ms: Optional[float] = Field(default=None, ge=0)
+    error_type: Optional[str] = None
     model_calls: list[ModelCallRef] = Field(default_factory=list)
     conversation: list[NeMoGymResponseInputItem] = Field(
         default_factory=list,

@@ -52,6 +52,11 @@ def test_tool_call_observation_rejects_invalid_timing(timing: dict) -> None:
         ToolCallObservation(invocation_id="root", tool_call_id="call-1", **timing)
 
 
+def test_agent_invocation_rejects_negative_duration() -> None:
+    with pytest.raises(ValidationError):
+        AgentInvocation(invocation_id="root", duration_ms=-1)
+
+
 def test_join_model_calls_resolves_exact_references_and_reports_unowned_calls() -> None:
     model_ref = ModelServerRef(name="policy", type="responses_api_models")
     bundle = AgentObservationBundle(
