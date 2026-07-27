@@ -1,25 +1,4 @@
 #!/bin/bash
-# 
-# Example run:
-# MODEL=/path/to/model \
-# EXPERIMENT_NAME=my-experiment-name \
-# NUM_NODES=4 \
-# SBATCH_ACCOUNT=my-slurm-account \
-# SBATCH_PARTITION=batch \
-# CONTAINER=/path/to/vllm/container \
-# MOUNTS=/shared/fs:/shared/fs \
-# bash benchmarks/nemotron_3.5_super/sbatch_eval_with_external_vllm.sh \
-# --config benchmarks/my-benchmark/config.yaml
-# 
-# This script assumes:
-# - The container is one built via benchmarks/nemotron_3.5_super/build_eval_container.sh
-# - GB200s which are 4 GPUs per node. If you want to use 8 GPUs per node, update the --tensor-parallel-size and --gres=gpu arguments to 8.
-# - Nemotron 3 Ultra configs e.g. with the parser configs.
-# 
-# If you want to use your own custom local Gym, please mount:
-# MOUNTS=/shared/fs:/shared/fs,/opt/Gym:/path/to/custom/local/Gym
-# The existing Gym venv and individual server venvs will still use the ones baked into the container.
-# 
 
 set -euo pipefail
 

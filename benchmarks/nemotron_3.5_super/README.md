@@ -1,12 +1,56 @@
 # Nemotron 3.5 Super Evaluation setup
 - [Nemotron 3.5 Super Evaluation setup](#nemotron-35-super-evaluation-setup)
-  - [Build eval container](#build-eval-container)
-  - [Interactive development on GPUs with Ray cluster](#interactive-development-on-gpus-with-ray-cluster)
-  - [Launch vLLM](#launch-vllm)
+  - [Development commands](#development-commands)
+    - [Run eval against external vLLM endpoint](#run-eval-against-external-vllm-endpoint)
+    - [Build eval container](#build-eval-container)
+    - [Interactive development on GPUs with Ray cluster](#interactive-development-on-gpus-with-ray-cluster)
+    - [Launch vLLM](#launch-vllm)
 
 
 
-## Build eval container
+## Development commands
+### Run eval against external vLLM endpoint
+This script assumes:
+- The container is one built via benchmarks/nemotron_3.5_super/build_eval_container.sh
+- GB200s which are 4 GPUs per node. If you want to use 8 GPUs per node, update the --tensor-parallel-size and --gres=gpu arguments to 8.
+- Nemotron 3 Ultra configs e.g. with the parser configs.
+
+If you want to use your own custom local Gym, please mount:
+```bash
+MOUNTS=/shared/fs:/shared/fs,/opt/Gym:/path/to/custom/local/Gym
+```
+The existing Gym venv and individual server venvs will still use the ones baked into the container.
+
+Example run:
+```bash
+MODEL=/path/to/model \
+EXPERIMENT_NAME=my-experiment-name \
+NUM_NODES=4 \
+SBATCH_ACCOUNT=my-slurm-account \
+SBATCH_PARTITION=batch \
+CONTAINER=/path/to/vllm/container \
+MOUNTS=/shared/fs:/shared/fs \
+bash benchmarks/nemotron_3.5_super/sbatch_eval_with_external_vllm.sh \
+--config benchmarks/my-benchmark/config.yaml
+```
+
+Production run:
+```bash
+MODEL=/lustre/fsw/portfolios/llmservice/users/riship/models/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
+EXPERIMENT_NAME=gpqa-dev \
+NUM_NODES=4 \
+SBATCH_ACCOUNT=nemotron_n4_post \
+SBATCH_PARTITION=batch \
+SBATCH_QOS=interactive \
+CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.25.1___with_gym.sqsh \
+MOUNTS="/lustre:/lustre,$(pwd)/env.yaml:/opt/Gym/env.yaml" \
+bash benchmarks/nemotron_3.5_super/sbatch_eval_with_external_vllm.sh \
+--config responses_api_models/vllm_model/configs/vllm_model.yaml \
+--config benchmarks/gpqa/config.yaml
+```
+
+
+### Build eval container
 Example run:
 ```bash
 SBATCH_ACCOUNT=my-slurm-account \
@@ -35,7 +79,8 @@ GYM_CONFIG=benchmarks/nemotron_3.5_super/eval_container_config.yaml \
 sbatch --gres=gpu:4 --qos=interactive benchmarks/nemotron_3.5_super/build_eval_container.sh
 ```
 
-## Interactive development on GPUs with Ray cluster
+
+### Interactive development on GPUs with Ray cluster
 Example run:
 ```bash
 NUM_NODES=4 \
@@ -60,7 +105,8 @@ MOUNTS=/lustre:/lustre \
 bash scripts/sbatch_interactive.sh
 ```
 
-## Launch vLLM
+
+### Launch vLLM
 This script assumes:
 - GB200s which are 4 GPUs per node. If you want to use 8 GPUs per node, update the --tensor-parallel-size and --gres=gpu arguments to 8.
 - Nemotron 3 Ultra configs e.g. with the parser configs.
