@@ -46,7 +46,6 @@ TEST_ROLLOUT_ID = "my-test-rollout-id"
 
 def _create_test_model_call_record() -> ModelCallRecord:
     return ModelCallRecord(
-        rollout_id=TEST_ROLLOUT_ID,
         status_code=200,
         route="my-test-route",
         timestamp_start=0.0,

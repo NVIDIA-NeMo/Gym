@@ -24,14 +24,14 @@ class TestCaptureStore:
         record = _create_test_model_call_record()
         record.request.input[0].content[0]["text"] = "Unicode payload: café 東京"
 
-        store.record(record)
+        store.record(TEST_ROLLOUT_ID, record)
 
         assert store.read(TEST_ROLLOUT_ID) == [record]
 
         record2 = record.model_copy(deep=True)
         record2.request.input[0].content[0]["text"] = "second"
 
-        store.record(record2)
+        store.record(TEST_ROLLOUT_ID, record2)
         assert store.read(TEST_ROLLOUT_ID) == [record, record2]
 
     def test_read_raises_on_malformed_nonblank_json(self, tmp_path: Path):
@@ -45,7 +45,6 @@ class TestCaptureStore:
         store = CaptureStore(tmp_path)
 
         record1 = _create_test_model_call_record()
-        record1.rollout_id = "0-0"
         record1.response.usage = NeMoGymResponseUsage(
             input_tokens=1,
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=2),
@@ -54,23 +53,20 @@ class TestCaptureStore:
             total_tokens=4,
         )
 
-        store.record(record1)
+        store.record("0-0", record1)
 
         aggregate_record = store.aggregate(rollout_id="0-0")
 
         assert len(aggregate_record.records) == 1
-        assert aggregate_record.records[0].rollout_id == "0-0"
         assert aggregate_record.records[0].response.usage.output_tokens == 3
 
     def test_clear(self, tmp_path: Path):
         store = CaptureStore(tmp_path)
 
         record1 = _create_test_model_call_record()
-        record1.rollout_id = "0-0"
-        store.record(record1)
+        store.record("0-0", record1)
         record2 = _create_test_model_call_record()
-        record2.rollout_id = "1-0"
-        store.record(record2)
+        store.record("1-0", record2)
 
         assert store.read("0-0") and store.read("1-0")
 
@@ -86,7 +82,6 @@ class TestCaptureStore:
         rows = []
 
         record = _create_test_model_call_record()
-        record.rollout_id = "0-0"
 
         def _write() -> None:
             with path.open("ab") as handle:
@@ -127,7 +122,7 @@ class TestCaptureStore:
         store = CaptureStore(tmp_path)
 
         def _write(i: int) -> None:
-            store.record(_create_test_model_call_record())
+            store.record(TEST_ROLLOUT_ID, _create_test_model_call_record())
 
         threads = [threading.Thread(target=_write, args=(i,)) for i in range(20)]
         for t in threads:
@@ -145,9 +140,8 @@ class TestCaptureStore:
             # Module-level so it is picklable under the "spawn" start method too.
             store = CaptureStore(root)
             record = _create_test_model_call_record()
-            record.rollout_id = "0-0"
             for _ in range(base, base + 100):
-                store.record(record)
+                store.record("0-0", record)
 
         ctx = mp.get_context("fork")
         procs = [ctx.Process(target=_cross_process_writer, args=(str(tmp_path), b * 100)) for b in range(4)]

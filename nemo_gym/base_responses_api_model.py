@@ -117,13 +117,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if not rollout_id:
             return response
 
-        request.state.model_call_record_dict["rollout_id"] = rollout_id
         request.state.model_call_record_dict["timestamp_end"] = perf_counter()
         request.state.model_call_record_dict["status_code"] = response.status_code
 
         # Record in the background to not block the response
         # The background task only runs after streaming has finished
-        task = BackgroundTask(self._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict))
+        task = BackgroundTask(
+            self._store.record, rollout_id, ModelCallRecord.model_validate(request.state.model_call_record_dict)
+        )
 
         # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
         assert not response.background

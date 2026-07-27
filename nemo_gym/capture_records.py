@@ -36,9 +36,6 @@ class CallCaptureConfig(BaseModel):
 class ModelCallRecord(BaseModel):
     """Observability record derived from one captured model-server exchange."""
 
-    # Rollout ID
-    rollout_id: str
-
     # HTTP information
     status_code: int
     route: str
@@ -105,7 +102,7 @@ class CaptureStore:
     def path_for(self, rollout_id: str) -> Path:
         return self._root / f"{rollout_id}.capture.jsonl"
 
-    def record(self, record: RecordEventType) -> None:
+    def record(self, rollout_id: str, record: RecordEventType) -> None:
         """Append one exchange and fsync (durable across a killed box).
 
         ``flock`` serializes appends across worker processes (a model server may run with
@@ -114,7 +111,7 @@ class CaptureStore:
         loop (the capture middleware offloads it via ``asyncio.to_thread``).
         """
         line = orjson.dumps(record.model_dump(), default=str, option=orjson.OPT_APPEND_NEWLINE)
-        path = self.path_for(record.rollout_id)
+        path = self.path_for(rollout_id)
         with self._lock:
             with path.open("ab") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)

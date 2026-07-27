@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, List
 
 from fastapi import Body, FastAPI, Request, Response
+from starlette.background import BackgroundTask
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -23,6 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.capture_records import EventTypes
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -71,31 +73,24 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def call_capture_middleware(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        # TODO @bxyu-nvidia: Implement agent recording.
-        # request.state.model_call_record_dict = {
-        #     "timestamp_start": perf_counter(),
-        #     "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
-        # }
+        events: List[EventTypes] = []
+        request.state.events = events
 
         response = await call_next(request)
 
         # Grab the rollout_id here after the route handler has run to populate the path_params
-        # rollout_id = request.path_params.get("rollout_id")
+        rollout_id = request.path_params.get("rollout_id")
 
-        # if not rollout_id:
-        #     return response
-
-        # request.state.model_call_record_dict["rollout_id"] = rollout_id
-        # request.state.model_call_record_dict["timestamp_end"] = perf_counter()
-        # request.state.model_call_record_dict["status_code"] = response.status_code
+        if not rollout_id:
+            return response
 
         # Record in the background to not block the response
         # The background task only runs after streaming has finished
-        # task = BackgroundTask(self._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict))
+        task = BackgroundTask(self._store.record, rollout_id, request.state.events)
 
         # # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
-        # assert not response.background
-        # response.background = task
+        assert not response.background
+        response.background = task
 
         return response
 
@@ -134,20 +129,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # )
 
         # # Application-level exception catching before it's caught by FastAPI exception middleware
-        # try:
-        #     response = await self._invoke_responses(request, body)
-        #     request.state.model_call_record_dict["response"] = response
-        #     # The raw response is identical to the response, so we dedupe
-        #     request.state.model_call_record_dict["raw_response"] = None
-        #     request.state.model_call_record_dict["error_response"] = None
-        # except Exception as e:
-        #     request.state.model_call_record_dict["response"] = None
-        #     request.state.model_call_record_dict["raw_response"] = None
-        #     request.state.model_call_record_dict["error_response"] = format_exc()
+        try:
+            response = await self._invoke_responses(request, body)
+            request.state.model_call_record_dict["response"] = response
+            # The raw response is identical to the response, so we dedupe
+            request.state.model_call_record_dict["raw_response"] = None
+            request.state.model_call_record_dict["error_response"] = None
+        finally:
+            pass
 
-        #     raise e
-
-        # return response
         params = {"body": body}
         self._maybe_inject_request(self.responses, request, body)
         return await self.responses(**params)
