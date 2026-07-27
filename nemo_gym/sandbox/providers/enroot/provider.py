@@ -31,6 +31,7 @@ import posixpath
 import shlex
 import shutil
 import signal
+import stat
 import tempfile
 import uuid
 from collections.abc import Mapping
@@ -64,13 +65,14 @@ READY_PROBE_COMMAND = (
 READY_PROBE_EXPECTED = "enroot-sandbox-ready"
 SANDBOX_RUNTIME_RETURN_CODE = 125
 # Best-effort stderr markers indicating enroot itself (not the user's command)
-# failed to run the command. Enroot prints its own errors prefixed with "[ERROR]".
+# failed to run the command. Enroot prefixes its own errors with "[ERROR]"; the
+# remaining entries are narrow nsenter/proc signatures. Broad strings like
+# "failed to" or "does not exist" are omitted — they appear in normal command
+# stderr and would corrupt the exit-code signal returned to the agent.
 ENROOT_RUNTIME_ERROR_MARKERS = (
     "[error]",
     "no such process",
-    "does not exist",
     "no such file or directory: /proc",
-    "failed to",
     "nsenter",
 )
 ENROOT_MISSING_CONTAINER_MARKERS = ("does not exist", "no such", "not found")
@@ -148,6 +150,11 @@ class EnrootCreateConfig:
     sqsh_cache_dir: str | None = None
     rw: bool = True
     remap_root: bool = False
+    # Clear the Docker ENTRYPOINT before launching the init so images with a
+    # non-shell entrypoint (e.g. ENTRYPOINT ["python"]) don't wrap the init
+    # command and exit immediately. Set to False only when the image entrypoint
+    # is intentionally required.
+    bypass_entrypoint: bool = True
     init_command: str = DEFAULT_INIT_COMMAND
     import_timeout_s: float | None = 1800
     create_timeout_s: float | None = 600
@@ -306,7 +313,7 @@ class EnrootProvider:
         runtime_path = cfg.runtime_path or os.environ.get("ENROOT_RUNTIME_PATH") or str(base / "runtime")
         self._sqsh_cache_dir = Path(cfg.sqsh_cache_dir or (base / "sqsh"))
         for directory in (data_path, cache_path, runtime_path, self._sqsh_cache_dir):
-            Path(directory).mkdir(parents=True, exist_ok=True)
+            Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
 
         self._enroot_env = {
             **os.environ,
@@ -402,8 +409,12 @@ class EnrootProvider:
 
         lock = self._import_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            if target.exists() and target.stat().st_size > 0:
-                return target
+            if target.exists():
+                st = target.stat()
+                if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() and st.st_size > 0:
+                    return target
+                # Symlink, wrong owner, or zero-length: discard and re-import.
+                target.unlink(missing_ok=True)
             # Import to a unique temp path then atomically rename so concurrent
             # (cross-process) creates never observe a half-written squashfs.
             tmp = self._sqsh_cache_dir / f".{key}.{uuid.uuid4().hex}.tmp"
@@ -469,6 +480,12 @@ class EnrootProvider:
         start_env = {**_resource_gpu_env(resources), **spec.env}
         for key, value in start_env.items():
             argv += ["-e", f"{key}={value}"]
+        # Clear the Docker ENTRYPOINT so images with a non-shell entrypoint
+        # (e.g. ENTRYPOINT ["python"]) don't wrap the init and exit immediately.
+        # Enroot exposes the entrypoint via ENROOT_ENTRYPOINT; passing an empty
+        # value overrides whatever the imported image config stored.
+        if self._create_config.bypass_entrypoint:
+            argv += ["-e", "ENROOT_ENTRYPOINT="]
         argv += list(self._create_config.extra_start_args)
         # Tag the init with the (unique) container name so the nested-in-pyxis PID
         # fallback can find THIS container's init process in /proc unambiguously. The
@@ -635,6 +652,17 @@ class EnrootProvider:
             )
         shutil.rmtree(instance.staging_dir, ignore_errors=True)
 
+    @staticmethod
+    def _pid_has_container_marker(pid: int, name: str) -> bool:
+        """Return True if /proc/<pid>/cmdline still carries the container's unique marker.
+
+        This guards against PID reuse: if the init exits and Linux reuses the PID
+        for an unrelated process, the container marker won't appear in the new
+        process's cmdline, so exec() returns a sandbox error instead of joining
+        the wrong namespace.
+        """
+        return name in _read_proc_cmdline(pid)
+
     async def exec(
         self,
         handle: SandboxHandle,
@@ -659,10 +687,10 @@ class EnrootProvider:
         ``stdin``, when given, is piped to the command's standard input.
         """
         instance = handle.raw
-        if instance.container_pid is None:
+        if instance.container_pid is None or not self._pid_has_container_marker(instance.container_pid, instance.name):
             return SandboxExecResult(
                 stdout=None,
-                stderr=f"enroot container {instance.name!r} has no running init PID",
+                stderr=f"enroot container {instance.name!r} init is no longer running (PID {instance.container_pid} stale or reused)",
                 return_code=SANDBOX_RUNTIME_RETURN_CODE,
                 error_type="sandbox",
             )
@@ -718,6 +746,11 @@ class EnrootProvider:
         if rel is not None:
             dest = instance.staging_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.is_symlink():
+                raise RuntimeError(
+                    f"upload_file: refusing to write to {target_path!r} — "
+                    "destination is a symlink inside the sandbox mount"
+                )
             dest.write_bytes(source_path.read_bytes())
             return
 
@@ -746,7 +779,13 @@ class EnrootProvider:
 
         rel = _path_under_mount(instance.mount_point, source_path)
         if rel is not None:
-            target_path.write_bytes((instance.staging_dir / rel).read_bytes())
+            host_file = instance.staging_dir / rel
+            if host_file.is_symlink():
+                raise RuntimeError(
+                    f"download_file: refusing to read {source_path!r} — "
+                    "source is a symlink inside the sandbox mount"
+                )
+            target_path.write_bytes(host_file.read_bytes())
             return
 
         tmp_name = uuid.uuid4().hex

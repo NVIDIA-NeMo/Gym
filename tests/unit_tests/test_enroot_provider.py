@@ -139,6 +139,8 @@ def _make_provider(
     monkeypatch.setattr(provider, "_run", rec)
     start_rec = StartRecorder(start_proc or FakeProc())
     monkeypatch.setattr(provider, "_start_detached", start_rec)
+    # Bypass /proc check: tests use fake PIDs that don't exist on the host.
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: True)
     return provider, rec, start_rec
 
 
@@ -237,6 +239,10 @@ def test_is_runtime_failure() -> None:
     assert enroot_provider._is_runtime_failure("[ERROR] no such process") is True
     assert enroot_provider._is_runtime_failure("nsenter: failed") is True
     assert enroot_provider._is_runtime_failure("ls: cannot access") is False
+    # Broad strings that appeared in user command stderr must NOT be classified as
+    # enroot runtime failures — they'd corrupt the exit-code signal to the agent.
+    assert enroot_provider._is_runtime_failure("failed to connect to database") is False
+    assert enroot_provider._is_runtime_failure("file does not exist") is False
 
 
 def test_coerce_mounts() -> None:
@@ -324,7 +330,9 @@ async def test_create_builds_argv_and_runs_probe(
     assert _contains_seq(start_argv, ["-m", "/host/a:/code/a"])
     assert _contains_seq(start_argv, ["-e", "FOO=bar"])
     assert _contains_seq(start_argv, ["-e", "NVIDIA_VISIBLE_DEVICES=0"])
-    assert start_argv[-4:] == [handle.sandbox_id, "sh", "-c", enroot_provider.DEFAULT_INIT_COMMAND]
+    expected_init = f"{enroot_provider.DEFAULT_INIT_COMMAND}  # {handle.sandbox_id}"
+    assert start_argv[-4:] == [handle.sandbox_id, "sh", "-c", expected_init]
+    assert _contains_seq(start_argv, ["-e", "ENROOT_ENTRYPOINT="])
 
 
 # The generated container name is random; the create test above needs the `list`
@@ -581,6 +589,32 @@ async def test_exec_command_failure_is_not_runtime_error(
     assert result.error_type is None
 
 
+async def test_exec_broad_stderr_is_not_runtime_error(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """'failed to' and 'does not exist' in user stderr must NOT become a sandbox error."""
+    for stderr in ("failed to connect to server", "file does not exist"):
+        provider, _rec, _sr = _make_provider(monkeypatch, lambda argv: (1, "", stderr), tmp_path)
+        result = await provider.exec(_make_handle(tmp_path), "myapp")
+        assert result.return_code == 1, f"expected exit 1 for stderr={stderr!r}"
+        assert result.error_type is None, f"expected no error_type for stderr={stderr!r}"
+
+
+async def test_exec_stale_pid_is_sandbox_error(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stale/reused PID (cmdline no longer contains the container marker) returns a sandbox error."""
+    provider, rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    # Override the marker check to simulate a dead init (PID reused by another process).
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: False)
+    handle = _make_handle(tmp_path)
+    result = await provider.exec(handle, "echo hi")
+    assert result.return_code == enroot_provider.SANDBOX_RUNTIME_RETURN_CODE
+    assert result.error_type == "sandbox"
+    assert "stale or reused" in (result.stderr or "")
+    assert rec.calls == []  # never shelled out to enroot
+
+
 # --------------------------------------------------------------------------- #
 # upload / download
 # --------------------------------------------------------------------------- #
@@ -681,6 +715,37 @@ async def test_download_fallback_error(fake_binary: str, monkeypatch: pytest.Mon
     with pytest.raises(RuntimeError, match="download"):
         await provider.download_file(handle, "/var/log/app.log", tmp_path / "local.txt")
     assert list(staging.iterdir()) == []
+
+
+async def test_upload_symlink_in_mount_is_refused(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Symlinks inside the bind-mounted staging dir must not be followed on upload."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    # Container creates a symlink at the target location.
+    (staging / "evil.txt").symlink_to("/proc/self/environ")
+    provider, _rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    handle = _make_handle(staging)
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"data")
+    with pytest.raises(RuntimeError, match="symlink"):
+        await provider.upload_file(handle, src, "/sandbox/evil.txt")
+
+
+async def test_download_symlink_in_mount_is_refused(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Symlinks inside the bind-mounted staging dir must not be followed on download."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    # Container creates a symlink at the source location.
+    (staging / "leak.txt").symlink_to("/proc/self/environ")
+    provider, _rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    handle = _make_handle(staging)
+    dest = tmp_path / "out.txt"
+    with pytest.raises(RuntimeError, match="symlink"):
+        await provider.download_file(handle, "/sandbox/leak.txt", dest)
 
 
 # --------------------------------------------------------------------------- #

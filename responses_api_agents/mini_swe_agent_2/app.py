@@ -459,7 +459,10 @@ def _run_eval_v2(
     # `set -uxo pipefail` fails on sh/dash.
     eval_script = test_spec.eval_script
     script_path = f"/tmp/_eval_{run_id}.sh"
-    env.execute(f"cat > {script_path} << 'EVEOF'\n{eval_script}\nEVEOF")
+    # Use a UUID-suffixed delimiter so that eval_script lines containing the
+    # bare token "EVEOF" don't silently truncate the heredoc.
+    heredoc_delim = f"EVEOF_{uuid4().hex}"
+    env.execute(f"cat > {script_path} << '{heredoc_delim}'\n{eval_script}\n{heredoc_delim}")
     env.execute(f"chmod +x {script_path}")
     result = env.execute(script_path, is_eval=True)
     test_output = result["output"]
