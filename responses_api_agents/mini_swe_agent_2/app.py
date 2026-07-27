@@ -461,7 +461,7 @@ def _run_eval_v2(
     script_path = f"/tmp/_eval_{run_id}.sh"
     # Use a UUID-suffixed delimiter so that eval_script lines containing the
     # bare token "EVEOF" don't silently truncate the heredoc.
-    heredoc_delim = f"EVEOF_{uuid4().hex}"
+    heredoc_delim = f"EVEOF_{str(uuid4()).replace('-', '')}"
     env.execute(f"cat > {script_path} << '{heredoc_delim}'\n{eval_script}\n{heredoc_delim}")
     env.execute(f"chmod +x {script_path}")
     result = env.execute(script_path, is_eval=True)
