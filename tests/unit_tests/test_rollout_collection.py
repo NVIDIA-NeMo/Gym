@@ -672,8 +672,8 @@ class TestRolloutCollection:
         capture_dir = tmp_path / "captures"
         get_global_config_dict = MagicMock(
             return_value={
-                "should_capture_model_calls": True,
-                "model_call_capture_dir": str(capture_dir),
+                "should_capture_calls": True,
+                "call_capture_dir": str(capture_dir),
             }
         )
         clear_captures = MagicMock()

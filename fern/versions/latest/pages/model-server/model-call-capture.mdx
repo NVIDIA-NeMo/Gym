@@ -17,8 +17,8 @@ Configure capture once at the top level of Gym's global config. The setting appl
 `SimpleResponsesAPIModel` in the run:
 
 ```yaml
-should_capture_model_calls: true
-model_call_capture_dir: /data/model-calls
+should_capture_calls: true
+call_capture_dir: /data/model-calls
 
 policy_model:
   responses_api_models:
@@ -28,8 +28,8 @@ policy_model:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `should_capture_model_calls` | `bool` | `false` | Enables model-call capture for the run. |
-| `model_call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
+| `should_capture_calls` | `bool` | `false` | Enables model-call capture for the run. |
+| `call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
 
 Each rollout id has an append-only JSONL file named `<rollout_id>.capture.jsonl`. Writes are flushed
 and fsynced. Capture failures are logged and do not fail model requests.

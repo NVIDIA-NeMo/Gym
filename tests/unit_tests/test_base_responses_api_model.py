@@ -108,8 +108,8 @@ class TestBaseResponsesAPIModel:
     def test_BaseResponsesAPIModel(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
         BaseResponsesAPIModel(config=config)
-        assert "should_capture_model_calls" not in BaseResponsesAPIModelConfig.model_fields
-        assert "model_call_capture_dir" not in BaseResponsesAPIModelConfig.model_fields
+        assert "should_capture_calls" not in BaseResponsesAPIModelConfig.model_fields
+        assert "call_capture_dir" not in BaseResponsesAPIModelConfig.model_fields
 
     def test_SimpleResponsesAPIModel(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
@@ -123,11 +123,11 @@ class TestBaseResponsesAPIModel:
         self,
         tmp_path: Path,
         TestSimpleResponsesAPIModel_cls: type[SimpleResponsesAPIModel] = _TestSimpleResponsesAPIModel,
-        should_capture_model_calls: bool = True,
+        should_capture_calls: bool = True,
     ) -> FastAPI:
         mock_server_client = MagicMock(spec=ServerClient)
         mock_server_client.global_config_dict = OmegaConf.create(
-            {"should_capture_model_calls": should_capture_model_calls, "model_call_capture_dir": str(tmp_path)}
+            {"should_capture_calls": should_capture_calls, "call_capture_dir": str(tmp_path)}
         )
 
         model_server = TestSimpleResponsesAPIModel_cls(
@@ -217,7 +217,7 @@ class TestBaseResponsesAPIModel:
         assert len(records) == 0
 
     def test_rollout_prefix_not_stripped_when_capture_disabled(self, tmp_path: Path):
-        app = self._create_test_app_with_model_call_capture(tmp_path, should_capture_model_calls=False)
+        app = self._create_test_app_with_model_call_capture(tmp_path, should_capture_calls=False)
 
         client = TestClient(app)
         # Dummy input to just test it doesn't 404

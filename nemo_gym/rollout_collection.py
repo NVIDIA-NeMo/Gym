@@ -36,7 +36,7 @@ from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsReq
 from nemo_gym.base_responses_api_model import (
     maybe_rollout_id_from_run_body,
 )
-from nemo_gym.capture_records import CaptureStore, ModelCallCaptureConfig
+from nemo_gym.capture_records import CallCaptureConfig, CaptureStore
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -521,15 +521,15 @@ class RolloutCollectionHelper(BaseModel):
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_config = ModelCallCaptureConfig.model_validate(get_global_config_dict())
+        capture_config = CallCaptureConfig.model_validate(get_global_config_dict())
 
         # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
         # same rollout ids, so clear the capture files this run is about to (re)write.
-        if capture_config.should_capture_model_calls and not config.resume_from_cache:
+        if capture_config.should_capture_calls and not config.resume_from_cache:
             print(
-                f"Clearing previously captured model calls dir {capture_config.model_call_capture_dir} because resume_from_cache=false"
+                f"Clearing previously captured model calls dir {capture_config.call_capture_dir} because resume_from_cache=false"
             )
-            store = CaptureStore(capture_config.model_call_capture_dir)
+            store = CaptureStore(capture_config.call_capture_dir)
             store.clear()
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
@@ -549,7 +549,7 @@ class RolloutCollectionHelper(BaseModel):
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
-            if capture_config.should_capture_model_calls:
+            if capture_config.should_capture_calls:
                 result["ng_model_call_capture"] = store.aggregate(
                     rollout_id=maybe_rollout_id_from_run_body(row)
                 ).model_dump()

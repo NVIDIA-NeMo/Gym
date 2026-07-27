@@ -13,22 +13,22 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
-class ModelCallCaptureConfig(BaseModel):
+class CallCaptureConfig(BaseModel):
     """Run-wide model-call capture settings from Gym's global config."""
 
-    should_capture_model_calls: bool = False
-    model_call_capture_dir: Optional[Path] = None
+    should_capture_calls: bool = False
+    call_capture_dir: Optional[Path] = None
 
     @model_validator(mode="after")
-    def validate_capture_dir(self) -> "ModelCallCaptureConfig":
-        if not self.should_capture_model_calls:
+    def validate_capture_dir(self) -> "CallCaptureConfig":
+        if not self.should_capture_calls:
             return self
 
-        if self.model_call_capture_dir is None:
-            raise ValueError("model_call_capture_dir is required when should_capture_model_calls=true")
+        if self.call_capture_dir is None:
+            raise ValueError("call_capture_dir is required when should_capture_calls=true")
 
-        if not self.model_call_capture_dir.is_absolute():
-            self.model_call_capture_dir = RESULTS_DIR / self.model_call_capture_dir
+        if not self.call_capture_dir.is_absolute():
+            self.call_capture_dir = RESULTS_DIR / self.call_capture_dir
 
         return self
 

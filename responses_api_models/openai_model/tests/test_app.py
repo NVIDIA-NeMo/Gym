@@ -84,7 +84,7 @@ class TestApp:
         server = self._setup_server()
         server.server_client.global_config_dict = {
             "observability_enabled": True,
-            "model_call_capture_dir": str(tmp_path),
+            "call_capture_dir": str(tmp_path),
         }
         app = server.setup_webserver()
         client = TestClient(app)
@@ -144,7 +144,7 @@ class TestApp:
         server = self._setup_server()
         server.server_client.global_config_dict = {
             "observability_enabled": True,
-            "model_call_capture_dir": str(tmp_path),
+            "call_capture_dir": str(tmp_path),
         }
         app = server.setup_webserver()
         client = TestClient(app)
@@ -182,7 +182,7 @@ class TestApp:
         server = self._setup_server()
         server.server_client.global_config_dict = {
             "observability_enabled": True,
-            "model_call_capture_dir": str(tmp_path),
+            "call_capture_dir": str(tmp_path),
         }
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=_response_data())

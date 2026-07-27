@@ -21,13 +21,14 @@ import sys
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
+from inspect import signature
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, Awaitable, Callable, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -589,14 +590,14 @@ repr(e): {repr(e)}"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
 
-    def setup_model_call_capture_middleware(self, app: FastAPI) -> None:
+    def setup_call_capture_middleware(self, app: FastAPI) -> None:
         # TODO @bxyu-nvidia: We nested import here to avoid circular dependencies.
         # server_utils -> openai_utils, openai_utils -> capture_records, capture_records -> openai_utils
         # We can fix this by taking out NeMoGymAsyncOpenAI from the openai_utils
-        from nemo_gym.capture_records import CaptureStore, ModelCallCaptureConfig
+        from nemo_gym.capture_records import CallCaptureConfig, CaptureStore
 
-        self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        if not self._capture_config.should_capture_model_calls:
+        self._capture_config = CallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        if not self._capture_config.should_capture_calls:
             return
 
         # Model call capture middleware must be the final middleware added so
@@ -605,12 +606,19 @@ repr(e): {repr(e)}"""
         # Here, we setup the exception middleware first so that we guarantee the ordering
         self.setup_exception_middleware(app)
 
-        self._store = CaptureStore(self._capture_config.model_call_capture_dir)
-        app.add_middleware(BaseHTTPMiddleware, dispatch=self.model_call_capture_middleware)
+        self._store = CaptureStore(self._capture_config.call_capture_dir)
+        app.add_middleware(BaseHTTPMiddleware, dispatch=self.call_capture_middleware)
 
         print(f"Set up model call capture middleware for {self.config.name}")
 
-    async def model_call_capture_middleware(
+    def _maybe_inject_request(self, fn: Callable, request: Request, params: Dict[str, Any]) -> None:
+        # responses() and other function signatures vary across servers: some take a leading `request` injected by FastAPI, some only
+        # `body`. Dispatch on whichever this server declares so the default messages() works for all of them.
+        # This function will modify the params dict to include a request parameter if the function signature requires one.
+        if "request" in signature(self.responses).parameters:
+            params["request"] = request
+
+    async def call_capture_middleware(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         # This method is to be overridden by inner classes that need it.

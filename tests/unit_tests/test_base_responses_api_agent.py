@@ -45,7 +45,7 @@ class TestBaseResponsesAPIAgent:
 
     def test_resolve_model_call_path(self):
         mock_agent = MagicMock()
-        mock_agent._capture_config.should_capture_model_calls = True
+        mock_agent._capture_config.should_capture_calls = True
 
         with_id = SimpleResponsesAPIAgent.resolve_model_call_path(
             mock_agent, base_url_or_path="http://my-test-url/v1", body={TASK_INDEX_KEY_NAME: 2}

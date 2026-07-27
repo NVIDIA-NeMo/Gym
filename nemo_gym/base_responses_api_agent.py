@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Request, Response
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -25,7 +25,6 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
-from nemo_gym.capture_records import ModelCallCaptureConfig
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -55,8 +54,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         self.setup_session_middleware(app)
 
-        # Used for constructing the model call path
-        self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        # Setup the capture middleware for model calls.
+        self.setup_call_capture_middleware(app)
+        if self._capture_config.should_capture_calls:
+            app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
+            app.post(f"/run/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.run_with_call_capture)
 
         app.post("/v1/responses")(self.responses)
         # Prefixed twin of /v1/responses: a self-call made with url_path_for_run() lands here, and
@@ -68,8 +70,39 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         return app
 
+    async def call_capture_middleware(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        # TODO @bxyu-nvidia: Implement agent recording.
+        # request.state.model_call_record_dict = {
+        #     "timestamp_start": perf_counter(),
+        #     "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
+        # }
+
+        response = await call_next(request)
+
+        # Grab the rollout_id here after the route handler has run to populate the path_params
+        # rollout_id = request.path_params.get("rollout_id")
+
+        # if not rollout_id:
+        #     return response
+
+        # request.state.model_call_record_dict["rollout_id"] = rollout_id
+        # request.state.model_call_record_dict["timestamp_end"] = perf_counter()
+        # request.state.model_call_record_dict["status_code"] = response.status_code
+
+        # Record in the background to not block the response
+        # The background task only runs after streaming has finished
+        # task = BackgroundTask(self._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict))
+
+        # # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
+        # assert not response.background
+        # response.background = task
+
+        return response
+
     def resolve_model_call_path(self, base_url_or_path: str, body: BaseModel | Mapping[str, Any] | None) -> str:
-        if not self._capture_config.should_capture_model_calls:
+        if not self._capture_config.should_capture_calls:
             return base_url_or_path
 
         maybe_rollout_id = maybe_rollout_id_from_run_body(body)
@@ -96,3 +129,46 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
         )
+
+    async def responses_with_call_capture(
+        self, rollout_id: str, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        # TODO @bxyu-nvidia: Implement agent recording.
+
+        # request.state.model_call_record_dict["route"] = "/v1/responses"
+
+        # # Directly use the input body since it's already in Responses format
+        # request.state.model_call_record_dict["request"] = body
+        # # The raw request is identical to the response, so we dedupe
+        # request.state.model_call_record_dict["raw_request"] = None
+
+        # assert not request.state.model_call_record_dict["request"].stream, (
+        #     "Model call capture for /v1/responses with streaming is currently not supported!"
+        # )
+
+        # # Application-level exception catching before it's caught by FastAPI exception middleware
+        # try:
+        #     response = await self._invoke_responses(request, body)
+        #     request.state.model_call_record_dict["response"] = response
+        #     # The raw response is identical to the response, so we dedupe
+        #     request.state.model_call_record_dict["raw_response"] = None
+        #     request.state.model_call_record_dict["error_response"] = None
+        # except Exception as e:
+        #     request.state.model_call_record_dict["response"] = None
+        #     request.state.model_call_record_dict["raw_response"] = None
+        #     request.state.model_call_record_dict["error_response"] = format_exc()
+
+        #     raise e
+
+        # return response
+        params = {"body": body}
+        self._maybe_inject_request(self.responses, request, body)
+        return await self.responses(**params)
+
+    async def run_with_call_capture(
+        self, rollout_id: str, request: Request, body: BaseRunRequest = Body()
+    ) -> BaseVerifyResponse:
+        # TODO @bxyu-nvidia: Implement agent recording.
+        params = {"body": body}
+        self._maybe_inject_request(self.run, request, body)
+        return await self.run(**params)

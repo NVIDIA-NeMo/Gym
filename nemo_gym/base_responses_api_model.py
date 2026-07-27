@@ -14,7 +14,6 @@
 # limitations under the License.
 """Model server base classes and per-rollout model-call capture."""
 
-import inspect
 import logging
 from abc import abstractmethod
 from time import perf_counter
@@ -110,8 +109,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         self.setup_session_middleware(app)
 
         # Setup the capture middleware for model calls.
-        self.setup_model_call_capture_middleware(app)
-        if self._capture_config.should_capture_model_calls:
+        self.setup_call_capture_middleware(app)
+        if self._capture_config.should_capture_calls:
             # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
             # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
             app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
@@ -140,7 +139,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         return app
 
-    async def model_call_capture_middleware(
+    async def call_capture_middleware(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         request.state.model_call_record_dict = {
@@ -243,12 +242,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def _invoke_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
-        # responses() signatures vary across servers: some take a leading `request`, some only
-        # `body`. Dispatch on whichever this server declares so the default messages() works for
-        # all of them.
-        if "request" in inspect.signature(self.responses).parameters:
-            return await self.responses(request=request, body=params)
-        return await self.responses(body=params)
+        params = {"body": params}
+        self._maybe_inject_request(self.responses, request, params)
+        return await self.responses(**params)
 
     # Model call capture methods
     def _wrap_async_body_iterator_with_response_capture(
