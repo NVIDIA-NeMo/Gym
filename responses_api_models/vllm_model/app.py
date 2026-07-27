@@ -232,7 +232,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
 
-        metadata = body_dict.get("metadata", dict())
+        metadata = body_dict.get("metadata") or {}
 
         # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
         metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs", "{}")
