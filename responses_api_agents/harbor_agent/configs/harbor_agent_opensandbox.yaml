@@ -81,13 +81,19 @@ harbor_agent:
         # timeouts below.
         sandbox_ttl_s: 21600
         sandbox_ready_timeout_s: 900
-        # Per-command exec bound (NOT a trial bound). Terminus-2 omits
-        # ``timeout_sec`` only for its short tmux plumbing (send-keys/capture are
-        # sub-second; blocked waits self-bound at ``timeout <=180s tmux wait
-        # done``), so 300s is ample headroom while still bounding a wedged exec
-        # on the cross-cluster path. A trial-length value here (e.g. hours) lets
-        # a single stuck exec hang the whole task until the trial deadline.
-        default_exec_timeout_s: 600
+        # Per-command exec bound (NOT a trial bound). This governs every exec
+        # that does not carry its own timeout -- which crucially includes
+        # Harbor's VERIFIER (harbor.verifier.verifier never passes timeout_sec).
+        # 87 of the 89 TB 2.1 tasks declare a [verifier] timeout_sec above 600
+        # (median 900, max 12000), so a smaller value here silently truncates
+        # verification and scores the task 0 instead of failing loudly.
+        # Measured on a gold-patch (oracle) run of all 89 tasks: the longest
+        # single command was compile-compcert's build at 1384s and the longest
+        # verifier was query-optimize at 604s; 600s scored 83/89 and 1800s
+        # scored 85/89 -- identical to a 12000s cap, i.e. 1800s is the smallest
+        # value that costs nothing. Terminus-2 agent commands pass their own
+        # command.duration_sec and are unaffected either way.
+        default_exec_timeout_s: 1800
         # Uniform per-sandbox resources for all tasks. disk_gib is derived from
         # override_storage_mb; 30 GiB avoids kubelet ephemeral-storage evictions
         # on disk-heavy tasks (image builds, dataset downloads) that overrun the

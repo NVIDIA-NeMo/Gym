@@ -232,6 +232,18 @@ class TestExec:
         assert _provider().exec_calls[-1]["timeout_s"] == 999
 
     @pytest.mark.asyncio
+    async def test_exec_default_timeout_covers_verifier_budgets(self, tmp_path):
+        # Regression guard. Harbor's verifier calls exec() WITHOUT timeout_sec,
+        # so this default is what bounds verification for every benchmark. A
+        # small value silently truncates the verifier and scores the task 0
+        # instead of failing loudly (observed on Terminal-Bench 2.1, where 87 of
+        # 89 tasks declare a [verifier] timeout_sec above 600s).
+        env = _make_environment(tmp_path, exec_shell=None)
+        await env.start(force_build=False)
+        await env.exec("true")
+        assert _provider().exec_calls[-1]["timeout_s"] >= 900
+
+    @pytest.mark.asyncio
     async def test_exec_requires_started_sandbox(self, tmp_path):
         env = _make_environment(tmp_path)
         with pytest.raises(RuntimeError, match="not running"):
