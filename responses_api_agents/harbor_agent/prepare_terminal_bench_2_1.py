@@ -38,14 +38,9 @@ PINNED_COMMIT = (
 AGENT_DIR = Path(__file__).parent
 OUTPUT_FPATH = AGENT_DIR / "example" / "terminal_bench_2_1_input.jsonl"
 DEFAULT_CHECKOUT_DIR = AGENT_DIR / "data" / "terminal-bench-2-1"
-TASK_PATCHES_DIR = AGENT_DIR / "task_patches"
 
 DATASET_ALIAS = "terminal_bench"
 RESPONSES_CREATE_PARAMS = {"input": [], "temperature": 1.0, "top_p": 0.95}
-
-# Task patches may only touch reference solutions. Anything that could change
-# what is asked of the agent or how it is graded is refused outright.
-_PATCHABLE_SUFFIX = "/solution/solve.sh"
 
 
 def _ensure_tasks_dir() -> Path:
@@ -65,64 +60,9 @@ def _ensure_tasks_dir() -> Path:
     return tasks_dir
 
 
-def _patch_targets(patch_text: str) -> list[str]:
-    """Return the ``b/`` paths a unified diff writes to."""
-    return [line[6:].split("\t", 1)[0].strip() for line in patch_text.splitlines() if line.startswith("+++ b/")]
-
-
-def apply_task_patches(tasks_dir: Path) -> list[str]:
-    """Apply the bundled reference-solution patches to a TB 2.1 checkout.
-
-    Opt-in (see ``--apply-task-patches``). These patch ``solution/solve.sh``
-    only, so they affect **oracle/gold-patch runs only** — ``solution/`` is
-    never uploaded for a model agent, so scored model runs are untouched.
-
-    Every patch is refused unless it writes exclusively to
-    ``*/solution/solve.sh``, and a patch that does not apply cleanly raises
-    instead of being skipped: the checkout is pinned to ``PINNED_COMMIT``, so a
-    failure means the pin moved and the patch needs revisiting.
-    """
-    if not TASK_PATCHES_DIR.is_dir():
-        return []
-
-    repo_root = tasks_dir.parent
-    applied: list[str] = []
-    for patch_path in sorted(TASK_PATCHES_DIR.glob("*.patch")):
-        patch_text = patch_path.read_text()
-        targets = _patch_targets(patch_text)
-        if not targets:
-            raise RuntimeError(f"{patch_path.name}: no '+++ b/' target lines found")
-        offending = [t for t in targets if not t.endswith(_PATCHABLE_SUFFIX)]
-        if offending:
-            raise RuntimeError(
-                f"{patch_path.name} would modify {offending}, but task patches may only touch "
-                f"'*{_PATCHABLE_SUFFIX}'. Patching tests/ or task.toml would change what is graded."
-            )
-
-        # --unsafe-paths so this also works when tasks_dir points at a plain
-        # (non-git) copy of the checkout, e.g. a staged dataset on shared storage.
-        result = subprocess.run(
-            ["git", "apply", "-p1", "--unsafe-paths", str(patch_path)],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to apply {patch_path.name} to {repo_root} (pin={PINNED_COMMIT[:12]}): {result.stderr.strip()}"
-            )
-        applied.append(patch_path.name)
-
-    if applied:
-        print(f"Applied {len(applied)} task patch(es) to {repo_root}: {', '.join(applied)}")
-    return applied
-
-
-def prepare(apply_patches: bool = False) -> Path:
+def prepare() -> Path:
     """Write one Gym input row per Terminal-Bench 2.1 task."""
     tasks_dir = _ensure_tasks_dir()
-    if apply_patches:
-        apply_task_patches(tasks_dir)
     task_names = sorted(p.name for p in tasks_dir.iterdir() if (p / "task.toml").exists())
     if not task_names:
         raise RuntimeError(f"No tasks with task.toml found under {tasks_dir}")
@@ -142,19 +82,4 @@ def prepare(apply_patches: bool = False) -> Path:
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--apply-task-patches",
-        action="store_true",
-        help=(
-            "Apply the bundled reference-solution patches in task_patches/ to the checkout. "
-            "Intended for gold-patch (oracle) validation runs, where a task whose upstream solve.sh "
-            "has rotted would otherwise fail through no fault of the harness. Off by default so the "
-            "benchmark runs exactly as published; only 'solution/solve.sh' may be patched, so scored "
-            "model runs are unaffected either way."
-        ),
-    )
-    args = parser.parse_args()
-    prepare(apply_patches=args.apply_task_patches)
+    prepare()
