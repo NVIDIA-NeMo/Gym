@@ -321,9 +321,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 logprobs=True,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
-                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                # For prompt and generation token IDs
-                # return_token_ids=True,
+                # For prompt and generation token IDs.
+                # Applied after extra_body merge so callers can still override it.
                 # For prompt token IDs
                 # prompt_logprobs=0,
             )
@@ -367,6 +366,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if extra_body:
             body_dict = extra_body | body_dict
+        if self.config.return_token_id_information:
+            body_dict.setdefault("return_token_ids", True)
 
         # Audio sidechannel: rows can carry audio on
         # ``responses_create_params.metadata`` via three mutually exclusive

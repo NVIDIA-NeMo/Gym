@@ -683,6 +683,52 @@ class TestApp:
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
 
+    def test_chat_completion_preprocess_does_not_request_token_ids_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello",
+                }
+            ]
+        }
+        result = server._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert "return_token_ids" not in result
+
+    def test_chat_completion_preprocess_requests_token_ids_for_observability(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.return_token_id_information = True
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello",
+                }
+            ]
+        }
+        result = server._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["return_token_ids"] is True
+        assert result["logprobs"] is True
+        assert result["return_tokens_as_token_ids"] is True
+
+    def test_chat_completion_preprocess_preserves_return_token_ids_override(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.return_token_id_information = True
+        server.config.extra_body = {"return_token_ids": False}
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello",
+                }
+            ]
+        }
+        result = server._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["return_token_ids"] is False
+
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         app = server.setup_webserver()
