@@ -739,11 +739,11 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
 
 
 @requires_tenacity
-def test_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
-    asyncio.run(_assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch))
+def test_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch))
 
 
-async def _assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
+async def _assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
     opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
     class FakeConnectionConfig:
@@ -768,7 +768,7 @@ async def _assert_opensandbox_connect_after_create_uses_connection_config(monkey
     )
 
     provider = OpenSandboxProvider(
-        connection={"domain": "sandbox.example", "protocol": "https"},
+        connection={"domain": "sandbox.example", "protocol": "https", "request_timeout_s": 300},
         create={"connect_attempt_timeout_s": 1},
         probe={"command": None},
     )
@@ -784,7 +784,7 @@ async def _assert_opensandbox_connect_after_create_uses_connection_config(monkey
     assert connect_call["connection_config"].kwargs == {
         "domain": "sandbox.example",
         "protocol": "https",
-        "request_timeout": timedelta(seconds=1),
+        "request_timeout": timedelta(seconds=300),
     }
 
 

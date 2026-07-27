@@ -72,6 +72,10 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     num_steps_passed: int = 0
     num_steps_total: int = 0
     problem_accuracy: bool = False
+    # Per-rollout sub-step pass fraction. As a numeric verify-response field it
+    # gets the full generic statistics (mean/std/min/max/median) from the
+    # RewardProfiler, which the aggregate-only pooled scalar cannot provide.
+    subtask_accuracy: float = 0.0
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
@@ -138,6 +142,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             num_steps_passed=num_passed,
             num_steps_total=len(scored),
             problem_accuracy=all_passed,
+            subtask_accuracy=num_passed / len(scored),
         )
 
 

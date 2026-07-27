@@ -103,6 +103,10 @@ redirects:
   - source: "/nemo/gym/tutorials/offline-training-w-rollouts.html"
     destination: "/nemo/gym/tutorials/training-tutorials/offline-training-w-rollouts"
   # Renamed/moved pages within the Fern site
+  - source: "/nemo/gym/training-tutorials"
+    destination: "/nemo/gym/tutorials/training-tutorials"
+  - source: "/nemo/gym/training-tutorials/:path*"
+    destination: "/nemo/gym/tutorials/training-tutorials/:path*"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

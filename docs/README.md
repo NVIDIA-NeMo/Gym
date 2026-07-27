@@ -8,6 +8,6 @@ The Sphinx tree that used to live here has been retired. NeMo Gym's documentatio
 - **Release snapshots:** do not copy ordinary Main docs fixes into GA folders. Create a new frozen snapshot under `fern/versions/v<release>/` only when that release cuts, then add it to `fern/docs.yml` `versions:`. Back-port to an existing GA snapshot only when the fix explicitly needs to change already-published release docs.
 - **Preview a PR:** PRs touching `fern/**` get an automatic 🌿 preview URL posted as a comment by `.github/workflows/fern-docs-preview-comment.yml`.
 
-For the agent-facing version of the same workflow, see [`../.claude/skills/nemo-gym-docs/SKILL.md`](../.claude/skills/nemo-gym-docs/SKILL.md).
+For the agent-facing version of the same workflow, see [`../.agents/skills/nemo-gym-docs/SKILL.md`](../.agents/skills/nemo-gym-docs/SKILL.md).
 
 Old `/nemo/gym/...` URLs from the Sphinx build are redirected to their Fern equivalents via `redirects:` in [`../fern/docs.yml`](../fern/docs.yml). Legacy `/nemo/gym/latest/...` URLs are redirects too; `latest` is not a separate Fern version. If you find a broken link to the published site, add a redirect there.

@@ -229,7 +229,8 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 900
     extra_args: list[str] = []
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
-    openclaw_version: Optional[str] = None
+    # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
+    openclaw_version: str
 
     @property
     def command_parts(self) -> list[str]:

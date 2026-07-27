@@ -125,6 +125,12 @@ def list_providers() -> list[str]:
     return sorted({*_PROVIDER_REGISTRY, *_BUILTIN_PROVIDER_LOADERS, *_entry_point_loaders()})
 
 
+def _load_daytona_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.daytona import DaytonaProvider
+
+    return DaytonaProvider
+
+
 def _load_opensandbox_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.opensandbox import OpenSandboxProvider
 
@@ -141,6 +147,10 @@ def _load_enroot_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.enroot import EnrootProvider
 
     return EnrootProvider
+def _load_docker_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.docker import DockerProvider
+
+    return DockerProvider
 
 
 def _load_ecs_fargate_provider() -> ProviderClass:
@@ -149,7 +159,9 @@ def _load_ecs_fargate_provider() -> ProviderClass:
     return EcsFargateProvider
 
 
-_BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
+_BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
+_BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
 _BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
 _BUILTIN_PROVIDER_LOADERS["enroot"] = _load_enroot_provider
+_BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider

@@ -36,6 +36,7 @@ from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,
     ClaudeCodeAgentRunRequest,
+    ModelServerRef,
     ResourcesServerRef,
     _extract_instruction,
     parse_stream_json,
@@ -525,7 +526,7 @@ class TestRolloutMCPConfig:
 
         captured: dict = {}
 
-        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, skills_path=None):
+        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, **kwargs):
             captured["instruction"] = instruction
             captured["mcp_config"] = mcp_config
             captured["config_exists_during_run"] = Path(mcp_config).is_file()
@@ -581,7 +582,7 @@ class TestRolloutMCPConfig:
                 return FakeAioHTTPResponse(json | {"reward": 1.0})
             raise AssertionError(f"unexpected post: {server_name} {url_path}")
 
-        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, skills_path=None):
+        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, **kwargs):
             captured["config_token"] = json.loads(Path(mcp_config).read_text())["mcpServers"]["example_mcp_weather"][
                 "headers"
             ]["X-NeMo-Gym-Session-Token"]
@@ -602,6 +603,48 @@ class TestRolloutMCPConfig:
         # and the per-rollout token from seed metadata reaches the generated MCP config.
         assert captured["verify_cookies"] == {"session": "sess-cookie"}
         assert captured["config_token"] == "tok"
+
+
+class TestRolloutCorrelation:
+    """The CLI streams /v1/messages, so correlation rides on the ANTHROPIC_BASE_URL path prefix."""
+
+    def _fake_proc(self):
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+
+        return FakeProc()
+
+    def _run_and_capture_base_url(self, agent, tmp_path: Path, **run_kwargs) -> str | None:
+        captured: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["base_url"] = kwargs["env"].get("ANTHROPIC_BASE_URL")
+            return self._fake_proc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code("hi", **run_kwargs))
+        return captured["base_url"]
+
+    def test_base_url_correlation(self, tmp_path: Path) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
+        # CLI appends /v1/messages -> server strips /ng-rollout/<id> and keys capture by it.
+        assert base_url == "http://model-server:9000/ng-rollout/task3-roll1"
+
+        with patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"):
+            assert agent._resolve_call_base_url(None) == "http://model-server:9000"
+
+        # Real Anthropic endpoint (no model server): never prefixed -- it has no stripping middleware,
+        # so a prefix would 404 every /v1/messages call.
+        anthropic = _make_agent(anthropic_base_url="https://api.anthropic.com")
+        assert anthropic._resolve_call_base_url("t3-r1") == "https://api.anthropic.com"
 
 
 class TestExtractInstruction:
