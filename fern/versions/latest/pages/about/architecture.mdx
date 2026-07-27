@@ -8,22 +8,22 @@ position: 2.5
 
 **Goal**: Understand how NeMo Gym implements environments as composable server components.
 
-**Read first**: [Environments](/about/concepts/environments) — what an environment is and how it decomposes into dataset, agent harness, verifier, and state.
+**Read first**: [Environments](/about/concepts/environments) — what belongs to an environment and how an agent harness interacts with it.
 
 </Info>
 
 ## How NeMo Gym Implements Environments
 
-NeMo Gym implements environments as composable FastAPI servers that communicate over async HTTP:
+NeMo Gym implements the environment-side runtime as a Resources Server and connects it to other composable components over async HTTP:
 
-| Concept | NeMo Gym Component Implementation |
+| Role | NeMo Gym implementation |
 |---------|---------------|
-| Dataset | JSONL: Responses API input — each row is a task (a single problem or challenge) for the agent to solve |
-| Agent Harness | FastAPI Agent Server |
-| Verifier + State | FastAPI Resources Server |
-| Model | FastAPI Model Server or managed by your own agent harness |
+| Environment tasks | JSONL: Responses API input plus task setup and privileged verification metadata |
+| Environment tools, state, and verifier | FastAPI Resources Server |
+| Interacting agent harness | FastAPI Agent Server |
+| Model used by the agent | FastAPI Model Server or a model managed by your own agent harness |
 
-All components are composable. Use different datasets with the same resources server, the same resources server with different models, or the same model with different agent harnesses.
+All components are composable. A runnable config under `environments/` packages datasets and a Resources Server with an Agent Server and Model Server. You can use different task datasets with the same environment runtime, pair that runtime with different agents, or evaluate the same agent with different models.
 
 This gives you flexibility to integrate with your existing models and agents:
 
@@ -31,13 +31,15 @@ This gives you flexibility to integrate with your existing models and agents:
 - **Use a built-in agent** — NeMo Gym includes some native agents, e.g. general-purpose multi-step tool calling, as well as built-in integrations with external harnesses like OpenHands.
 - **Train with any model endpoint** — The Model Server standardizes different LLM endpoints behind the Responses API and provides token IDs and log probabilities needed for RL training.
 
-## How an Agent Runs a Task in NeMo Gym Environments
+## How an Agent Runs a Task in a NeMo Gym Environment
 
 Each task attempt flows through three steps. The resulting trajectory is called a *rollout*:
 
-1. **Initialize** — The agent receives a task row from the dataset and initializes a session on the Resources Server, which sets up isolated state for this task.
+1. **Initialize** — Gym gives the Agent Server a task row. The Agent Server initializes a session on the Resources Server, which sets up isolated environment state for the task.
 2. **Agent Loop** — The agent calls a model for inference, then routes any tool calls to either its own tools or the Resources Server. This repeats until the agent decides the task is complete.
 3. **Verify** — The agent asks the Resources Server to score the attempt. The verifier inspects the final state and returns a reward signal.
+
+Today, native Gym Agent Servers expose both `/v1/responses` and `/run`. The `responses()` handler implements agent behavior; the `run()` handler is Gym's rollout processor, coordinating `seed_session() → responses() → verify()`. This placement is an implementation choice, not an ownership claim: environment tools, state, and verification still belong to the Resources Server.
 
 
 ```
@@ -69,7 +71,7 @@ Each task attempt flows through three steps. The resulting trajectory is called 
 
 ### Agent Server
 
-Hosts agent harnesses that orchestrate rollouts. Use your own harness, or use built-in harnesses such as OpenHands or NeMo Gym's native harnesses such as Simple Agent.
+Hosts agent harnesses and the Gym rollout-processing endpoint. Use your own harness, or use built-in harnesses such as OpenHands or NeMo Gym's native Simple Agent.
 
 ### Model Server
 

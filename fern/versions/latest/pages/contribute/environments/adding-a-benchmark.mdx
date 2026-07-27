@@ -5,6 +5,52 @@ position: 3
 ---
 The most important principle when adding benchmarks into NeMo Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
 
+A benchmark is a fixed evaluation configuration, not a second environment runtime. It reuses a Resources Server for environment-owned tools, state, and verification, then fixes a dataset split, preparation procedure, agent pairing, repeat count, and metrics under `benchmarks/<name>/`.
+
+## New benchmark or existing benchmark?
+
+- **Creating a new benchmark:** first create or reuse the environment-side Resources Server and verifier. Then add the fixed evaluation dataset and protocol under `benchmarks/`.
+- **Integrating an existing third-party benchmark:** preserve the upstream tasks, harness semantics, scorer, dependencies, and comparison protocol. Reproduce the upstream result before adapting it to Gym.
+
+## Integration workflow
+
+### 1. Record the upstream contract
+
+Pin or record the upstream version and capture:
+
+- task source, split, count, IDs, and license;
+- prompts, agent/harness behavior, tools, and stop conditions;
+- scorer and reward aggregation;
+- model, sampling, timeout, and repeat settings;
+- published or maintainer-approved metrics.
+
+Run the original implementation with those settings. Save the command and result so later differences can be attributed to either upstream reproduction or the Gym adapter.
+
+### 2. Choose the adapter boundary
+
+Use a Resources Server when the benchmark supplies tasks and scoring but can run with a Gym agent. Put environment-owned tools, state, and verification there.
+
+Use an Agent Server `/run` adapter when the upstream benchmark requires its own harness or inseparable end-to-end episode runner. Convert Gym task rows to upstream input, invoke the runner asynchronously, and convert its trajectory and reward to `BaseVerifyResponse`.
+
+If the benchmark comes from an environment framework, use the decision tree in [Integrate external libraries](/environment-tutorials/integrate-external-environments).
+
+### 3. Add reproducible packaging
+
+Add or reuse:
+
+- a server-local `requirements.txt` with reproducible dependencies;
+- a preparation script that produces the fixed split without committing restricted or large source data;
+- representative example rows;
+- `benchmarks/<name>/config.yaml` with a `type: benchmark` dataset and explicit `num_repeats`;
+- tests for schema conversion and scorer parity;
+- a README documenting upstream version, licenses, patches, commands, and known deviations.
+
+See [Configuration](/reference/configuration) for the current schema and [Benchmarks](/evaluation/benchmarks) for the relationship between benchmark configs and environment runtimes.
+
+### 4. Check fidelity
+
+Compare upstream and Gym on the same task IDs and settings. Check task counts, missing/error rates, per-task outcomes, aggregate and per-category metrics, and variance. Matching aggregate scores are not sufficient if the adapters fail on different tasks.
+
 ## Reward profiling
 
 In order to ensure the rough software correctness of your benchmark, baseline against publicly available models including a mixture of open-source and closed-source models. This process is also known as reward profiling.

@@ -3,7 +3,9 @@ title: "Configure Agents"
 description: ""
 position: 1
 ---
-The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.
+The Agent Server hosts the harness that interacts with an environment. It defines whether the agent behavior is single-step or multi-step, single-turn or multi-turn, and manages the model loop and agent-owned tools. Environment-owned tools, state, and verification remain in the Resources Server.
+
+Native Gym Agent Servers also expose `/run`, the rollout-processing endpoint that coordinates session initialization, the harness loop, and final verification. The Agent Server does not run an LLM itself; it delegates text generation to the Model Server.
 
 ## Rollout Lifecycle
 

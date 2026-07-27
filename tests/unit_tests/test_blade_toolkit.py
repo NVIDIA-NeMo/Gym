@@ -19,20 +19,12 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CLAUDE_SKILLS = (
-    "add-benchmark",
-    "gh-stack",
-    "nemo-gym-blade-analysis",
-    "nemo-gym-debugging",
-    "nemo-gym-docs",
-    "nemo-gym-pivot-datasets",
-    "nemo-gym-reward-profiling",
+CANONICAL_SKILLS_DIR = REPO_ROOT / ".agents/skills"
+CLAUDE_SKILLS = tuple(
+    skill_dir.name for skill_dir in sorted(CANONICAL_SKILLS_DIR.iterdir()) if (skill_dir / "SKILL.md").is_file()
 )
-CODEX_COMPATIBILITY_LINKS = (
-    "nemo-gym-blade-analysis",
-    "nemo-gym-debugging",
-    "nemo-gym-pivot-datasets",
-    "nemo-gym-reward-profiling",
+CODEX_COMPATIBILITY_LINKS = tuple(
+    skill for skill in CLAUDE_SKILLS if (CANONICAL_SKILLS_DIR / skill / "agents/openai.yaml").is_file()
 )
 TOOLKIT = REPO_ROOT / ".agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py"
 

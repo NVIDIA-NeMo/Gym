@@ -2,7 +2,9 @@
 title: "New Environment"
 description: ""
 ---
-An environment consists of three components: Agents, Models, and Resources. Most contributors will create new resources servers while using existing agent server and model server implementations. If you need to create custom agents or models, you can reference the implementations in `responses_api_agents/` and `responses_api_models/`.
+An environment defines tasks, environment-owned tools and state, and verification. In NeMo Gym, the Resources Server implements the environment-side runtime. A runnable config under `environments/<name>/` composes it and its datasets with an external Agent Server and Model Server.
+
+Most contributors create a Resources Server and reuse an existing agent and model implementation. Create a custom agent only when the required model/tool loop cannot be expressed by an existing harness under `responses_api_agents/`.
 
 This guide focuses on the resources server contribution process.
 
@@ -21,6 +23,15 @@ Specifically, you should run training using a model that achieves meaningful per
 
 When making a training environment PR, include W&B links and screenshots of the train and validation curves.
 
+## Start with the tasks
+
+Before scaffolding, decide where the tasks come from:
+
+1. **Existing data:** confirm its license and convert each task to Gym's Responses API JSONL row format. Keep privileged verification metadata outside the model-visible input.
+2. **New tasks:** define the target behavior, task distribution, difficulty range, failure modes, and objective completion signal. For a synthetic-data-generation example, see the pipeline in [`resources_servers/calendar/README.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/calendar/README.md).
+
+Do not design tools or a verifier until representative tasks make the intended success condition concrete.
+
 ## Required Files
 
 Your resources server must include these files:
@@ -28,12 +39,14 @@ Your resources server must include these files:
 | File | Description |
 | --- | --- |
 | `app.py` | Main server implementation with `verify` function |
-| `configs/*.yaml` | Configuration with valid `domain` field |
+| `configs/*.yaml` | Reusable Resources Server configuration with a valid `domain` field |
 | `tests/test_app.py` | At least one unit test |
 | `data/example.jsonl` | At least five example inputs |
 | `data/example_rollouts.jsonl` | Pre-generated rollouts from example data (generate before submitting PR) |
 | `requirements.txt` | Python dependencies |
 | `README.md` | Documentation with licensing information |
+
+Also add `environments/<name>/config.yaml` to package the datasets, Resources Server, Agent Server, and Model Server into a discoverable runnable composition.
 
 ## Contribution Workflow
 
@@ -68,6 +81,7 @@ Build your resources server:
 - Implement verification logic for your tasks by defining the `verify()` function
 - Set the `domain` field in your resources server configuration (see `Domain`).
 - Complete the auto-generated `README.md` with licensing information
+- Add the runnable composition under `environments/<name>/config.yaml`; keep environment tools in the Resources Server and agent-specific behavior in the Agent Server.
 
 ### 3. Testing
 

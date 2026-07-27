@@ -1,0 +1,4 @@
+interface:
+  display_name: "Integrate NeMo Gym Benchmark"
+  short_description: "Port an existing benchmark with fidelity"
+  default_prompt: "Use $nemo-gym-integrate-benchmark to integrate this existing benchmark into NeMo Gym."

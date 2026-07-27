@@ -16,7 +16,7 @@ Skills are versioned with the repo and kept up to date as Gym evolves. Gym will 
 | [`.claude/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills) | Claude Code compatibility links |
 | [`.codex/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) | Codex compatibility links |
 
-Skills have one source of truth under `.agents/skills/`. Claude Code and Codex reach that same content through their native discovery paths, so references, scripts, and instructions cannot drift between copies.
+Skills have one source of truth under `.agents/skills/`. Claude Code and Codex reach that same content through compatibility symlinks in their native discovery paths, so references, scripts, and instructions cannot drift between copies.
 
 <Info>
 Assistants discover skills automatically when they are pointed at a local Gym checkout. No extra install step is required beyond cloning the repository.
@@ -26,7 +26,13 @@ Assistants discover skills automatically when they are pointed at a local Gym ch
 
 | Skill | What it covers |
 |---|---|
-| [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) | End-to-end workflow for adding a new benchmark or training environment |
+| [`nemo-gym-create-environment`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-create-environment) | Create tasks, a Resources Server, verifier, agent pairing, runnable config, and validation |
+| [`nemo-gym-integrate-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-integrate-benchmark) | Preserve upstream behavior and results while wrapping an existing benchmark |
+| [`nemo-gym-training`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-training) | Configure RL training with NeMo RL, VeRL, or Unsloth |
+| [`nemo-gym-evaluation`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-evaluation) | Evaluate and compare models or agent harnesses, collect rollouts, and analyze metrics |
+| [`nemo-gym-verification-and-scoring`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-verification-and-scoring) | Design, implement, and validate deterministic, execution, judge, or reward-model scoring |
+| [`nemo-gym-async-patterns-and-performance`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-async-patterns-and-performance) | Implement scalable HTTP, Ray, subprocess, and concurrency patterns |
+| [`nemo-gym-integrate-environment-framework`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-integrate-environment-framework) | Adapt frameworks such as Harbor, OpenEnv, and Verifiers at the correct Gym seam |
 | [`nemo-gym-reward-profiling`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-reward-profiling) | `gym env start`, `gym eval run`, and `gym eval profile` baselining |
 | [`nemo-gym-debugging`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-debugging) | Diagnosing failed rollouts, partial JSONL, verifier errors, and infra issues |
 | [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs) | Adding, moving, and removing pages on the Fern docs site |
@@ -43,7 +49,7 @@ When you work with an AI coding assistant in a Gym checkout, mention the task in
 You can also point an assistant at a specific skill file if you want a particular playbook:
 
 ```text
-Follow .agents/skills/add-benchmark/SKILL.md to integrate this benchmark.
+Follow .agents/skills/nemo-gym-integrate-benchmark/SKILL.md to integrate this benchmark.
 ```
 
 <Tip>
@@ -55,5 +61,5 @@ The [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skill
 ## Related Topics
 
 - [Development Setup](/contribute/development-setup) — environment setup, CI, and commit requirements
-- [Add a Benchmark](https://docs.nvidia.com/nemo/gym/contribute/environments/adding-a-benchmark) — human-readable tutorial that complements the `add-benchmark` skill
+- [Add a Benchmark](https://docs.nvidia.com/nemo/gym/contribute/environments/adding-a-benchmark) — human-readable integration and fidelity guidance
 - [Contribute Environments](/contribute/environments) — guidance for new training environments

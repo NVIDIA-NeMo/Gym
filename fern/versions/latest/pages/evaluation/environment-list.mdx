@@ -4,7 +4,7 @@ description: "Browse built-in benchmark and training environments."
 position: 3
 ---
 
-NeMo Gym includes 100+ environments covering math, coding, reasoning, knowledge, agentic tool use, instruction following, and safety. Each environment is a resources server that defines a dataset, verification logic, and optional tools. Environments marked ✓ have a corresponding benchmark config with a fixed evaluation split and `prepare_script`.
+NeMo Gym includes 100+ environment runtimes covering math, coding, reasoning, knowledge, agentic tool use, instruction following, and safety. Each listed Resources Server implements environment-owned tools, state, and verification and can be composed with one or more task datasets and agent harnesses. Entries marked ✓ have a corresponding config under `benchmarks/` with a fixed evaluation split and `prepare_script`.
 
 Use the CLI to discover what's available before running:
 

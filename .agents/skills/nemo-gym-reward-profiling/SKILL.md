@@ -1,22 +1,22 @@
 ---
 name: nemo-gym-reward-profiling
 description: >-
-  Use to help users get started with Nemo Gym reward profiling. Covers the basic
-  gym env start, gym eval run, and gym eval profile workflow, repeated rollouts,
-  materialized inputs, rollout JSONL artifacts, task and rollout identity, output
-  inspection, partial profiling, and rollout_infos. For failed jobs, prefer
-  nemo-gym-debugging.
+  Deep reference for Nemo Gym reward-profiling artifacts and behavior: materialized
+  inputs, task and rollout identity, partial profiling, rollout_infos, and output
+  inspection. Use when modifying or explaining profiling internals and file formats.
+  For normal evaluation setup and comparison, use evaluation guidance; for failed
+  jobs, use debugging guidance.
 ---
 
 # Nemo Gym Reward Profiling
 
 ## Invocation Check
 
-Use this skill when the user wants to run, understand, or lightly modify Nemo Gym reward profiling. Keep the answer oriented around the normal workflow:
+Use this skill when the user needs detailed reward-profiling artifact semantics or wants to modify profiling behavior. Keep the answer grounded in this workflow:
 
 `gym env start` starts model/resources servers, `gym eval run --no-serve` writes rollout artifacts, and `gym eval profile` generates profiling output from those artifacts.
 
-If the user is primarily debugging a failed job or stack trace, use the `nemo-gym-debugging` skill first.
+If the user is primarily designing an evaluation or debugging a failed job, use the corresponding evaluation or failure-diagnosis workflow instead.
 
 ## Basic Workflow
 

@@ -6,28 +6,56 @@ position: 2
 
 Verification is how an environment evaluates agent behavior and computes a score. Every environment implements some form of verification — the pattern you choose depends on your task.
 
-<Cards>
+Choose the strongest observable evidence that directly measures success. Prefer deterministic checks over learned judgment when both measure the same outcome.
 
-<Card title="Equivalence Match">
-Compare the agent's output to a known reference answer.
+## Choose a pattern
 
-<Badge minimal outlined>coming soon</Badge>
-</Card>
+| Pattern | Use when | Examples |
+|---|---|---|
+| **Equivalence match** | Correct results have a canonical answer or a safely normalized equivalent form | Multiple choice, numeric answers, structured output |
+| **Execution or state match** | Success is observable by running output or inspecting the world after the agent acts | Unit tests, SQL result sets, calendar/database state |
+| **LLM-as-Judge** | Correctness is semantic or rubric-based and deterministic evidence is insufficient | Open-ended explanations, style, nuanced instruction following |
+| **Reward model** | A validated learned scorer exists for a preference or quality dimension that rules and judge prompts cannot measure reliably | Preference, helpfulness, or domain-quality scoring |
 
-<Card title="Execution and State Match">
-Execute the agent's actions, such as tool calls or generated code, and verify the output or resulting state.
+Combine patterns only when each component has a clear interpretation. Do not use an LLM judge merely to avoid implementing available deterministic evidence.
 
-<Badge minimal outlined>coming soon</Badge>
-</Card>
+## Equivalence match
 
-<Card title="LLM-as-Judge" href="/build-verifiers/verification-patterns/llm-as-judge">
-Prompt an LLM to evaluate the agent's output against rubrics, instructions, or reference answers.
-</Card>
+Extract the answer defensively, normalize only irrelevant representation differences, and compare against privileged task metadata. Explicitly define invariances such as whitespace, ordering, numeric tolerance, aliases, or equivalent serialization.
 
-<Card title="Reward Model">
-Use an LLM trained on human preferences to score outputs for alignment, such as RLHF reward modeling.
+Test empty and malformed outputs, equivalent valid forms, near misses, and answers that exploit over-broad normalization. See [Single-step environment](/environment-tutorials/single-step-environment) for a complete Resources Server implementation shape.
 
-<Badge minimal outlined>coming soon</Badge>
-</Card>
+## Execution or state match
 
-</Cards>
+Use executable evidence when the task changes a system or produces runnable output:
+
+- run generated code against isolated tests;
+- compare SQL query results rather than query text;
+- inspect final files, database rows, calendar entries, or game state;
+- verify required side effects and prohibited side effects.
+
+Initialize clean state in `seed_session()` and read that session's final state in `verify()`. Bound execution time and resources. Distinguish model-caused failure from sandbox, dependency, or verifier infrastructure failure.
+
+See [Resources Server implementation](/environment-tutorials/real-world-environment/resources-server-implementation) for state-based verification and [Async patterns and performance](/infrastructure/async-patterns-and-performance) for subprocess isolation and concurrency.
+
+## LLM-as-Judge
+
+Use a judge only when the target outcome is semantic and a deterministic signal would be an invalid proxy. Provide the task, candidate, rubric or reference, and a strict output schema; calibrate against labeled passing, failing, borderline, malformed, and adversarial cases.
+
+Read [LLM-as-Judge](/build-verifiers/verification-patterns/llm-as-judge) for implementation and calibration.
+
+## Reward model
+
+Use a trained reward model only when its training distribution and target quality dimension match the environment. Version the model and preprocessing, define the output-to-reward mapping, and test calibration, drift, and adversarial behavior. A reward model transport or inference failure is infrastructure failure, not a score of zero.
+
+## Common reward contract
+
+For every pattern, document:
+
+- success evidence and privileged metadata;
+- reward range and partial-credit semantics;
+- malformed, empty, timeout, and infrastructure-failure behavior;
+- irrelevant transformations the score should ignore;
+- known blind spots and reward-hacking risks.
+
+Validate on hand-labeled positive, negative, boundary, and adversarial examples, then inspect false positives and false negatives in real rollouts before using the reward for training.

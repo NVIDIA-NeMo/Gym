@@ -4,8 +4,8 @@ description: "How NeMo Gym fits within the NVIDIA NeMo platform and the broader 
 position: 3
 ---
 NeMo Gym is one of several specialized libraries in the NVIDIA NeMo platform. Alongside NeMo RL for
-post-training, NeMo Gym focuses on the *environments* agents act in — pairing a dataset, agent harness, and
-verifier so the same environment can drive both evaluation and training.
+post-training, NeMo Gym focuses on the *environments* agents act in — tasks, interactive tools and state,
+and verification — plus the runnable server compositions used for evaluation and training.
 
 <Tip>
 For what NeMo Gym does and when to use it, see the [Overview](/about) and [What NeMo Gym Provides](/about#what-nemo-gym-provides). For how environments are implemented as composable servers, see [Architecture](/about/architecture).
@@ -18,10 +18,10 @@ NeMo Gym is also integrated with the broader agentic ecosystem. We would love yo
 NVIDIA NeMo is a GPU-accelerated platform for training generative AI models and optimizing AI agents. It includes specialized libraries that span the model lifecycle end to end:
 
 - **NeMo Curator**: Prepares, filters, and deduplicates training data at scale.
-- **NeMo Gym**: Defines the environments — dataset, agent harness, and verifier — that agents are evaluated and trained in *(this library)*.
+- **NeMo Gym**: Defines environments and connects them to agent harnesses and models for evaluation and training *(this library)*.
 - **NeMo RL**: Runs scalable post-training (GRPO, DPO, and SFT) against those environments.
 
-**NeMo Gym's role**: NeMo Gym is where a task becomes an interactive environment. It standardizes how an agent interacts with the world (the agent harness), how task completion is scored (the verifier), and how per-task state is isolated — producing the rollouts and reward signals that training frameworks like NeMo RL consume, and the consistent scoring that evaluation depends on.
+**NeMo Gym's role**: NeMo Gym is where tasks, environment-owned tools and state, and verification become a reusable environment runtime. Gym composes that runtime with an external agent harness and model, producing the rollouts and reward signals that training frameworks like NeMo RL consume and the consistent scoring that evaluation depends on.
 
 ## Environment Libraries
 

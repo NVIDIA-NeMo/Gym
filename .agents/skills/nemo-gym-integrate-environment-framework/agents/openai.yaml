@@ -1,0 +1,4 @@
+interface:
+  display_name: "Integrate Environment Framework"
+  short_description: "Adapt environment frameworks to NeMo Gym"
+  default_prompt: "Use $nemo-gym-integrate-environment-framework to design and validate this framework adapter."

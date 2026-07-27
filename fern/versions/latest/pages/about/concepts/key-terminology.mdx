@@ -15,7 +15,7 @@ A collection of multiple rollouts generated together, typically for the same tas
 
 **Environment**
 
-The conditions in which your model operates. Functionally, this typically refers to tools the model has access to.
+The task-conditioned world an agent acts in: tasks, environment-owned tools and state, and verification. The model and agent harness interact with the environment but are not part of its conceptual boundary. In Gym, a runnable configuration under `environments/` composes those environment pieces with an Agent Server and Model Server.
 
 **Task**
 
@@ -27,7 +27,7 @@ A single rollout attempt for a specific task. Multiple instances per task captur
 
 **Training environment**
 
-A set of tasks that share the same environment setup compiled into a single prompt dataset.
+A set of training tasks that share environment tools, state semantics, and verification.
 
 **Trace**
 
@@ -59,7 +59,7 @@ The primary LLM being trained or evaluated - the "decision-making brain" you wan
 
 **Resources Server**
 
-The FastAPI service (under `resources_servers/`) that holds per-task state, exposes the environment's tools, and implements `verify()` to score a rollout into a reward — the verifier-and-state component of an environment. (In Gym an *environment* is a resources server together with an agent and dataset(s); see the `environments/` directory.) Every environment has exactly one resources server.
+The FastAPI service under `resources_servers/` that implements the environment-side runtime: per-task state, environment-owned tools, and `verify()` logic that scores a rollout. A typical native Gym environment uses one Resources Server, then a runnable config pairs it and its datasets with an external Agent Server and Model Server.
 
 **Agent Server (Responses API Agent)**
 
@@ -71,7 +71,7 @@ The FastAPI service (under `responses_api_models/`) that wraps an LLM endpoint (
 
 **Orchestration**
 
-Coordination logic that manages when to call models, which tools to use, and how to sequence multi-step operations.
+Coordination logic that sequences a rollout. In native Gym Agent Servers, `responses()` implements the harness loop, while `run()` coordinates session seeding, agent execution, and verification. External frameworks may place the equivalent rollout processor elsewhere.
 
 **Verifier**
 

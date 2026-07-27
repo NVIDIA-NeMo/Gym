@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Evaluation"
+  short_description: "Evaluate and compare models or agents"
+  default_prompt: "Use $nemo-gym-evaluation to design, run, and interpret this NeMo Gym evaluation."

@@ -1,17 +1,17 @@
 ---
 name: nemo-gym-debugging
 description: >-
-  Use when debugging a Nemo Gym run or reward profiling job. Covers rollout collection failures,
-  empty or partial JSONL outputs, stale materialized inputs, verifier/schema errors, Ray or Slurm
-  issues, vLLM readiness, judge failures, tool/sandbox failures, cache problems, and throughput
-  bottlenecks.
+  Diagnoses failed or incomplete Nemo Gym runs and reward profiling jobs. Use when
+  rollout collection crashes, hangs, produces empty or partial JSONL, or reports
+  infrastructure, schema, Ray, Slurm, vLLM, judge, tool, sandbox, cache, or throughput
+  failures. For healthy evaluation setup and score analysis, use evaluation guidance.
 ---
 
 # Nemo Gym Debugging
 
 ## Invocation Check
 
-Use this skill when something failed or looks suspicious in a Nemo Gym run. If the task is adding a new env, use the `nemo-gym-env-integration` skill; if it is changing profiling behavior, use the `nemo-gym-reward-profiling` skill.
+Use this skill when something failed or looks suspicious in a Nemo Gym run. Healthy environment creation, normal evaluation setup, and score interpretation are outside this failure-diagnosis workflow.
 
 Debug by classification, not by guessing. The first goal is to decide whether the issue is:
 
