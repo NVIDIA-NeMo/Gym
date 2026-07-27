@@ -411,12 +411,26 @@ class RolloutCollectionHelper(BaseModel):
 
         return rows
 
-    def _load_from_cache(self, config: RolloutCollectionConfig) -> Tuple[List[Dict], List[Dict], List[Dict]]:
-        """Load cache and return (remaining_input_rows, already_completed_rows, cached_results)."""
+    def _load_from_cache(
+        self,
+        config: RolloutCollectionConfig,
+        *,
+        retain_result_strs: bool = True,
+    ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+        """Load cached rollouts while preserving the historical four-value return contract.
+
+        ``retain_result_strs=False`` avoids keeping a second serialized copy of
+        every cached rollout when the caller will not upload them to W&B.
+        """
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, f))
         with Path(config.output_jsonl_fpath).open("rb") as f:
-            results = [orjson.loads(line) for line in f]
+            if retain_result_strs:
+                result_strs = [[line.strip()] for line in f]
+                results = [orjson.loads(parts[0]) for parts in result_strs]
+            else:
+                result_strs = []
+                results = [orjson.loads(line) for line in f]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
@@ -470,16 +484,18 @@ class RolloutCollectionHelper(BaseModel):
 - {len(input_rows)} rows that still need to be run"""
         )
 
-        return input_rows, rows, results
+        return input_rows, rows, results, result_strs
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
-        should_upload_wandb = config.upload_rollouts_to_wandb and get_wandb_run()
+        wandb_run = get_wandb_run() if config.upload_rollouts_to_wandb else None
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
-            input_rows, rows, results = self._load_from_cache(config)
-            result_strs = [[orjson.dumps(r)] for r in results] if should_upload_wandb else []
+            input_rows, rows, results, result_strs = self._load_from_cache(
+                config,
+                retain_result_strs=wandb_run is not None,
+            )
             persisted_rows = list(rows)
             persisted_results = list(results)
         else:
@@ -495,7 +511,7 @@ class RolloutCollectionHelper(BaseModel):
 
             rows: List[Dict] = []
             results: List[Dict] = []
-            result_strs: List[List[bytes]] = []
+            result_strs: List[List[str]] = []
             persisted_rows: List[Dict] = []
             persisted_results: List[Dict] = []
 
@@ -552,7 +568,7 @@ class RolloutCollectionHelper(BaseModel):
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
-            if should_upload_wandb:
+            if wandb_run is not None:
                 result_strs.append([serialized])
 
             if no_persist:
@@ -589,9 +605,9 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        if should_upload_wandb:  # pragma: no cover
+        if wandb_run is not None:  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
+            wandb_run.log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
 
         print("Sorting results to ensure consistent ordering")
