@@ -320,6 +320,10 @@ class EnrootProvider:
             "ENROOT_DATA_PATH": data_path,
             "ENROOT_CACHE_PATH": cache_path,
             "ENROOT_RUNTIME_PATH": runtime_path,
+            # Isolate each container's /proc so sibling sandboxes and host
+            # processes are not visible inside the container. Stock enroot
+            # defaults this to "no"; we always force it on.
+            "ENROOT_UNSHARE_PID": "yes",
         }
         # Serializes concurrent imports of the same image within this process.
         self._import_locks: dict[str, asyncio.Lock] = {}
