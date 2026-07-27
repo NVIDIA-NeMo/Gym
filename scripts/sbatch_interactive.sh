@@ -4,6 +4,7 @@
 # NUM_NODES=4 \
 # SBATCH_ACCOUNT=my-slurm-account \
 # SBATCH_PARTITION=batch \
+# SBATCH_GRES=gpu:4 \
 # CONTAINER=/path/to/vllm/container \
 # MOUNTS=/shared/fs:/shared/fs \
 # bash scripts/sbatch_interactive.sh
@@ -18,9 +19,7 @@ MOUNTS=$MOUNTS
 
 sbatch \
     --nodes=$NUM_NODES \
-    --gres=gpu:4 \
     --time=04:00:00 \
     --job-name=$USER-dev \
     --exclusive \
-    --segment=$NUM_NODES \
     scripts/sbatch_base.sh
