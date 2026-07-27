@@ -12,16 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import asyncio
 import json
 import time
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-import nemo_gym.base_resources_server as base_resources_server
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -32,7 +32,12 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -42,45 +47,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.responses_converter import split_responses_input_output_items
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_models.vllm_model import app as vllm_model_app
-
-
-try:
-    AggregateMetrics = base_resources_server.AggregateMetrics
-    AggregateMetricsRequest = base_resources_server.AggregateMetricsRequest
-except AttributeError:
-    # Older Gym images predate aggregate-metrics types. The endpoint is not
-    # called by those images, but the agent still needs matching route models.
-    class AggregateMetricsRequest(BaseModel):
-        verify_responses: List[Dict[str, Any]]
-
-    class AggregateMetrics(BaseModel):
-        group_level_metrics: List[Dict[str, Any]] = Field(default_factory=list)
-        agent_metrics: Dict[str, Any] = Field(default_factory=dict)
-        key_metrics: Dict[str, Any] = Field(default_factory=dict)
-
-
-try:
-    split_responses_input_output_items = vllm_model_app.split_responses_input_output_items
-except AttributeError:
-    # Keep the newer vLLM adapter's input/output split behavior when running
-    # against an image from before this helper was exported.
-    def split_responses_input_output_items(
-        items: List[Any],
-    ) -> tuple[List[Any], List[Any]]:
-        if not items:
-            return [], []
-
-        for i, item in enumerate(items):
-            if (
-                getattr(item, "role", None) == "assistant"
-                or getattr(item, "type", None) in {"reasoning", "reasoning_item"}
-                or getattr(item, "type", None) in ("function_call",)
-            ):
-                break
-
-        return items[:i], items[i:]
+from responses_api_agents.conversational_tool_use_agent.prompt import (
+    AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE,
+    AGENT_SYSTEM_MESSAGE_TEMPLATE,
+    agent_system_message,
+    responses_api_tools,
+)
 
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
@@ -97,6 +71,12 @@ class ConversationalToolUseAgentConfig(BaseResponsesAPIAgentConfig):
 class ConversationalToolUseAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
+    domain_name: str = ""
+    profile: Literal["general", "proactive"]
+    policy: str
+    tools: List[Dict[str, Any]]
+    customer_scenario: Dict[str, Any] = Field(default_factory=dict)
+    source_artifacts: Dict[str, Any] = Field(default_factory=dict)
     initial_user_message: Optional[str] = None
 
 
@@ -104,42 +84,45 @@ class ConversationalToolUseAgentVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
 
 
+class ConversationTrajectoryResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    messages: List[Dict[str, Any]]
+    prefill_message_count: int = Field(ge=0)
+    continuation_start_index: int = Field(ge=0)
+    terminal_state: Optional[Literal["complete", "incomplete"]] = None
+    generation_invalid_reason: Optional[str] = None
+    terminal_error: Optional[str] = None
+    agent_verification_result: Optional[Dict[str, Any]] = None
+    user_verification_result: Optional[Dict[str, Any]] = None
+    environment_verification_result: Optional[Dict[str, Any]] = None
+
+
+class ConversationalToolUseResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    profile: Literal["general", "proactive"]
+    source_artifacts: Dict[str, Any] = Field(default_factory=dict)
+    trajectory: ConversationTrajectoryResult
+
+
 class ConversationalToolUseAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     instance_config: Dict[str, Any] = Field(default_factory=lambda: {"mask_sample": False})
+    result: Optional[ConversationalToolUseResult] = None
+
+    @model_validator(mode="after")
+    def require_result_for_scored_rollout(self) -> "ConversationalToolUseAgentVerifyResponse":
+        failure_class = (self.model_extra or {}).get(NG_FAILURE_CLASS_KEY)
+        if failure_class != TRANSIENT_FAILURE_CLASS and self.result is None:
+            raise ValueError("scored conversational tool-use responses require a typed result")
+        return self
 
 
 class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
-    AGENT_SYSTEM_MESSAGE_TEMPLATE: ClassVar[
-        str
-    ] = """You are a customer service agent that helps the user.  The policy that determines how you should respond to requests from users is described below between the <policy> and </policy> tags.
-
-In each turn you can either:
-- Send a message to the user.
-- Make a tool call.
-You cannot do both at the same time.
-
-<policy>
-{domain_policy}
-</policy>
-
-Try to be helpful and always follow the policy."""
-
-    AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE: ClassVar[
-        str
-    ] = """You are a customer service agent that helps the user.  The policy that determines how you should respond to requests from users is described below between the <policy> and </policy> tags.
-
-In each turn you can either:
-- Send a message to the user.
-- Make one or more tool calls.
-You cannot do both at the same time.
-
-<policy>
-{domain_policy}
-</policy>
-
-Try to be helpful and always follow the policy."""
+    AGENT_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = AGENT_SYSTEM_MESSAGE_TEMPLATE
+    AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE
 
     config: ConversationalToolUseAgentConfig
 
@@ -203,7 +186,9 @@ Try to be helpful and always follow the policy."""
                     )
                     resources_server_cookies = tool_output["cookies"]
                     new_outputs.append(tool_output["output"])
-                    should_continue = should_continue and tool_output["should_continue"]
+                    if not tool_output["should_continue"]:
+                        should_continue = False
+                        break
                 if not should_continue:
                     terminal_before_agent_call = True
 
@@ -215,7 +200,7 @@ Try to be helpful and always follow the policy."""
             model_payload["input"] = self._normalize_response_input_items(body.input + new_outputs)
             model_response_http = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path="/v1/responses",
+                url_path=self.url_path_for_request("/v1/responses", request),
                 json=model_payload,
                 cookies=model_server_cookies,
             )
@@ -230,6 +215,7 @@ Try to be helpful and always follow the policy."""
                 ) from exc
 
             self._filter_unselected_function_calls(model_response, body.parallel_tool_calls)
+            self._filter_empty_messages(model_response)
             last_model_response = model_response
             new_outputs.extend(model_response.output)
             usage = self._merge_usage(usage, model_response)
@@ -241,12 +227,21 @@ Try to be helpful and always follow the policy."""
                 resources_server_cookies = terminal["cookies"]
                 break
 
+            recorded_outputs = await self._record_agent_outputs(
+                model_response,
+                resources_server_cookies,
+            )
+            resources_server_cookies = recorded_outputs["cookies"]
+            if not recorded_outputs["should_continue"]:
+                break
+
+            message_outputs = self._message_outputs(model_response)
             function_calls = self._function_calls(model_response)
             if function_calls:
                 calls_to_execute = function_calls if body.parallel_tool_calls else function_calls[:1]
                 if agent_step_limit_reached:
                     terminal = await self._record_agent_step_limit(
-                        calls_to_execute,
+                        [],
                         resources_server_cookies,
                         model_response,
                     )
@@ -262,21 +257,13 @@ Try to be helpful and always follow the policy."""
                     )
                     resources_server_cookies = tool_output["cookies"]
                     new_outputs.append(tool_output["output"])
-                    should_continue = should_continue and tool_output["should_continue"]
+                    if not tool_output["should_continue"]:
+                        should_continue = False
+                        break
                 if not should_continue:
                     break
             else:
-                message_outputs = self._message_outputs(model_response)
                 if message_outputs:
-                    terminal = await self._record_assistant_message(
-                        message_outputs[0],
-                        resources_server_cookies,
-                        model_response,
-                    )
-                    resources_server_cookies = terminal["cookies"]
-                    if not terminal["should_continue"]:
-                        break
-
                     user_response = await self._post_resource(
                         "/next_user_message",
                         {},
@@ -324,12 +311,16 @@ Try to be helpful and always follow the policy."""
         self, request: Request, body: ConversationalToolUseAgentRunRequest
     ) -> ConversationalToolUseAgentVerifyResponse:
         body = self._materialize_initial_user_message(body)
+        self._validate_materialized_responses_create_params(body)
         cookies = request.cookies
+        seed_payload = body.model_dump()
+        seed_payload["rollout_id"] = self.rollout_id_from_run(body)
+        session_needs_discard = True
         try:
             seed_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
-                json=body.model_dump(),
+                json=seed_payload,
                 cookies=cookies,
             )
             await raise_for_status(seed_response)
@@ -339,44 +330,54 @@ Try to be helpful and always follow the policy."""
                 raise
             return self._build_transient_failure_response(body, stage="seed_session", exc=exc)
 
-        responses_create_params = body.responses_create_params.model_copy(deep=True)
-        self._validate_materialized_responses_create_params(responses_create_params)
-
         try:
-            response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(response)
-            cookies = response.cookies
-            response_payload = await get_response_json(response)
-            responses_create_params, response_payload = self._canonicalize_run_transcript(
-                responses_create_params,
-                response_payload,
-            )
-        except Exception as exc:
-            if not self._is_transient_infrastructure_error(exc):
-                raise
-            return self._build_transient_failure_response(body, stage="rollout", exc=exc)
+            responses_create_params = body.responses_create_params.model_copy(deep=True)
+            try:
+                response = await self.server_client.post(
+                    server_name=self.config.name,
+                    url_path=self.url_path_for_run("/v1/responses", body),
+                    json=responses_create_params,
+                    cookies=cookies,
+                )
+                await raise_for_status(response)
+                cookies = self._merge_cookies(cookies, response.cookies)
+                response_payload = await get_response_json(response)
+                responses_create_params, response_payload = self._canonicalize_run_transcript(
+                    responses_create_params,
+                    response_payload,
+                )
+            except Exception as exc:
+                if not self._is_transient_infrastructure_error(exc):
+                    raise
+                return self._build_transient_failure_response(body, stage="rollout", exc=exc)
 
-        verify_request = ConversationalToolUseAgentVerifyRequest.model_validate(
-            body.model_dump() | {"responses_create_params": responses_create_params, "response": response_payload}
-        )
-        try:
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=verify_request.model_dump(),
-                cookies=cookies,
+            verify_request = ConversationalToolUseAgentVerifyRequest.model_validate(
+                body.model_dump()
+                | {
+                    "responses_create_params": responses_create_params,
+                    "response": response_payload,
+                }
             )
-            await raise_for_status(verify_response)
-            return ConversationalToolUseAgentVerifyResponse.model_validate(await get_response_json(verify_response))
-        except Exception as exc:
-            if not self._is_transient_infrastructure_error(exc):
-                raise
-            return self._build_transient_failure_response(body, stage="verify", exc=exc)
+            try:
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=verify_request.model_dump(),
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_response)
+                verified = ConversationalToolUseAgentVerifyResponse.model_validate(
+                    await get_response_json(verify_response)
+                )
+                session_needs_discard = False
+                return verified
+            except Exception as exc:
+                if not self._is_transient_infrastructure_error(exc):
+                    raise
+                return self._build_transient_failure_response(body, stage="verify", exc=exc)
+        finally:
+            if session_needs_discard:
+                await self._discard_session(cookies)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         response = await self.server_client.post(
@@ -416,23 +417,61 @@ Try to be helpful and always follow the policy."""
             "should_continue": bool(payload.get("should_continue", True)),
         }
 
-    async def _record_assistant_message(
+    async def _record_agent_outputs(
         self,
-        assistant_message: NeMoGymResponseOutputMessage,
-        cookies: Dict[str, str],
         model_response: NeMoGymResponse,
+        cookies: Dict[str, str],
     ) -> Dict[str, Any]:
-        text = self._message_text(assistant_message)
+        outputs = []
+        for output in model_response.output:
+            if output.type == "message" and any(
+                getattr(content_item, "type", None) == "output_text" for content_item in output.content
+            ):
+                outputs.append(
+                    {
+                        "type": "message",
+                        "content": self._message_text(output),
+                    }
+                )
+            elif output.type == "function_call":
+                outputs.append(
+                    {
+                        "type": "function_call",
+                        "tool_name": output.name,
+                        "tool_call_id": output.call_id,
+                        "arguments": output.arguments,
+                    }
+                )
+
+        if not outputs:
+            return {"cookies": cookies, "should_continue": True}
+
         resource_response = await self._post_resource(
-            "/record_agent_message",
+            "/record_agent_outputs",
             {
-                "content": text,
+                "outputs": outputs,
                 "response": model_response.model_dump(mode="json", exclude_unset=True),
             },
             cookies=cookies,
         )
         payload = await get_response_json(resource_response)
         return {"cookies": resource_response.cookies, "should_continue": bool(payload.get("should_continue", True))}
+
+    async def _discard_session(self, cookies: Dict[str, str]) -> None:
+        try:
+            await self._post_resource("/discard_session", {}, cookies=cookies)
+        except Exception as exc:
+            print(
+                f"[conversational-tool-use-session-cleanup] {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    def _merge_cookies(
+        self,
+        current: Optional[Dict[str, str]],
+        updates: Optional[Dict[str, str]],
+    ) -> Dict[str, str]:
+        return {**dict(current or {}), **dict(updates or {})}
 
     async def _record_generation_error(
         self,
@@ -495,7 +534,15 @@ Try to be helpful and always follow the policy."""
         response_payload: Dict[str, Any],
     ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, Dict[str, Any]]:
         response = NeMoGymResponse.model_validate(response_payload)
-        input_items, output_items = split_responses_input_output_items(response.output)
+        has_model_output = any(
+            getattr(item, "role", None) == "assistant"
+            or getattr(item, "type", None) in {"reasoning", "reasoning_item", "function_call"}
+            for item in response.output
+        )
+        if has_model_output:
+            input_items, output_items = split_responses_input_output_items(response.output)
+        else:
+            input_items, output_items = list(response.output), []
         if not input_items:
             return responses_create_params, response_payload
 
@@ -658,19 +705,39 @@ Try to be helpful and always follow the policy."""
             role = getattr(item, "role", None)
         return str(role) if role is not None else None
 
-    def _validate_materialized_responses_create_params(
-        self, responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    ) -> None:
+    def _validate_materialized_responses_create_params(self, body: ConversationalToolUseAgentRunRequest) -> None:
+        responses_create_params = body.responses_create_params
         input_items = self._input_items(responses_create_params)
-        if not any(self._item_role(item) in ("system", "developer") for item in input_items):
+        policy_messages = [
+            self._input_item_text(item) for item in input_items if self._item_role(item) in ("system", "developer")
+        ]
+        if not policy_messages:
             raise HTTPException(
                 status_code=400,
                 detail="responses_create_params.input must include the materialized policy system prompt.",
+            )
+        expected_policy_message = agent_system_message(
+            body.policy,
+            parallel_tool_calls=bool(responses_create_params.parallel_tool_calls),
+        )
+        if policy_messages != [expected_policy_message]:
+            raise HTTPException(
+                status_code=400,
+                detail="responses_create_params policy prompt does not match the top-level policy.",
             )
         if not responses_create_params.tools:
             raise HTTPException(
                 status_code=400,
                 detail="responses_create_params.tools must include materialized policy tools.",
+            )
+        actual_tools = [
+            tool.model_dump(mode="json", exclude_none=True) if isinstance(tool, BaseModel) else dict(tool)
+            for tool in responses_create_params.tools
+        ]
+        if actual_tools != responses_api_tools(body.tools):
+            raise HTTPException(
+                status_code=400,
+                detail="responses_create_params.tools do not match the top-level tool definitions.",
             )
 
     def _empty_response(self) -> NeMoGymResponse:
@@ -766,6 +833,13 @@ Try to be helpful and always follow the policy."""
             filtered_outputs.append(output)
         model_response.output = filtered_outputs
         model_response.parallel_tool_calls = False
+
+    def _filter_empty_messages(self, model_response: NeMoGymResponse) -> None:
+        model_response.output = [
+            output
+            for output in model_response.output
+            if output.type != "message" or self._message_text(output).strip()
+        ]
 
     def _message_outputs(self, model_response: NeMoGymResponse) -> List[NeMoGymResponseOutputMessage]:
         return [

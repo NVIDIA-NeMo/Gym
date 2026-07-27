@@ -9,3 +9,9 @@ conversational_tool_use_policy_tool_generation:
         type: responses_api_models
         name: policy_tool_judge_model
       max_retries: 20
+
+policy_generation_model:
+  _copy: policy_model
+
+policy_tool_judge_model:
+  _copy: policy_model

@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Generate customer scenarios as one Gym rollout per domain."""
 
 from __future__ import annotations
@@ -86,6 +99,15 @@ class CustomerScenario(BaseModel):
             self.task_instructions,
         )
 
+    def create_dedup_key(self) -> tuple[str, str, str, Optional[str], str]:
+        return (
+            self.customer_persona.casefold(),
+            self.reason_for_contact.casefold(),
+            self.customer_details.casefold(),
+            self.unknown_info.casefold() if self.unknown_info is not None else None,
+            self.task_instructions.casefold(),
+        )
+
 
 class CustomerScenarioCollection(BaseModel):
     """
@@ -110,9 +132,11 @@ class ScenarioGenerationRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     id: Optional[str] = None
+    profile: Literal["general", "proactive"]
     domain_name: str
     policy: str
     tools: list[dict[str, Any]] = Field(default_factory=list)
+    source_artifacts: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScenarioCallTrace(BaseModel):
@@ -204,7 +228,7 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
             accepted_from_call = 0
             duplicate_from_call = 0
             for scenario in trace.scenarios:
-                scenario_key = scenario.create_tuple()
+                scenario_key = scenario.create_dedup_key()
                 if scenario_key in accepted_keys:
                     duplicate_from_call += 1
                     continue

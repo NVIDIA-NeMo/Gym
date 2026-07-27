@@ -12,13 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import asyncio
 import json
 import re
 import textwrap
 from enum import StrEnum
 from json import JSONDecodeError
-from typing import Any, ClassVar, Dict, List, Literal, Optional
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Union
 
 import jsonschema.validators
 from aiohttp import ClientConnectionError, ClientResponseError
@@ -40,7 +41,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
 
 
 TRAJECTORY_COMPLETE_INDICATOR = "###STOP###"
@@ -101,8 +102,8 @@ class VerificationFailureLabel(StrEnum):
     TRAJECTORY_FAILURE = "trajectory_failure"
 
 
-def _default_responses_create_params(temperature: float = 1.0) -> NeMoGymResponseCreateParamsNonStreaming:
-    return NeMoGymResponseCreateParamsNonStreaming(input=[], temperature=temperature, parallel_tool_calls=False)
+def _default_responses_create_params() -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(input=[])
 
 
 class ConversationalToolUseSimulationConfig(BaseResourcesServerConfig):
@@ -112,13 +113,13 @@ class ConversationalToolUseSimulationConfig(BaseResourcesServerConfig):
     judge_model_server: Optional[ModelServerRef] = None
 
     user_responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
-        default_factory=lambda: _default_responses_create_params(temperature=1.0)
+        default_factory=_default_responses_create_params
     )
     tool_simulator_responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
-        default_factory=lambda: _default_responses_create_params(temperature=1.0)
+        default_factory=_default_responses_create_params
     )
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
-        default_factory=lambda: _default_responses_create_params(temperature=1.0)
+        default_factory=_default_responses_create_params
     )
     generation_attempts: int = Field(default=3, ge=1)
     judge_provider_attempts: int = Field(default=3, ge=1)
@@ -244,6 +245,7 @@ class ConversationMessage(BaseModel):
 
 class ConversationSessionState(BaseModel):
     domain_name: str
+    profile: Literal["general", "proactive"]
     policy: str
     tool_signatures: List[ToolSignature]
     customer_scenario: CustomerScenario
@@ -261,18 +263,50 @@ class ConversationSessionState(BaseModel):
     verification_reward: Optional[float] = None
     judge_generation_error: Optional[str] = None
     judge_diagnostics: Dict[str, Any] = Field(default_factory=dict)
+    rollout_id: Optional[str] = None
+
+
+class ConversationTrajectoryMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal[MessageType.TEXT, MessageType.TOOL_CALL, MessageType.TOOL_EXECUTION]
+    source: Literal[Source.USER, Source.AGENT, Source.ENVIRONMENT]
+
+
+class ConversationTrajectoryResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    messages: List[ConversationTrajectoryMessage]
+    prefill_message_count: int = Field(ge=0)
+    continuation_start_index: int = Field(ge=0)
+    terminal_state: Optional[Literal["complete", "incomplete"]] = None
+    generation_invalid_reason: Optional[str] = None
+    terminal_error: Optional[str] = None
+    agent_verification_result: Optional[AgentVerificationResult] = None
+    user_verification_result: Optional[VerificationResult] = None
+    environment_verification_result: Optional[VerificationResult] = None
+
+
+class ConversationalToolUseResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    profile: Literal["general", "proactive"]
+    source_artifacts: Dict[str, Any] = Field(default_factory=dict)
+    trajectory: ConversationTrajectoryResult
 
 
 class ConversationalToolUseSeedSessionRequest(BaseSeedSessionRequest):
     model_config = ConfigDict(extra="allow")
 
     domain_name: str = ""
+    profile: Literal["general", "proactive"]
     policy: str
     tools: List[ToolSignature] = Field(default_factory=list)
     customer_scenario: CustomerScenario = Field(default_factory=CustomerScenario)
     responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     initial_user_message: Optional[str] = None
     source_artifacts: Dict[str, Any] = Field(default_factory=dict)
+    rollout_id: Optional[str] = None
 
 
 class SessionToolsResponse(BaseModel):
@@ -298,6 +332,34 @@ class RecordAgentMessageRequest(BaseModel):
 
 
 class RecordAgentMessageResponse(BaseModel):
+    should_continue: bool
+    terminal_state: Optional[str] = None
+
+
+class RecordedAgentMessage(BaseModel):
+    type: Literal["message"]
+    content: str
+
+
+class RecordedAgentToolCall(BaseModel):
+    type: Literal["function_call"]
+    tool_name: str
+    tool_call_id: str
+    arguments: str
+
+
+RecordedAgentOutput = Annotated[
+    Union[RecordedAgentMessage, RecordedAgentToolCall],
+    Field(discriminator="type"),
+]
+
+
+class RecordAgentOutputsRequest(BaseModel):
+    outputs: List[RecordedAgentOutput]
+    response: Optional[Dict[str, Any]] = None
+
+
+class RecordAgentOutputsResponse(BaseModel):
     should_continue: bool
     terminal_state: Optional[str] = None
 
@@ -354,6 +416,10 @@ class AgentToolCallRequest(BaseModel):
     response: Optional[Dict[str, Any]] = None
 
 
+class DiscardSessionResponse(BaseModel):
+    discarded: bool
+
+
 class ConversationalToolUseVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
 
@@ -363,7 +429,7 @@ class ConversationalToolUseVerifyResponse(BaseVerifyResponse):
 
     instance_config: Dict[str, Any] = Field(default_factory=lambda: {"mask_sample": False})
     terminal_state: Optional[str] = None
-    result: Dict[str, Any] = Field(default_factory=dict)
+    result: ConversationalToolUseResult
     trajectory_invalid_reasons: List[str] = Field(default_factory=list)
     failure_labels: List[str] = Field(default_factory=list)
     num_user_messages: int = 0
@@ -627,10 +693,12 @@ Return type in JSON Schema format: {return_type}
         app.post("/session_tools")(self.session_tools)
         app.post("/session_resume")(self.session_resume)
         app.post("/record_agent_message")(self.record_agent_message)
+        app.post("/record_agent_outputs")(self.record_agent_outputs)
         app.post("/record_generation_error")(self.record_generation_error)
         app.post("/record_agent_step_limit")(self.record_agent_step_limit)
         app.post("/next_user_message")(self.next_user_message)
         app.post("/execute_agent_tool_call")(self.execute_agent_tool_call)
+        app.post("/discard_session")(self.discard_session)
         app.post("/{tool_name}")(self.route_tool_call)
         return app
 
@@ -640,10 +708,12 @@ Return type in JSON Schema format: {return_type}
         session_id = request.session[SESSION_ID_KEY]
         state = ConversationSessionState(
             domain_name=body.domain_name,
+            profile=body.profile,
             policy=body.policy,
             tool_signatures=body.tools,
             customer_scenario=body.customer_scenario,
             source_artifacts=body.source_artifacts,
+            rollout_id=body.rollout_id,
         )
         self._hydrate_prefilled_history(state, body.responses_create_params)
 
@@ -857,18 +927,77 @@ Return type in JSON Schema format: {return_type}
     async def record_agent_message(
         self, request: Request, body: RecordAgentMessageRequest
     ) -> RecordAgentMessageResponse:
+        result = await self.record_agent_outputs(
+            request,
+            RecordAgentOutputsRequest(
+                outputs=[RecordedAgentMessage(type="message", content=body.content)],
+                response=body.response,
+            ),
+        )
+        return RecordAgentMessageResponse(
+            should_continue=result.should_continue,
+            terminal_state=result.terminal_state,
+        )
+
+    async def record_agent_outputs(
+        self, request: Request, body: RecordAgentOutputsRequest
+    ) -> RecordAgentOutputsResponse:
         state = self._get_state(request)
         if state.terminal_state:
-            return RecordAgentMessageResponse(should_continue=False, terminal_state=state.terminal_state)
+            return RecordAgentOutputsResponse(should_continue=False, terminal_state=state.terminal_state)
 
-        message = ConversationMessage(
-            type=MessageType.TEXT,
-            source=Source.AGENT,
-            content=body.content,
-            responses=[body.response] if body.response is not None else None,
-        )
-        state.messages.append(message)
-        return RecordAgentMessageResponse(should_continue=True)
+        known_call_ids = {
+            message.tool_call_id
+            for message in state.messages
+            if message.type == MessageType.TOOL_CALL and message.tool_call_id is not None
+        }
+        for output in body.outputs:
+            if isinstance(output, RecordedAgentMessage):
+                message = ConversationMessage(
+                    type=MessageType.TEXT,
+                    source=Source.AGENT,
+                    content=output.content,
+                    responses=[body.response] if body.response is not None else None,
+                )
+            else:
+                message = ConversationMessage(
+                    type=MessageType.TOOL_CALL,
+                    source=Source.AGENT,
+                    responses=[body.response] if body.response is not None else None,
+                    tool_call_id=output.tool_call_id,
+                    tool_name=output.tool_name,
+                    arguments=output.arguments,
+                )
+                if output.tool_call_id in known_call_ids:
+                    state.messages.append(message)
+                    self._record_generation_failure(
+                        state,
+                        TrajectoryInvalidReason.INVALID_AGENT_TOOL_CALL,
+                        VerificationFailureLabel.AGENT_FAILURE,
+                        f"The tool call ID {output.tool_call_id} is not unique within the trajectory.",
+                    )
+                    return RecordAgentOutputsResponse(
+                        should_continue=False,
+                        terminal_state=state.terminal_state,
+                    )
+                known_call_ids.add(output.tool_call_id)
+
+            state.messages.append(message)
+            invalid = self._validate_message(state, message)
+            if invalid is not None:
+                invalid_reason, error = invalid
+                self._record_generation_failure(
+                    state,
+                    invalid_reason,
+                    VerificationFailureLabel.AGENT_FAILURE,
+                    error,
+                )
+                return RecordAgentOutputsResponse(
+                    should_continue=False,
+                    terminal_state=state.terminal_state,
+                )
+
+        return RecordAgentOutputsResponse(should_continue=True)
 
     async def record_generation_error(
         self, request: Request, body: RecordGenerationErrorRequest
@@ -995,6 +1124,12 @@ Return type in JSON Schema format: {return_type}
             response_object=body.response,
         )
 
+    async def discard_session(self, request: Request) -> DiscardSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        return DiscardSessionResponse(
+            discarded=self.session_id_to_state.pop(session_id, None) is not None,
+        )
+
     async def _handle_agent_tool_call(
         self,
         *,
@@ -1035,6 +1170,14 @@ Return type in JSON Schema format: {return_type}
                     detail=f"Pending tool call {tool_call_id} does not match the requested execution.",
                 )
         else:
+            if any(
+                message.type == MessageType.TOOL_CALL and message.tool_call_id == tool_call_id
+                for message in state.messages
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tool call {tool_call_id} has already been executed.",
+                )
             tool_call_message = ConversationMessage(
                 type=MessageType.TOOL_CALL,
                 source=Source.AGENT,
@@ -1129,6 +1272,7 @@ Return type in JSON Schema format: {return_type}
     async def verify(
         self, request: Request, body: ConversationalToolUseVerifyRequest
     ) -> ConversationalToolUseVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
         state = self._get_state(request)
         diagnostics = self._trajectory_diagnostics(state)
         judge_generation_error = None
@@ -1217,7 +1361,9 @@ Return type in JSON Schema format: {return_type}
                 "result": self._trajectory_result(state),
             }
         )
-        return ConversationalToolUseVerifyResponse.model_validate(response_payload)
+        verified_response = ConversationalToolUseVerifyResponse.model_validate(response_payload)
+        self.session_id_to_state.pop(session_id, None)
+        return verified_response
 
     def _get_state(self, request: Request) -> ConversationSessionState:
         session_id = request.session[SESSION_ID_KEY]
@@ -1301,6 +1447,7 @@ Return type in JSON Schema format: {return_type}
             model_server=model_server,
             params=self.config.user_responses_create_params,
             messages=self._user_simulator_messages(state),
+            rollout_id=state.rollout_id,
         )
         response_text = self._first_response_text(response)
         canonical_response = self.USER_RESPONSE_PREFIX_PATTERN.sub("", response_text)
@@ -1346,6 +1493,7 @@ Return type in JSON Schema format: {return_type}
             model_server=model_server,
             params=self.config.tool_simulator_responses_create_params,
             messages=messages,
+            rollout_id=state.rollout_id,
         )
         return self._first_response_text(response), response.model_dump(mode="json", exclude_unset=True)
 
@@ -1703,6 +1851,7 @@ Return type in JSON Schema format: {return_type}
                         NeMoGymEasyInputMessage(role="system", content=system_message),
                         NeMoGymEasyInputMessage(role="user", content=user_message),
                     ],
+                    rollout_id=state.rollout_id,
                 )
                 response_objects.append(response.model_dump())
                 response_text = self._last_text(response)
@@ -1739,6 +1888,7 @@ Return type in JSON Schema format: {return_type}
                         NeMoGymEasyInputMessage(role="system", content=system_message),
                         NeMoGymEasyInputMessage(role="user", content=user_message),
                     ],
+                    rollout_id=state.rollout_id,
                 )
                 response_objects.append(response.model_dump())
                 response_text = self._last_text(response)
@@ -1823,6 +1973,7 @@ Return type in JSON Schema format: {return_type}
         model_server: ModelServerRef,
         params: NeMoGymResponseCreateParamsNonStreaming,
         messages: List[NeMoGymEasyInputMessage],
+        rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
         attempts = self.config.judge_provider_attempts
         for attempt in range(1, attempts + 1):
@@ -1831,6 +1982,7 @@ Return type in JSON Schema format: {return_type}
                     model_server=model_server,
                     params=params,
                     messages=messages,
+                    rollout_id=rollout_id,
                 )
             except Exception as exc:
                 provider_error = self._find_judge_provider_error(exc)
@@ -1884,12 +2036,13 @@ Return type in JSON Schema format: {return_type}
         model_server: ModelServerRef,
         params: NeMoGymResponseCreateParamsNonStreaming,
         messages: List[NeMoGymEasyInputMessage],
+        rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
         request_body = params.model_copy(deep=True)
         request_body.input = messages
         response = await self.server_client.post(
             server_name=model_server.name,
-            url_path="/v1/responses",
+            url_path=f"{rollout_path_prefix(rollout_id)}/v1/responses",
             json=request_body,
         )
         await raise_for_status(response)
@@ -2079,26 +2232,22 @@ Return type in JSON Schema format: {return_type}
             "judge_skipped_for_transfer_mismatch": False,
         }
 
-    def _trajectory_result(self, state: ConversationSessionState) -> Dict[str, Any]:
-        return {
-            "trajectory": {
-                "messages": [self._message_dict(message) for message in state.messages],
-                "prefill_message_count": state.prefill_message_count,
-                "continuation_start_index": state.prefill_message_count,
-                "terminal_state": state.terminal_state,
-                "generation_invalid_reason": state.generation_invalid_reason,
-                "terminal_error": state.terminal_error,
-                "agent_verification_result": None
-                if state.agent_verification_result is None
-                else state.agent_verification_result.model_dump(mode="json"),
-                "user_verification_result": None
-                if state.user_verification_result is None
-                else state.user_verification_result.model_dump(mode="json"),
-                "environment_verification_result": None
-                if state.environment_verification_result is None
-                else state.environment_verification_result.model_dump(mode="json"),
-            }
-        }
+    def _trajectory_result(self, state: ConversationSessionState) -> ConversationalToolUseResult:
+        return ConversationalToolUseResult(
+            profile=state.profile,
+            source_artifacts=state.source_artifacts,
+            trajectory=ConversationTrajectoryResult(
+                messages=[self._message_dict(message) for message in state.messages],
+                prefill_message_count=state.prefill_message_count,
+                continuation_start_index=state.prefill_message_count,
+                terminal_state=state.terminal_state,
+                generation_invalid_reason=state.generation_invalid_reason,
+                terminal_error=state.terminal_error,
+                agent_verification_result=state.agent_verification_result,
+                user_verification_result=state.user_verification_result,
+                environment_verification_result=state.environment_verification_result,
+            ),
+        )
 
     def _message_dict(self, message: ConversationMessage) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -2185,6 +2334,10 @@ Return type in JSON Schema format: {return_type}
                 1.0 for row in flat if row.get("num_user_failures", 0) > 0
             )
             / len(flat),
+            "conversational_tool_use/agent_failure_rate": sum(
+                1.0 for row in flat if row.get("num_agent_failures", 0) > 0
+            )
+            / len(flat),
             "conversational_tool_use/tool_failure_rate": sum(
                 1.0 for row in flat if row.get("num_tool_failures", 0) > 0
             )
@@ -2202,6 +2355,7 @@ Return type in JSON Schema format: {return_type}
                 "conversational_tool_use/transfer_mismatch_judge_skip_rate",
                 "conversational_tool_use/tool_schema_failure_rate",
                 "conversational_tool_use/user_failure_rate",
+                "conversational_tool_use/agent_failure_rate",
                 "conversational_tool_use/tool_failure_rate",
             )
             if key in metrics

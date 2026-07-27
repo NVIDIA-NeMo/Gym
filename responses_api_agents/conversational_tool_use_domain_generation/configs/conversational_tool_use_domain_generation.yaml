@@ -4,4 +4,7 @@ conversational_tool_use_domain_generation:
       entrypoint: app.py
       model_server:
         type: responses_api_models
-        name: policy_model
+        name: domain_generation_model
+
+domain_generation_model:
+  _copy: policy_model

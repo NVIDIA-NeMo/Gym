@@ -1,15 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Build raw-seed datasets for conversational tool-use Gym rollouts."""
 
 import argparse
 import hashlib
 import json
 import os
+import tempfile
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.conversational_tool_use_simulation.app import (
@@ -22,16 +37,19 @@ from resources_servers.conversational_tool_use_simulation.scripts.quality import
     detect_leak,
     validate_tool_schema,
 )
-from responses_api_agents.conversational_tool_use_agent.app import ConversationalToolUseAgent
+from responses_api_agents.conversational_tool_use_agent.prompt import (
+    agent_system_message,
+    responses_api_tools,
+)
 
 
 DEFAULT_SOURCE_ENV_VARS = (
-    "CONVERSATIONAL_TOOL_USE_SIMPLE_SOURCE_DIR",
+    "CONVERSATIONAL_TOOL_USE_GENERAL_SOURCE_DIR",
     "CONVERSATIONAL_TOOL_USE_PROACTIVE_SOURCE_DIR",
 )
 DEFAULT_SOURCE_NAMES = [
-    "260625_nemotron_synthetic_tool_use_conversational_simple",
-    "260625_nemotron_synthetic_tool_use_conversational_proactive",
+    "conversational_tool_use_general",
+    "conversational_tool_use_proactive",
 ]
 DEFAULT_DATASET_NAME = "conversational_tool_use_sample"
 DEFAULT_OUTPUT_PATH = Path(__file__).resolve().parents[1] / "data" / f"{DEFAULT_DATASET_NAME}.jsonl"
@@ -39,7 +57,8 @@ DEFAULT_AGENT_NAME = "conversational_tool_use_agent"
 DEFAULT_DOMAIN_GENERATOR_MODEL = "Qwen3-235B-A22B-Thinking-2507"
 DEFAULT_POLICY_TOOLS_MODEL = "DeepSeek-R1-0528"
 DEFAULT_SCENARIO_GENERATOR_MODEL = "Qwen3-235B-A22B-Thinking-2507"
-DEFAULT_POLICY_TEMPERATURE = 1.0
+DATASET_SCHEMA_VERSION = 1
+GenerationProfile = Literal["general", "proactive"]
 
 TOOL_REQUIRED_FIELDS = ("name", "doc", "params", "returns")
 SCENARIO_REQUIRED_FIELDS = (
@@ -122,6 +141,72 @@ class DatasetMetadataConfig:
         }
 
 
+@dataclass(frozen=True)
+class DatasetFileStats:
+    sha256: str
+    size_bytes: int
+    rows: int
+
+
+def source_tree_fingerprint(source_dir: Path) -> str:
+    if not source_dir.is_dir():
+        raise ValueError(f"Source directory does not exist: {source_dir}")
+
+    inputs: list[tuple[str, Path]] = []
+    manifest_candidates = (
+        ("source/run_manifest.json", source_dir / "run_manifest.json"),
+        ("parent/run_manifest.json", source_dir.parent / "run_manifest.json"),
+    )
+    manifest = next(((label, path) for label, path in manifest_candidates if path.is_file()), None)
+    if manifest is not None:
+        inputs.append(manifest)
+
+    domain_dirs = numeric_domain_dirs(source_dir)
+    hasher = hashlib.sha256()
+    for domain_dir in domain_dirs:
+        hasher.update(f"domain:{domain_dir.name}\0".encode())
+        for filename in ("domain.json", "policy.md", "tools.jsonl"):
+            path = domain_dir / filename
+            if path.is_file():
+                inputs.append((f"{domain_dir.name}/{filename}", path))
+        for path in scenario_files(domain_dir):
+            inputs.append((f"{domain_dir.name}/{path.relative_to(domain_dir)}", path))
+
+    for label, path in inputs:
+        hasher.update(label.encode("utf-8"))
+        hasher.update(b"\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+def dataset_file_stats(path: Path, *, validate_rows: bool) -> DatasetFileStats:
+    hasher = hashlib.sha256()
+    size_bytes = 0
+    rows = 0
+    with path.open("rb") as handle:
+        for line_number, raw_line in enumerate(handle, 1):
+            hasher.update(raw_line)
+            size_bytes += len(raw_line)
+            if not raw_line.strip():
+                continue
+            rows += 1
+            if validate_rows:
+                try:
+                    row = json.loads(raw_line)
+                    ConversationalToolUseSeedSessionRequest.model_validate(row)
+                    NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(f"{path}:{line_number}: invalid conversational tool-use row: {exc}") from exc
+    return DatasetFileStats(
+        sha256=hasher.hexdigest(),
+        size_bytes=size_bytes,
+        rows=rows,
+    )
+
+
 def numeric_domain_dirs(source_dir: Path) -> list[Path]:
     if not source_dir.is_dir():
         return []
@@ -176,28 +261,6 @@ def load_tools(domain_dir: Path) -> list[dict[str, Any]]:
     if not converted_tools:
         raise ArtifactValidationError("empty_tools", "tools.jsonl contains no tools")
     return converted_tools
-
-
-def agent_system_message(policy: str, parallel_tool_calls: bool = False) -> str:
-    template = (
-        ConversationalToolUseAgent.AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE
-        if parallel_tool_calls
-        else ConversationalToolUseAgent.AGENT_SYSTEM_MESSAGE_TEMPLATE
-    )
-    return template.format(domain_policy=policy)
-
-
-def responses_api_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "name": tool["name"],
-            "description": tool["doc"],
-            "parameters": tool["params"],
-            "strict": True,
-        }
-        for tool in tools
-    ]
 
 
 def scenario_files(domain_dir: Path) -> list[Path]:
@@ -316,19 +379,26 @@ def build_row(
     tools: list[dict[str, Any]],
     scenario: dict[str, Any],
     agent_name: str,
+    profile: GenerationProfile,
     parallel_tool_calls: bool = False,
-    policy_temperature: float = DEFAULT_POLICY_TEMPERATURE,
     seed_metadata: dict[str, Any] | None = None,
     domain_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    seed_metadata = dict(seed_metadata or {})
+    domain_metadata = dict(domain_metadata or {})
+    validate_profile_metadata(profile, seed_metadata, source="run manifest")
+    validate_profile_metadata(profile, domain_metadata, source="domain artifact")
+
     domain_name = domain_name_for_row(domain_dir, scenario)
     source_domain_index = maybe_int(domain_dir.name)
     tool_names = [tool["name"] for tool in tools]
     relative_scenario_file = str(scenario_path.relative_to(domain_dir))
     row_metadata = {
         **metadata_config.to_dict(),
-        **(seed_metadata or {}),
-        **(domain_metadata or {}),
+        **seed_metadata,
+        **domain_metadata,
+        "dataset_schema_version": DATASET_SCHEMA_VERSION,
+        "generation_profile": profile,
         "source_name": source_name,
         "source_index": source_index,
         "domain_name": domain_name,
@@ -346,9 +416,14 @@ def build_row(
         "policy_num_chars": len(policy),
         "parallel_tool_calls": parallel_tool_calls,
     }
+    scenario_path_digest = hashlib.sha256(relative_scenario_file.encode("utf-8")).hexdigest()[:12]
     row = {
-        "id": f"{metadata_config.dataset_name}_{source_index}_{domain_dir.name}_{scenario_path.stem}_{scenario_line_number:06d}",
+        "id": (
+            f"{metadata_config.dataset_name}_{source_index}_{domain_dir.name}_"
+            f"{scenario_path.stem}_{scenario_path_digest}_{scenario_line_number:06d}"
+        ),
         "domain_name": domain_name,
+        "profile": profile,
         "policy": policy,
         "tools": tools,
         "customer_scenario": scenario,
@@ -361,7 +436,6 @@ def build_row(
                 }
             ],
             "parallel_tool_calls": parallel_tool_calls,
-            "temperature": policy_temperature,
             "tools": responses_api_tools(tools),
         },
         "agent_ref": {
@@ -377,10 +451,10 @@ def build_row(
             "scenario_line": scenario_line_number,
             "source_domain_index": source_domain_index,
             "scenario_generator_run": row_metadata["scenario_generator_run"],
-            **(domain_metadata or {}),
+            **domain_metadata,
             **{
                 key: value
-                for key, value in (seed_metadata or {}).items()
+                for key, value in seed_metadata.items()
                 if key
                 in {
                     "seed_protocol_version",
@@ -390,6 +464,7 @@ def build_row(
                     "generation_profile",
                 }
             },
+            "generation_profile": profile,
         },
     }
     ConversationalToolUseSeedSessionRequest.model_validate(row)
@@ -433,15 +508,22 @@ def accepted_rows_for_source(
     agent_name: str,
     skip_examples_limit: int,
     parallel_tool_calls: bool,
-    policy_temperature: float,
+    profile: GenerationProfile,
 ) -> tuple[int, SourceReport]:
     rows_written = 0
     report = SourceReport(source_name=source_name, source_index=source_index)
     seed_metadata = source_manifest_metadata(source_dir)
+    validate_profile_metadata(profile, seed_metadata, source=f"{source_name} run manifest")
     for domain_dir in numeric_domain_dirs(source_dir):
         if scan_domains is not None and report.domains_seen >= scan_domains:
             break
         report.domains_seen += 1
+        domain_metadata = domain_artifact_metadata(domain_dir)
+        validate_profile_metadata(
+            profile,
+            domain_metadata,
+            source=f"{source_name}/{domain_dir.name}/domain.json",
+        )
         try:
             policy, tools = validate_domain_static_artifacts(domain_dir)
         except ArtifactValidationError as exc:
@@ -491,10 +573,10 @@ def accepted_rows_for_source(
                             tools=tools,
                             scenario=scenario,
                             agent_name=agent_name,
+                            profile=profile,
                             parallel_tool_calls=parallel_tool_calls,
-                            policy_temperature=policy_temperature,
                             seed_metadata=seed_metadata,
-                            domain_metadata=domain_artifact_metadata(domain_dir),
+                            domain_metadata=domain_metadata,
                         )
                     except ArtifactValidationError as exc:
                         report.record_scenario_skip(scenario_path, exc.reason, exc.detail, skip_examples_limit)
@@ -522,6 +604,7 @@ def build_sample_dataset(
     max_rows: int | None,
     dataset_name: str = DEFAULT_DATASET_NAME,
     source_names: list[str] | None = None,
+    source_profiles: list[GenerationProfile] | None = None,
     agent_name: str = DEFAULT_AGENT_NAME,
     max_rows_per_domain: int | None = 1,
     scan_domains_per_source: int | None = 100,
@@ -530,7 +613,6 @@ def build_sample_dataset(
     scenario_generator_model: str = DEFAULT_SCENARIO_GENERATOR_MODEL,
     skip_examples_limit: int = 50,
     parallel_tool_calls: bool = False,
-    policy_temperature: float = DEFAULT_POLICY_TEMPERATURE,
 ) -> dict[str, Any]:
     if max_rows is not None and max_rows <= 0:
         raise ValueError("max_rows must be positive when set")
@@ -540,6 +622,11 @@ def build_sample_dataset(
         source_names = default_source_names_for(source_dirs)
     if len(source_names) != len(source_dirs):
         raise ValueError("source_names must have the same length as source_dirs")
+    if source_profiles is None:
+        source_profiles = default_source_profiles_for(source_dirs, source_names)
+    if len(source_profiles) != len(source_dirs):
+        raise ValueError("source_profiles must have the same length as source_dirs")
+    source_profiles = [normalize_generation_profile(profile) for profile in source_profiles]
     metadata_config = DatasetMetadataConfig(
         dataset_name=dataset_name,
         domain_generator_model=domain_generator_model,
@@ -550,47 +637,89 @@ def build_sample_dataset(
     rows_per_source = None if max_rows is None else max(1, (max_rows + source_count - 1) // source_count)
     rows_written = 0
     reports = []
+    source_fingerprints = [source_tree_fingerprint(source_dir) for source_dir in source_dirs]
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as f:
-        for source_index, (source_dir, source_name) in enumerate(zip(source_dirs, source_names)):
-            source_max_rows = None
-            if rows_per_source is not None:
-                source_max_rows = min(rows_per_source, max_rows - rows_written)
-                if source_max_rows <= 0:
-                    source_max_rows = 0
-            written_for_source, report = accepted_rows_for_source(
-                source_dir=source_dir,
-                source_name=source_name,
-                source_index=source_index,
-                output_file=f,
-                metadata_config=metadata_config,
-                max_rows=source_max_rows,
-                max_rows_per_domain=max_rows_per_domain,
-                scan_domains=scan_domains_per_source,
-                agent_name=agent_name,
-                skip_examples_limit=skip_examples_limit,
-                parallel_tool_calls=parallel_tool_calls,
-                policy_temperature=policy_temperature,
-            )
-            rows_written += written_for_source
-            reports.append(report)
-
-    report_payload = {
-        "output_path": str(output_path),
-        "rows_written": rows_written,
-        "metadata": metadata_config.to_dict(),
-        "source_names": source_names,
-        "max_rows": max_rows,
-        "max_rows_per_domain": max_rows_per_domain,
-        "scan_domains_per_source": scan_domains_per_source,
-        "agent_name": agent_name,
-        "parallel_tool_calls": parallel_tool_calls,
-        "policy_temperature": policy_temperature,
-        "sources": [report.to_dict() for report in reports],
-    }
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return report_payload
+    temporary_output: Path | None = None
+    temporary_report: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output_file:
+            temporary_output = Path(output_file.name)
+            for source_index, (source_dir, source_name, source_profile) in enumerate(
+                zip(source_dirs, source_names, source_profiles)
+            ):
+                source_max_rows = None
+                if rows_per_source is not None:
+                    source_max_rows = min(rows_per_source, max_rows - rows_written)
+                    if source_max_rows <= 0:
+                        source_max_rows = 0
+                written_for_source, report = accepted_rows_for_source(
+                    source_dir=source_dir,
+                    source_name=source_name,
+                    source_index=source_index,
+                    output_file=output_file,
+                    metadata_config=metadata_config,
+                    max_rows=source_max_rows,
+                    max_rows_per_domain=max_rows_per_domain,
+                    scan_domains=scan_domains_per_source,
+                    agent_name=agent_name,
+                    skip_examples_limit=skip_examples_limit,
+                    parallel_tool_calls=parallel_tool_calls,
+                    profile=source_profile,
+                )
+                rows_written += written_for_source
+                reports.append(report)
+
+        output_stats = dataset_file_stats(temporary_output, validate_rows=True)
+        if output_stats.rows != rows_written:
+            raise RuntimeError(
+                f"Built row count mismatch: writer reported {rows_written}, file contains {output_stats.rows}"
+            )
+        report_payload = {
+            "dataset_schema_version": DATASET_SCHEMA_VERSION,
+            "output_path": str(output_path),
+            "output_sha256": output_stats.sha256,
+            "output_size_bytes": output_stats.size_bytes,
+            "rows_written": rows_written,
+            "metadata": metadata_config.to_dict(),
+            "source_names": source_names,
+            "source_profiles": source_profiles,
+            "source_fingerprints": source_fingerprints,
+            "max_rows": max_rows,
+            "max_rows_per_domain": max_rows_per_domain,
+            "scan_domains_per_source": scan_domains_per_source,
+            "agent_name": agent_name,
+            "parallel_tool_calls": parallel_tool_calls,
+            "sources": [report.to_dict() for report in reports],
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=report_path.parent,
+            prefix=f".{report_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as report_file:
+            temporary_report = Path(report_file.name)
+            report_file.write(json.dumps(report_payload, ensure_ascii=False, indent=2) + "\n")
+
+        temporary_output.replace(output_path)
+        temporary_output = None
+        temporary_report.replace(report_path)
+        temporary_report = None
+        return report_payload
+    finally:
+        if temporary_output is not None:
+            temporary_output.unlink(missing_ok=True)
+        if temporary_report is not None:
+            temporary_report.unlink(missing_ok=True)
 
 
 def default_source_names_for(source_dirs: list[Path]) -> list[str]:
@@ -607,10 +736,53 @@ def default_source_names_for(source_dirs: list[Path]) -> list[str]:
     return names
 
 
-def default_source_dirs_from_env() -> list[Path]:
+def default_source_profiles_for(
+    source_dirs: list[Path],
+    source_names: list[str],
+) -> list[GenerationProfile]:
+    profiles: list[GenerationProfile] = []
+    for source_dir, source_name in zip(source_dirs, source_names):
+        manifest_profile = source_manifest_metadata(source_dir).get("generation_profile")
+        if manifest_profile is not None:
+            profiles.append(normalize_generation_profile(manifest_profile))
+        else:
+            profiles.append("proactive" if "proactive" in source_name.casefold() else "general")
+    return profiles
+
+
+def normalize_generation_profile(value: Any) -> GenerationProfile:
+    normalized = str(value).casefold()
+    if normalized in {"general", "simple"}:
+        return "general"
+    if normalized == "proactive":
+        return "proactive"
+    raise ValueError(f"Unsupported generation profile: {value!r}")
+
+
+def validate_profile_metadata(
+    profile: GenerationProfile,
+    metadata: dict[str, Any],
+    *,
+    source: str,
+) -> None:
+    metadata_profile = metadata.get("generation_profile")
+    if metadata_profile is None:
+        return
+    normalized = normalize_generation_profile(metadata_profile)
+    if normalized != profile:
+        raise ValueError(f"{source} declares generation profile {normalized!r}, but the dataset source is {profile!r}")
+    metadata["generation_profile"] = normalized
+
+
+def default_source_dirs_from_env(source_indexes: Iterable[int] | None = None) -> list[Path]:
+    indexes = tuple(source_indexes) if source_indexes is not None else tuple(range(len(DEFAULT_SOURCE_ENV_VARS)))
     source_dirs = []
     missing_vars = []
-    for env_var in DEFAULT_SOURCE_ENV_VARS:
+    for source_index in indexes:
+        try:
+            env_var = DEFAULT_SOURCE_ENV_VARS[source_index]
+        except IndexError as exc:
+            raise ValueError(f"Unsupported source index: {source_index}") from exc
         value = os.environ.get(env_var)
         if not value:
             missing_vars.append(env_var)
@@ -640,6 +812,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Neutral source name to store in row metadata. May be passed once per source-dir.",
     )
+    parser.add_argument(
+        "--source-profile",
+        action="append",
+        choices=("general", "proactive"),
+        default=None,
+        help="Generation profile to stamp on rows. May be passed once per source-dir.",
+    )
     parser.add_argument("--output-path", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--report-path", type=Path, default=None)
     parser.add_argument("--max-rows", type=int, default=20)
@@ -654,7 +833,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--domain-generator-model", default=DEFAULT_DOMAIN_GENERATOR_MODEL)
     parser.add_argument("--policy-tools-model", default=DEFAULT_POLICY_TOOLS_MODEL)
     parser.add_argument("--scenario-generator-model", default=DEFAULT_SCENARIO_GENERATOR_MODEL)
-    parser.add_argument("--policy-temperature", type=float, default=DEFAULT_POLICY_TEMPERATURE)
     parser.add_argument("--agent-name", default=DEFAULT_AGENT_NAME)
     parser.add_argument("--skip-examples-limit", type=int, default=50)
     parser.add_argument(
@@ -681,6 +859,7 @@ def main() -> None:
         max_rows=max_rows,
         dataset_name=args.dataset_name,
         source_names=source_names,
+        source_profiles=args.source_profile,
         agent_name=args.agent_name,
         max_rows_per_domain=max_rows_per_domain,
         scan_domains_per_source=scan_domains_per_source,
@@ -689,7 +868,6 @@ def main() -> None:
         scenario_generator_model=args.scenario_generator_model,
         skip_examples_limit=args.skip_examples_limit,
         parallel_tool_calls=args.parallel_tool_calls,
-        policy_temperature=args.policy_temperature,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

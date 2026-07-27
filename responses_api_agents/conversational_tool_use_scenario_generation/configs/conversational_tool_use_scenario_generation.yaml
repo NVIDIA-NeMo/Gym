@@ -5,3 +5,6 @@ conversational_tool_use_scenario_generation:
       model_server:
         type: responses_api_models
         name: scenario_generation_model
+
+scenario_generation_model:
+  _copy: policy_model
