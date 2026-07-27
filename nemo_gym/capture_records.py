@@ -6,7 +6,7 @@ from threading import Lock
 from typing import Any, Dict, List, Optional, Union
 
 import orjson
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, TypeAdapter, model_validator
 
 from nemo_gym import RESULTS_DIR
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
@@ -33,13 +33,11 @@ class CallCaptureConfig(BaseModel):
         return self
 
 
-class BaseRolloutRecord(BaseModel):
+class ModelCallRecord(BaseModel):
+    """Observability record derived from one captured model-server exchange."""
+
     # Rollout ID
     rollout_id: str
-
-
-class ModelCallRecord(BaseRolloutRecord):
-    """Observability record derived from one captured model-server exchange."""
 
     # HTTP information
     status_code: int
@@ -64,13 +62,32 @@ class ModelCallRecord(BaseRolloutRecord):
     raw_response: Optional[Union[Dict[str, Any], List[str]]]
 
 
+class BaseEvent(BaseModel):
+    pass
+
+
+class ToolCallEvent(BaseEvent):
+    timestamp_start: float
+    timestamp_end: float
+
+
+EventTypes = Union[ToolCallEvent]
+
+
+RecordEventType = Union[ModelCallRecord, EventTypes]
+RecordEventTypeAdapter = TypeAdapter(RecordEventType)
+
+
 class AggregateCallRecords(BaseModel):
     # Any other typically useful aggregate information can be added here
     records: List[ModelCallRecord]
+    events: List[EventTypes]
 
     @classmethod
-    def from_records(cls, records: List[ModelCallRecord]) -> "AggregateCallRecords":
-        return cls(records=records)
+    def from_records(cls, records: List[RecordEventType]) -> "AggregateCallRecords":
+        records = [r for r in records if isinstance(r, ModelCallRecord)]
+        events = [e for e in records if isinstance(e, EventTypes)]
+        return cls(records=records, events=events)
 
 
 class CaptureStore:
@@ -88,7 +105,7 @@ class CaptureStore:
     def path_for(self, rollout_id: str) -> Path:
         return self._root / f"{rollout_id}.capture.jsonl"
 
-    def record(self, record: BaseRolloutRecord) -> None:
+    def record(self, record: RecordEventType) -> None:
         """Append one exchange and fsync (durable across a killed box).
 
         ``flock`` serializes appends across worker processes (a model server may run with
@@ -108,12 +125,12 @@ class CaptureStore:
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def read(self, rollout_id: str) -> List[BaseRolloutRecord]:
+    def read(self, rollout_id: str) -> List[RecordEventType]:
         path = self.path_for(rollout_id)
         if not path.exists():
             return []
 
-        exchanges: List[BaseRolloutRecord] = []
+        exchanges: List[RecordEventType] = []
         # Stream line-by-line; a capture can be large (token-ids / logprobs).
         with self._lock:
             with path.open("rb") as handle:
@@ -123,7 +140,7 @@ class CaptureStore:
                         stripped = line.strip()
                         if not stripped:
                             continue
-                        exchanges.append(ModelCallRecord.model_validate(orjson.loads(stripped)))
+                        exchanges.append(RecordEventTypeAdapter.validate_python(orjson.loads(stripped)))
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
