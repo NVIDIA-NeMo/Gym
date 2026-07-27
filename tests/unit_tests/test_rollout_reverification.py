@@ -2293,7 +2293,7 @@ class TestRunFromConfigJudgeFailedOnly:
         await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
         assert dispatched == []
-        assert f"no rows with _ng_failure_class='{JUDGE_FAILED_FAILURE_CLASS}'" in capsys.readouterr().out
+        assert "Nothing to be re-verified" in capsys.readouterr().out
         # the seeded success is still present
         assert [r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")] == [0]
 
@@ -2350,12 +2350,12 @@ class TestRunFromConfigJudgeFailedOnly:
         assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(1) == 1  # not duplicated
 
     async def test_missing_failures_sidecar_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        # inputs + successes exist, but no rollouts_failures.jsonl sidecar
+        # inputs + successes exist, but no rollouts_failures.jsonl sidecar → recovery has nothing to read
         self._write(tmp_path / "inputs.jsonl", [self._mat(0)])
         self._write(tmp_path / "rollouts.jsonl", [self._success(0)])
         self._patch(monkeypatch, [])
 
-        with pytest.raises(ConfigError, match="failures sidecar"):
+        with pytest.raises(FileNotFoundError, match="rollouts_failures.jsonl"):
             await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
     async def test_resume_incrementally_recovers_judge_failures_across_invocations(
