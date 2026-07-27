@@ -1,0 +1,76 @@
+---
+title: "Fystash Provider"
+description: "Configure NeMo Gym sandboxes backed by Fystash warm Firecracker rooms (experimental, out-of-tree)."
+position: 5
+---
+
+The `fystash` provider creates sandboxes through the [Fystash](https://fystash.ai) Room API — warm Firecracker microVMs for agent and rollout isolation. It is an **experimental, out-of-tree** backend today: register the provider from the Fystash adapter (or Harbor cascade) rather than expecting a built-in under `nemo_gym.sandbox.providers`.
+
+<Note>
+Fystash v1 is **template_id**-oriented. Unlike Daytona or OpenSandbox, `SandboxSpec.image` is not pulled as an arbitrary container image. Pass `provider_options.template_id` or set `FYSTASH_TEMPLATE_ID`.
+</Note>
+
+## Setup
+
+Install / vendor the Fystash adapter (see [docs.fystash.ai/guides/nemo-gym](https://docs.fystash.ai/guides/nemo-gym)), then set:
+
+| Variable | Purpose |
+| --- | --- |
+| `FYSTASH_API` | Control-plane URL. Defaults to `https://api.fystash.ai`. |
+| `FYSTASH_API_KEY` | API key from [fystash.ai/signup](https://fystash.ai/signup) → Account. |
+| `FYSTASH_TEMPLATE_ID` | Room template (`default`, `docker`, …). |
+
+Register before starting envs:
+
+```python
+from integrations.nemo_gym import register  # from fystash-infra adapter
+
+register()  # register_provider("fystash", FystashProvider)
+```
+
+## Provider Config
+
+Example named `sandbox` block (agents reference with `sandbox_provider: sandbox`):
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: fystash-room-api
+  fystash:
+    connection:
+      endpoint: ${oc.env:FYSTASH_API,https://api.fystash.ai}
+      api_key: ${oc.env:FYSTASH_API_KEY}
+```
+
+```bash
+gym env start \
+  --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+  --config path/to/fystash.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
+## Harbor cascade
+
+If you already run Harbor-backed NeMo Gym agents (`harbor_agent`), point Harbor at Fystash with `harbor_environment_type: fystash` after the Harbor Fystash provider lands ([harbor#2491](https://github.com/harbor-framework/harbor/pull/2491)). That path does not require the native `SandboxProvider` registration.
+
+## SandboxSpec Provider Options
+
+| Option | Purpose |
+| --- | --- |
+| `template_id` | Fystash room template used instead of pulling `SandboxSpec.image`. |
+
+## Relevant SandboxSpec Fields
+
+| Field | Fystash behavior |
+| --- | --- |
+| `image` | Not pulled in v1; ignored unless you map it yourself. Prefer `template_id`. |
+| `workdir` | Guest working directory for exec. |
+| `env` | Best-effort export into the guest shell. |
+| `files` | Upload via room drive after create. |
+| `metadata` | Stored on the handle; not all keys are forwarded to the control plane. |
+
+## Honesty
+
+- Not a built-in provider until an in-tree `nemo_gym.sandbox.providers.fystash` lands
+- Not GPU scheduling / multi-host placement / NGC packaging
+- Full how-to: [docs.fystash.ai/guides/nemo-gym](https://docs.fystash.ai/guides/nemo-gym) · adapter: [fystash/fystash-infra integrations/nemo_gym](https://github.com/fystash/fystash-infra/tree/main/integrations/nemo_gym)
