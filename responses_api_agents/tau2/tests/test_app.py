@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from tau2.data_model.simulation import RewardInfo, SimulationRun, TerminationReason
 
 from nemo_gym.base_responses_api_agent import AggregateMetricsRequest
 from nemo_gym.server_utils import ServerClient
@@ -134,27 +133,26 @@ class TestApp:
         with patch("responses_api_agents.tau2.app.ensure_tau2_data_dir"):
             client = TestClient(server.setup_webserver())
 
-        result = SimulationRun(
-            id="run-1",
-            task_id="task-1",
-            start_time="2026-07-22T00:00:00Z",
-            end_time="2026-07-22T00:00:00Z",
-            duration=0,
-            termination_reason=TerminationReason.AGENT_STOP,
-            reward_info=RewardInfo(reward=1),
-            messages=[],
-        )
+        class StopRun(Exception):
+            pass
+
+        captured = {}
+
+        async def stop_after_config(**kwargs):
+            captured.update(kwargs)
+            raise StopRun
+
         model_urls = {"policy": "http://policy:8000", "user": "http://user:8001"}
         with (
             patch("responses_api_agents.tau2.app.get_server_url", side_effect=model_urls.__getitem__),
-            patch("responses_api_agents.tau2.app.run_single_task", AsyncMock(return_value=result)),
+            patch("responses_api_agents.tau2.app.run_single_task", stop_after_config),
+            pytest.raises(StopRun),
         ):
-            response = client.post("/run", json=request_body)
+            client.post("/run", json=request_body)
 
-        assert response.status_code == 200
-        response_config = response.json()["config"]
-        assert response_config["llm_args_agent"]["api_base"] == model_urls["policy"] + url_suffix
-        assert response_config["llm_args_user"]["api_base"] == model_urls["user"] + url_suffix
+        config = captured["config"]
+        assert config.llm_args_agent["api_base"] == model_urls["policy"] + url_suffix
+        assert config.llm_args_user["api_base"] == model_urls["user"] + url_suffix
 
     async def test_compute_metrics(self) -> None:
         example_rollouts_fpath = Path(__file__).parent.parent / "data" / "example_rollouts.jsonl"

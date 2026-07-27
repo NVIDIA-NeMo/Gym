@@ -50,7 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.stirrup_agent.task_strategy import TaskSampleSkipError, TaskStrategy
 
 
@@ -1038,13 +1038,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     # -- helpers ----------------------------------------------------------
 
     def _get_model_base_url(self) -> str:
-        from nemo_gym.global_config import get_first_server_config_dict
-        from nemo_gym.server_utils import ServerClient
-
-        global_config_dict = ServerClient.load_from_global_config().global_config_dict
-        model_server_config = get_first_server_config_dict(global_config_dict, self.config.model_server.name)
-        base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
-        return f"{apply_rollout_prefix(base_url, current_rollout_id())}/v1"
+        return self.resolve_model_base_url(self.config.model_server.name, current_rollout_id())
 
     # -- /v1/responses ----------------------------------------------------
 

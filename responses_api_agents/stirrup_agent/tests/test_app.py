@@ -128,13 +128,12 @@ class TestApp:
 
     def test_model_base_url_accepts_rollout_correlation(self) -> None:
         wrapper = StirrupAgentWrapper(config=_make_config(), server_client=MagicMock(spec=ServerClient))
-        loaded = MagicMock(global_config_dict={"policy_model": {}})
 
-        with (
-            patch("nemo_gym.server_utils.ServerClient.load_from_global_config", return_value=loaded),
-            patch(
-                "nemo_gym.global_config.get_first_server_config_dict",
-                return_value={"host": "model-host", "port": 8000},
+        with patch.object(
+            StirrupAgentWrapper,
+            "resolve_model_base_url",
+            side_effect=lambda _, rollout_id: (
+                f"http://model-host:8000/ng-rollout/{rollout_id}/v1" if rollout_id else "http://model-host:8000/v1"
             ),
         ):
             with rollout_context("7-3"):
@@ -245,7 +244,6 @@ class TestJudgeOnlyMode:
 
         config = _make_config(judge_only=True, persist_deliverables_dir=str(tmp_path))
         server_client = MagicMock(spec=ServerClient)
-        server_client.global_config_dict = {"observability_enabled": True}
         server_client.post = AsyncMock(return_value=MagicMock())
         wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
 
@@ -253,13 +251,7 @@ class TestJudgeOnlyMode:
             input="ignored",
             metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
         )
-        body = StirrupRunRequest(
-            responses_create_params=params,
-            task_id="task-1",
-            prompt="do the thing",
-            _ng_task_index=7,
-            _ng_rollout_index=0,
-        )
+        body = StirrupRunRequest(responses_create_params=params, task_id="task-1", prompt="do the thing")
         request = MagicMock()
         request.cookies = {}
 
