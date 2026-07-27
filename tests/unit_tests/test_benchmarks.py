@@ -82,7 +82,36 @@ class TestPrepareBenchmark:
             patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
-            mock_module.prepare.assert_called_once()
+            mock_module.prepare.assert_called_once_with()
+
+    def test_forwards_prepare_script_args(self, tmp_path: Path) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+
+        mock_module = MagicMock()
+        mock_module.prepare.return_value = tmp_path / "output.jsonl"
+
+        prepare_script_args = {
+            "model": "/path/to/checkpoint",
+            "length": 1048576,
+            "data_format": "default",
+        }
+        with (
+            patch(
+                "nemo_gym.benchmarks.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {
+                        "config_paths": [str(config_path)],
+                        "prepare_script_args": prepare_script_args,
+                        **safe_load(config_path.read_text()),
+                    }
+                ),
+            ),
+            patch("nemo_gym.benchmarks.BENCHMARKS_DIR", bench_dir.parent),
+            patch("nemo_gym.benchmarks.importlib.import_module", return_value=mock_module),
+        ):
+            prepare_benchmark()
+
+        mock_module.prepare.assert_called_once_with(**prepare_script_args)
 
     def test_missing_prepare_py(self, tmp_path: Path) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
