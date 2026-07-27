@@ -33,8 +33,8 @@ upstream.
 
 | Area | Checked behavior | Evidence |
 |---|---|---|
-| Action semantics | All eight tools are validated; modeled parameters change deterministic transitions; scheduler, MCS, handover, and UL-power controls expose condition-dependent costs instead of unconditional relief; identical setpoints are idempotent. The PRB-cap schema advertises only the supported UE target, and runtime validation uses the UE identifiers actually present in each cell. | `tests/test_guardrail.py`, `tests/test_replay_action_semantics.py`, `tests/test_reward_correctness.py` |
-| Reward contract | Live and replay use one version selector; T2 uses `openair_t2_v3` with service accounting; non-T2 paths preserve frozen V1. | `openair_congestion/reward_profiles.py`, `tests/test_reward_profiles.py` |
+| Action semantics | Default replay tiers expose eight validated tools; T2 reset narrows model-facing tools to `noop` and UE-targeted `set_prb_cap` with bounds matching its runtime guardrail. Modeled parameters change deterministic transitions; identical setpoints are idempotent. | `tests/test_guardrail.py`, `tests/test_replay_action_semantics.py`, `tests/test_app.py`, `responses_api_agents/gymnasium_agent/tests/test_app.py` |
+| Reward contract | Live, synthetic replay, and dataset replay use one version selector; T2 uses `openair_t2_v3` with service accounting; non-T2 paths preserve frozen V1. | `openair_congestion/reward_profiles.py`, `tests/test_reward_profiles.py`, `tests/test_dataset_ingestion.py` |
 | Admission accounting | Requested, admitted, delivered, denied, and forcibly terminated service agree with emitted UE topology. | `tests/test_replay_action_semantics.py`, `tests/test_reward_profiles.py` |
 | Transactionality | Failed reward computation does not partially commit a step; close and render synchronize with an in-flight step. | `tests/test_replay_lifecycle.py` |
 | Cleanup | Failed backend close stays tracked; a completed agent rollout survives `/close` failure with a structured warning. | `tests/test_app.py`, `responses_api_agents/gymnasium_agent/tests/test_app.py` |
@@ -64,8 +64,9 @@ GRPO environment.
 
 ## Generated evidence
 
-- `data/example.jsonl` contains five neutral model prompts spanning the evaluator
-  regimes without naming them in model-facing content.
+- `data/example.jsonl` contains five neutral model prompts spanning distinct
+  deterministic fallback regime dynamics without naming the regimes in
+  model-facing content.
 - `data/example_rollouts.jsonl` contains deterministic full trajectories through
   the real reset/step/close HTTP surface. Each transition records the action
   dynamics version, reward version, service accounting, reward measurements,
@@ -74,19 +75,26 @@ GRPO environment.
 - `golden_set.py` derives a reproducible single-intervention oracle from the
   deterministic action grid; its labels are not produced by an LLM judge.
 
-## Executed external validation
+## Historical external validation — rerun required
 
 These empirical jobs ran outside the repository and their full receipts are
-not checked into this contribution. The hashes below identify the preserved
-results without turning failed experiments into model-quality claims.
+not checked into this contribution. They predate the fallback-load,
+regime-dynamics, and T2 tool-contract corrections in this review. The hashes
+identify preserved historical results, but their scores are not comparable to
+the current branch and cannot qualify it. Rerun both profiles before making
+any current model-quality claim.
 
 ### Strict real-model profile
 
 A strict 500-prompt × 16-response profile completed against Qwen3-1.7B and
 Qwen3-8B:
 
-- all four scripted anchors completed 8,000 episodes and preserved
-  `relief > noop > random-valid > catastrophic`;
+- all four scripted anchors completed 8,000 episodes under the historical
+  strict-order gate. The current gate uses the more defensible partial order
+  `relief > noop`, `relief > random-valid`, and both
+  `noop` and `random-valid > catastrophic`;
+- each current anchor constraint is evaluated on paired prompt/repeat returns
+  and must have a deterministic 95% bootstrap lower bound above zero;
 - Qwen3-1.7B completed 8,000 episodes with mean return `-2.2886`, but had
   1,157 parse failures;
 - Qwen3-8B completed 8,000 episodes with mean return `-3.3175`, zero

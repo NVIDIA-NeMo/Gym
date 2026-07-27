@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # OpenAir Congestion Resource Server
 
-`openair_congestion` is a multi-turn NeMo Gym environment for 5G RAN congestion control. On each turn, an agent reads cell and UE KPIs and must emit exactly one of eight network-control tool calls. The environment validates the call, applies a deterministic synthetic network transition, returns the next KPIs, and computes an auditable reward.
+`openair_congestion` is a multi-turn NeMo Gym environment for 5G RAN congestion control. On each turn, an agent reads cell and UE KPIs and must emit exactly one tool call. The default replay tiers expose eight network-control choices; the safety-constrained T2 profile exposes only `noop` and UE-targeted `set_prb_cap`. The environment validates the call, applies a deterministic synthetic network transition, returns the next KPIs, and computes an auditable reward.
 
 The default replay environment is fully contained in this directory. It needs neither a 5G lab nor a GPU. Live OpenAirInterface control is intentionally outside the scope of this contribution.
 
@@ -15,7 +15,7 @@ For the code-level claim and verification map, see
 Each task supplies the agent with:
 
 1. A system instruction describing the 5G operator role.
-2. Eight tool schemas.
+2. Tool schemas for the selected tier.
 3. A user observation containing current cell and UE KPIs.
 
 The agent must return exactly one tool call:
@@ -31,7 +31,7 @@ The agent must return exactly one tool call:
 | `set_ul_power_control` | `cell_id`, `p0_dbm`, `alpha` | Change uplink fractional power control. |
 | `noop` | none | Leave controls unchanged for one step. |
 
-Tool argument schemas come from `openair_congestion.tools.TOOL_SCHEMA_BY_NAME`. The guardrail rejects unavailable or out-of-range actions and applies the configured rejection cost without crashing the episode. Missing, malformed, unknown, or multiple tool calls violate the protocol: the episode terminates, receives the finite negative `protocol_violation_penalty`, and releases its session immediately.
+Tool argument schemas come from `openair_congestion.tools.TOOL_SCHEMA_BY_NAME`. For T2, reset returns a narrower tool contract and the shared Gymnasium agent filters the model-facing list to `noop` and `set_prb_cap`, tightens the cell bound to the observed topology, and tightens `max_prb` to `200..273`. The server-side guardrail remains authoritative. Missing, malformed, unknown, or multiple tool calls violate the protocol: the episode terminates, receives the finite negative `protocol_violation_penalty`, and releases its session immediately.
 
 Replay actions are persistent absolute setpoints rather than fixed tool-name bonuses. Parameter changes therefore produce distinct deterministic transitions, while reapplying an identical setpoint is idempotent. The replay admission-control ledger keeps requested, admitted, delivered, denied, and forcibly terminated service consistent with the emitted UE topology. `set_prb_cap` exposes only UE targeting, and non-empty slice reservations are rejected, because the bundled synthetic topology does not model slices.
 
@@ -46,7 +46,8 @@ The environment itself is the verifier. There is no LLM judge. For each accepted
 
 The objective can be read as congestion cost: a clean steady transition is `0`, and persistent congestion contributes negative level costs. A transition that materially improves KPIs can receive positive delta credit. Therefore, compare episode returns only when reward profile, backend, horizon, and task manifest are identical.
 
-Reward selection is versioned and shared by live and replay paths:
+Reward selection is versioned and shared by live, synthetic replay, and
+diagnostic dataset-replay paths:
 
 - T2 episodes use `openair_t2_v3` with explicit requested/admitted/delivered service, denial, and forced-termination accounting.
 - Connected T1 runner episodes preserve `openair_v1` with the runner's `0.08` PRB-pressure threshold.
@@ -64,6 +65,14 @@ The handwritten relief policy is an example policy, baseline, and possible SFT-d
 | `dataset_replay` | No | Diagnostics only | Replays recorded observations and recomputes guardrail/reward information. Because the selected action cannot change the prerecorded next state, this backend must not be used for policy training or model-quality claims. |
 
 Select the backend in `configs/openair_congestion.yaml` or with `OPENAIR_CONGESTION_BACKEND`. Selecting `oai_collector` fails at startup with an explicit unsupported-backend error; no live OAI implementation is represented as complete here.
+
+The clean-checkout fallback behind `replay` deliberately creates
+medium/high-difficulty overload without the optional `congestion_gen`
+package. Its five regime names drive distinct synthetic pressure patterns:
+offered-load pressure (`prb_exhaustion`), higher-load burst snapshots
+(`bursty`), SINR/BLER impairment (`interference`), access pressure
+(`prach_storm`), and heterogeneous 5QI demand (`qos_competition`). These are
+deterministic benchmark dynamics, not claims of live-network fidelity.
 
 Episode slots are finite. Repeated reset, normal termination, truncation, protocol failure, and explicit close release state immediately. A hard client or process crash cannot call `/close`, so an inactive session is reclaimed on a later reset after the configurable `session_ttl_s` lease (one hour by default).
 
@@ -148,11 +157,12 @@ data, not measured OAI/FlexRIC KPM.
 Choose one tool call (or noop) to address congestion now. Output only the tool call.
 ```
 
-The model receives rendered KPI telemetry and the eight tool schemas. Evaluator
-metadata such as `difficulty`, `regime_mix`, and `scenario_id` is not rendered
-into this message. The scalar reward and its decomposition are produced by the
-environment after the tool call; they are rollout evidence, not an LLM-judge
-response.
+The model receives rendered KPI telemetry plus the tool schemas enabled for
+that tier: eight in the default replay tiers, or the narrowed two-tool T2
+contract. Evaluator metadata such as `difficulty`, `regime_mix`, and
+`scenario_id` is not rendered into this message. The scalar reward and its
+decomposition are produced by the environment after the tool call; they are
+rollout evidence, not an LLM-judge response.
 
 ## Checked-in example evidence
 
@@ -206,9 +216,12 @@ Trace rows use `reward_measurements` to reconstruct aggregate state. `aggregate_
 Set the backend and file in the resource-server config:
 
 ```yaml
-backend: dataset_replay
-dataset_path: data/fixtures/sample_provided.jsonl
-cell_capacity_mbps: 60.0
+openair_congestion:
+  resources_servers:
+    openair_congestion:
+      backend: dataset_replay
+      dataset_path: data/fixtures/sample_provided.jsonl
+      cell_capacity_mbps: 60.0
 ```
 
 Task `scenario_id` must match a dataset episode key or be omitted for deterministic seed-based selection.
@@ -237,9 +250,12 @@ Then change only these resource-server keys in
 `/tmp/openair_congestion_dataset.yaml`:
 
 ```yaml
-backend: dataset_replay
-dataset_path: data/user/my_5g_measurements.jsonl
-cell_capacity_mbps: 60.0
+openair_congestion:
+  resources_servers:
+    openair_congestion:
+      backend: dataset_replay
+      dataset_path: data/user/my_5g_measurements.jsonl
+      cell_capacity_mbps: 60.0
 ```
 
 Each `episode_id` needs at least two ordered observations. For the checked-in
@@ -322,7 +338,13 @@ Run the offline scripted capability sweep:
 python resources_servers/openair_congestion/model_sweep.py
 ```
 
-The CI gate expects the known-policy ordering `relief > noop > random-valid > catastrophic`. Optional OpenAI-compatible models can be added with:
+The CI gate expects a known-policy partial order: `relief > noop`,
+`relief > random-valid`, and both `noop` and `random-valid > catastrophic`.
+It intentionally does not order noop against random-valid because unguided
+valid control can sometimes relieve a genuinely congested state by chance.
+Every required comparison is paired by prompt/repeat and must have a positive
+mean delta and a deterministic 95% bootstrap lower bound above zero.
+Optional OpenAI-compatible models can be added with:
 
 ```bash
 python resources_servers/openair_congestion/model_sweep.py \

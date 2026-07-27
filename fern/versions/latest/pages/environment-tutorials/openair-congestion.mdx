@@ -147,7 +147,7 @@ intentionally change them when dynamics or a versioned reward profile changes.
 A task row supplies:
 
 1. a system instruction;
-2. eight function-tool schemas;
+2. function-tool schemas for the requested tier;
 3. evaluator metadata such as seed and difficulty; and
 4. a neutral user request.
 
@@ -183,7 +183,7 @@ The canonical schema is in `openair_congestion/schemas.py`:
 The scalar reward is not model-generated. After the policy calls a tool, the
 environment computes and records the reward and its per-term breakdown.
 
-The eight tools are:
+The default replay tiers expose eight tools:
 
 | Tool | Control |
 |---|---|
@@ -200,6 +200,12 @@ The model must emit exactly one function call. Missing, malformed, unknown,
 or multiple calls terminate the episode with a finite negative protocol
 penalty. A well-formed but unsafe call is rejected by the guardrail and scored
 as a rejected transition.
+
+For T2, reset returns an explicit narrow action contract. Before the first
+model turn, the shared Gymnasium agent filters the model-facing schemas to
+`noop` and UE-targeted `set_prb_cap`, constrains `cell_id` to the observed
+three-cell topology, and constrains `max_prb` to `200..273`. The server
+guardrail independently enforces the same contract.
 
 <Warning>
 These names describe network controls, but the bundled backend applies
@@ -291,9 +297,12 @@ Temporarily set these keys under
 `configs/openair_congestion.yaml`:
 
 ```yaml
-backend: dataset_replay
-dataset_path: data/fixtures/sample_provided.jsonl
-cell_capacity_mbps: 60.0
+openair_congestion:
+  resources_servers:
+    openair_congestion:
+      backend: dataset_replay
+      dataset_path: data/fixtures/sample_provided.jsonl
+      cell_capacity_mbps: 60.0
 ```
 
 Dataset rows are validated at startup. Malformed topology, duplicate IDs,
@@ -358,9 +367,12 @@ cp /absolute/path/my_5g_measurements.jsonl \
 Set:
 
 ```yaml
-backend: dataset_replay
-dataset_path: data/user/my_5g_measurements.jsonl
-cell_capacity_mbps: 60.0
+openair_congestion:
+  resources_servers:
+    openair_congestion:
+      backend: dataset_replay
+      dataset_path: data/user/my_5g_measurements.jsonl
+      cell_capacity_mbps: 60.0
 ```
 
 Each row is one timestep. Rows with the same `episode_id` form an episode and
@@ -468,13 +480,19 @@ PYTHONPATH=.:resources_servers/openair_congestion \
   python resources_servers/openair_congestion/model_sweep.py
 ```
 
-This checks the fixed policy ladder:
+This checks the fixed policy partial order:
 
 ```text
-relief > noop > random-valid > catastrophic
+relief > noop
+relief > random-valid
+noop > catastrophic
+random-valid > catastrophic
 ```
 
-That ladder is a reward sanity check. It is not evidence that a real model
+Each comparison uses paired prompt/repeat returns and must have a positive
+mean delta with a deterministic 95% bootstrap lower bound above zero.
+
+That partial order is a reward sanity check. It is not evidence that a real model
 understands telecom control.
 
 Generate the held-out finite-grid benchmark:
