@@ -13,10 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Awaitable, Callable
 
 from fastapi import Body, FastAPI, Request, Response
-from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -24,7 +23,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -100,17 +98,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # response.background = task
 
         return response
-
-    def resolve_model_call_path(self, base_url_or_path: str, body: BaseModel | Mapping[str, Any] | None) -> str:
-        if not self._capture_config.should_capture_calls:
-            return base_url_or_path
-
-        maybe_rollout_id = maybe_rollout_id_from_run_body(body)
-        if not maybe_rollout_id:
-            return base_url_or_path
-
-        base_url_or_path = base_url_or_path.rstrip("/")
-        return f"{base_url_or_path}/{ROLLOUT_PATH_PREFIX}/{maybe_rollout_id}"
 
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.

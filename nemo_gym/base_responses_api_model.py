@@ -149,9 +149,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         response = await call_next(request)
 
-        # Grab the rollout_id here after the route handler has run to populate the path_params
-        rollout_id = request.path_params.get("rollout_id")
-
+        rollout_id = self._get_rollout_id(request)
         if not rollout_id:
             return response
 

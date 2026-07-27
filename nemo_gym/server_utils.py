@@ -58,6 +58,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
+    ROLLOUT_ID_KEY,
     ROLLOUT_PATH_PREFIX,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
@@ -610,6 +611,26 @@ repr(e): {repr(e)}"""
         app.add_middleware(BaseHTTPMiddleware, dispatch=self.call_capture_middleware)
 
         print(f"Set up model call capture middleware for {self.config.name}")
+
+    @staticmethod
+    def _get_rollout_id(request: Request) -> Optional[str]:
+        if ROLLOUT_ID_KEY in request.session:
+            return request.session[ROLLOUT_ID_KEY]
+
+        # Lazily grab the rollout_id here after the route handler has run to populate the path_params
+        request.session[ROLLOUT_ID_KEY] = request.path_params.get(ROLLOUT_ID_KEY)
+        return request.session[ROLLOUT_ID_KEY]
+
+    def resolve_call_path(self, base_url_or_path: str, request: Request) -> str:
+        if not self._capture_config.should_capture_calls:
+            return base_url_or_path
+
+        maybe_rollout_id = self._get_rollout_id(request)
+        if not maybe_rollout_id:
+            return base_url_or_path
+
+        base_url_or_path = base_url_or_path.rstrip("/")
+        return f"{base_url_or_path}/{ROLLOUT_PATH_PREFIX}/{maybe_rollout_id}"
 
     def _maybe_inject_request(self, fn: Callable, request: Request, params: Dict[str, Any]) -> None:
         # responses() and other function signatures vary across servers: some take a leading `request` injected by FastAPI, some only
