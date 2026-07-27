@@ -402,6 +402,29 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     assert calls[0].latency_ttft_ms is None  # nothing streamed before the raise
 
 
+def test_raised_upstream_error_preserves_status_and_body(tmp_path):
+    class UpstreamError(RuntimeError):
+        response = SimpleNamespace(status_code=403, content=b'{"error":{"message":"denied"}}')
+
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def _boom(body: dict = Body()) -> dict:
+        raise UpstreamError
+
+    _install_capture(app, tmp_path)
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/ng-rollout/r-upstream/v1/responses",
+        json={"input": "x"},
+    )
+
+    assert response.status_code == 500
+    [exchange] = CaptureStore(tmp_path).read("r-upstream")
+    assert exchange["status_code"] == 403
+    assert exchange["error_category"] == "auth"
+    assert json.loads(exchange["response_raw"]) == {"error": {"message": "denied"}}
+
+
 @pytest.mark.parametrize("request_bytes", [b"{not-json", b"[]"])
 def test_invalid_request_body_does_not_drop_capture(tmp_path, request_bytes):
     app = FastAPI()
