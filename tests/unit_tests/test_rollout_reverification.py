@@ -457,57 +457,65 @@ class TestRecoveryRolloutPredicate:
         # later a judge failure for the same key arrives → must be kept
         assert predicate(self._row(0)) is True
 
+    def test_skips_judge_failures_whose_key_is_already_in_the_output(self) -> None:
+        """A judge-failure key already present in the output (a seeded success or an already-recovered
+        row) is skipped — no re-verify/duplicate — without any resume/cache machinery."""
+        predicate = _recovery_rollout_predicate(skip_keys={(0, 0), (2, 0)})
+        assert predicate(self._row(0)) is False  # already present in output
+        assert predicate(self._row(1)) is True  # genuinely still to recover
+        assert predicate(self._row(2)) is False  # already present in output
+
 
 class TestSeedOutputWithSuccesses:
-    def test_copies_all_rows_verbatim_and_returns_count(self, tmp_path: Path) -> None:
+    def test_copies_all_rows_verbatim_and_returns_their_keys(self, tmp_path: Path) -> None:
         src = tmp_path / "successes.jsonl"
         rows = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reward": float(i)} for i in range(3)]
         src.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
         out = tmp_path / "output.jsonl"
 
-        count = _seed_output_with_successes(src, out)
+        keys = _seed_output_with_successes(src, out)
 
-        assert count == 3
+        assert keys == {(0, 0), (1, 0), (2, 0)}
         seeded = [orjson.loads(line) for line in out.read_bytes().splitlines() if line.strip()]
         assert seeded == rows
 
-    def test_empty_source_creates_empty_output_and_returns_zero(self, tmp_path: Path) -> None:
+    def test_empty_source_creates_empty_output_and_returns_empty_set(self, tmp_path: Path) -> None:
         src = tmp_path / "successes.jsonl"
         src.write_bytes(b"")
         out = tmp_path / "output.jsonl"
 
-        count = _seed_output_with_successes(src, out)
+        keys = _seed_output_with_successes(src, out)
 
-        assert count == 0
+        assert keys == set()
         assert out.exists()
         assert out.read_bytes() == b""
 
     def test_normalizes_missing_trailing_newline_and_skips_blanks(self, tmp_path: Path) -> None:
         src = tmp_path / "successes.jsonl"
-        # two rows, second without a trailing newline, plus a blank line
+        # two keyless rows (no task/rollout index), second without a trailing newline, plus a blank line
         src.write_bytes(orjson.dumps({"a": 1}) + b"\n\n" + orjson.dumps({"a": 2}))
         out = tmp_path / "output.jsonl"
 
-        count = _seed_output_with_successes(src, out)
+        keys = _seed_output_with_successes(src, out)
 
-        assert count == 2
+        assert keys == set()  # keyless rows contribute no dedup keys
         lines = out.read_bytes().splitlines()
-        assert [orjson.loads(line) for line in lines] == [{"a": 1}, {"a": 2}]
+        assert [orjson.loads(line) for line in lines] == [{"a": 1}, {"a": 2}]  # still written
 
-    def test_idempotent_skips_keys_already_in_output(self, tmp_path: Path) -> None:
-        """Re-seeding onto an output that already holds some successes must not duplicate them
-        (guards the --resume / already-seeded path)."""
+    def test_returns_all_output_keys_incl_prior_rows_and_does_not_duplicate(self, tmp_path: Path) -> None:
+        """The returned set is every key present in the output afterward — including a row already in the
+        output that is NOT in the successes source (e.g. a prior-recovered row) — and nothing is duplicated."""
         row = lambda t: {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
         src = tmp_path / "successes.jsonl"
-        src.write_bytes(b"\n".join(orjson.dumps(row(t)) for t in (0, 1, 2)) + b"\n")
+        src.write_bytes(b"\n".join(orjson.dumps(row(t)) for t in (1, 2)) + b"\n")  # successes = tasks 1, 2
         out = tmp_path / "output.jsonl"
-        out.write_bytes(orjson.dumps(row(0)) + b"\n")  # task 0 already present
+        out.write_bytes(orjson.dumps(row(0)) + b"\n")  # task 0 already in output, NOT in the source
 
-        count = _seed_output_with_successes(src, out)
+        keys = _seed_output_with_successes(src, out)
 
-        assert count == 2  # only tasks 1 and 2 were seeded
+        assert keys == {(0, 0), (1, 0), (2, 0)}  # union of pre-existing (0) + seeded successes (1, 2)
         seeded = [orjson.loads(line) for line in out.read_bytes().splitlines() if line.strip()]
-        assert sorted(r[TASK_INDEX_KEY_NAME] for r in seeded) == [0, 1, 2]  # task 0 not duplicated
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in seeded) == [0, 1, 2]  # no duplicate of task 0
 
 
 # ---------------------------------------------------------------------------
@@ -982,7 +990,7 @@ class TestPrepareOutputFpaths:
         and crashing run_from_config on its default (non-resume) path.
         """
         nested = tmp_path / "does" / "not" / "exist" / "out.jsonl"
-        paths = _prepare_output_fpaths("", str(nested), resume_from_cache=False, overwrite=False)
+        paths = _prepare_output_fpaths("", str(nested), resume_from_cache=False, overwrite=False, append=False)
 
         assert paths.output.parent.is_dir()
         assert not paths.output.is_dir()
@@ -992,13 +1000,15 @@ class TestPrepareOutputFpaths:
 
     def test_applies_name_prefix_to_output_and_failures(self, tmp_path: Path) -> None:
         paths = _prepare_output_fpaths(
-            "unsafe_", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False
+            "unsafe_", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
         )
         assert paths.output.name == "unsafe_out.jsonl"
         assert paths.failures.name == "unsafe_out_failures.jsonl"
 
     def test_empty_prefix_leaves_names_unchanged(self, tmp_path: Path) -> None:
-        paths = _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+        paths = _prepare_output_fpaths(
+            "", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
+        )
         assert paths.output.name == "out.jsonl"
         assert paths.failures.name == "out_failures.jsonl"
 
@@ -1007,7 +1017,7 @@ class TestPrepareOutputFpaths:
         out = tmp_path / "out.jsonl"
         out.write_text("precious prior rollouts")
         with pytest.raises(ConfigError, match="already exists"):
-            _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=False)
+            _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=False, append=False)
         # the file is left untouched
         assert out.read_text() == "precious prior rollouts"
 
@@ -1016,7 +1026,9 @@ class TestPrepareOutputFpaths:
         failures = tmp_path / "out_failures.jsonl"
         failures.write_text("prior failures")
         with pytest.raises(ConfigError, match="already exists"):
-            _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+            _prepare_output_fpaths(
+                "", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
+            )
 
     def test_deletes_existing_files_when_overwrite_and_not_resuming(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -1026,7 +1038,7 @@ class TestPrepareOutputFpaths:
         out.write_text("stale")
         failures.write_text("stale")
 
-        paths = _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=True)
+        paths = _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=True, append=False)
 
         assert not paths.output.exists()
         assert not paths.failures.exists()
@@ -1034,7 +1046,9 @@ class TestPrepareOutputFpaths:
 
     def test_no_existing_files_is_fine_without_overwrite(self, tmp_path: Path) -> None:
         """A first run (no prior files) proceeds without needing overwrite."""
-        paths = _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+        paths = _prepare_output_fpaths(
+            "", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
+        )
         assert not paths.output.exists()
 
     def test_keeps_existing_files_when_resuming_regardless_of_overwrite(self, tmp_path: Path) -> None:
@@ -1044,7 +1058,20 @@ class TestPrepareOutputFpaths:
         failures.write_text("keep me too")
 
         # resume reuses the file; overwrite is ignored and nothing is deleted or raised
-        paths = _prepare_output_fpaths("", str(out), resume_from_cache=True, overwrite=False)
+        paths = _prepare_output_fpaths("", str(out), resume_from_cache=True, overwrite=False, append=False)
+
+        assert paths.output.read_text() == "keep me"
+        assert paths.failures.read_text() == "keep me too"
+
+    def test_keeps_existing_files_when_appending_regardless_of_overwrite(self, tmp_path: Path) -> None:
+        """--append reuses the existing output: nothing is deleted or raised even without overwrite."""
+        out = tmp_path / "out.jsonl"
+        failures = tmp_path / "out_failures.jsonl"
+        out.write_text("keep me")
+        failures.write_text("keep me too")
+
+        # append reuses the file; overwrite is ignored and nothing is deleted or raised
+        paths = _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=False, append=True)
 
         assert paths.output.read_text() == "keep me"
         assert paths.failures.read_text() == "keep me too"
@@ -1307,13 +1334,32 @@ class TestGuardReverifyMode:
     subset referenced by the current payload batch), reading the force flag from the config.
     """
 
-    def _make_config(self, tmp_path: Path, *, force: bool = False) -> RolloutReverificationConfig:
+    def _make_config(
+        self, tmp_path: Path, *, force: bool = False, judge_failed_only: bool = False
+    ) -> RolloutReverificationConfig:
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "in.jsonl"),
             rollouts_jsonl_fpath=str(tmp_path / "r.jsonl"),
             output_jsonl_fpath=str(tmp_path / "out.jsonl"),
             force=force,
+            judge_failed_only=judge_failed_only,
         )
+
+    async def test_judge_failed_only_skips_the_guard_and_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Recovery bypasses the reverify-mode check: the guard returns None without querying any RS
+        (so a UNKNOWN/UNSUPPORTED server does not block recovery, and no `unsafe_` prefix is applied)."""
+        called = False
+
+        def _boom() -> None:
+            nonlocal called
+            called = True
+            raise AssertionError("setup_server_client must not be called for judge_failed_only")
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", _boom)
+        assert await _guard_reverify_mode(self._make_config(tmp_path, judge_failed_only=True)) is None
+        assert called is False
 
     def _patch(
         self,
@@ -2060,7 +2106,7 @@ class TestRunFromConfigJudgeFailedOnly:
             failures=[self._failure(2), self._failure(3)],
         )
         dispatched: list = []
-        guard_mock, _ = self._patch(monkeypatch, dispatched)
+        self._patch(monkeypatch, dispatched)
 
         returned = await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
@@ -2079,8 +2125,8 @@ class TestRunFromConfigJudgeFailedOnly:
         # the returned union covers all four, sorted
         assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1, 2, 3]
 
-        # recovery skips the reverify-mode guard entirely, and writes an un-prefixed output
-        guard_mock.assert_not_awaited()
+        # recovery does not apply the reverify-mode guard's outcome (the guard early-returns None for
+        # judge_failed_only), so the output is un-prefixed (no `unsafe_`), regardless of RS mode
         assert (tmp_path / "recovered.jsonl").exists()
         assert not (tmp_path / "unsafe_recovered.jsonl").exists()
 

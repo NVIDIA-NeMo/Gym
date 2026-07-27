@@ -328,19 +328,25 @@ def _is_judge_failure(row: Dict[str, Any]) -> bool:
     return row.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED_FAILURE_CLASS
 
 
-def _recovery_rollout_predicate() -> Callable[[Dict[str, Any]], bool]:
+def _recovery_rollout_predicate(
+    skip_keys: Optional[set[tuple[Any, Any]]] = None,
+) -> Callable[[Dict[str, Any]], bool]:
     """Build the row filter for `--judge-failed-only` recovery.
 
-    Keeps only judge-class failures and dedups on `(task, rollout)` so a sidecar with multiple failure attempts for one key
-    re-verifies it exactly once.
+    Keeps only judge-class failures, skips any whose `(task, rollout)` key is in `skip_keys` (the keys
+    already present in the output: seeded successes + rows a prior recovery already appended) so a
+    key-in-both is never re-verified/duplicated and re-runs are idempotent — this dedup is done here,
+    independent of the resume/cache machinery — and dedups on the key so a sidecar with multiple failure
+    attempts for one key re-verifies it exactly once.
     """
+    skip_keys = skip_keys or set()
     seen: set[tuple[Any, Any]] = set()
 
     def predicate(row: Dict[str, Any]) -> bool:
         if not _is_judge_failure(row):
             return False
         key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
-        if key in seen:
+        if key in skip_keys or key in seen:
             return False
         seen.add(key)
         return True
@@ -348,24 +354,28 @@ def _recovery_rollout_predicate() -> Callable[[Dict[str, Any]], bool]:
     return predicate
 
 
-def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> None:
+def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> set[tuple[int, int]]:
     """Copy the already-successful rollout rows into the output file so the final aggregate covers
-    successes + recovered rows. Idempotent: a success whose (task, rollout) key is already present in
-    the output is skipped."""
-    existing: set[tuple[int, int]] = set()
+    successes + recovered rows, and return the set of (task, rollout) keys ALREADY PRESENT in the output
+    afterward"""
+    present: set[tuple[int, int]] = set()
     if output_fpath.exists():
         with output_fpath.open("rb") as f:
-            existing = {key for line in f if (key := _parse_output_line_key(line)) is not None}
-    count = 0
+            present = {key for line in f if (key := _parse_output_line_key(line)) is not None}
+    seeded = 0
     with successes_fpath.open("rb") as src, output_fpath.open("ab") as dst:
         for line in src:
             if not line.strip():
                 continue
-            if (key := _parse_output_line_key(line)) is not None and key in existing:
-                continue
+            key = _parse_output_line_key(line)
+            if key is not None:
+                if key in present:
+                    continue
+                present.add(key)
             dst.write(line if line.endswith(b"\n") else line + b"\n")
-            count += 1
-    print(f"Recovery mode: seeded {count} successful rollout(s) into {output_fpath}")
+            seeded += 1
+    print(f"Recovery mode: seeded {seeded} successful rollout(s) into {output_fpath}")
+    return present
 
 
 # ---------------------------------------------------------------------------
@@ -680,8 +690,9 @@ class RolloutReverificationHelper(BaseModel):
         if config.judge_failed_only:
             print(_RECOVERY_TWO_SOURCES_WARNING)
             reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
-            _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
-            rollout_predicate = _recovery_rollout_predicate()
+            # Seed the successes and dedup so the re-verification doesn't judge successes again.
+            skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
+            rollout_predicate = _recovery_rollout_predicate(skip_keys)
 
         payloads_to_reverify = _prepare_payloads(
             materialized_inputs_jsonl_fpath,
