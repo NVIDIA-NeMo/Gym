@@ -94,8 +94,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         return response
 
-    # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
-    # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.
     @abstractmethod
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
