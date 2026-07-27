@@ -523,6 +523,8 @@ def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no co
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
+    _is_exception_middleware_setup: bool = False
+
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
@@ -555,6 +557,9 @@ class SimpleServer(BaseServer):
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
+        if self._is_exception_middleware_setup:
+            return
+
         @app.middleware("http")
         async def exception_handling_middleware(request: Request, call_next):
             try:
