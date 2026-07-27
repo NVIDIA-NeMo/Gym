@@ -279,35 +279,22 @@ def _harbor_run_mocks(
     with (
         patch("responses_api_agents.harbor_agent.app.get_global_config_dict") as mock_gc,
         patch("responses_api_agents.harbor_agent.app.runner_ray_remote") as mock_ray,
+        patch("asyncio.to_thread") as mock_to_thread,
         patch.object(HarborAgent, "_build_job_config", return_value={"job_name": "mock_job"}),
     ):
         mock_gc.return_value = _GLOBAL_CONFIG
+        mock_ray.remote.return_value = MagicMock()
 
-        trial_dir: Optional[str] = None
-        if not side_effect:
+        if side_effect:
+            mock_to_thread.side_effect = side_effect
+        else:
             trial_dir = tempfile.mkdtemp(prefix="harbor_trial_")
             (Path(trial_dir) / "result.json").write_text(json.dumps(trial_result or DEFAULT_TRIAL_RESULT))
             if trajectory is not None:
                 agent_dir = Path(trial_dir) / "agent"
                 agent_dir.mkdir(parents=True, exist_ok=True)
                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
-
-        # ``run()`` awaits the Ray ObjectRef directly (Ray futures are
-        # awaitable), so ``.remote(...)`` must hand back a fresh awaitable on
-        # every call rather than a plain return value. Covers both dispatch
-        # paths: bare ``runner_ray_remote.remote`` and the
-        # ``.options(num_cpus=...)`` variant used when
-        # ``harbor_ray_task_num_cpus`` is configured.
-        def _remote(*args, **kwargs):
-            async def _resolve():
-                if side_effect:
-                    raise side_effect
-                return trial_dir
-
-            return _resolve()
-
-        mock_ray.remote.side_effect = _remote
-        mock_ray.options.return_value.remote.side_effect = _remote
+            mock_to_thread.return_value = trial_dir
 
         yield
 
