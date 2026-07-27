@@ -589,8 +589,36 @@ def test_chat_completion_to_responses_create_params_sanity(converter: ResponsesC
                     "function": {
                         "name": "test tool",
                         "description": "test description",
-                        "parameters": {},
-                        "strict": True,
+                        "parameters": {
+                            "properties": {
+                                "card_type": {
+                                    "description": "Type of credit card",
+                                    "title": "Card Type",
+                                    "type": "string",
+                                },
+                                "customer_name": {
+                                    "description": "Full legal name",
+                                    "title": "Customer Name",
+                                    "type": "string",
+                                },
+                                "annual_income": {
+                                    "description": "Annual income in USD",
+                                    "title": "Annual Income",
+                                    "type": "number",
+                                },
+                                "rho_bank_subscription": {
+                                    "default": False,
+                                    "description": "Whether user has Rho-Bank+ subscription",
+                                    "title": "Rho Bank Subscription",
+                                    "type": "boolean",
+                                },
+                            },
+                            "required": ["card_type", "customer_name", "annual_income"],
+                            "title": "parameters",
+                            "type": "object",
+                        },
+                        # Omit strict on purpose
+                        # "strict": True,
                     },
                 }
             ],
@@ -610,8 +638,31 @@ def test_chat_completion_to_responses_create_params_sanity(converter: ResponsesC
             {
                 "name": "test tool",
                 "description": "test description",
-                "parameters": {},
-                "strict": True,
+                "parameters": {
+                    "properties": {
+                        "card_type": {"description": "Type of credit card", "title": "Card Type", "type": "string"},
+                        "customer_name": {
+                            "description": "Full legal name",
+                            "title": "Customer Name",
+                            "type": "string",
+                        },
+                        "annual_income": {
+                            "description": "Annual income in USD",
+                            "title": "Annual Income",
+                            "type": "number",
+                        },
+                        "rho_bank_subscription": {
+                            "default": False,
+                            "description": "Whether user has Rho-Bank+ subscription",
+                            "title": "Rho Bank Subscription",
+                            "type": "boolean",
+                        },
+                    },
+                    "required": ["card_type", "customer_name", "annual_income"],
+                    "title": "parameters",
+                    "type": "object",
+                },
+                "strict": None,
                 "type": "function",
             }
         ],
