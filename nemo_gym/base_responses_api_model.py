@@ -755,6 +755,24 @@ def _classify_exception(exc: BaseException) -> str:
     return "exception"
 
 
+def _exception_http_details(exc: BaseException) -> tuple[Optional[int], bytes]:
+    response = getattr(exc, "response", None)
+    status = getattr(exc, "status", None)
+    if not isinstance(status, int):
+        status = getattr(exc, "status_code", None)
+    if not isinstance(status, int) and response is not None:
+        status = getattr(response, "status_code", None)
+
+    body = getattr(exc, "response_content", None)
+    if body is None and response is not None:
+        body = getattr(response, "content", None)
+        if body is None:
+            body = getattr(response, "text", None)
+    if isinstance(body, str):
+        body = body.encode()
+    return (status if isinstance(status, int) else None, bytes(body) if isinstance(body, (bytes, bytearray)) else b"")
+
+
 # --- SSE reconstruction: rebuild a final response object from a streamed body ---
 def _parse_sse_events(raw: bytes) -> list[dict[str, Any]]:
     """Parse an SSE byte stream into its JSON ``data:`` payloads (best-effort; non-JSON skipped)."""
@@ -1067,6 +1085,11 @@ class _CaptureMiddleware:
             await self._app(scope, _receive, _send)
         except Exception as exc:
             completed_at = time.time()
+            exception_status, exception_body = _exception_http_details(exc)
+            upstream_status = state["status"] or exception_status
+            upstream_body = bytes(state["body"]) or exception_body
+            error_category = _classify_status(upstream_status) if isinstance(upstream_status, int) else None
+            error_category = error_category or _classify_exception(exc)
             # Offload the blocking write+fsync so it never stalls the event loop.
             try:
                 await asyncio.to_thread(
@@ -1080,11 +1103,11 @@ class _CaptureMiddleware:
                     started_at=started_at,
                     completed_at=completed_at,
                     response_body=None,
-                    status_code=state["status"],
-                    error_category=_classify_exception(exc),
+                    status_code=upstream_status,
+                    error_category=error_category,
                     latency_ms=(time.perf_counter() - start) * 1000.0,
                     ttft_ms=state["ttft_ms"],
-                    response_raw=(bytes(state["body"]).decode("utf-8", errors="replace") if state["body"] else None),
+                    response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
