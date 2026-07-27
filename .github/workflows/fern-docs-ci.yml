@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Validates Fern docs configuration on pull requests.
-# See fern/AUTODOCS_GUIDE.md and docs.yml `libraries`.
+# See fern/README.md and docs.yml `libraries`.
 
 name: Fern docs (check)
 

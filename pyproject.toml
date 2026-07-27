@@ -219,20 +219,6 @@ dependencies = [
     "pydot",
 ]
 
-[dependency-groups]
-docs = [
-    "sphinx>=8.2.3",
-    "sphinx-autobuild>=2025.8.25",    # For live doc serving while editing docs
-    "sphinx-autodoc2>=0.5.0",         # For documenting Python API
-    "sphinx-copybutton>=0.5.2",       # Adds a copy button for code blocks
-    "myst-parser>=4.0.1",             # For our markdown docs
-    "nvidia-sphinx-theme>=0.0.8",     # Our NVIDIA theme
-    "sphinxcontrib-mermaid>=1.0.0",   # For mermaid diagrams
-    "sphinx-design>=0.6.1",           # For our design elements
-    "swagger-plugin-for-sphinx>=6.0.0", # For Swagger API documentation
-    "sphinx-reredirects>=0.1.6",      # For URL redirects when pages move
-]
-
 [project.optional-dependencies]
 all = [
     "nemo-gym[dev,sandbox]",
@@ -557,7 +543,6 @@ exclude = [
     "*.egg",
     "build",
     "dist",
-    "docs/source/conf.py",
     "setup.py",
 ]
 # Files to completely ignore
