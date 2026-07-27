@@ -123,7 +123,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Record in the background to not block the response
         # The background task only runs after streaming has finished
         task = BackgroundTask(
-            self._store.record, rollout_id, ModelCallRecord.model_validate(request.state.model_call_record_dict)
+            self._store.record, rollout_id, [ModelCallRecord.model_validate(request.state.model_call_record_dict)]
         )
 
         # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
