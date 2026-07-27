@@ -458,8 +458,8 @@ class RolloutCollectionHelper(BaseModel):
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
         # Stamp the resume attempt (count of prior failures for this key) on actual retries so their
-        # captured model calls are keyed separately from the prior attempt's (see
-        # maybe_rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
+        # captured model calls are keyed separately from the prior attempt's.
+        # The first attempt (0) is left unstamped -> bare rollout id.
         for row in input_rows:
             attempt = attempts_by_key.get(get_key(row), 0)
             if attempt > 0:

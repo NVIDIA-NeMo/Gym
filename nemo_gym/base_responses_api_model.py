@@ -18,7 +18,7 @@ import logging
 from abc import abstractmethod
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, AsyncGenerator, Awaitable, Callable, Mapping, Optional
+from typing import AsyncGenerator, Awaitable, Callable
 
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -29,11 +29,6 @@ from starlette.background import BackgroundTask
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.capture_records import ModelCallRecord
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
-from nemo_gym.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -69,37 +64,6 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
 
 class BaseResponsesAPIModel(BaseServer):
     config: BaseResponsesAPIModelConfig
-
-
-def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
-    """Per-rollout model-call capture id from a run-request's task/rollout indices.
-
-    Reads the canonical row keys (``_ng_task_index`` / ``_ng_rollout_index``) that
-    rollout_collection ships to an agent's ``/run``. When a resume re-dispatch attempt is present
-    (``_ng_attempt_index`` > 0), an ``-a<n>`` suffix is appended so a retry's captured model calls
-    stay separable from the prior attempt; the first attempt (0) keeps the bare ``<task>-<rollout>``
-    key for backward compatibility.
-    """
-    if isinstance(body, BaseModel):
-        data = body.model_dump()
-    elif isinstance(body, Mapping):
-        data = body
-    else:
-        return None
-
-    task = data.get(TASK_INDEX_KEY_NAME)
-    rollout = data.get(ROLLOUT_INDEX_KEY_NAME)
-    if task is None or rollout is None:
-        return None
-
-    rollout_id = f"{task}-{rollout}"
-    attempt = data.get(ATTEMPT_INDEX_KEY_NAME)
-    if attempt is not None:
-        attempt_index = int(attempt)
-        if attempt_index > 0:
-            rollout_id = f"{rollout_id}-a{attempt_index}"
-
-    return rollout_id
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):

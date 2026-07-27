@@ -13,26 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from types import MappingProxyType
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import Body, FastAPI
 from fastapi.responses import PlainTextResponse
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModel,
     BaseResponsesAPIModelConfig,
     ModelCallRecord,
     SimpleResponsesAPIModel,
-    maybe_rollout_id_from_run_body,
 )
 from nemo_gym.capture_records import CaptureStore
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
@@ -223,31 +218,3 @@ class TestBaseResponsesAPIModel:
         # Dummy input to just test it doesn't 404
         assert client.post("/v1/responses", json={}).status_code == 422
         assert client.post("/v1/ng-rollout/3-0/responses", json={}).status_code == 404
-
-
-class TestMaybeRolloutIDFromRunBody:
-    def test_reads_canonical_indices(self):
-        """The shared accessor agents use to derive the rollout id from a /run request body."""
-
-        mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
-        assert maybe_rollout_id_from_run_body(mapping) == "3-1"
-        assert maybe_rollout_id_from_run_body({TASK_INDEX_KEY_NAME: 3}) is None  # partial -> None
-        assert maybe_rollout_id_from_run_body({}) is None
-        assert maybe_rollout_id_from_run_body(None) is None
-
-        # The shape agents actually receive: a run-request model with extra="allow".
-        class _Body(BaseModel):
-            model_config = ConfigDict(extra="allow")
-
-        body = _Body.model_validate({TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 2})
-        assert maybe_rollout_id_from_run_body(body) == "5-2"
-
-    def test_attempt_suffix(self):
-        base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
-        assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
-        assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": 0}) == "3-2"  # first attempt -> bare
-        assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": 1}) == "3-2-a1"
-        assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "2"}) == "3-2-a2"  # coerced
-        assert maybe_rollout_id_from_run_body({"_ng_rollout_index": 2}) is None  # missing task -> None
-        with pytest.raises(ValueError):
-            maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})

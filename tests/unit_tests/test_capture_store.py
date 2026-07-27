@@ -6,9 +6,6 @@ from pathlib import Path
 import orjson
 import pytest
 
-from nemo_gym.base_responses_api_model import (
-    maybe_rollout_id_from_run_body,
-)
 from nemo_gym.capture_records import CaptureStore
 from nemo_gym.openai_utils import (
     NeMoGymResponseInputTokensDetails,
@@ -59,9 +56,7 @@ class TestCaptureStore:
 
         store.record(record1)
 
-        aggregate_record = store.aggregate(
-            rollout_id=maybe_rollout_id_from_run_body({"_ng_task_index": 0, "_ng_rollout_index": 0})
-        )
+        aggregate_record = store.aggregate(rollout_id="0-0")
 
         assert len(aggregate_record.records) == 1
         assert aggregate_record.records[0].rollout_id == "0-0"
