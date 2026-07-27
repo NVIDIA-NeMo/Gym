@@ -232,7 +232,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         request.state.model_call_record_dict["route"] = "/v1/chat/completions"
 
         request.state.model_call_record_dict["request"] = (
-            _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_responses_create_params(body_dict)
+            _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_responses_create_params(body)
         )
         request.state.model_call_record_dict["raw_request"] = body_dict
 

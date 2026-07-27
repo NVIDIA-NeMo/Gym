@@ -19,6 +19,7 @@ from openai.types.completion_usage import CompletionUsage
 
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChoice,
@@ -566,6 +567,57 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
     )
 
     assert expected_response == actual_response
+
+
+# ===========================================================================
+# chat_completion_to_responses_create_params
+# ===========================================================================
+
+
+def test_chat_completion_to_responses_create_params_sanity(converter: ResponsesConverter):
+    actual_response_create_params = converter.chat_completion_to_responses_create_params(
+        chat_completion_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "hello",
+                },
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "test tool",
+                        "description": "test description",
+                        "parameters": {},
+                        "strict": True,
+                    },
+                }
+            ],
+        )
+    )
+
+    expected_response_create_params = NeMoGymResponseCreateParamsNonStreaming(
+        model=None,
+        input=[
+            dict(
+                role="user",
+                content="hello",
+            ),
+        ],
+        reasoning={"effort": None},
+        tools=[
+            {
+                "name": "test tool",
+                "description": "test description",
+                "parameters": {},
+                "strict": True,
+                "type": "function",
+            }
+        ],
+    )
+
+    assert expected_response_create_params == actual_response_create_params
 
 
 # ===========================================================================
