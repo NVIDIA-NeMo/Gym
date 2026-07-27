@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 import orjson
 from pydantic import BaseModel, TypeAdapter, model_validator
 
-from nemo_gym import RESULTS_DIR
+from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
@@ -28,7 +28,7 @@ class CallCaptureConfig(BaseModel):
             raise ValueError("call_capture_dir is required when should_capture_calls=true")
 
         if not self.call_capture_dir.is_absolute():
-            self.call_capture_dir = RESULTS_DIR / self.call_capture_dir
+            self.call_capture_dir = WORKING_DIR / self.call_capture_dir
 
         return self
 
