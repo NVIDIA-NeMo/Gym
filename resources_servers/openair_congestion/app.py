@@ -37,7 +37,6 @@ import asyncio
 import json
 import math
 import time
-from dataclasses import asdict
 from typing import Any, Optional
 
 from jsonschema import Draft202012Validator
@@ -55,8 +54,6 @@ from resources_servers.openair_congestion.backends import Backend, select_backen
 
 # isort: split
 from openair_congestion.render import T2_OBSERVATION_RENDER, to_policy_text
-from openair_congestion.reward_profiles import select_reward_profile
-from openair_congestion.rewards import DEFAULT_WEIGHTS
 from openair_congestion.schemas import ToolCall
 from openair_congestion.tools import TOOL_SCHEMA_BY_NAME
 
@@ -103,6 +100,7 @@ _DEFAULT_OBSERVATION_RENDER = "openair_natural_language_v1"
 
 def _episode_contract(
     capabilities: dict[str, Any],
+    reward_contract: dict[str, Any],
     tier: str,
     *,
     n_cells: int,
@@ -110,11 +108,9 @@ def _episode_contract(
 ) -> dict[str, Any]:
     """Return the explicit contract consumed by external rollout trainers."""
 
-    profile = select_reward_profile(tier)
     contract = {
         **capabilities,
-        "reward_profile": profile.version,
-        "reward_weights": asdict(DEFAULT_WEIGHTS),
+        **reward_contract,
         "observation_render": (T2_OBSERVATION_RENDER if tier.upper() == "T2" else _DEFAULT_OBSERVATION_RENDER),
     }
     if tier.upper() == "T2":
@@ -158,6 +154,7 @@ class OpenAirCongestionResourcesServerConfig(BaseResourcesServerConfig):
     # normalizer; trace episodes recording cell_capacity_mbps_total override it.
     dataset_path: str = "data/fixtures/sample_provided.jsonl"
     cell_capacity_mbps: float = 60.0
+    reward_weights: Optional[dict[str, float]] = None
     # Truncation-budget fallback for task rows that omit max_steps. Must not
     # exceed the gymnasium_agent's max_steps in the yaml: the agent truncates
     # client-side without notifying the env, so a larger server budget would
@@ -225,6 +222,10 @@ class OpenAirCongestionEnv(GymnasiumServer):
     # Backend built once at startup so a bad replay_root / unknown backend
     # name fails at boot, not on the first rollout. Pydantic private attr.
     _backend: Optional[Backend] = None
+    # Allocation and session registration must be one atomic operation.  The
+    # backend leak reaper treats any allocation absent from session_state as
+    # orphaned, so concurrent resets cannot safely overlap that interval.
+    _reset_lock: Optional[asyncio.Lock] = None
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -234,6 +235,7 @@ class OpenAirCongestionEnv(GymnasiumServer):
         if not math.isfinite(self.config.session_ttl_s):
             raise ValueError("session_ttl_s must be finite and positive")
         self._backend = select_backend(self.config)
+        self._reset_lock = asyncio.Lock()
 
     @property
     def backend(self) -> Backend:
@@ -279,53 +281,63 @@ class OpenAirCongestionEnv(GymnasiumServer):
             if requested_max_steps < 1:
                 raise ValueError("max_steps must be a positive integer")
 
-        await self._reap_expired_sessions()
-
-        # A client retry can POST /reset twice with the same session cookie.
-        # Close the previous episode first or its backend slot leaks forever.
-        stale = self.session_state.pop(session_id, None)
-        if stale is not None:
-            try:
-                await asyncio.to_thread(self.backend.close, stale["episode_id"])
-            except KeyError:
-                pass  # already closed inside the env
-
         # `metadata` = extra task-row fields forwarded by gymnasium_agent.
         task_params = {
             key: metadata[key]
             for key in ("seed", "difficulty", "regime_mix", "scenario_id", "tier", "max_steps")
             if metadata.get(key) is not None
         }
-        first_obs, meta = await asyncio.to_thread(
-            self.backend.reset,
-            task_params,
-            live_episode_ids=self._live_episode_ids(),
-        )
-        contract = _episode_contract(
-            self.backend.capabilities(),
-            meta.tier,
-            n_cells=first_obs.global_.n_cells,
-            max_target_id=max(
-                (ue.ue_id for cell in first_obs.cells for ue in cell.ues),
-                default=0,
-            ),
-        )
-        self.session_state[session_id] = {
-            "episode_id": meta.episode_id,
-            "contract": contract,
-            "cumulative_reward": 0.0,
-            "n_steps": 0,
-            # agent_steps counts model turns, n_steps env steps; a turn with
-            # no tool call consumes a turn without advancing the env.
-            "agent_steps": 0,
-            "last_activity_monotonic": time.monotonic(),
-            # Cap at the agent's turn budget so the server truncates no later
-            # than the agent and the episode slot is freed via close_session().
-            "max_agent_steps": min(
-                int(task_params.get("max_steps") or self.config.max_steps_default),
-                self.config.agent_max_steps,
-            ),
-        }
+        assert self._reset_lock is not None
+        async with self._reset_lock:
+            await self._reap_expired_sessions()
+
+            # A client retry can POST /reset twice with the same session cookie.
+            # Close the previous episode first or its backend slot leaks forever.
+            stale = self.session_state.pop(session_id, None)
+            if stale is not None:
+                try:
+                    await asyncio.to_thread(self.backend.close, stale["episode_id"])
+                except KeyError:
+                    pass  # already closed inside the env
+
+            first_obs, meta = await asyncio.to_thread(
+                self.backend.reset,
+                task_params,
+                live_episode_ids=self._live_episode_ids(),
+            )
+            try:
+                contract = _episode_contract(
+                    self.backend.capabilities(),
+                    self.backend.reward_contract(meta.tier),
+                    meta.tier,
+                    n_cells=first_obs.global_.n_cells,
+                    max_target_id=max(
+                        (ue.ue_id for cell in first_obs.cells for ue in cell.ues),
+                        default=0,
+                    ),
+                )
+                self.session_state[session_id] = {
+                    "episode_id": meta.episode_id,
+                    "contract": contract,
+                    "cumulative_reward": 0.0,
+                    "n_steps": 0,
+                    # agent_steps counts model turns, n_steps env steps; a turn with
+                    # no tool call consumes a turn without advancing the env.
+                    "agent_steps": 0,
+                    "last_activity_monotonic": time.monotonic(),
+                    # Cap at the agent's turn budget so the server truncates no later
+                    # than the agent and the episode slot is freed via close_session().
+                    "max_agent_steps": min(
+                        int(task_params.get("max_steps") or self.config.max_steps_default),
+                        self.config.agent_max_steps,
+                    ),
+                }
+            except BaseException:
+                try:
+                    await asyncio.to_thread(self.backend.close, meta.episode_id)
+                except KeyError:
+                    pass
+                raise
         # Observation appended as a user message after the dataset prompt.
         return to_policy_text(first_obs), {
             "episode_id": meta.episode_id,
@@ -432,7 +444,10 @@ class OpenAirCongestionEnv(GymnasiumServer):
 
         terminated = bool(done)
         truncated = (not terminated) and out_of_budget
-        observation = None if (terminated or truncated) else to_policy_text(next_obs)
+        # Gymnasium terminal transitions still return the observation reached
+        # by the action.  It is the after-state used to compute this reward
+        # and must remain available to trace/evaluation consumers.
+        observation = to_policy_text(next_obs)
 
         return (
             observation,

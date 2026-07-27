@@ -31,6 +31,8 @@ def test_committed_example_metrics_and_rollouts_are_complete():
         assert rollout["terminated"] or rollout["truncated"]
         assert rollout["trajectory"]
         assert rollout["reward"] == pytest.approx(sum(step["reward"] for step in rollout["trajectory"]))
+        assert all(step["next_observation"] for step in rollout["trajectory"])
+        assert rollout["trajectory"][-1]["next_observation"]
         assert all(step["causal_action_effects"] is True for step in rollout["trajectory"])
         assert all(step["training_usable"] is True for step in rollout["trajectory"])
         assert all(step["guardrail_accepted"] is True for step in rollout["trajectory"])

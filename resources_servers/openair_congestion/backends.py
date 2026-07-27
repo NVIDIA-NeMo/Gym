@@ -53,6 +53,7 @@ from __future__ import annotations
 import os
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import asdict
 from typing import Any, Optional
 
 
@@ -70,6 +71,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised only when unp
     ) from exc
 
 from openair_congestion.replay_env import ReplayEnv, action_effect_version  # noqa: E402
+from openair_congestion.reward_profiles import select_reward_profile  # noqa: E402
+from openair_congestion.rewards import DEFAULT_WEIGHTS  # noqa: E402
 from openair_congestion.schemas import EpisodeMeta, Observation, ToolCall  # noqa: E402
 
 
@@ -110,6 +113,16 @@ class Backend(ABC):
     @abstractmethod
     def capabilities(self) -> dict[str, Any]:
         """Describe whether actions causally affect served transitions."""
+
+    def reward_contract(self, tier: str) -> dict[str, Any]:
+        """Return the effective scoring configuration exposed to clients."""
+
+        profile = select_reward_profile(tier)
+        return {
+            "reward_profile": profile.version,
+            "reward_weights": asdict(DEFAULT_WEIGHTS),
+            "prb_pressure_threshold": profile.prb_pressure_threshold,
+        }
 
 
 class ReplayBackend(Backend):

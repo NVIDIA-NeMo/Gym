@@ -248,6 +248,19 @@ class TestSnapshotLoader:
 
 
 class TestTraceLoader:
+    @staticmethod
+    def _trace_row(*, iteration, step):
+        return {
+            "iter": iteration,
+            "episode_id": "reused",
+            "step": step,
+            "tool_sent": {"name": "noop", "arguments": {}},
+            "reward_measurements": {
+                "aggregate_delivered_mbps": 10.0,
+                "n_ues": 2,
+            },
+        }
+
     def test_trace_fixture_is_detected_and_parsed(self):
         episodes = load_provided_dataset(TRACE_FIXTURE)
         assert sorted(episodes) == ["ep_000341", "ep_000342"]
@@ -256,6 +269,31 @@ class TestTraceLoader:
         for source in episodes.values():
             for obs in source.observations:
                 assert isinstance(obs, Observation)
+
+    def test_reused_episode_ids_are_partitioned_by_iteration(self, tmp_path):
+        path = tmp_path / "reused_ids.jsonl"
+        rows = [self._trace_row(iteration=iteration, step=step) for iteration in (0, 1) for step in (0, 1)]
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        episodes = load_provided_dataset(path)
+
+        assert sorted(episodes) == ["reused::iter=0", "reused::iter=1"]
+        assert all(len(source.observations) == 2 for source in episodes.values())
+
+    @pytest.mark.parametrize(
+        "steps",
+        [
+            pytest.param((0, 0), id="duplicate"),
+            pytest.param((1, 0), id="non-monotonic"),
+        ],
+    )
+    def test_trace_steps_must_be_unique_and_strictly_increasing(self, tmp_path, steps):
+        path = tmp_path / "bad_step_order.jsonl"
+        rows = [self._trace_row(iteration=0, step=step) for step in steps]
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        with pytest.raises(ValueError, match="strictly increasing"):
+            load_provided_dataset(path)
 
     def test_aggregates_reconstruct_recorded_measurements(self):
         # Step 1 of ep_000341 carries the full measurement set; the
@@ -300,6 +338,102 @@ class TestTraceLoader:
             "n_ues",
         ):
             assert recomputed[key] == pytest.approx(recorded[key]), key
+
+    def test_trace_service_accounting_reaches_the_t2_reward(self, tmp_path):
+        path = tmp_path / "t2_service_trace.jsonl"
+        rows = []
+        for step, accounting in enumerate(
+            (
+                {
+                    "requested_service_mbps": 20.0,
+                    "admitted_service_mbps": 20.0,
+                    "delivered_service_mbps": 18.0,
+                },
+                {
+                    "requested_service_mbps": 20.0,
+                    "admitted_service_mbps": 10.0,
+                    "delivered_service_mbps": 8.0,
+                    "forced_terminated_service_mbps": 5.0,
+                    "cumulative_forced_terminated_service_mbps": 5.0,
+                    "forced_termination_events": 1.0,
+                    "step_forced_terminated_service_mbps": 5.0,
+                    "step_forced_termination_events": 1.0,
+                    "unadmitted_service_mbps": 10.0,
+                    "undelivered_admitted_service_mbps": 2.0,
+                },
+            )
+        ):
+            rows.append(
+                {
+                    "iter": 0,
+                    "episode_id": "t2_service",
+                    "tier": "T2",
+                    "step": step,
+                    "tool_sent": {"name": "noop", "arguments": {}},
+                    "reward_measurements": {
+                        "aggregate_delivered_mbps": accounting["delivered_service_mbps"],
+                        "n_ues": 2,
+                        **accounting,
+                    },
+                }
+            )
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        backend = _make_backend(
+            dataset_path=str(path),
+            reward_weights={"w_reject": 0.75},
+        )
+        _, meta = backend.reset({"scenario_id": "t2_service"})
+        _, reward, _, info = backend.step(meta.episode_id, NOOP)
+        backend.close(meta.episode_id)
+
+        assert meta.tier == "T2"
+        assert info["reward_profile"] == "openair_t2_v3"
+        assert info["reward_weights"]["w_reject"] == pytest.approx(0.75)
+        assert info["prb_pressure_threshold"] == pytest.approx(0.85)
+        for key, value in accounting.items():
+            assert info["service_accounting"][key] == pytest.approx(value)
+        assert info["reward_measurements"]["requested_service_mbps"] == pytest.approx(20.0)
+        assert info["reward_measurements"]["admitted_service_mbps"] == pytest.approx(10.0)
+        assert info["reward_measurements"]["step_forced_termination_events"] == pytest.approx(1.0)
+        assert info["reward_terms"]["service_denial"] < 0.0
+        assert info["reward_terms"]["forced_termination"] < 0.0
+        assert reward == pytest.approx(info["reward_terms"]["total"])
+
+    def test_snapshot_requested_and_admitted_measurements_are_preserved(self, tmp_path):
+        path = tmp_path / "service_snapshot.jsonl"
+        rows = []
+        for step in (0, 1):
+            rows.append(
+                {
+                    "episode_id": "service_snapshot",
+                    "step": step,
+                    "global": {"tier": "T2"},
+                    "cells": [
+                        {
+                            "cell_id": 0,
+                            "prb_util_dl_p50": 0.9,
+                            "ues": [
+                                {
+                                    "ue_id": 0,
+                                    "requested_mbps": 12.0,
+                                    "admitted_mbps": 7.0,
+                                    "offered_mbps": 7.0,
+                                    "delivered_mbps": 6.0,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        source = load_provided_dataset(path)["service_snapshot"]
+
+        assert source.observations[1].cells[0].ues[0].requested_mbps == pytest.approx(12.0)
+        assert source.observations[1].cells[0].ues[0].admitted_mbps == pytest.approx(7.0)
+        assert source.service_accounting[1]["requested_service_mbps"] == pytest.approx(12.0)
+        assert source.service_accounting[1]["admitted_service_mbps"] == pytest.approx(7.0)
 
     def test_sparse_trace_row_defaults_to_uncongested(self):
         # Step 0 of ep_000342 carries only the required measurement keys:

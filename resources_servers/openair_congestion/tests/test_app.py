@@ -22,6 +22,7 @@ import json
 import math
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
@@ -134,6 +135,7 @@ _TASK_METADATA = {
     "tier": "replay",
     "max_steps": 16,
 }
+_SNAPSHOT_FIXTURE = Path(__file__).resolve().parent.parent / "data" / "fixtures" / "sample_provided.jsonl"
 
 
 class TestReset:
@@ -235,6 +237,22 @@ class TestReset:
             assert step_info[key] == reset_info[key]
 
     @pytest.mark.asyncio
+    async def test_dataset_reset_advertises_the_effective_reward_configuration(self):
+        env = _make_env(
+            backend="dataset_replay",
+            dataset_path=str(_SNAPSHOT_FIXTURE),
+            reward_weights={"w_sla": 0.25, "w_reject": 0.75},
+        )
+
+        _, info = await env.reset({"scenario_id": "lab_run_a"}, session_id="dataset")
+
+        assert info["backend"] == "dataset_replay"
+        assert info["reward_profile"] == "openair_v1"
+        assert info["reward_weights"]["w_sla"] == pytest.approx(0.25)
+        assert info["reward_weights"]["w_reject"] == pytest.approx(0.75)
+        assert info["prb_pressure_threshold"] == pytest.approx(0.85)
+
+    @pytest.mark.asyncio
     async def test_none_session_is_rejected_before_reset(self):
         env = _make_env()
         with pytest.raises(ValueError, match="session_id"):
@@ -247,6 +265,55 @@ class TestReset:
         _, info_b = await env.reset(dict(_TASK_METADATA, seed=7002), session_id="b")
         assert info_a["episode_id"] != info_b["episode_id"]
         assert env.session_state["a"]["episode_id"] != env.session_state["b"]["episode_id"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_resets_do_not_reap_an_unregistered_allocation(self, monkeypatch):
+        env = _make_env(pool_size=1)
+        original_reset = env.backend.reset
+        first_allocated = threading.Event()
+        second_attempted = threading.Event()
+        call_lock = threading.Lock()
+        call_count = 0
+
+        def interleaved_reset(*args, **kwargs):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+                current_call = call_count
+            if current_call == 2:
+                assert first_allocated.wait(timeout=1.0)
+            result = original_reset(*args, **kwargs)
+            if current_call == 1:
+                first_allocated.set()
+                second_attempted.wait(timeout=0.1)
+            else:
+                second_attempted.set()
+            return result
+
+        monkeypatch.setattr(env.backend, "reset", interleaved_reset)
+        results = await asyncio.gather(
+            env.reset(dict(_TASK_METADATA), session_id="a"),
+            env.reset(dict(_TASK_METADATA, seed=7002), session_id="b"),
+            return_exceptions=True,
+        )
+
+        successes = [result for result in results if not isinstance(result, BaseException)]
+        failures = [result for result in results if isinstance(result, BaseException)]
+        assert len(successes) == 1
+        assert len(failures) == 1
+        assert isinstance(failures[0], RuntimeError)
+        assert "pool exhausted" in str(failures[0])
+        assert len(env.session_state) == 1
+
+        surviving_session = next(iter(env.session_state))
+        _, reward, terminated, truncated, _ = await env.step(
+            _tool_response("noop", {}),
+            {},
+            session_id=surviving_session,
+        )
+        assert math.isfinite(reward)
+        assert terminated is False
+        assert truncated is False
 
     @pytest.mark.asyncio
     async def test_re_reset_same_session_closes_old_episode(self):
@@ -505,6 +572,26 @@ class TestStep:
         # Mirror the framework: /step calls close_session on terminated/truncated.
         await env.close_session("sid")
         assert "sid" not in env.session_state
+
+    @pytest.mark.asyncio
+    async def test_terminal_step_preserves_the_scored_after_observation(self):
+        env = _make_env(agent_max_steps=1)
+        before, _ = await env.reset(dict(_TASK_METADATA, max_steps=1), session_id="sid")
+
+        after, reward, terminated, truncated, info = await env.step(
+            _tool_response("noop", {}),
+            {},
+            session_id="sid",
+        )
+
+        assert before is not None
+        assert math.isfinite(reward)
+        assert terminated or truncated
+        assert after is not None
+        assert after != before
+        assert info["step_idx"] == 1
+        assert info["reward_measurements"]
+        assert info["reward_terms"]["total"] == pytest.approx(reward)
 
     @pytest.mark.asyncio
     async def test_step_without_reset_truncates_gracefully(self):
