@@ -237,4 +237,15 @@ env.yaml
 
 # Backup files
 *.backup
+# Local-only run logs: contain internal infrastructure identifiers and must
+# never be committed to this public repository.
 OPENSANDBOX_SSE_DROP_REPORT.md
+EXPERIMENT_LOG.md
+
+# Claude Code agent runtime artifacts
+**/.claude_node/
+
+# cvdp generic agent provisioned harness deps (portable python/node + CLIs, built at runtime)
+responses_api_agents/cvdp_agent/deps/
+resources_servers/cvdp/data/gym_agentic_code_generation_no_commercial.jsonl
+resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.jsonl

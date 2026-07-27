@@ -1,0 +1,121 @@
+---
+title: "Model-call capture"
+description: "Optional per-rollout model-call evidence for evaluation and debugging"
+position: 5
+---
+
+Model-call capture records requests, responses, token usage, tool calls, reasoning, latency, and
+errors at a Gym model server. It does not assemble an agent trajectory or define a training data
+representation.
+
+Capture is opt-in and off by default. It does not modify the model response, the agent response, or
+the rollout reward.
+
+## Enable capture
+
+Configure capture once at the top level of Gym's global config. The setting applies to every
+`SimpleResponsesAPIModel` in the run:
+
+```yaml
+observability_enabled: true
+model_call_capture_dir: /data/model-calls
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
+| `model_call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
+
+Each rollout id has an append-only JSONL file named `<rollout_id>.capture.jsonl`. Writes are flushed
+and fsynced. Capture failures are logged and do not fail model requests.
+
+## Correlate calls with a rollout
+
+Use `/ng-rollout/<rollout_id>` as the model-server URL prefix. SDKs append their standard
+`/v1/responses`, `/v1/chat/completions`, or `/v1/messages` path after it, and the model server removes
+the rollout prefix before routing.
+
+Correlation is caller-supplied. An unprefixed call is forwarded normally but is not captured.
+
+Agents built on `SimpleResponsesAPIAgent` can use these helpers: `url_path_for_run(url_path, body)`
+prefixes a downstream call from the run request's task/rollout indices (only when
+`observability_enabled` is true — otherwise URLs stay unprefixed), and
+`url_path_for_request(url_path, request)` carries an inbound prefixed self-call through to the
+model call. The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on
+every agent by default. SDK-based harnesses that configure a client once use
+`base_url_for_run(base_url, body)`, the base-URL counterpart with the same gating; harnesses that
+must thread the id through layers use `rollout_id_from_run(body)` +
+`resolve_model_base_url(name, rollout_id)` instead.
+
+The model servers and `rollout_collection` read the same path from the global config. If
+`gym env start` and `gym eval run --no-serve` are separate invocations, pass the same top-level
+capture settings to both. For separate pods or nodes, that absolute path must refer to a volume
+mounted in every producer and the collector. Multiple model servers may append to the same rollout
+file; records retain their typed `model_ref`, and POSIX advisory file locking serializes writers
+when the shared filesystem supports it.
+
+Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id.
+Concurrent collection jobs with overlapping indices must use separate capture directories.
+
+## Read captured calls
+
+```python
+from nemo_gym.base_responses_api_model import (
+    CaptureStore,
+    aggregate_model_call_metrics,
+    read_model_call_records,
+)
+
+store = CaptureStore("/data/model-calls")
+calls = read_model_call_records(store, rollout_id)
+totals = aggregate_model_call_metrics(store, rollout_id)
+```
+
+`ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It
+contains a unique server-generated `model_call_id`, typed `model_ref`, wall-clock `started_at` and
+`completed_at`, a `call_index`, API dialect, token and cache usage, latency, error details, tool
+calls, reasoning content, and the captured request and response. `started_at` is recorded immediately
+before invoking the downstream ASGI application; `completed_at` is recorded when that invocation
+returns or raises, before capture parsing and persistence. Both are UTC Unix seconds for external
+trace correlation; durations use the monotonic latency fields. `call_index` reflects durable append
+order; neither it nor the timestamps provide causal or semantic ordering for concurrent calls. The
+request and response payloads remain the model-call evidence. Malformed or non-object request bodies
+are retained in raw JSONL as `request_raw`; the derived record has `request: null`.
+
+Streaming responses are forwarded unchanged and reassembled for capture on a best-effort basis.
+Responses, Chat Completions, and Anthropic Messages are supported. If reassembly fails, request,
+status, correlation, and latency data remain available. A successful-status stream that closes
+without its dialect's terminal event retains any partial reconstruction and is marked
+`stream_truncated`.
+
+## Rollout-record attachment
+
+`rollout_collection` attaches available model-call data under:
+
+```text
+ng_model_call_capture = {
+  rollout_id,
+  metrics,
+  calls,
+}
+```
+
+`metrics.num_calls` is the number of captured model calls. Attached calls omit raw request and
+response payloads; those remain in `CaptureStore`. Resume attempts use an `-a<n>` suffix so their
+data does not mix with an earlier attempt. Before dispatch, the collector clears any existing capture
+for that exact rollout-attempt id, including a kill-shaped attempt being redispatched.
+
+The attachment is additive: it does not replace or rewrite the existing response, reward,
+`NeMoGymResponse`, token-id, or log-prob fields. Downstream consumers can choose whether to read it.
+
+## Limitations
+
+The model-server boundary observes model HTTP requests and responses. It can record tool calls,
+reasoning, and tool results present in those payloads, but it does not observe the actual tool
+execution boundary, environment events, context compaction, semantic turns, or subagent structure.
+Those require instrumentation at the agent, tool, environment, or rollout layer.

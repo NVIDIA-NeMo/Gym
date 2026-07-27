@@ -39,7 +39,7 @@ from typing import List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import _resolve_under_cwd_or_install
 
 
 SKILL_MD_FILENAME = "SKILL.md"
@@ -72,18 +72,6 @@ class SkillsConfig(BaseModel):
     """Run-level skills config: ``skills.path`` points at a directory of skill directories."""
 
     path: str = Field(description="Directory of Agent Skills standard skill directories to make available.")
-
-
-def _resolve_skills_path(path: str) -> Path:
-    """Resolve a skills path. Relative paths check cwd first, then the Gym root (PARENT_DIR).
-
-    This matches how ``input_jsonl_fpath`` and ``config_paths`` are resolved.
-    """
-    p = Path(path)
-    if p.is_absolute():
-        return p
-    cwd_path = Path.cwd() / p
-    return cwd_path if cwd_path.exists() else PARENT_DIR / p
 
 
 def hash_skill_dir(root: Path) -> str:
@@ -156,7 +144,8 @@ def load_skill_directory(path: str) -> SkillsRef:
     Raises ``ValueError`` with an actionable message if the path is missing, is not a
     directory, contains no skills, or contains a malformed skill.
     """
-    resolved = _resolve_skills_path(path)
+    # Resolve like input_jsonl_fpath/config_paths: NEMO_GYM_EXTRA_ROOTS / --search-dir, cwd, then the install.
+    resolved = _resolve_under_cwd_or_install(path)
     if not resolved.exists():
         raise ValueError(f"Skills path does not exist: {resolved} (from skills.path={path!r}).")
     if not resolved.is_dir():
@@ -192,7 +181,7 @@ def stage_skills(path: str, dest_skills_dir: Path) -> None:
     mechanism scans (e.g. ``<CLAUDE_CONFIG_DIR>/skills/`` for Claude Code). ``dest_skills_dir``
     must not already exist. Raises ``ValueError`` if the source path is missing or not a directory.
     """
-    resolved = _resolve_skills_path(path)
+    resolved = _resolve_under_cwd_or_install(path)
     if not resolved.is_dir():
         raise ValueError(
             f"Cannot stage skills: {resolved} is not a directory (from skills path {path!r}). "

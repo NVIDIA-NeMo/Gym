@@ -1,32 +1,51 @@
 {
-  "n": 3,
-  "overall": {
-    "reward": 0.4219,
-    "rougeL": 0.4219,
-    "rouge1": 0.4846,
-    "rouge2": 0.1872,
-    "rougeLsum": 0.4219,
-    "bleu": 0.095,
-    "meteor": 0.3641
-  },
-  "by_dimension": {
-    "multi_turn": {
-      "reward": 0.4615,
-      "rougeL": 0.4615,
-      "rouge1": 0.4615,
-      "rouge2": 0.1818,
-      "rougeLsum": 0.4615,
-      "bleu": 0.1313,
-      "meteor": 0.1961
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/rolemrc/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Creative Commons Attribution 4.0 International",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
     },
-    "on_scene_dialogue": {
-      "reward": 0.4022,
-      "rougeL": 0.4022,
-      "rouge1": 0.4962,
-      "rouge2": 0.1899,
-      "rougeLsum": 0.4022,
-      "bleu": 0.0768,
-      "meteor": 0.4481
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 37.2,
+        "Min": 30.0,
+        "Max": 43.0,
+        "Standard deviation": 4.97
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.2,
+        "Min": 1.0,
+        "Max": 2.0,
+        "Standard deviation": 0.447
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "reference": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "task": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "dimension": {
+        "unique_count": 4,
+        "total_count": 5
     }
-  }
 }

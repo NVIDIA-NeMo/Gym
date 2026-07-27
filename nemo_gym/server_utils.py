@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import json
 import resource
+import socket
 import sys
 import time
 from abc import abstractmethod
@@ -49,12 +50,13 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
+    ROLLOUT_PATH_PREFIX,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
 )
@@ -81,6 +83,19 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 
     global_aiohttp_client_request_debug: bool = False
 
+    global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
+        default=60,
+        description=("TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes."),
+    )
+    global_aiohttp_tcp_keepalive_interval_seconds: int = Field(
+        default=10,
+        description=("TCP_KEEPINTVL: seconds between successive keepalive probes."),
+    )
+    global_aiohttp_tcp_keepalive_probes: int = Field(
+        default=3,
+        description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
+    )
+
 
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
@@ -100,6 +115,28 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
+def _make_keepalive_socket_factory(
+    idle_seconds: int,
+    interval_seconds: int,
+    probes: int,
+):
+    def factory(addr_info) -> socket.socket:
+        family, type_, proto, _canonname, _sockaddr = addr_info
+        sock = socket.socket(family=family, type=type_, proto=proto)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt_name, opt_value in (
+            ("TCP_KEEPIDLE", idle_seconds),
+            ("TCP_KEEPINTVL", interval_seconds),
+            ("TCP_KEEPCNT", probes),
+        ):
+            opt = getattr(socket, opt_name, None)
+            if opt is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+        return sock
+
+    return factory
+
+
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
         "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
@@ -111,6 +148,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
             keepalive_timeout=15.0,
+            socket_factory=_make_keepalive_socket_factory(
+                idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+                interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+                probes=cfg.global_aiohttp_tcp_keepalive_probes,
+            ),
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
@@ -491,6 +533,10 @@ class SimpleServer(BaseServer):
         return f"{self.__class__.__name__}___{self.config.name}"
 
     def setup_session_middleware(self, app: FastAPI) -> None:
+        if getattr(app.state, "nemo_gym_session_middleware_installed", False):
+            return
+        app.state.nemo_gym_session_middleware_installed = True
+
         # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
         # Says that if you register middlewares A and then B,
         # - at request time: They execute B first then A
@@ -632,6 +678,12 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
+        # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
+        # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
+        if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
+            from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+
+            maybe_auto_expose(server, app)
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -767,3 +819,15 @@ def get_server_url(server_name: str) -> str:
     )
 
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
+
+
+def rollout_path_prefix(rollout_id: Optional[str]) -> str:
+    """Return the leading model-server path prefix for a rollout, if available."""
+    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
+
+
+def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
+    """Append a rollout prefix to a model-server root URL."""
+    if not rollout_id:
+        return base_url
+    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)

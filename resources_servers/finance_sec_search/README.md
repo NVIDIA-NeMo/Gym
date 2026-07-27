@@ -43,6 +43,15 @@ The `tavily_api_key` is referenced as `${tavily_api_key}` in
 The resource server caches SEC data locally to avoid redundant API calls and to
 enable offline operation after the first fetch.
 
+### Enabling / disabling the cache (`use_cache`)
+
+| `use_cache` | Behavior |
+|-------------|----------|
+| `false` (default) | The on-disk cache is fully bypassed — no cache directories are created and **every request fetches fresh filings live**. |
+| `true` | The on-disk cache under `cache_dir` is read and written: ticker mappings, filing metadata, and parsed filing content are cached and reused across requests/runs. |
+
+Keep `use_cache: false` (the default) for **eval**
+
 ### What is cached
 
 | Directory | Contents |

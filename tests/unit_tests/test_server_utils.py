@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import socket
 from unittest.mock import AsyncMock, MagicMock
 
 from pytest import MonkeyPatch, raises
@@ -26,10 +27,24 @@ from nemo_gym.server_utils import (
     BaseServerConfig,
     ConnectionError,
     DictConfig,
+    GlobalAIOHTTPAsyncClientConfig,
     HeadServer,
     ServerClient,
     SimpleServer,
+    _make_keepalive_socket_factory,
     initialize_ray,
+)
+
+
+_TCP_KEEPALIVE_TEST_IDLE = 42
+_TCP_KEEPALIVE_TEST_INTERVAL = 7
+_TCP_KEEPALIVE_TEST_PROBES = 2
+_TEST_ADDR_INFO = (
+    socket.AF_INET,
+    socket.SOCK_STREAM,
+    socket.IPPROTO_TCP,
+    "",
+    ("203.0.113.1", 443),
 )
 
 
@@ -228,6 +243,80 @@ class TestServerUtils:
         ray_init_mock.assert_called_once_with(ignore_reinit_error=True)
         ray_get_runtime_context_mock.assert_called_once()
 
+    def test_keepalive_socket_factory_sets_keepalive_sockopts(self, monkeypatch: MonkeyPatch) -> None:
+        mock_sock = MagicMock()
+        socket_ctor_mock = MagicMock(return_value=mock_sock)
+        monkeypatch.setattr(socket, "socket", socket_ctor_mock)
+
+        factory = _make_keepalive_socket_factory(
+            idle_seconds=_TCP_KEEPALIVE_TEST_IDLE,
+            interval_seconds=_TCP_KEEPALIVE_TEST_INTERVAL,
+            probes=_TCP_KEEPALIVE_TEST_PROBES,
+        )
+        result = factory(_TEST_ADDR_INFO)
+
+        assert result is mock_sock
+        socket_ctor_mock.assert_called_once_with(
+            family=_TEST_ADDR_INFO[0], type=_TEST_ADDR_INFO[1], proto=_TEST_ADDR_INFO[2]
+        )
+        mock_sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt_name, opt_value in (
+            ("TCP_KEEPIDLE", _TCP_KEEPALIVE_TEST_IDLE),
+            ("TCP_KEEPINTVL", _TCP_KEEPALIVE_TEST_INTERVAL),
+            ("TCP_KEEPCNT", _TCP_KEEPALIVE_TEST_PROBES),
+        ):
+            opt = getattr(socket, opt_name, None)
+            if opt is not None:
+                mock_sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, opt, opt_value)
+
+    def test_keepalive_socket_factory_skips_missing_platform_sockopts(self, monkeypatch: MonkeyPatch) -> None:
+        mock_sock = MagicMock()
+        socket_ctor_mock = MagicMock(return_value=mock_sock)
+        monkeypatch.setattr(socket, "socket", socket_ctor_mock)
+        for opt_name in ("TCP_KEEPIDLE", "TCP_KEEPINTVL", "TCP_KEEPCNT"):
+            monkeypatch.delattr(socket, opt_name, raising=False)
+
+        factory = _make_keepalive_socket_factory(
+            idle_seconds=_TCP_KEEPALIVE_TEST_IDLE,
+            interval_seconds=_TCP_KEEPALIVE_TEST_INTERVAL,
+            probes=_TCP_KEEPALIVE_TEST_PROBES,
+        )
+        factory(_TEST_ADDR_INFO)
+
+        mock_sock.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
+        cfg = GlobalAIOHTTPAsyncClientConfig()
+        assert cfg.global_aiohttp_tcp_keepalive_idle_seconds == 60
+        assert cfg.global_aiohttp_tcp_keepalive_interval_seconds == 10
+        assert cfg.global_aiohttp_tcp_keepalive_probes == 3
+
+    def test_keepalive_socket_factory_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
+        mock_sock = MagicMock()
+        socket_ctor_mock = MagicMock(return_value=mock_sock)
+        monkeypatch.setattr(socket, "socket", socket_ctor_mock)
+
+        cfg = GlobalAIOHTTPAsyncClientConfig(
+            global_aiohttp_tcp_keepalive_idle_seconds=123,
+            global_aiohttp_tcp_keepalive_interval_seconds=45,
+            global_aiohttp_tcp_keepalive_probes=6,
+        )
+        factory = _make_keepalive_socket_factory(
+            idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+            interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+            probes=cfg.global_aiohttp_tcp_keepalive_probes,
+        )
+        factory(_TEST_ADDR_INFO)
+
+        for opt_name, opt_value in (
+            ("TCP_KEEPIDLE", 123),
+            ("TCP_KEEPINTVL", 45),
+            ("TCP_KEEPCNT", 6),
+        ):
+            opt = getattr(socket, opt_name, None)
+            if opt is not None:
+                mock_sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, opt, opt_value)
+
     def test_dry_run_skips_webserver_spinup(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_ray_return_value(monkeypatch, True)
 
@@ -249,3 +338,40 @@ class TestServerUtils:
                 pass
 
         TestSimpleServer.run_webserver()
+
+    def test_setup_session_middleware_idempotent(self) -> None:
+        from fastapi import FastAPI, Request
+        from fastapi.testclient import TestClient
+        from starlette.middleware.sessions import SessionMiddleware
+
+        from nemo_gym.config_types import BaseRunServerInstanceConfig
+        from nemo_gym.server_utils import SESSION_ID_KEY
+
+        class TestSimpleServer(SimpleServer):
+            def setup_webserver(self):
+                assert False
+
+        server = TestSimpleServer(
+            config=BaseRunServerInstanceConfig(name="my_server", host="", port=0, entrypoint=""),
+            server_client=ServerClient(
+                head_server_config=BaseServerConfig(host="", port=0),
+                global_config_dict=DictConfig({}),
+            ),
+        )
+
+        app = FastAPI()
+        server.setup_session_middleware(app)
+        server.setup_session_middleware(app)
+
+        session_middlewares = [m for m in app.user_middleware if m.cls is SessionMiddleware]
+        assert 1 == len(session_middlewares)
+        assert 2 == len(app.user_middleware)
+
+        @app.get("/session")
+        async def get_session(request: Request) -> dict:
+            return {"session_id": request.session[SESSION_ID_KEY]}
+
+        with TestClient(app) as client:
+            response = client.get("/session")
+            assert response.json()["session_id"]
+            assert 1 == len(response.headers.get_list("set-cookie"))
