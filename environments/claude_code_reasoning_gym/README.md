@@ -26,17 +26,19 @@ anthropic_base_url: http://localhost:8000
 
 See [`responses_api_agents/claude_code_agent`](../../responses_api_agents/claude_code_agent/README.md) for the full set of agent options (`thinking`, `max_thinking_tokens`, `allowed_tools`, `disallowed_tools`, `max_turns`, `timeout`, etc.).
 
-## Quick start
+## Start
 
 ```bash
-ng_run "+config_paths=[environments/claude_code_reasoning_gym/config.yaml]"
+gym env start --config environments/claude_code_reasoning_gym/config.yaml
 ```
 
+## Run
+
 ```bash
-ng_collect_rollouts \
-    +agent_name=claude_code_reasoning_gym_agent \
-    +input_jsonl_fpath=environments/claude_code_reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=results/claude_code_reasoning_gym_rollouts.jsonl
+gym eval run --no-serve \
+  --agent claude_code_reasoning_gym_agent \
+  --input environments/claude_code_reasoning_gym/data/example.jsonl \
+  --output results/claude_code_reasoning_gym_rollouts.jsonl
 ```
 
 ## Prepare training data

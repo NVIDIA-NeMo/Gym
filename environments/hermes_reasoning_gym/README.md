@@ -4,17 +4,21 @@ Hermes Agent with terminal, file, code_execution, skills, todo toolsets on reaso
 
 Source benchmark: https://github.com/open-thought/reasoning-gym
 The instructions below assume you have a vLLM server running and `policy_base_url`, `policy_model_name`, and `policy_api_key` configured in your `env.yaml` file. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
-## Quick start
+## Start
 
 ```bash
-ng_run "+config_paths=[environments/hermes_reasoning_gym/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+  --config environments/hermes_reasoning_gym/config.yaml \
+  --model-type openai_model
 ```
 
+## Run
+
 ```bash
-ng_collect_rollouts \
-    +agent_name=hermes_reasoning_gym_agent \
-    +input_jsonl_fpath=environments/hermes_reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=results/hermes_reasoning_gym_rollouts.jsonl
+gym eval run --no-serve \
+  --agent hermes_reasoning_gym_agent \
+  --input environments/hermes_reasoning_gym/data/example.jsonl \
+  --output results/hermes_reasoning_gym_rollouts.jsonl
 ```
 
 ## Prepare training data

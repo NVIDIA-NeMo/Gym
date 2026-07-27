@@ -4,17 +4,21 @@ LangGraph reflection agent compatible with resource servers that do not use tool
 
 Source benchmark: https://github.com/open-thought/reasoning-gym
 The instructions below assume you have a vLLM server running and `policy_base_url`, `policy_model_name`, and `policy_api_key` configured in your `env.yaml` file. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
-## Quick start
+## Start
 
 ```bash
-ng_run "+config_paths=[environments/langgraph_reflection_reasoning_gym/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+  --config environments/langgraph_reflection_reasoning_gym/config.yaml \
+  --model-type openai_model
 ```
 
+## Run
+
 ```bash
-ng_collect_rollouts \
-    +agent_name=langgraph_reflection_reasoning_gym_agent \
-    +input_jsonl_fpath=environments/langgraph_reflection_reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=results/langgraph_reflection_reasoning_gym_rollouts.jsonl
+gym eval run --no-serve \
+  --agent langgraph_reflection_reasoning_gym_agent \
+  --input environments/langgraph_reflection_reasoning_gym/data/example.jsonl \
+  --output results/langgraph_reflection_reasoning_gym_rollouts.jsonl
 ```
 
 ## Prepare training data
