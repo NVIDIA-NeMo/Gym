@@ -9,7 +9,7 @@ import orjson
 from pydantic import BaseModel, model_validator
 
 from nemo_gym import RESULTS_DIR
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
@@ -135,3 +135,7 @@ class CaptureStore:
     def aggregate(self, rollout_id: str) -> AggregateModelCallRecords:
         records = self.read(rollout_id)
         return AggregateModelCallRecords.from_records(records)
+
+
+def create_call_path(base_url_or_path: str, rollout_id: str) -> str:
+    return f"{base_url_or_path}/{ROLLOUT_PATH_PREFIX}/{rollout_id}"

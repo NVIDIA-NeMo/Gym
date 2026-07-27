@@ -794,3 +794,4 @@ class AggregateMetrics(BaseModel):
 # the capture middleware in base_responses_api_model.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 ROLLOUT_ID_KEY_NAME = "rollout_id"
+NG_CALL_CAPTURE_KEY_NAME = "_ng_call_capture"

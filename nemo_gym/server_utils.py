@@ -629,8 +629,11 @@ repr(e): {repr(e)}"""
         if not maybe_rollout_id:
             return base_url_or_path
 
+        # We import here for the same reason as the above setup middleware fn
+        from nemo_gym.capture_records import create_call_path
+
         base_url_or_path = base_url_or_path.rstrip("/")
-        return f"{base_url_or_path}/{ROLLOUT_PATH_PREFIX}/{maybe_rollout_id}"
+        return create_call_path(base_url_or_path, maybe_rollout_id)
 
     def _maybe_inject_request(self, fn: Callable, request: Request, params: Dict[str, Any]) -> None:
         # responses() and other function signatures vary across servers: some take a leading `request` injected by FastAPI, some only
