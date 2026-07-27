@@ -1,10 +1,17 @@
 # Nemotron 3.5 Super Evaluation setup
 - [Nemotron 3.5 Super Evaluation setup](#nemotron-35-super-evaluation-setup)
+  - [Run production evals](#run-production-evals)
   - [Development commands](#development-commands)
     - [Run eval against external vLLM endpoint](#run-eval-against-external-vllm-endpoint)
     - [Build eval container](#build-eval-container)
     - [Interactive development on GPUs with Ray cluster](#interactive-development-on-gpus-with-ray-cluster)
     - [Launch vLLM](#launch-vllm)
+
+
+## Run production evals
+TODO @bxyu-nvidia: Will publish these by Thu Jul 30
+
+Results will appear in that checkpoint folder.
 
 
 ## Development commands
@@ -16,7 +23,7 @@ This script assumes:
 
 If you want to use your own custom local Gym, please mount:
 ```bash
-MOUNTS=/shared/fs:/shared/fs,/opt/Gym:/path/to/custom/local/Gym
+MOUNTS=/shared/fs:/shared/fs,/path/to/custom/local/Gym:/opt/Gym
 ```
 The existing Gym venv and individual server venvs will still use the ones baked into the container.
 
