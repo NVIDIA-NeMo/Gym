@@ -36,13 +36,14 @@ upstream.
 | Action semantics | Default replay tiers expose eight validated tools; T2 reset narrows model-facing tools to `noop` and UE-targeted `set_prb_cap` with bounds matching its runtime guardrail. Modeled parameters change deterministic transitions; identical setpoints are idempotent. | `tests/test_guardrail.py`, `tests/test_replay_action_semantics.py`, `tests/test_app.py`, `responses_api_agents/gymnasium_agent/tests/test_app.py` |
 | Reward contract | Live, synthetic replay, and dataset replay use one version selector; T2 uses `openair_t2_v3` with service accounting; non-T2 paths preserve frozen V1. | `openair_congestion/reward_profiles.py`, `tests/test_reward_profiles.py`, `tests/test_dataset_ingestion.py` |
 | Admission accounting | Requested, admitted, delivered, denied, and forcibly terminated service agree with emitted UE topology. | `tests/test_replay_action_semantics.py`, `tests/test_reward_profiles.py` |
-| Transactionality | Failed reward computation does not partially commit a step; close and render synchronize with an in-flight step. | `tests/test_replay_lifecycle.py` |
+| Transactionality | Failed reward computation does not partially commit a step; close and render synchronize with an in-flight step; concurrent resets cannot reap an allocation before its session is registered. | `tests/test_replay_lifecycle.py`, `tests/test_app.py` |
 | Cleanup | Failed backend close stays tracked; a completed agent rollout survives `/close` failure with a structured warning. | `tests/test_app.py`, `responses_api_agents/gymnasium_agent/tests/test_app.py` |
 | Model input | Difficulty and regime labels remain evaluator metadata and are absent from rendered/model-facing messages; T2 receives compact requested/admitted/cap decision state through the HTTP path. | `tests/test_render.py`, `tests/test_app.py`, `tests/test_example_artifacts.py` |
 | Model ordering | Compliance requires zero failures; exploratory mode enforces an explicit failure-rate ceiling. Only common usable pairs participate, and adjacent deltas need a positive 95% bootstrap lower bound. | `tests/test_model_sweep.py` |
 | Input integrity | Topology counts and identifiers agree; fractional CSV identifiers fail closed with provenance. | `tests/test_schemas.py`, `tests/test_dataset_ingestion.py` |
 | Boundary hygiene | Gymnasium rollouts forward only resource-server-issued cookies, and legacy KPI failures return a stable public error without the internal exporter endpoint. | `responses_api_agents/gymnasium_agent/tests/test_app.py`, `tests/test_legacy_server_api.py` |
-| Recorded-data boundary | The checked-in dataset fixture is the default diagnostic input; recorded actions do not change prerecorded next observations; backend metadata marks these rollouts non-causal and not training-usable. | `dataset_backend.py`, `tests/test_dataset_ingestion.py`, `README.md`, Fern tutorial |
+| Recorded-data boundary | The checked-in dataset fixture is the default diagnostic input; recorded actions do not change prerecorded next observations; backend metadata marks these rollouts non-causal and not training-usable. Effective reward configuration and T2 service accounting survive ingestion and are exposed in reset/step metadata. Reused GRPO episode IDs are partitioned by iteration and malformed step order fails closed. | `dataset_backend.py`, `tests/test_dataset_ingestion.py`, `README.md`, Fern tutorial |
+| Transition completeness | Every successful scored step, including terminal and truncated steps, returns its after-observation; generated evidence therefore retains both sides of every transition. | `app.py`, `generate_example_rollouts.py`, `tests/test_app.py`, `tests/test_example_artifacts.py` |
 
 ## First-user workflow
 
@@ -70,7 +71,8 @@ GRPO environment.
 - `data/example_rollouts.jsonl` contains deterministic full trajectories through
   the real reset/step/close HTTP surface. Each transition records the action
   dynamics version, reward version, service accounting, reward measurements,
-  and reward terms.
+  reward terms, and the scored after-observation. SHA-256:
+  `ed4102eb611f7dc6d26d8a07e878ce7b6c0cebb638134eadd01a90c15de06911`.
 - `data/example_metrics.json` is the NeMo Gym example-validation receipt.
 - `golden_set.py` derives a reproducible single-intervention oracle from the
   deterministic action grid; its labels are not produced by an LLM judge.
@@ -156,3 +158,25 @@ PYTHONPATH=.:resources_servers/openair_congestion \
 
 .venv/bin/gym env test --resources-server openair_congestion
 ```
+
+## Local handoff verification — July 27, 2026
+
+The runtime, regression tests, and generated artifact were verified at signed,
+DCO-trailed commit `b9f5dd4705d10772ff3cd30ad96f4f28a73ce799`. The
+following handoff commit changes documentation only; its complete Fern and
+pre-commit checks were run on the staged documentation tree.
+
+| Gate | Result |
+|---|---|
+| Affected OpenAir, shared Gymnasium, and agent tests | `239 passed` |
+| Clean-install `gym env test --resources-server openair_congestion` | `215 passed` |
+| Repository non-sandbox CI-equivalent suite | `1237 passed`, `170 deselected` |
+| Repository sandbox CI-equivalent suite | `170 passed`, `1237 deselected` |
+| Combined repository coverage | `97.66%` (required `96%`) |
+| Generated rollout reproducibility | Two independent generations were byte-identical; committed SHA-256 is `ed4102eb611f7dc6d26d8a07e878ce7b6c0cebb638134eadd01a90c15de06911` |
+| Ruff, formatting, diff hygiene, scoped pre-commit | Passed |
+| Fern documentation check | `0 errors`; one expected unauthenticated redirect-check warning |
+
+This receipt establishes local code-review handoff readiness. It does not
+convert the failed historical model/GRPO qualifications into success, prove
+live-network fidelity, or represent upstream maintainer acceptance.

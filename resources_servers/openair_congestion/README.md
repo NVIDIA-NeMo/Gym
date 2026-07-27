@@ -201,7 +201,7 @@ cp "$validation_dir/example_metrics.json" \
 
 ### KPI snapshots
 
-Each row is one timestep. Rows with the same `episode_id` form an episode and need at least two observations. Required data are `cells[]`, `cells[].prb_util_dl_p50`, a non-empty `cells[].ues[]`, and `cells[].ues[].delivered_mbps`. Optional KPI fields pass through; missing fields are synthesized to the canonical observation shape.
+Each row is one timestep. Rows with the same `episode_id` form an episode and need at least two observations. Required data are `cells[]`, `cells[].prb_util_dl_p50`, a non-empty `cells[].ues[]`, and `cells[].ues[].delivered_mbps`. Optional KPI fields pass through; missing fields are synthesized to the canonical observation shape. T2 recordings can preserve `requested_mbps` and `admitted_mbps` per UE plus a row-level `service_accounting` object for forced-termination measurements that are not part of the observation schema.
 
 ```json
 {"episode_id":"run_a","step":0,"cells":[{"cell_id":0,"prb_util_dl_p50":0.55,"ues":[{"ue_id":0,"offered_mbps":20.0,"delivered_mbps":18.0,"bler":0.05,"sinr_db":12.0}]}]}
@@ -211,7 +211,7 @@ See `data/fixtures/sample_provided.jsonl`.
 
 ### Rollout traces
 
-Trace rows use `reward_measurements` to reconstruct aggregate state. `aggregate_delivered_mbps` and `n_ues` are required. Recorded actions and rewards are not trusted: the current policy supplies the action, and the environment recomputes guardrail and reward output. See `data/fixtures/sample_trace.jsonl`.
+Trace rows use `reward_measurements` to reconstruct aggregate state. `aggregate_delivered_mbps` and `n_ues` are required. Requested, admitted, delivered, denied, and forced-termination fields are carried into the recomputed service objective when present. Trace `step` values must be unique and strictly increasing in file order. If a collector reuses one `episode_id` in multiple `iter` values, the loader exposes separate keys such as `episode_7::iter=2`; a single-iteration trace keeps its original key. Recorded actions and rewards are not trusted: the current policy supplies the action, and the environment recomputes guardrail and reward output. See `data/fixtures/sample_trace.jsonl`.
 
 Set the backend and file in the resource-server config:
 
@@ -225,6 +225,12 @@ openair_congestion:
 ```
 
 Task `scenario_id` must match a dataset episode key or be omitted for deterministic seed-based selection.
+
+Reset and step metadata report the effective `reward_profile`,
+`reward_weights`, and `prb_pressure_threshold`. These values are the contract
+actually used for recomputation, including any `reward_weights` override in the
+YAML. Successful terminal and truncated steps retain the scored after-state in
+their `observation` field.
 
 ### Inspect your own JSONL
 

@@ -309,6 +309,11 @@ Dataset rows are validated at startup. Malformed topology, duplicate IDs,
 fractional integer fields, and non-finite values fail with file-and-line
 provenance.
 
+For GRPO trace rows, `step` must be unique and strictly increasing within an
+episode. If an export reuses one `episode_id` across multiple `iter` values,
+the loader separates them into scenario keys such as `episode_7::iter=2`.
+Single-iteration exports keep their original episode key.
+
 `dataset_path` is relative to `resources_servers/openair_congestion/`, because
 that directory is the resource server's working directory. For a repeatable
 first run, copy the config, select the sample's `lab_run_a` episode, and start a
@@ -381,8 +386,20 @@ must provide at least two observations. At minimum, each row needs a non-empty
 every UE needs `delivered_mbps`. See
 `data/fixtures/sample_provided.jsonl` for sparse and complete examples.
 
+For T2 data, add optional per-UE `requested_mbps` and `admitted_mbps`. Put
+transition-level forced-termination fields in a row-level
+`service_accounting` object. Trace-format rows can carry the same requested,
+admitted, delivered, denied, and forced-termination values in
+`reward_measurements`; the diagnostic backend forwards them to the selected
+reward profile.
+
 Set each task row's `scenario_id` to one of your `episode_id` values, or omit it
 to select an episode deterministically from the task seed.
+
+The reset and step responses expose the effective `reward_profile`,
+`reward_weights`, and `prb_pressure_threshold`, including YAML weight
+overrides. Successful terminal and truncated transitions also keep the scored
+after-observation instead of replacing it with `null`.
 
 <Warning>
 A stored scalar reward is optional only when you preserve the complete reward
