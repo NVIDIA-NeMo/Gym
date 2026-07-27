@@ -788,8 +788,7 @@ class EnrootProvider:
             host_file = instance.staging_dir / rel
             if host_file.is_symlink():
                 raise RuntimeError(
-                    f"download_file: refusing to read {source_path!r} — "
-                    "source is a symlink inside the sandbox mount"
+                    f"download_file: refusing to read {source_path!r} — source is a symlink inside the sandbox mount"
                 )
             target_path.write_bytes(host_file.read_bytes())
             return

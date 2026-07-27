@@ -147,6 +147,8 @@ def _load_enroot_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.enroot import EnrootProvider
 
     return EnrootProvider
+
+
 def _load_docker_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.docker import DockerProvider
 
