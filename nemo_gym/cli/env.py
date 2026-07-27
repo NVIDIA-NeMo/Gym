@@ -36,21 +36,30 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, ROOT_DIR
+from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.cli.setup_command import run_command, setup_env_command
-from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
+from nemo_gym.cli.utils import (
+    exit_cleanly_on_config_error,
+    exit_unknown_component,
+    fuzzy_matches,
+    print_no_matches,
+    print_rich_table,
+    render_component_inspection,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    QUERY_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.registry import discover_environments
+from nemo_gym.registry import discover_environments, read_environment_details
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -71,14 +80,14 @@ _FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
 def _resolve_server_dir(rel_path: Path) -> Path:
     """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
 
-    Checks the current working directory first (a user's local server), then falls back to the Gym
-    install root (``PARENT_DIR``) where built-in servers live in both editable and wheel installs.
-    This lets ``gym env test`` find and run built-in servers from any cwd, not just a repo checkout.
+    Searches NEMO_GYM_EXTRA_ROOTS, the current working directory (a user's local server), then the Gym
+    install root (``PARENT_DIR``) where built-in servers live in both editable and wheel installs. A
+    directory counts as a server only if it ships an install marker for one of our two venv setups. This
+    lets ``gym env test`` find and run built-in (and plugin) servers from any cwd, not just a repo checkout.
     """
-    cwd_path = Path.cwd() / rel_path
-    if (cwd_path / "requirements.txt").exists() or (cwd_path / "pyproject.toml").exists():
-        return cwd_path
-    return PARENT_DIR / rel_path
+    return _resolve_under_cwd_or_install(
+        rel_path, validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists()
+    )
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -618,14 +627,14 @@ def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
 
-    # Discover server modules under both the cwd (a user's project) and the Gym install root
-    # (built-ins, which live under PARENT_DIR in editable and wheel installs). Entrypoints are kept
-    # relative; the cwd shadows the install root for same-named modules. This lets `gym env test`
-    # discover and run built-in servers from any cwd, not only a repo checkout.
+    # Discover server modules across every component-search root: NEMO_GYM_EXTRA_ROOTS (plugins), the cwd
+    # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
+    # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
+    # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
     server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
-    for root in (Path.cwd(), PARENT_DIR):
+    for root in component_search_roots():
         for server_type_dir in server_type_dirs:
             for module_path in sorted((root / server_type_dir).glob("*")):
                 if "pycache" in module_path.name or not module_path.is_dir():
@@ -918,14 +927,49 @@ def validate():
     rich.print("[green]✓[/green] Config is valid.")
 
 
+def _inspect_environment(name: str, environments: dict, global_config_dict) -> None:
+    """Render the ``gym list environments <name>`` inspect view for one environment."""
+    entry = environments.get(name)
+    if entry is None:
+        exit_unknown_component(name, environments, "environment")
+        return
+
+    parsed = read_environment_details(entry.config_path)
+    details = {"config": str(entry.config_path.resolve())}
+    if parsed["resources_servers"]:
+        details["resources servers"] = ", ".join(parsed["resources_servers"])
+    if parsed["agent"]:
+        details["agent"] = parsed["agent"]
+    if parsed["datasets"]:
+        details["datasets"] = ", ".join(parsed["datasets"])
+
+    description = parsed["description"]
+    if parsed["value"]:  # surface `value` as a trailing line of the description
+        description = f"{description}\nValue: {parsed['value']}" if description else f"Value: {parsed['value']}"
+
+    render_component_inspection(
+        json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
+        name=name,
+        type_noun="environment",
+        domain=parsed["domain"],
+        description=description,
+        details=details,
+        usage=f"gym env start --environment {name} --model-type vllm_model",
+    )
+
+
 def list_environments() -> None:
-    """List the environments available under environments/, by short name.
+    """List the environments under environments/, or inspect one by name (``gym list environments <name>``).
+    Optionally filtered by a `query` (the `gym search environments` entry point). ``--search-dir`` adds extra
+    roots on top of the cwd and built-ins.
 
     Examples:
 
     ```bash
     gym list environments
+    gym list environments calendar
     gym list environments --json
+    gym list environments --search-dir /path/to/project
     ```
     """
     global_config_dict = get_global_config_dict(
@@ -936,6 +980,21 @@ def list_environments() -> None:
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     environments = discover_environments()
+
+    name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
+    if name:
+        _inspect_environment(name, environments, global_config_dict)
+        return
+
+    # `gym search environments <query>` reuses this command, narrowing to fuzzy matches on
+    # name + domain + description.
+    query = global_config_dict.get(QUERY_KEY_NAME)
+    if query:
+        environments = {
+            name: env
+            for name, env in environments.items()
+            if fuzzy_matches(query, name, env.domain or "", env.description or "")
+        }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(
@@ -949,11 +1008,16 @@ def list_environments() -> None:
         return
 
     if not environments:
-        rich.print("[yellow]No environments found.[/yellow]")
+        print_no_matches("environments", query)
         return
 
-    table = Table(title=f"Available environments in NeMo Gym ({len(environments)})")
-    table.add_column("Environment")
+    title = (
+        f"Environments matching '{query}' ({len(environments)})"
+        if query
+        else f"Available environments in NeMo Gym ({len(environments)})"
+    )
+    table = Table(title=title)
+    table.add_column("Name")
     table.add_column("Domain")
     table.add_column("Description")
     for name, environment in environments.items():
