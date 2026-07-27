@@ -27,7 +27,7 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │  NEMO-GYM             │          │                  │               │
 │                       │          │                  │               │
 │  ┌────────────────────┼──────────┼──────────────────┼───────────┐   │
-│  │  ng_collect_rollouts          │                  │           │   │
+│  │  gym eval run                 │                  │           │   │
 │  │  (CLI orchestrator)           │                  │           │   │
 │  └───────────────┬───────────────┼──────────────────┼───────────┘   │
 │                  │ /run          │                  │               │
@@ -125,7 +125,7 @@ All three providers follow the same unified flow: **Agent → Adapter → Model 
 │                                                                     │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │  CLI / Orchestrator Layer                                     │  │
-│  │  ng_collect_rollouts / ng_reward_profile                      │  │
+│  │  gym eval run / gym eval profile                              │  │
 │  │                                                               │  │
 │  │  • Reads input JSONL (tasks)                                  │  │
 │  │  • Dispatches /run requests to agent servers                  │  │
@@ -289,9 +289,9 @@ responses_api_agents/browser_agent/
    uv venv && uv sync --extra dev
    source .venv/bin/activate
    ```
-   After activating the virtual environment, CLI commands like `ng_run`, `ng_collect_rollouts`, etc. become available.
+   After activating the virtual environment, CLI commands like `gym env start`, `gym eval run`, etc. become available.
    All BrowserGym-specific dependencies (`playwright`, `anthropic`, `Pillow`, etc.) are declared in
-   each server's `requirements.txt` and installed automatically by `ng_run` when it creates per-server
+   each server's `requirements.txt` and installed automatically by `gym env start` when it creates per-server
    virtual environments. Chromium is also auto-installed on first server startup via `ensure_playwright()`.
 
 3. **API keys and settings** in `env.yaml` (project root):
@@ -321,7 +321,8 @@ responses_api_agents/browser_agent/
 ### Start All Servers
 
 ```bash
-ng_run "+config_paths=[resources_servers/browser_gym/configs/browser_gym.yaml]"
+gym env start \
+  --config resources_servers/browser_gym/configs/browser_gym.yaml
 ```
 
 This starts 9 servers:
@@ -332,13 +333,15 @@ This starts 9 servers:
 First run is slow (~2-3 min) because it creates isolated venvs and downloads Chromium. Subsequent runs are faster with:
 
 ```bash
-ng_run "+config_paths=[resources_servers/browser_gym/configs/browser_gym.yaml]" +skip_venv_if_present=true
+gym env start \
+  --config resources_servers/browser_gym/configs/browser_gym.yaml \
+  +skip_venv_if_present=true
 ```
 
 ### Check Server Health
 
 ```bash
-ng_status
+gym env status
 ```
 
 ### Collect Rollouts
@@ -375,45 +378,49 @@ The script calls the gym's `/api/v1/get_expected_state` endpoint and converts ea
 **OpenAI (Computer Use Preview):**
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=browser_openai_agent \
-  +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
-  +output_jsonl_fpath=results/cua_rollouts_openai.jsonl \
-  +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+  --agent browser_openai_agent \
+  --input resources_servers/browser_gym/data/example.jsonl \
+  --output results/cua_rollouts_openai.jsonl \
+  --num-repeats 1 \
+  --max-output-tokens 16384 \
+  --temperature 1.0
 ```
 
 **Anthropic Claude Sonnet:**
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=browser_anthropic_sonnet_agent \
-  +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
-  +output_jsonl_fpath=results/cua_rollouts_anthropic_sonnet.jsonl \
-  +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
+gym eval run --no-serve \
+  --agent browser_anthropic_sonnet_agent \
+  --input resources_servers/browser_gym/data/example.jsonl \
+  --output results/cua_rollouts_anthropic_sonnet.jsonl \
+  --num-repeats 1 \
+  --max-output-tokens 4096 \
+  --temperature 1.0
 ```
 
 **Anthropic Claude Opus:**
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=browser_anthropic_opus_agent \
-  +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
-  +output_jsonl_fpath=results/cua_rollouts_anthropic_opus.jsonl \
-  +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 4096, temperature: 1.0}"
+gym eval run --no-serve \
+  --agent browser_anthropic_opus_agent \
+  --input resources_servers/browser_gym/data/example.jsonl \
+  --output results/cua_rollouts_anthropic_opus.jsonl \
+  --num-repeats 1 \
+  --max-output-tokens 4096 \
+  --temperature 1.0
 ```
 
 **Gemini 2.5 Computer Use:**
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=browser_gemini_agent \
-  +input_jsonl_fpath=resources_servers/browser_gym/data/example.jsonl \
-  +output_jsonl_fpath=results/cua_rollouts_gemini.jsonl \
-  +num_repeats=1 \
-  "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+  --agent browser_gemini_agent \
+  --input resources_servers/browser_gym/data/example.jsonl \
+  --output results/cua_rollouts_gemini.jsonl \
+  --num-repeats 1 \
+  --max-output-tokens 16384 \
+  --temperature 1.0
 ```
 
 Available agent names: `browser_openai_agent`, `browser_anthropic_sonnet_agent`, `browser_anthropic_opus_agent`, `browser_gemini_agent`
@@ -423,12 +430,19 @@ Available agent names: `browser_openai_agent`, `browser_anthropic_sonnet_agent`,
 ### Reward Profiling
 
 ```bash
-ng_reward_profile \
-  +materialized_inputs_jsonl_fpath=results/cua_rollouts_openai_materialized_inputs.jsonl \
-  +rollouts_jsonl_fpath=results/cua_rollouts_openai.jsonl
+gym eval profile \
+  --inputs results/cua_rollouts_openai_materialized_inputs.jsonl \
+  --rollouts results/cua_rollouts_openai.jsonl
 ```
 
 Output is written to `results/cua_rollouts_openai_reward_profiling.jsonl` and `results/cua_rollouts_openai_agent_metrics.json` (auto-derived from the rollouts path).
+
+During verification, assertion categories from `get_expected_state` are mapped onto
+`get_actual_state` assertions by exact title. Every category observed in the rollout
+data is reported dynamically under metric names such as
+`pass@1[avg-of-1]/category/<category>`; category names are not hard-coded. If the
+expected-state lookup fails or an assertion cannot be matched, the scalar reward is
+still computed normally and the unmatched assertion simply has no category metric.
 
 ### Viewing Results
 
@@ -501,10 +515,12 @@ cua_debug_trajectories: true
 
 Then restart the servers. All agents will save debug trajectories.
 
-### Option 2: Via CLI override on `ng_run`
+### Option 2: Via CLI override on `gym env start`
 
 ```bash
-ng_run "+config_paths=[resources_servers/browser_gym/configs/browser_gym.yaml]" ++cua_debug_trajectories=true
+gym env start \
+  --config resources_servers/browser_gym/configs/browser_gym.yaml \
+  ++cua_debug_trajectories=true
 ```
 
 ### Output Structure
@@ -596,7 +612,7 @@ Create `.vscode/launch.json` in the project root with the following content (rep
 
 Then:
 
-1. **Stop `ng_run`** if it's running (ports will conflict)
+1. **Stop `gym env start`** if it's running (ports will conflict)
 2. Open **Run and Debug** (Cmd+Shift+D)
 3. Select **"Browser Gym Full Stack (Resource Server + Agent)"** and press F5
 4. Set breakpoints in:
@@ -623,17 +639,17 @@ curl -X POST http://127.0.0.1:13135/run \
   }'
 ```
 
-Note: `ng_status` and `ng_collect_rollouts` will not work in debugger mode (no HeadServer). Use curl to trigger runs directly.
+Note: `gym env status` and `gym eval run --no-serve` will not work in debugger mode (no HeadServer). Use curl to trigger runs directly.
 
 ## Running Tests
 
-Each server's tests are run individually (NeMo-Gym isolates tests per server via `ng_test`).
+Each server's tests are run individually (NeMo-Gym isolates tests per server via `gym env test`).
 
 ### Browser Gym Resource Server
 
 ```bash
-# Via ng_test (creates isolated venv, installs deps, runs pytest):
-ng_test +entrypoint=resources_servers/browser_gym
+# Via gym env test (creates isolated venv, installs deps, runs pytest):
+gym env test +entrypoint=resources_servers/browser_gym
 
 # Or directly with pytest (faster, uses current venv):
 pytest resources_servers/browser_gym/tests/test_app.py -x -v
@@ -642,7 +658,7 @@ pytest resources_servers/browser_gym/tests/test_app.py -x -v
 ### Browser Agent
 
 ```bash
-ng_test +entrypoint=responses_api_agents/browser_agent
+gym env test +entrypoint=responses_api_agents/browser_agent
 
 # Or directly:
 pytest responses_api_agents/browser_agent/tests/test_app.py -x -v
@@ -651,7 +667,7 @@ pytest responses_api_agents/browser_agent/tests/test_app.py -x -v
 ### OpenAI Model Server
 
 ```bash
-ng_test +entrypoint=responses_api_models/openai_model
+gym env test +entrypoint=responses_api_models/openai_model
 
 # Or directly:
 pytest responses_api_models/openai_model/tests/test_app.py -x -v
@@ -660,7 +676,7 @@ pytest responses_api_models/openai_model/tests/test_app.py -x -v
 ### Anthropic Model Server
 
 ```bash
-ng_test +entrypoint=responses_api_models/turing_browser_agent_anthropic_model
+gym env test +entrypoint=responses_api_models/turing_browser_agent_anthropic_model
 
 # Or directly (requires `anthropic` SDK):
 pytest responses_api_models/turing_browser_agent_anthropic_model/tests/test_app.py -x -v
@@ -669,7 +685,7 @@ pytest responses_api_models/turing_browser_agent_anthropic_model/tests/test_app.
 ### Gemini Model Server
 
 ```bash
-ng_test +entrypoint=responses_api_models/turing_browser_agent_gemini_model
+gym env test +entrypoint=responses_api_models/turing_browser_agent_gemini_model
 
 # Or directly (requires `google-genai` SDK):
 pytest responses_api_models/turing_browser_agent_gemini_model/tests/test_app.py -x -v

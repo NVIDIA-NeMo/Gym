@@ -2901,6 +2901,44 @@ class TestBrowserAgentUncoveredBranches:
         return BrowserAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
     @pytest.mark.asyncio
+    async def test_aggregate_metrics_proxies_to_resources_server(self):
+        from nemo_gym.base_resources_server import AggregateMetricsRequest
+
+        agent = self._make_agent()
+        body = AggregateMetricsRequest(verify_responses=[])
+        response_data = {
+            "group_level_metrics": [],
+            "agent_metrics": {
+                "mean/reward": 0.5,
+                "pass@1[avg-of-1]/category/Positive": 75.0,
+            },
+            "key_metrics": {
+                "mean/reward": 0.5,
+                "pass@1[avg-of-1]/category/Positive": 75.0,
+            },
+        }
+        mock_http_response = AsyncMock()
+
+        with (
+            patch("responses_api_agents.browser_agent.app.raise_for_status", new_callable=AsyncMock) as mock_raise,
+            patch(
+                "responses_api_agents.browser_agent.app.get_response_json",
+                new_callable=AsyncMock,
+                return_value=response_data,
+            ),
+        ):
+            agent.server_client.post = AsyncMock(return_value=mock_http_response)
+            result = await agent.aggregate_metrics(body)
+
+        agent.server_client.post.assert_awaited_once_with(
+            server_name=agent.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        mock_raise.assert_awaited_once_with(mock_http_response)
+        assert result.key_metrics["pass@1[avg-of-1]/category/Positive"] == 75.0
+
+    @pytest.mark.asyncio
     async def test_debug_trajectory_init_failure_handled(self):
         agent = self._make_agent(cua_debug_trajectories=True, max_steps=1)
 

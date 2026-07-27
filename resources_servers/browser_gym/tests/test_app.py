@@ -315,17 +315,47 @@ class TestVerifyEndpoint:
 
             mock_response = AsyncMock()
             mock_response.status = 200
-            mock_response.json = AsyncMock(return_value={"assertions": [{"result": "pass"}, {"result": "pass"}]})
+            mock_response.json = AsyncMock(
+                return_value={
+                    "assertions": [
+                        {"title": "completion check", "result": "pass"},
+                        {"title": "side-effect check", "result": "pass"},
+                    ]
+                }
+            )
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
 
+            mock_expected_response = AsyncMock()
+            mock_expected_response.status = 200
+            mock_expected_response.json = AsyncMock(
+                return_value={
+                    "verifiers": {
+                        "TEST-001": {
+                            "assertions": [
+                                {"title": "side-effect check", "category": "Any Future Category"},
+                                {"title": "completion check", "category": "Completion"},
+                            ]
+                        }
+                    }
+                }
+            )
+            mock_expected_response.__aenter__ = AsyncMock(return_value=mock_expected_response)
+            mock_expected_response.__aexit__ = AsyncMock(return_value=None)
+
             mock_session = MagicMock()
             mock_session.post = MagicMock(return_value=mock_response)
+            mock_session.get = MagicMock(return_value=mock_expected_response)
             mock_session.closed = False
 
             with patch.object(server, "_get_verify_session", return_value=mock_session):
                 result = await server.verify(body)
                 assert result.reward == 1.0
+                assert [a["category"] for a in result.verification_result["assertions"]] == [
+                    "Completion",
+                    "Any Future Category",
+                ]
+                mock_session.get.assert_called_once_with("http://localhost:3000/api/v1/get_expected_state")
 
     @pytest.mark.asyncio
     async def test_verify_failure(self):
@@ -358,7 +388,14 @@ class TestVerifyEndpoint:
 
             mock_response = AsyncMock()
             mock_response.status = 200
-            mock_response.json = AsyncMock(return_value={"assertions": [{"result": "pass"}, {"result": "fail"}]})
+            mock_response.json = AsyncMock(
+                return_value={
+                    "assertions": [
+                        {"result": "pass", "category": "From Actual State"},
+                        {"result": "fail", "category": "From Actual State"},
+                    ]
+                }
+            )
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
 
@@ -370,6 +407,90 @@ class TestVerifyEndpoint:
                 result = await server.verify(body)
                 assert result.reward == 0.0
 
+
+class TestCategoryReporting:
+    def test_extract_expected_categories_is_dynamic_and_rejects_ambiguous_titles(self):
+        payload = {
+            "verifiers": {
+                "task-1": {
+                    "assertions": [
+                        {"title": "a", "category": "Positive"},
+                        {"title": "b", "category": "Custom Category"},
+                        {"title": "duplicate", "category": "First"},
+                        {"title": "duplicate", "category": "Second"},
+                        {"title": "uncategorized"},
+                    ]
+                }
+            }
+        }
+
+        assert BrowserGymResourcesServer._extract_expected_categories(payload) == {
+            "task-1": {
+                "a": "Positive",
+                "b": "Custom Category",
+            }
+        }
+
+    def test_apply_assertion_categories_preserves_existing_and_leaves_unmatched(self):
+        assertions = [
+            {"title": "a", "result": "pass"},
+            {"title": "b", "result": "pass", "category": "From Actual State"},
+            {"title": "unmatched", "result": "fail"},
+        ]
+
+        matched = BrowserGymResourcesServer._apply_assertion_categories(
+            assertions,
+            {"a": "From Expected State", "b": "Should Not Override"},
+        )
+
+        assert matched == 1
+        assert assertions == [
+            {"title": "a", "result": "pass", "category": "From Expected State"},
+            {"title": "b", "result": "pass", "category": "From Actual State"},
+            {"title": "unmatched", "result": "fail"},
+        ]
+
+    def test_compute_metrics_reports_every_observed_category(self):
+        tasks = [
+            [
+                {
+                    "reward": 0.0,
+                    "verification_result": {
+                        "assertions": [
+                            {"category": "Completion Quality", "result": "pass"},
+                            {"category": "Completion Quality", "result": "fail"},
+                            {"category": "Unexpected/Future Category", "result": "pass"},
+                        ]
+                    },
+                }
+            ],
+            [
+                {
+                    "reward": 1.0,
+                    "verification_result": {
+                        "assertions": [
+                            {"category": "Completion Quality", "result": "pass"},
+                            {"category": "Completion Quality", "result": "pass"},
+                            {"category": "Unexpected/Future Category", "result": "fail"},
+                        ]
+                    },
+                }
+            ],
+        ]
+
+        server = object.__new__(BrowserGymResourcesServer)
+        metrics = server.compute_metrics(tasks)
+        key_metrics = server.get_key_metrics(metrics)
+
+        assert metrics["pass@1[avg-of-1]/accuracy"] == 50.0
+        assert metrics["pass@1[avg-of-1]/category/Completion Quality"] == 75.0
+        assert metrics["pass@1[avg-of-1]/category/Unexpected/Future Category"] == 50.0
+        assert key_metrics["pass@1[avg-of-1]/category/Completion Quality"] == 75.0
+        assert key_metrics["pass@1[avg-of-1]/category/Unexpected/Future Category"] == 50.0
+        assert not any("assertion_count" in name or "coverage" in name for name in metrics)
+
+
+class TestVerifySession:
     @pytest.mark.asyncio
     async def test_get_verify_session_creates_once(self):
         with patch("resources_servers.browser_gym.app.ensure_playwright"):
@@ -786,7 +907,9 @@ class TestVerifyInitialState:
 
             mock_response = AsyncMock()
             mock_response.status = 200
-            mock_response.json = AsyncMock(return_value={"assertions": [{"result": "pass"}]})
+            mock_response.json = AsyncMock(
+                return_value={"assertions": [{"result": "pass", "category": "From Actual State"}]}
+            )
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
 
@@ -836,7 +959,9 @@ class TestVerifyInitialState:
 
             mock_response = AsyncMock()
             mock_response.status = 200
-            mock_response.json = AsyncMock(return_value={"assertions": [{"result": "pass"}]})
+            mock_response.json = AsyncMock(
+                return_value={"assertions": [{"result": "pass", "category": "From Actual State"}]}
+            )
             mock_response.__aenter__ = AsyncMock(return_value=mock_response)
             mock_response.__aexit__ = AsyncMock(return_value=None)
 
