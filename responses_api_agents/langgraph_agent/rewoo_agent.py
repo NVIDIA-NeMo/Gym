@@ -210,7 +210,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         graph.add_node("worker", worker)
         graph.add_node("solve", solve)
         graph.set_entry_point("plan")
-        graph.add_edge("plan", "worker")
+        graph.add_conditional_edges("plan", route_worker, {"worker": "worker", "solve": "solve"})
         graph.add_conditional_edges("worker", route_worker, {"worker": "worker", "solve": "solve"})
         graph.add_edge("solve", END)
 

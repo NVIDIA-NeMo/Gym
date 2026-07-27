@@ -186,3 +186,29 @@ async def test_staged_model_calls_use_only_the_current_prompt(agent_class, confi
 
     model_input = agent.server_client.post.call_args.kwargs["json"].input
     assert [(message.role, message.content) for message in model_input] == [("user", "current stage")]
+
+
+async def test_rewoo_falls_back_to_solve_when_plan_has_no_steps() -> None:
+    config = ReWOOAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        resources_server=ResourcesServerRef(type="resources_servers", name=""),
+        model_server=ModelServerRef(type="responses_api_models", name="test_model"),
+    )
+    agent = ReWOOAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    agent.server_client.post.side_effect = [
+        _mock_model_response("I can solve this directly."),
+        _mock_model_response("<answer>42</answer>"),
+    ]
+
+    client = TestClient(agent.setup_webserver())
+    res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "What is 6 * 7?"}]})
+
+    assert res.status_code == 200
+    assert agent.server_client.post.call_count == 2
+    assert [item["content"][0]["text"] for item in res.json()["output"]] == [
+        "I can solve this directly.",
+        "<answer>42</answer>",
+    ]
