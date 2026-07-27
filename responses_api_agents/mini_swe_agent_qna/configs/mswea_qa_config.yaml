@@ -46,7 +46,7 @@ agent:
     </example_response>
 
     <system_information>
-    {{system}} {{release}} {{version}} {{machine}}
+    {{system | default("Linux")}} {{release | default("")}} {{version | default("")}} {{machine | default("")}}
     </system_information>
 
     ## Useful command examples

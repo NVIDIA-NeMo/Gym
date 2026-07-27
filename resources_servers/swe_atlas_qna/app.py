@@ -373,7 +373,7 @@ class SweAtlasQnaServer(SimpleResourcesServer):
                     response_obj = await self.server_client.post(
                         server_name=self.config.judge_model_server.name,
                         url_path="/v1/chat/completions",
-                        json=request_params,
+                        json=request_params.model_dump(exclude_unset=True, mode="json"),
                     )
                     completion = NeMoGymChatCompletion.model_validate(await get_response_json(response_obj))
             except Exception:

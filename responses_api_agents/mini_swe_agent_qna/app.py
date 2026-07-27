@@ -471,9 +471,18 @@ class MiniSWEAgentQna(SimpleResponsesAPIAgent):
     async def _verify_answer(self, body: MiniSWEAgentQnaRunRequest, answer: str) -> tuple[float, dict[str, Any]]:
         """POST the extracted answer to the resources server /verify; return (reward, extra)."""
         answer_response = _default_response_object()
+        answer_response["model"] = getattr(body.responses_create_params, "model", None) or "mini_swe_agent_qna"
         answer_response["output"] = [_answer_message_item(answer)]
 
-        verify_request = body.model_dump() | {"response": answer_response}
+        # The verifier only needs task metadata and the final answer. Do not pass the
+        # mini-swe trajectory back through responses_create_params.input; after a
+        # rollout it contains trace items that are not valid create-params input.
+        verify_request = {
+            "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=[]).model_dump(mode="json"),
+            "response": NeMoGymResponse.model_validate(answer_response).model_dump(mode="json"),
+            "verifier_metadata": body.verifier_metadata,
+            "instance_id": body.instance_id,
+        }
         try:
             verify_obj = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -482,16 +491,18 @@ class MiniSWEAgentQna(SimpleResponsesAPIAgent):
             )
             await raise_for_status(verify_obj)
             verify_result = await get_response_json(verify_obj)
-        except Exception:
-            print("Verify call failed; scoring 0.", flush=True)
-            return 0.0, {}
+        except Exception as exc:
+            verify_error = f"{exc}\n{traceback.format_exc()}"
+            print(f"Verify call failed; scoring 0.\n{verify_error}", flush=True)
+            return 0.0, {"verify_error": verify_error}
 
         reward = float(verify_result.get("reward", 0.0) or 0.0)
         extra = {
             key: verify_result[key]
-            for key in ("agg_score", "passed", "rubric_scores", "num_rubrics", "num_scored")
+            for key in ("agg_score", "passed", "rubric_scores", "num_rubrics", "num_scored", "num_unscored")
             if key in verify_result
         }
+        extra["verify_result_keys"] = sorted(verify_result.keys())
         return reward, extra
 
     # ------------------------------------------------------------------

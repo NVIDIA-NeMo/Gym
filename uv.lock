@@ -1815,7 +1815,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], marker = "extra == 'all'" },
     { name = "omegaconf" },
-    { name = "openai", specifier = "<=2.7.2" },
+    { name = "openai", specifier = "<=2.45.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.9" },
     { name = "orjson" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
