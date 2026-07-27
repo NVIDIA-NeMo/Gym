@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
+from typing import TYPE_CHECKING, Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -67,10 +67,16 @@ class ToolCallObservation(ObservationModel):
     tool_name: Optional[str] = None
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
-    duration_ms: Optional[float] = None
+    duration_ms: Optional[float] = Field(default=None, ge=0)
     timing_source: Optional[Literal["executor", "artifact", "harness"]] = None
     status: Literal["completed", "failed", "timeout", "cancelled", "incomplete", "unknown"] = "unknown"
     error_type: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> "ToolCallObservation":
+        if self.started_at is not None and self.completed_at is not None and self.completed_at < self.started_at:
+            raise ValueError("completed_at must not precede started_at")
+        return self
 
 
 class SandboxObservation(ObservationModel):
@@ -143,15 +149,6 @@ class AgentObservationBundle(ObservationModel):
         if len(invocation_ids) != len(set(invocation_ids)):
             raise ValueError("invocation_id must be unique within an observation bundle")
         return self
-
-
-def link_tool_calls_to_sandbox(bundle: AgentObservationBundle, sandbox_id: Optional[str]) -> None:
-    """Link unassigned tool calls to their shared enclosing sandbox."""
-    if sandbox_id is None:
-        return
-    for record in bundle.records:
-        if isinstance(record, ToolCallObservation) and record.sandbox_id is None:
-            record.sandbox_id = sandbox_id
 
 
 def join_model_call_observations(
@@ -278,51 +275,9 @@ def join_model_call_observations(
     return result
 
 
-def model_visible_tool_calls(
-    conversation: Iterable[NeMoGymResponseInputItem],
-) -> list[tuple[str, Optional[str], str]]:
-    """Return model-visible call IDs, tool names, and result statuses."""
-
-    def field(item: Any, name: str) -> Any:
-        return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
-
-    items = list(conversation)
-    results = {
-        call_id: field(item, "status")
-        for item in items
-        if field(item, "type") == "function_call_output" and isinstance((call_id := field(item, "call_id")), str)
-    }
-    return [
-        (
-            call_id,
-            field(item, "name"),
-            (
-                results[call_id]
-                if results.get(call_id) in {"completed", "incomplete"}
-                else "unknown"
-                if call_id in results
-                else "incomplete"
-            ),
-        )
-        for item in items
-        if field(item, "type") == "function_call" and isinstance((call_id := field(item, "call_id")), str) and call_id
-    ]
-
-
 @dataclass(frozen=True, slots=True)
 class AgentEpisode:
     """An Agent response and the observations available at its execution boundary."""
 
     response: NeMoGymResponse
     observations: AgentObservationBundle
-
-
-def response_with_observations(episode: AgentEpisode) -> NeMoGymResponse:
-    """Carry observations through a prefixed Agent self-call."""
-    return episode.response.model_copy(update={"ng_agent_observations": episode.observations.model_dump(mode="json")})
-
-
-def pop_response_observations(response: dict[str, Any]) -> Optional[AgentObservationBundle]:
-    """Remove and validate observations carried by an Agent self-call."""
-    observations = response.pop("ng_agent_observations", None)
-    return AgentObservationBundle.model_validate(observations) if observations is not None else None

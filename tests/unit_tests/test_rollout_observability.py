@@ -6,9 +6,7 @@ from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_model import ModelCallRecord
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import (
-    AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -17,9 +15,6 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
     ToolCallObservation,
     join_model_call_observations,
-    link_tool_calls_to_sandbox,
-    pop_response_observations,
-    response_with_observations,
 )
 
 
@@ -30,63 +25,6 @@ from nemo_gym.rollout_observability import (
 def test_model_call_ref_rejects_incomplete_join_keys(value: dict) -> None:
     with pytest.raises(ValidationError, match="model_call_id or both model_ref and response_id"):
         ModelCallRef.model_validate(value)
-
-
-def test_observations_round_trip_through_internal_response() -> None:
-    response = NeMoGymResponse.model_validate(
-        {
-            "id": "response",
-            "created_at": 0,
-            "model": "model",
-            "object": "response",
-            "output": [],
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-        }
-    )
-    carried = response_with_observations(
-        AgentEpisode(response=response, observations=AgentObservationBundle(source="test"))
-    ).model_dump(mode="json")
-
-    observations = pop_response_observations(carried)
-
-    assert observations == AgentObservationBundle(source="test")
-    assert "ng_agent_observations" not in carried
-
-
-def test_parallel_tool_calls_share_enclosing_sandbox_without_overwriting_existing_link() -> None:
-    bundle = AgentObservationBundle(
-        source="test",
-        records=[
-            ToolCallObservation(
-                invocation_id="root",
-                tool_call_id="call-1",
-                started_at=1.0,
-                completed_at=3.0,
-            ),
-            ToolCallObservation(
-                invocation_id="root",
-                tool_call_id="call-2",
-                started_at=2.0,
-                completed_at=4.0,
-            ),
-            ToolCallObservation(
-                invocation_id="child",
-                tool_call_id="call-3",
-                sandbox_id="other-sandbox",
-            ),
-        ],
-    )
-
-    link_tool_calls_to_sandbox(bundle, "shared-sandbox")
-
-    tools = [record for record in bundle.records if isinstance(record, ToolCallObservation)]
-    assert [tool.sandbox_id for tool in tools] == [
-        "shared-sandbox",
-        "shared-sandbox",
-        "other-sandbox",
-    ]
 
 
 def test_observation_bundle_rejects_duplicate_invocation_ids() -> None:
@@ -100,6 +38,18 @@ def test_observation_bundle_rejects_duplicate_invocation_ids() -> None:
 def test_observation_models_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError, match="producer_extension"):
         ModelCallRef.model_validate({"model_call_id": "call-1", "producer_extension": "unexpected"})
+
+
+@pytest.mark.parametrize(
+    "timing",
+    (
+        {"duration_ms": -1},
+        {"started_at": 2.0, "completed_at": 1.0},
+    ),
+)
+def test_tool_call_observation_rejects_invalid_timing(timing: dict) -> None:
+    with pytest.raises(ValidationError):
+        ToolCallObservation(invocation_id="root", tool_call_id="call-1", **timing)
 
 
 def test_join_model_calls_resolves_exact_references_and_reports_unowned_calls() -> None:

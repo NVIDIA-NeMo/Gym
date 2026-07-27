@@ -656,7 +656,13 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 entry = {
                     k: v
                     for k, v in r.items()
-                    if k not in ("response", "responses_create_params", "ng_agent_observations")
+                    if k
+                    not in (
+                        "response",
+                        "responses_create_params",
+                        "ng_agent_observations",
+                        "ng_model_call_capture",
+                    )
                 }
                 usage = (r.get("response") or {}).get("usage")
                 if usage:

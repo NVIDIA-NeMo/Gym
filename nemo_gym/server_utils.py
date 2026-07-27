@@ -341,14 +341,10 @@ class ServerClient(BaseModel):
         observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
         server_entry = self.global_config_dict.get(server_name)
         rollout_id = current_rollout_id()
-        if (
-            observability_enabled
-            and server_entry is not None
-            and "resources_servers" in server_entry
-            and url_path == "/verify"
-        ):
-            rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
-            if rollout_id is not None:
+        if observability_enabled and server_entry is not None and "resources_servers" in server_entry:
+            if url_path == "/verify":
+                rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
+            if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
                 url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
         if (
