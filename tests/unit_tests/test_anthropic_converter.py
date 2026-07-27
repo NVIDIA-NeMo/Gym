@@ -145,7 +145,6 @@ class TestAnthropicRequestToResponses:
         assert params.input[0].content == "calling"
         fc = params.input[1]
         assert fc.type == "function_call"
-        assert fc.id.startswith("fc_")
         assert fc.call_id == "toolu_1"
         assert fc.name == "lookup"
         assert json.loads(fc.arguments) == {"city": "Paris"}

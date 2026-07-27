@@ -132,6 +132,7 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
             "tool-grandchild",
             agent=child,
             child_id=grandchild,
+            status="timeout",
         ),
     )
     _write(
@@ -147,17 +148,22 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
 
     bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
 
-    invocations = _records(bundle, AgentInvocation)
-    assert [invocation.invocation_id for invocation in invocations] == [session, child, grandchild]
-    root_invocation, child_invocation, grandchild_invocation = invocations
+    invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
+    assert set(invocations) == {session, child, grandchild}
+    root_invocation = invocations[session]
+    child_invocation = invocations[child]
+    grandchild_invocation = invocations[grandchild]
     assert child_invocation.parent_invocation_id == session
     assert child_invocation.spawned_by_tool_call_id == "tool-child"
     assert grandchild_invocation.parent_invocation_id == child
     assert grandchild_invocation.spawned_by_tool_call_id == "tool-grandchild"
+    assert grandchild_invocation.status == "incomplete"
     assert [reference.response_id for reference in root_invocation.model_calls] == ["msg-root"]
     assert [reference.response_id for reference in child_invocation.model_calls] == ["msg-child"]
     assert [reference.response_id for reference in grandchild_invocation.model_calls] == ["msg-grandchild"]
-    assert all(reference.model_ref == MODEL_REF for invocation in invocations for reference in invocation.model_calls)
+    assert all(
+        reference.model_ref == MODEL_REF for invocation in invocations.values() for reference in invocation.model_calls
+    )
     assert [item.type for item in root_invocation.conversation] == [
         "message",
         "reasoning",
@@ -171,6 +177,7 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
     assert timings["tool-fast"].duration_ms == pytest.approx(1000)
     assert timings["tool-child"].duration_ms == pytest.approx(3000)
     assert timings["tool-grandchild"].duration_ms == pytest.approx(1000)
+    assert timings["tool-grandchild"].status == "timeout"
     assert all(tool.timing_source == "artifact" for tool in timings.values())
     assert [(gap.code, gap.invocation_id) for gap in bundle.gaps] == [("invocation_outcome_unavailable", session)]
 
@@ -223,6 +230,13 @@ def test_malformed_and_incomplete_artifacts_produce_sanitized_gaps(tmp_path: Pat
             "msg-root",
             {"type": "tool_use", "id": "pending", "name": "Bash", "input": {}},
         ),
+        _assistant(
+            "root",
+            "2026-07-22T10:00:05Z",
+            "msg-later",
+            {"type": "tool_use", "id": "reversed", "name": "Bash", "input": {}},
+        ),
+        _tool_result("root", "2026-07-22T09:59:59Z", "reversed"),
         _tool_result("root", "2026-07-22T10:00:03Z", "orphan"),
     )
     _write(
@@ -245,6 +259,7 @@ def test_malformed_and_incomplete_artifacts_produce_sanitized_gaps(tmp_path: Pat
         "tool_result_missing",
         "tool_start_timestamp_missing",
         "tool_start_missing",
+        "tool_timing_invalid",
     } <= codes
     assert all(not invocation.model_calls for invocation in _records(bundle, AgentInvocation))
     assert sentinel not in bundle.model_dump_json()

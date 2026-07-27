@@ -70,7 +70,7 @@ def _status(block: dict[str, Any], result: Any) -> str:
         if result.get("interrupted") is True:
             return "incomplete"
         value = result.get("status")
-        if value in {"completed", "failed", "timeout", "incomplete"}:
+        if value in {"completed", "failed", "timeout", "cancelled", "incomplete"}:
             return value
     # A tool_result block is an explicit terminal observation even when Claude Code
     # does not attach a separate status object.
@@ -436,8 +436,12 @@ def extract_claude_code_observations(
         if call_finishes and completed_at is None:
             add_tool_gap("tool_result_timestamp_missing")
         duration_ms = None
-        if started_at is not None and completed_at is not None and completed_at >= started_at:
-            duration_ms = (completed_at - started_at) * 1000
+        if started_at is not None and completed_at is not None:
+            if completed_at >= started_at:
+                duration_ms = (completed_at - started_at) * 1000
+            else:
+                add_tool_gap("tool_timing_invalid")
+                completed_at = None
         tool_calls.append(
             ToolCallObservation(
                 invocation_id=invocation_id,
@@ -470,24 +474,18 @@ def extract_claude_code_observations(
             invocation_id=invocation_id,
             parent_invocation_id=parent[0] if parent else None,
             spawned_by_tool_call_id=parent[1] if parent else None,
-            status=parent[2] if parent else "unknown",
+            status=(
+                "incomplete"
+                if parent and parent[2] in {"timeout", "cancelled"}
+                else parent[2]
+                if parent
+                else "unknown"
+            ),
             model_calls=model_calls[invocation_id],
             conversation=conversations[invocation_id],
         )
 
-    def order_key(invocation_id: str) -> tuple[tuple[float, str], ...]:
-        path: list[tuple[float, str]] = []
-        seen: set[str] = set()
-        while invocation_id not in seen:
-            seen.add(invocation_id)
-            path.append((first_seen.get(invocation_id, math.inf), invocation_id))
-            parent = parent_by_invocation.get(invocation_id)
-            if parent is None:
-                break
-            invocation_id = parent[0]
-        return tuple(reversed(path))
-
-    ordered_ids = sorted(all_invocation_ids, key=order_key)
+    ordered_ids = sorted(all_invocation_ids, key=lambda invocation_id: (first_seen[invocation_id], invocation_id))
 
     return AgentObservationBundle(
         source=SOURCE,

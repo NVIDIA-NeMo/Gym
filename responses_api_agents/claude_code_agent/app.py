@@ -449,10 +449,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             if claude_config_dir is not None:
                 try:
                     if observation_collector is not None:
-                        try:
-                            await asyncio.to_thread(observation_collector, claude_config_dir)
-                        except Exception:
-                            LOG.exception("failed to collect Claude Code observations")
+                        await asyncio.to_thread(observation_collector, claude_config_dir)
+                except Exception:
+                    LOG.exception("failed to collect Claude Code observations")
                 finally:
                     shutil.rmtree(claude_config_dir, ignore_errors=True)
 
@@ -583,12 +582,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        rollout_id = request.path_params.get("rollout_id") if request is not None else None
-        return await self._create_response(body, rollout_id=rollout_id)
+        return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
-    async def responses_with_observations(
+    async def _create_episode(
         self,
-        request: Optional[Request],
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         mcp_config: Optional[str] = None,
@@ -649,8 +646,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
                 if rollout_id is not None:
-                    episode = await self.responses_with_observations(
-                        request,
+                    episode = await self._create_episode(
                         body.responses_create_params,
                         mcp_config=mcp_config,
                         skills_path=skills_path,
@@ -669,9 +665,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump()
-                | {"response": agent_resp_json}
-                | ({"rollout_id": rollout_id} if rollout_id is not None else {}),
+                json=body.model_dump() | {"response": agent_resp_json},
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
