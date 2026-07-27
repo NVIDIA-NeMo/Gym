@@ -21,8 +21,12 @@ from fastapi import Request, Response
 from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, BaseRunRequest
+from nemo_gym.base_responses_api_agent import (
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
@@ -630,6 +634,16 @@ class BrowserAgent(SimpleResponsesAPIAgent):
         except Exception:
             logger.exception("Error in run")
             raise
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy aggregate_metrics to the resources server."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
 
 if __name__ == "__main__":

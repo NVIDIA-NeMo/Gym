@@ -14,14 +14,16 @@
 import asyncio
 import logging
 import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 from fastapi import FastAPI
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
+from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from resources_servers.browser_gym.browser_pool import BrowserPool
 from resources_servers.browser_gym.schemas import (
     BrowserGymResourcesServerConfig,
@@ -48,6 +50,8 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
     config: BrowserGymResourcesServerConfig
     browser_pool: BrowserPool = Field(default=None, exclude=True)
     _verify_session: Optional[aiohttp.ClientSession] = None
+    _expected_categories_by_gym: Dict[str, Dict[str, Dict[str, str]]] = PrivateAttr(default_factory=dict)
+    _expected_categories_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context):
         super().model_post_init(__context)
@@ -128,6 +132,127 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
                 timeout=aiohttp.ClientTimeout(total=self.config.verify_timeout_seconds),
             )
         return self._verify_session
+
+    @staticmethod
+    def _extract_expected_categories(payload: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+        """Build task -> assertion title -> category mappings from get_expected_state."""
+        mappings: Dict[str, Dict[str, str]] = {}
+        verifiers = payload.get("verifiers")
+        if not isinstance(verifiers, dict):
+            return mappings
+
+        for task_id, verifier in verifiers.items():
+            if not isinstance(verifier, dict):
+                continue
+
+            title_to_category: Dict[str, str] = {}
+            ambiguous_titles = set()
+            for assertion in verifier.get("assertions", []):
+                if not isinstance(assertion, dict):
+                    continue
+                title = assertion.get("title")
+                raw_category = assertion.get("category")
+                category = str(raw_category).strip() if raw_category is not None else ""
+                if not isinstance(title, str) or not title or not category or title in ambiguous_titles:
+                    continue
+                if title in title_to_category and title_to_category[title] != category:
+                    title_to_category.pop(title)
+                    ambiguous_titles.add(title)
+                    continue
+                title_to_category[title] = category
+
+            mappings[str(task_id)] = title_to_category
+
+        return mappings
+
+    async def _get_expected_assertion_categories(
+        self,
+        session: aiohttp.ClientSession,
+        gym_url: str,
+        task_id: str,
+    ) -> Dict[str, str]:
+        """Fetch and cache assertion categories for a task.
+
+        Category lookup is best-effort: verification and reward calculation
+        continue unchanged if the expected-state endpoint is unavailable.
+        """
+        gym_base_url = gym_url.rstrip("/")
+        cached = self._expected_categories_by_gym.get(gym_base_url)
+        if cached is not None:
+            return cached.get(task_id, {})
+
+        lock = self._expected_categories_locks.setdefault(gym_base_url, asyncio.Lock())
+        async with lock:
+            cached = self._expected_categories_by_gym.get(gym_base_url)
+            if cached is not None:
+                return cached.get(task_id, {})
+
+            expected_url = f"{gym_base_url}/api/v1/get_expected_state"
+            try:
+                async with session.get(expected_url) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "Expected-state API returned %s for %s; category mapping skipped",
+                            resp.status,
+                            expected_url,
+                        )
+                        return {}
+                    payload = await resp.json()
+            except Exception as e:
+                logger.warning("Failed to fetch assertion categories from %s: %s", expected_url, e)
+                return {}
+
+            mappings = self._extract_expected_categories(payload)
+            self._expected_categories_by_gym[gym_base_url] = mappings
+            return mappings.get(task_id, {})
+
+    @staticmethod
+    def _apply_assertion_categories(assertions: List[Any], categories_by_title: Dict[str, str]) -> int:
+        """Attach expected-state categories to actual-state assertions by exact title."""
+        matched = 0
+        for assertion in assertions:
+            if not isinstance(assertion, dict) or assertion.get("category"):
+                continue
+            category = categories_by_title.get(assertion.get("title"))
+            if category:
+                assertion["category"] = category
+                matched += 1
+        return matched
+
+    @staticmethod
+    def _category_score_fn(verify_response: Dict[str, Any]) -> Dict[str, float]:
+        """Return overall accuracy plus every category observed on this rollout."""
+        scores = {"accuracy": float(verify_response.get("reward", 0.0))}
+        category_results: Dict[str, List[float]] = defaultdict(list)
+        verification_result = verify_response.get("verification_result") or {}
+        assertions = verification_result.get("assertions", []) if isinstance(verification_result, dict) else []
+
+        for assertion in assertions:
+            if not isinstance(assertion, dict):
+                continue
+            raw_category = assertion.get("category")
+            category = str(raw_category).strip() if raw_category is not None else ""
+            if category:
+                category_results[category].append(1.0 if assertion.get("result") == "pass" else 0.0)
+
+        for category, results in category_results.items():
+            scores[f"category/{category}"] = sum(results) / len(results)
+        return scores
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Report pass metrics for every assertion category present in the rollouts."""
+        return compute_pass_majority_metrics(tasks, score_fn=self._category_score_fn)[0]
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Select overall and dynamically discovered category metrics."""
+        key_metrics = {
+            name: agent_metrics[name]
+            for name in ("mean/reward", "mean/input_tokens", "mean/output_tokens", "mean/total_tokens")
+            if name in agent_metrics
+        }
+        key_metrics.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
+        key_metrics.update(highest_k_metrics(agent_metrics, "pass@{k}"))
+        return key_metrics
 
     async def verify(self, body: CUAVerifyRequest) -> CUAVerifyResponse:
         vm = body.verifier_metadata or {}
@@ -217,6 +342,20 @@ class BrowserGymResourcesServer(SimpleResourcesServer):
             if not assertions:
                 logger.warning("Verification returned no assertions for task_id=%s", task_id)
                 return CUAVerifyResponse(**body.model_dump(), reward=0.0, verification_result=result)
+
+            missing_category_count = sum(
+                1 for assertion in assertions if isinstance(assertion, dict) and not assertion.get("category")
+            )
+            if missing_category_count:
+                categories_by_title = await self._get_expected_assertion_categories(session, gym_url, task_id)
+                matched = self._apply_assertion_categories(assertions, categories_by_title)
+                if categories_by_title and matched < missing_category_count:
+                    logger.warning(
+                        "Mapped categories for %d/%d uncategorized assertions for task_id=%s",
+                        matched,
+                        missing_category_count,
+                        task_id,
+                    )
 
             all_passed = all(a.get("result") == "pass" for a in assertions)
             reward = 1.0 if all_passed else 0.0
