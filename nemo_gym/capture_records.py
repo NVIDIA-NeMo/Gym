@@ -38,7 +38,7 @@ class BaseRolloutRecord(BaseModel):
     rollout_id: str
 
 
-class ModelCallRecord(BaseModel):
+class ModelCallRecord(BaseRolloutRecord):
     """Observability record derived from one captured model-server exchange."""
 
     # HTTP information
