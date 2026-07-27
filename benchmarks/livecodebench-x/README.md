@@ -36,7 +36,7 @@ source the existing monolingual `livecodebench/v5_2408_2502` and
 ## Data Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/livecodebench-x/config.yaml]"
+gym eval prepare --benchmark livecodebench-x
 ```
 
 That writes `benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl`
@@ -47,7 +47,7 @@ have the same characteristic; `code_gen.verify()` already handles it.
 
 For a smaller subset (e.g. one language × one version, ~300 rows) suitable
 for local smoke-testing, invoke the prepare script directly with its argparse
-flags — `ng_prepare_benchmark` calls `prepare()` with no kwargs and so cannot
+flags — `gym eval prepare` calls `prepare()` with no kwargs and so cannot
 forward these:
 
 ```bash
@@ -64,26 +64,32 @@ python benchmarks/livecodebench-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-ng_run "+config_paths=[benchmarks/livecodebench-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --benchmark livecodebench-x \
+    --model-type vllm_model
 ```
 
 Then in another shell:
 
 ```bash
 mkdir -p results/livecodebench-x
-ng_collect_rollouts \
-    "+config_paths=[benchmarks/livecodebench-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-    +agent_name=livecodebench-x_code_gen_simple_agent \
-    +input_jsonl_fpath=benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl \
-    +output_jsonl_fpath=results/livecodebench-x/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic/default.yaml \
-    +num_repeats=4 +num_repeats_add_seed=true \
-    "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 16384}"
+gym eval run --no-serve \
+    --benchmark livecodebench-x \
+    --model-type vllm_model \
+    --agent livecodebench-x_code_gen_simple_agent \
+    --input benchmarks/livecodebench-x/data/livecodebench-x_benchmark.jsonl \
+    --output results/livecodebench-x/rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/prompts/generic/default.yaml \
+    --temperature 1.0 \
+    --top-p 0.95 \
+    --max-output-tokens 16384 \
+    +num_repeats_add_seed=true
 ```
 
-`+config_paths` and `+prompt_config` are required: the prepared JSONL ships
+`--config` and `+prompt_config` are required: the prepared JSONL ships
 raw benchmark rows (no `responses_create_params.input` baked in), and the
-agent's dataset-level `prompt_config` is metadata for `ng_run` only — the
+agent's dataset-level `prompt_config` is metadata for `gym env start` only — the
 rollout CLI needs `+prompt_config=...` directly to apply the prompt template
 before merging `responses_create_params` overrides. `mkdir -p` is needed
-because `ng_collect_rollouts` does not create parent directories.
+because `gym eval run --no-serve` does not create parent directories.

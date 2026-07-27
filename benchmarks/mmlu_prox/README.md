@@ -13,13 +13,16 @@ This benchmark uses the `mcqa` resource server with the `mcqa_simple_agent`.
 
 ```bash
 # Prepare data
-ng_prepare_benchmark "+config_paths=[benchmarks/mmlu_prox/config.yaml]"
+gym eval prepare --benchmark mmlu_prox
 
 # Start servers
-ng_run "+config_paths=[benchmarks/mmlu_prox/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --benchmark mmlu_prox \
+    --model-type vllm_model
 
 # Collect rollouts
-ng_collect_rollouts \
-    "+config_paths=[benchmarks/mmlu_prox/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-    +output_jsonl_fpath=results/mmlu_prox.jsonl
+gym eval run --no-serve \
+    --benchmark mmlu_prox \
+    --model-type vllm_model \
+    --output results/mmlu_prox.jsonl
 ```

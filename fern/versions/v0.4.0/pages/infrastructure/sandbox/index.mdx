@@ -1,0 +1,311 @@
+---
+title: "Sandbox API"
+description: "Use the provider-neutral sandbox module for isolated execution in NeMo Gym agents and environments."
+position: 3
+---
+
+The `nemo_gym.sandbox` module is the provider-neutral interface for creating isolated execution environments, running commands, and moving files in or out of those environments. Agents and resources servers call the same API while provider pages document backend-specific setup, configuration, and isolation properties.
+
+Import caller-facing APIs from the public package boundary:
+
+```python
+from nemo_gym.sandbox import AsyncSandbox, Sandbox, SandboxResources, SandboxSpec
+```
+
+<Note>
+Treat `nemo_gym.sandbox` as the stable caller-facing API. Provider modules under `nemo_gym.sandbox.providers` are implementation details unless you are adding or configuring a provider.
+</Note>
+
+<Cards>
+
+<Card title="OpenSandbox Provider" href="/infrastructure/sandbox/opensandbox">
+Run sandboxes through an OpenSandbox server and SDK.
+
+<Badge minimal outlined>provider</Badge> <Badge minimal outlined>opensandbox</Badge>
+</Card>
+
+<Card title="Apptainer Provider" href="/infrastructure/sandbox/apptainer">
+Run sandboxes as local Apptainer instances on a host or HPC node.
+
+<Badge minimal outlined>provider</Badge> <Badge minimal outlined>apptainer</Badge>
+</Card>
+
+<Card title="Adding a Provider" href="/infrastructure/sandbox/adding-a-provider">
+Implement the `SandboxProvider` protocol and register a new runtime backend.
+
+<Badge minimal outlined>contributors</Badge> <Badge minimal outlined>providers</Badge>
+</Card>
+
+</Cards>
+
+## Install Provider Dependencies
+
+The public API is part of `nemo-gym`. Runtime backends can have optional dependencies, so install the extras or system packages required by the provider you configure in your agent or resources server.
+
+## Core Types
+
+| API | Purpose |
+| --- | --- |
+| `AsyncSandbox` | Async facade for FastAPI servers, async agents, and rollout code. Use this inside async code. |
+| `Sandbox` | Sync facade for synchronous harnesses. It owns a private event loop and rejects calls from an already-running async loop. |
+| `SandboxSpec` | Provider-neutral sandbox creation request. Includes image, TTL, working directory, files, metadata, resources, entrypoint, and provider options. |
+| `SandboxResources` | Typed resource request with CPU, memory, disk, and GPU fields. |
+| `SandboxExecResult` | Command result with `stdout`, `stderr`, `return_code`, and optional `error_type`. |
+| `SandboxStatus` | Provider-neutral lifecycle status: `starting`, `running`, `stopped`, `error`, or `unknown`. |
+| `SandboxCreateError` | Base create-time failure for provider allocation and readiness errors. |
+| `SandboxCreateVerificationError` | Create-time failure raised when a new sandbox cannot pass provider readiness checks. |
+
+## First-Run Example
+
+Create a small local script after your provider is available. Replace the provider name and settings with the backend configured for your environment.
+
+```python
+import asyncio
+
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+
+
+provider_config = {"apptainer": {}}
+
+spec = SandboxSpec(
+    image="docker://python:3.12-slim",
+    ttl_s=1800,
+    ready_timeout_s=300,
+    workdir="/sandbox",
+    files={
+        "/sandbox/hello.py": "print('hello from sandbox')\n",
+    },
+    resources=SandboxResources(cpu=1, memory_mib=1024, disk_gib=5),
+    metadata={"example": "first-run"},
+)
+
+
+async def main() -> None:
+    async with AsyncSandbox(provider_config, spec) as sandbox:
+        await sandbox.start()
+        result = await sandbox.exec("python /sandbox/hello.py", timeout_s=60)
+        print(result.stdout or result.stderr)
+        raise SystemExit(result.return_code)
+
+
+asyncio.run(main())
+```
+
+Run it from your local checkout or application environment:
+
+```bash
+python first_sandbox.py
+```
+
+`exec()` returns a `SandboxExecResult`. Nonzero process exits are reported in `return_code`; providers should reserve exceptions for sandbox runtime failures such as allocation, transport, or lifecycle errors.
+
+## Provider Config Blocks
+
+Agents can refer to a named provider block instead of embedding provider credentials or backend settings in the agent config. The `sandbox_provider` field names a top-level config block, and that block contains exactly one provider key plus optional reserved keys:
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: opensandbox-sdk
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY}
+      protocol: http
+```
+
+The agent then references that block by name:
+
+```yaml
+mini_swe_agent_2:
+  responses_api_agents:
+    mini_swe_agent_2:
+      sandbox_provider: sandbox
+      sandbox_spec:
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        provider_options:
+          platform:
+            os: linux
+            arch: amd64
+```
+
+Every provider config can bind the same name, such as `sandbox`, so swapping backends is swapping the provider config path passed to `gym env start`. If one run needs multiple sandboxes, give each block a distinct name and reference each one separately.
+
+`default_metadata` is merged into `SandboxSpec.metadata` before create. The agent's own `sandbox_spec.metadata` wins on key conflicts.
+
+The helpers used by agents are public:
+
+```python
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+
+
+provider_config = resolve_provider_config("sandbox", global_config_dict)
+provider_metadata = resolve_provider_metadata("sandbox", global_config_dict)
+```
+
+Inline single-key mappings are also accepted when a caller does not use Hydra config:
+
+```python
+provider_config = {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+```
+
+## Lifecycle
+
+`AsyncSandbox` and `Sandbox` are lifecycle objects. Construct one with a provider config and optional `SandboxSpec`, call `start()`, run commands or transfer files, then call `stop()`. Context managers close the provider on exit, but they do not start the sandbox automatically.
+
+```python
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+
+
+spec = SandboxSpec(
+    image="ghcr.io/example/eval-image:py312",
+    ttl_s=18000,
+    ready_timeout_s=1200,
+    workdir="/workspace",
+    resources=SandboxResources(cpu=2, memory_mib=8192, disk_gib=20),
+    metadata={"benchmark": "my-benchmark", "task_id": "task-001"},
+)
+
+async with AsyncSandbox(provider_config, spec) as sandbox:
+    await sandbox.start()
+    result = await sandbox.exec(
+        "python -m pytest -q",
+        timeout_s=600,
+        user="root",
+    )
+    passed = result.return_code == 0
+```
+
+## Sync vs. Async
+
+Use `AsyncSandbox` inside FastAPI handlers, async resources servers, async agents, and rollout collection code.
+
+Use `Sandbox` only in synchronous code, such as a third-party harness adapter that does not expose async hooks.
+
+```python
+from nemo_gym.sandbox import Sandbox, SandboxSpec
+
+
+with Sandbox(provider_config, SandboxSpec(image="ghcr.io/example/eval-image:py312")) as sandbox:
+    sandbox.start()
+    result = sandbox.exec("python --version", timeout_s=30)
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+```
+
+<Warning>
+Do not call `Sandbox` from FastAPI handlers, async resources servers, or async agents. It blocks the caller by design. Use `AsyncSandbox` in async code.
+</Warning>
+
+## SandboxSpec Fields
+
+`SandboxSpec` is intentionally provider-neutral. Providers map these fields onto their own runtime primitives.
+
+| Field | Description |
+| --- | --- |
+| `image` | Container image to create. |
+| `ttl_s` | Sandbox lifetime in seconds, when supported by the provider. |
+| `ready_timeout_s` | Time to wait for sandbox readiness. |
+| `workdir` | Default working directory for `exec()` calls. |
+| `env` | Environment variables injected into the sandbox. Forward only values required by the task. |
+| `files` | Text files to upload at startup, keyed by remote target path. |
+| `metadata` | String metadata for tracing, debugging, and backend labels. Providers may normalize values for their runtime. |
+| `resources` | `SandboxResources` or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. |
+| `entrypoint` | Optional container entrypoint override. |
+| `provider_options` | Provider-specific options that do not fit the common schema. |
+
+You can pass resources as either a `SandboxResources` instance or a mapping:
+
+```python
+spec = SandboxSpec(
+    image="ghcr.io/example/eval-image:py312",
+    resources={
+        "cpu": 2,
+        "memory_mib": 8192,
+        "disk_gib": 20,
+    },
+)
+```
+
+Unknown resource keys raise a `ValueError`, which catches config drift early.
+
+## Startup Files and File Transfer
+
+Use `files` for small text files that should exist before the first command runs:
+
+```python
+spec = SandboxSpec(
+    image="ghcr.io/example/eval-image:py312",
+    workdir="/workspace",
+    files={
+        "/workspace/input.txt": "hello\n",
+    },
+)
+```
+
+Use `upload()` and `download()` for local files:
+
+```python
+await sandbox.upload(local_path, "/workspace/archive.tar.gz")
+await sandbox.download("/workspace/log.txt", output_path)
+```
+
+`upload()` and `download()` operate on files. If you need structured values, serialize them locally before uploading and parse the downloaded file locally after the sandbox command completes.
+
+## Status and Cleanup
+
+Call `status()` when a runner needs to distinguish a stopped sandbox from a provider error:
+
+```python
+status = await sandbox.status()
+if status.value == "error":
+    ...
+```
+
+Always stop sandboxes in cleanup paths. `stop()` is idempotent on the public facade and closes provider-scoped resources after ending the sandbox lifecycle.
+
+```python
+sandbox = AsyncSandbox(provider_config, spec)
+try:
+    await sandbox.start()
+    result = await sandbox.exec("pytest -q", timeout_s=600)
+finally:
+    await sandbox.stop()
+```
+
+## Image Rewrites
+
+Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.
+
+```python
+from nemo_gym.sandbox import rewrite_image
+
+
+image = rewrite_image(
+    "docker.io/library/python:3.12-slim",
+    [{"from": "docker.io/", "to": "mirror.example.com/dockerhub/"}],
+)
+```
+
+Rewrites are ordered. The first matching `from` prefix wins.
+
+## Error Handling
+
+Sandbox create failures use provider-neutral exception classes:
+
+- `SandboxCreateError` for sandbox allocation or readiness failures.
+- `SandboxCreateVerificationError` when a created sandbox fails Gym readiness verification.
+
+In resources servers and agents, catch these errors close to the sandbox operation and return a meaningful verifier or rollout error. Do not let one bad sandbox allocation crash a long-running server.
+
+```python
+from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError
+
+
+sandbox = AsyncSandbox(provider_config, spec)
+try:
+    await sandbox.start()
+except SandboxCreateError as error:
+    return {"reward": 0.0, "error": f"sandbox_create_failed: {error}"}
+```

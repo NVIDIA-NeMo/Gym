@@ -1,0 +1,1 @@
+user: "{question}\n{options_text}\nRespond with the correct choice in <choice></choice> tags, exactly as it is written above."

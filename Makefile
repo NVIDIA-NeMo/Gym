@@ -15,7 +15,7 @@ PUBLISH_WORKFLOW := Publish Fern Docs
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-        docs docs-check docs-preview docs-publish docs-login docs-generate-library
+        docs docs-check docs-preview docs-publish docs-login docs-login-remote docs-generate-library
 
 help:
 	@echo ""
@@ -80,7 +80,14 @@ docs-login:
 		*) echo ""; echo "Bailing. Open the dashboard URL above, sign in, then re-run 'make docs-login'."; exit 1 ;; \
 	esac
 	@echo ""
-	npx -y fern-api@latest login
+	npx -y fern-api@latest login $(LOGIN_FLAGS)
+
+# Same as docs-login, but uses Fern's device-code flow instead of opening a
+# browser locally — needed on headless remote machines (SSH dev boxes, etc.)
+# where the OAuth callback can't reach a browser. Prints a URL + short code
+# you complete on your laptop.
+docs-login-remote: LOGIN_FLAGS := --device-code
+docs-login-remote: docs-login
 
 # Local-only preview. `fern docs md generate` populates fern/product-docs/ from
 # the nemo_gym package source (declared under `libraries:` in fern/docs.yml);

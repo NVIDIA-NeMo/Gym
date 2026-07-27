@@ -242,7 +242,11 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             ]
 
             if not all_fn_calls and all_output_messages:
-                break
+                # Match vals-ai/finance-agent eval (get_agent.py _before_query +
+                # _should_stop=False): inject "Continue." instead of breaking so
+                # the model keeps looping until submit_final_result or max_steps.
+                new_outputs.append(NeMoGymEasyInputMessage(role="user", content="Continue."))
+                continue
 
             done = False
             for output_function_call in all_fn_calls:

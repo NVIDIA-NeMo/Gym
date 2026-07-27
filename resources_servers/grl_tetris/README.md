@@ -12,18 +12,19 @@ GRL Tetris environment in Gymnasium style. The model emits one or more `<action>
 Start NeMo Gym servers
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml,\
-resources_servers/grl_tetris/configs/grl_tetris.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --config responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml \
+    --resources-server grl_tetris
 ```
 
 Collect trajectories:
 ```bash
-ng_collect_rollouts +agent_name=grl_tetris_gymnasium_agent \
-    +input_jsonl_fpath=resources_servers/grl_tetris/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/grl_tetris/data/example_rollouts.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent grl_tetris_gymnasium_agent \
+    --input resources_servers/grl_tetris/data/example.jsonl \
+    --output resources_servers/grl_tetris/data/example_rollouts.jsonl \
+    --limit 5
 ```
 
 

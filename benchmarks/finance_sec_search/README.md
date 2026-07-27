@@ -27,13 +27,13 @@ server's `/prompt_templates`.
 Without web search:
 
 ```bash
-ng_prepare_benchmark '+config_paths=[benchmarks/finance_sec_search/config_no_web_search.yaml]'
+gym eval prepare --benchmark finance_sec_search/config_no_web_search
 ```
 
 With web search (requires `tavily_api_key` in `env.yaml`):
 
 ```bash
-ng_prepare_benchmark '+config_paths=[benchmarks/finance_sec_search/config_web_search.yaml]'
+gym eval prepare --benchmark finance_sec_search/config_web_search
 ```
 
 Downloads `public.csv` from the Vals AI GitHub repo and writes benchmark
@@ -47,16 +47,16 @@ JSONL to `data/`.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/finance_sec_search/config_no_web_search.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark finance_sec_search/config_no_web_search
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=finance_sec_search_benchmark_agent \
-    +input_jsonl_fpath=benchmarks/finance_sec_search/data/finance_sec_search_benchmark.jsonl \
-    +output_jsonl_fpath=results/finance_sec_search_rollouts.jsonl
+gym eval run --no-serve \
+    --agent finance_sec_search_benchmark_agent \
+    --input benchmarks/finance_sec_search/data/finance_sec_search_benchmark.jsonl \
+    --output results/finance_sec_search_rollouts.jsonl
 ```

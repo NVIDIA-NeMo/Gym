@@ -12,11 +12,15 @@ All third-party software is used as obtained, without modification, unless other
 | **Datasets** | Dataset loading library | Apache-2.0 | Hugging Face | https://github.com/huggingface/datasets |
 | **FastAPI** | Python web framework | MIT | Sebastián Ramírez | https://github.com/tiangolo/fastapi |
 | **Hydra-core** | Configuration management | MIT | Facebook Research | https://github.com/facebookresearch/hydra |
+| **Harvey LAB** | Legal agent benchmark and document skills (modified runtime, pinned at `f46ef86e4788545622db25dcffa3aebb7a139929`) | MIT | Harvey AI | https://github.com/harveyai/harvey-labs |
 | **MLflow** | Experiment tracking | Apache-2.0 | Databricks Inc. | https://github.com/mlflow/mlflow |
 | **Math-Verify** | Math reasoning verifier | Apache-2.0 | Hugging Face | https://github.com/huggingface/Math-Verify |
+| **MCP Python SDK** | Model Context Protocol SDK | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/python-sdk |
 | **OmegaConf** | Config library | BSD-3-Clause | Omry Yadan | https://github.com/omry/omegaconf |
 | **OpenAI Python** | API client | Apache-2.0 | OpenAI | https://github.com/openai/openai-python |
+| **PinchBench** | Agentic benchmark (cloned & patched at image build) | MIT | PinchBench | https://github.com/pinchbench/skill |
 | **spaCy Model (en_core_web_sm)** | NLP embedding model | MIT | Explosion AI | https://github.com/explosion/spacy-models/releases/tag/en_core_web_sm-3.8.0 |
+| **IFEval (vendored)** | Instruction-following rule checkers (`resources_servers/iheval/ifeval/`) — verbatim from IHEval (`src/rule_following/evaluate/`), which adapts Google Research's IFEval; kept unmodified aside from an added license header. See `resources_servers/iheval/ifeval/PROVENANCE.md`. | Apache-2.0 | Google Research / ytyz1307zzh | https://github.com/ytyz1307zzh/IHEval |
 | **Uvicorn** | ASGI server | BSD-3-Clause | Encode OSS Ltd. | https://github.com/encode/uvicorn |
 | **uvloop** | Async event loop | Apache-2.0 OR MIT | MagicStack Inc. | https://github.com/MagicStack/uvloop |
 

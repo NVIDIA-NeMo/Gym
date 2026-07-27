@@ -16,17 +16,17 @@ server.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/global-piqa/config.yaml]"
+gym eval prepare --benchmark global-piqa
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/global-piqa/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark global-piqa
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=global_piqa_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/global-piqa/data/global-piqa_benchmark.jsonl \
-    +output_jsonl_fpath=results/global-piqa/rollouts.jsonl \
-    +prompt_config=benchmarks/global-piqa/prompts/default.yaml
+gym eval run --no-serve \
+    --agent global_piqa_mcqa_simple_agent \
+    --input benchmarks/global-piqa/data/global-piqa_benchmark.jsonl \
+    --output results/global-piqa/rollouts.jsonl \
+    --prompt-config benchmarks/global-piqa/prompts/default.yaml
 ```

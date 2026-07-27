@@ -1,0 +1,21 @@
+# Chain to the BunsenBench Chemistry MCQ resource server + simple agent config.
+config_paths:
+  - resources_servers/bunsenbench_chemistry_mcq/configs/bunsenbench_chemistry_mcq.yaml
+
+bunsenbench_chemistry_mcq_resources_server:
+  _inherit_from: bunsenbench_chemistry_mcq
+
+bunsenbench_chemistry_mcq_benchmark_simple_agent:
+  _inherit_from: bunsenbench_chemistry_mcq_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: bunsenbench_chemistry_mcq_resources_server
+      datasets:
+      - name: bunsenbench_chemistry_mcq
+        type: benchmark
+        jsonl_fpath: benchmarks/bunsenbench_chemistry_mcq/data/bunsenbench_chemistry_mcq_benchmark.jsonl
+        prompt_config: benchmarks/bunsenbench_chemistry_mcq/prompts/default.yaml
+        prepare_script: benchmarks/bunsenbench_chemistry_mcq/prepare.py
+        license: TBD
+        num_repeats: 8

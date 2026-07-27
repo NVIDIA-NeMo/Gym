@@ -45,10 +45,10 @@ The `example.jsonl` file contains 3 synthetic tasks for quick testing:
 
 **Usage:**
 ```bash
-ng_collect_rollouts \
-  +agent_name=multichallenge_simple_agent \
-  +input_jsonl_fpath=resources_servers/multichallenge/data/example.jsonl \
-  +output_jsonl_fpath=/tmp/test_rollouts.jsonl
+gym eval run --no-serve \
+  --agent multichallenge_simple_agent \
+  --input resources_servers/multichallenge/data/example.jsonl \
+  --output /tmp/test_rollouts.jsonl
 ```
 
 ## Raw JSON Format
@@ -106,7 +106,7 @@ Each line in the JSONL file:
 **Key transformations:**
 - `thinking` role messages are **excluded** from `responses_create_params.input`
 - `context` is a pre-formatted string for the LLM judge (also excludes thinking)
-- `responses_create_params` wrapper is required by `ng_collect_rollouts`
+- `responses_create_params` wrapper is required by `gym eval run`
 - `metadata` preserves full original data for reference
 
 ## Regenerating JSONL Files

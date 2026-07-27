@@ -1,0 +1,26 @@
+# Generic local vLLM deployment. Serves the checkpoint passed via `--model <HF id or path>`
+# (i.e. `policy_model_name`). Set parallelism to match your node before running.
+#
+# Example:
+#   gym eval run --benchmark aime24 --model-type local_vllm_model --model Qwen/Qwen3-30B-A3B-Instruct-2507
+policy_model:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+
+      # If your model is downloaded at ~/.cache/huggingface/hub/models--<org>--<model>, set hf_home to ~/.cache/huggingface.
+      hf_home: null
+
+      vllm_serve_env_vars: {}
+
+      # vLLM parallelism is sensitive; tensor_parallel_size * pipeline_parallel_size GPUs are used per model instance.
+      # Override per node, e.g. `++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=8`.
+      vllm_serve_kwargs:
+        data_parallel_size: 1
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+        trust_remote_code: true
+        gpu_memory_utilization: 0.9
