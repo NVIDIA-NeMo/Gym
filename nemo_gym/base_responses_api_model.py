@@ -244,7 +244,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         try:
             response = await self.chat_completions(body)
             request.state.model_call_record_dict["response"] = _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_response(
-                body, response
+                request.state.model_call_record_dict["request"], response
             )
             request.state.model_call_record_dict["raw_response"] = response.model_dump()
             request.state.model_call_record_dict["error_response"] = None
