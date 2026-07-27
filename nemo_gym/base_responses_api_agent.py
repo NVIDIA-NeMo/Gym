@@ -57,8 +57,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # Setup the capture middleware for model calls.
         self.setup_call_capture_middleware(app)
         if self._capture_config.should_capture_calls:
-            app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
-            app.post(f"/run/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.run_with_call_capture)
+            app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses)
+            app.post(f"/run/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.run)
 
         app.post("/v1/responses")(self.responses)
         # Prefixed twin of /v1/responses: a self-call made with url_path_for_run() lands here, and
@@ -111,21 +111,3 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
         )
-
-    async def responses_with_call_capture(
-        self,
-        rollout_id: str,
-        request: Request,
-        response: Response,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-    ) -> NeMoGymResponse:
-        params = {"body": body}
-        self._maybe_inject_request(self.responses, request, response, params)
-        return await self.responses(**params)
-
-    async def run_with_call_capture(
-        self, rollout_id: str, request: Request, response: Response, body: BaseRunRequest = Body()
-    ) -> BaseVerifyResponse:
-        params = {"body": body}
-        self._maybe_inject_request(self.run, request, response, params)
-        return await self.run(**params)
