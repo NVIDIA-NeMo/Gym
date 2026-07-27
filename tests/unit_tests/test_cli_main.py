@@ -603,6 +603,8 @@ class TestEvalReverifyFlags:
             (["--overwrite"], "+overwrite=true"),
             (["--resume"], "+resume_from_cache=true"),
             (["--disable-aggregation"], "+disable_aggregation=true"),
+            (["--judge-failed-only"], "+judge_failed_only=true"),
+            (["--append"], "+append=true"),
         ],
     )
     def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
@@ -637,6 +639,7 @@ class TestEvalReverifyFlags:
                 "--overwrite",
                 "--resume",
                 "--disable-aggregation",
+                "--judge-failed-only",
             ],
         )
         assert set(overrides) == {
@@ -649,6 +652,7 @@ class TestEvalReverifyFlags:
             "+overwrite=true",
             "+resume_from_cache=true",
             "+disable_aggregation=true",
+            "+judge_failed_only=true",
         }
 
 

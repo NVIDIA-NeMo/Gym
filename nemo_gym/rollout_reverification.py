@@ -19,11 +19,11 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import orjson
 from omegaconf import DictConfig
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
@@ -50,6 +50,19 @@ from nemo_gym.server_utils import (
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     setup_server_client,
+)
+
+
+# Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
+JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
+
+# Printed at the start of a `--judge-failed-only` run.
+_RECOVERY_TWO_SOURCES_WARNING = (
+    "WARNING: judge-failed-only recovery merges rewards from TWO sources — the successful rollouts in "
+    "--rollouts were scored by the ORIGINAL run's verifier/judge, while the recovered rows are scored by the "
+    "CURRENT verification config. If any crucial parameter (judge model, judge prompt/params, verifier config, "
+    "etc.) changed between the original run and this recovery, the merged rewards are inconsistent. Ensure the "
+    "verification config matches the original run."
 )
 
 
@@ -104,6 +117,32 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
             "are skipped; only the remaining rows are re-verified and appended."
         ),
     )
+    judge_failed_only: bool = Field(
+        default=False,
+        description=(
+            "Failure-recovery mode: carry the SUCCESSFUL rollouts (rollouts_jsonl_fpath) through unchanged "
+            "and re-verify ONLY the run's previously judge-failed rollouts, read from the failures sidecar "
+            "auto-derived next to rollouts_jsonl_fpath (`<rollouts_stem>_failures.jsonl`)."
+        ),
+    )
+    append: bool = Field(
+        default=False,
+        description=(
+            "Recovery-only: append the re-verified judge-failure results to an EXISTING output file instead of "
+            "seeding the successful rollouts into a fresh output. Use to add the recovered rows directly onto a "
+            "file that already holds the successes (e.g. point --output at the run's rollouts file). The output "
+            "is opened in append mode (never cleared) and already-present keys are skipped, so re-running is "
+            "idempotent. Only valid together with judge_failed_only=true, and mutually exclusive with overwrite."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_append(self) -> "RolloutReverificationConfig":
+        if self.append and not self.judge_failed_only:
+            raise ValueError("`append` is only valid together with `judge_failed_only` (pass --judge-failed-only).")
+        if self.append and self.overwrite:
+            raise ValueError("`append` and `overwrite` are mutually exclusive: one appends, the other clears.")
+        return self
 
 
 @dataclass
@@ -277,6 +316,59 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
 
 
 # ---------------------------------------------------------------------------
+# Judge-failure recovery (`--judge-failed-only`): re-verify only the previously
+# judge-failed rollouts from the failures sidecar and merge them back with the
+# already-successful rollouts (seeded into the output) so the aggregate metrics
+# cover the union — identical to a clean run, with no inference re-run.
+# ---------------------------------------------------------------------------
+
+
+def _is_judge_failure(row: Dict[str, Any]) -> bool:
+    """Whether a failures-sidecar row is a judge failure (the only recoverable class)."""
+    return row.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED_FAILURE_CLASS
+
+
+def _recovery_rollout_predicate() -> Callable[[Dict[str, Any]], bool]:
+    """Build the row filter for `--judge-failed-only` recovery.
+
+    Keeps only judge-class failures and dedups on `(task, rollout)` so a sidecar with multiple failure attempts for one key
+    re-verifies it exactly once.
+    """
+    seen: set[tuple[Any, Any]] = set()
+
+    def predicate(row: Dict[str, Any]) -> bool:
+        if not _is_judge_failure(row):
+            return False
+        key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
+
+    return predicate
+
+
+def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> None:
+    """Copy the already-successful rollout rows into the output file so the final aggregate covers
+    successes + recovered rows. Idempotent: a success whose (task, rollout) key is already present in
+    the output is skipped."""
+    existing: set[tuple[int, int]] = set()
+    if output_fpath.exists():
+        with output_fpath.open("rb") as f:
+            existing = {key for line in f if (key := _parse_output_line_key(line)) is not None}
+    count = 0
+    with successes_fpath.open("rb") as src, output_fpath.open("ab") as dst:
+        for line in src:
+            if not line.strip():
+                continue
+            if (key := _parse_output_line_key(line)) is not None and key in existing:
+                continue
+            dst.write(line if line.endswith(b"\n") else line + b"\n")
+            count += 1
+    print(f"Recovery mode: seeded {count} successful rollout(s) into {output_fpath}")
+
+
+# ---------------------------------------------------------------------------
 # Functions used by the main RolloutReverificationHelper in the reverification process:
 # Yielding InputRolloutPair objects to be re-verified
 # Preparing the payloads from them (by skipping rows that are already in the cache and some formatting)
@@ -285,22 +377,30 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
 
 
 def _yield_inputs_and_rollouts_paired(
-    materialized_inputs_jsonl_fpath: Path, rollouts_jsonl_fpath: Path, limit: Optional[int] = None
+    materialized_inputs_jsonl_fpath: Path,
+    rollouts_jsonl_fpath: Path,
+    limit: Optional[int] = None,
+    rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> "Iterator[InputRolloutPair]":
     inputs_by_key = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
         for line in m_f:
             r = orjson.loads(line)
             inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
+    # `limit` bounds the number of pairs actually YIELDED (post-predicate)
+    n_yielded = 0
     with open(rollouts_jsonl_fpath) as r_f:
-        for i, line in tqdm(enumerate(r_f), desc="Reading rollouts"):  # never holds the whole file
-            if limit is not None and i >= limit:
+        for line in tqdm(r_f, desc="Reading rollouts"):  # never holds the whole file
+            if limit is not None and n_yielded >= limit:
                 break
             rollout_row = orjson.loads(line)
+            if rollout_predicate is not None and not rollout_predicate(rollout_row):
+                continue
             input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
             if input_row is None:
                 raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
             yield InputRolloutPair(input=input_row, rollout=rollout_row)
+            n_yielded += 1
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
@@ -313,20 +413,24 @@ def _prepare_payloads(
     output_fpaths: OutputPaths,
     resume_from_cache: bool,
     limit: Optional[int] = None,
+    rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> List[Dict]:
     all_payloads = [
         _build_verify_payload(pair)
         for pair in _yield_inputs_and_rollouts_paired(
-            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit
+            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit, rollout_predicate=rollout_predicate
         )
     ]
     if resume_from_cache:
         cache = _load_cache_keys_by_status(output_fpaths)
         payloads = list(_drop_cache_from_payloads(all_payloads, cache))
         summarize_cache_usage(cache, all_payloads, payloads)
-        return payloads
+        prepared_payloads = payloads
     else:
-        return all_payloads
+        prepared_payloads = all_payloads
+    if not prepared_payloads:
+        print("WARNING: Nothing to be re-verified.")
+    return prepared_payloads
 
 
 def _run_verification_payloads(
@@ -390,11 +494,13 @@ async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[
 async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[str]:
     """Check reverify_mode for every RS in the config before reverification starts.
 
-    Returns a warning string when force=True and at least one RS is UNSUPPORTED or UNKNOWN (caller must
+    Returns a warning string when the user runs full re-verification (not judge-failed-only) and force=True and at least one RS is UNSUPPORTED or UNKNOWN (caller must
     print it and apply the unsafe_ output prefix).
     Raises ConfigError when force=False and at least one RS is UNSUPPORTED or UNKNOWN.
     Returns None when all RS are STATELESS.
     """
+    if config.judge_failed_only:
+        return None
     server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
     non_stateless_rs = await _check_reverify_mode(server_client, agent_to_rs)
@@ -509,15 +615,19 @@ async def _call_aggregate_metrics(
 
 
 def _prepare_output_fpaths(
-    output_name_prefix: str, output_jsonl_fpath: str, resume_from_cache: bool, overwrite: bool
+    output_name_prefix: str,
+    output_jsonl_fpath: str,
+    resume_from_cache: bool,
+    overwrite: bool,
+    append: bool,
 ) -> OutputPaths:
     output_fpath = Path(output_jsonl_fpath)
     output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
     failures_fpath = failures_path_for(output_fpath)
-    if not resume_from_cache:
+    if not (append or resume_from_cache):
         # A fresh run must not silently clobber a prior run's rollouts: delete only when the user
-        # explicitly opts in via overwrite, otherwise refuse. resume_from_cache reuses the file.
+        # explicitly opts in via overwrite, otherwise refuse. resume_from_cache and append reuse the file.
         for fpath in (output_fpath, failures_fpath):
             if not fpath.exists():
                 continue
@@ -557,20 +667,31 @@ class RolloutReverificationHelper(BaseModel):
             output_name_prefix = ""
 
         output_fpaths = _prepare_output_fpaths(
-            output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache, config.overwrite
+            output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache, config.overwrite, config.append
         )
         materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
         rollouts_jsonl_fpath = _resolve_under_cwd_or_install(
             config.rollouts_jsonl_fpath
         )  # rollouts are inputs for the verification
 
+        reverify_source_fpath = rollouts_jsonl_fpath
+        rollout_predicate = None
+
+        if config.judge_failed_only:
+            print(_RECOVERY_TWO_SOURCES_WARNING)
+            reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
+            _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
+            rollout_predicate = _recovery_rollout_predicate()
+
         payloads_to_reverify = _prepare_payloads(
             materialized_inputs_jsonl_fpath,
-            rollouts_jsonl_fpath,
+            reverify_source_fpath,
             output_fpaths,
             config.resume_from_cache,
             config.limit,
+            rollout_predicate=rollout_predicate,
         )
+
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")

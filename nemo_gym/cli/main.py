@@ -623,6 +623,18 @@ COMMANDS = {
                 "disable_aggregation",
                 "Skip the post-reverification aggregate-metrics computation and file write.",
             ),
+            _bool_flag(
+                "judge-failed-only",
+                "judge_failed_only",
+                "Failure-recovery: carry successful rollouts through unchanged and re-verify only the run's "
+                "previously judge-failed rollouts (auto-read from <rollouts_stem>_failures.jsonl).",
+            ),
+            _bool_flag(
+                "append",
+                "append",
+                "With --judge-failed-only: append recovered results to an existing --output (never cleared) "
+                "instead of seeding successes into a fresh file.",
+            ),
         ),
     ),
     "eval profile": Command(
