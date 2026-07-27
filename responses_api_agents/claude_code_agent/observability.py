@@ -10,7 +10,7 @@ import math
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
@@ -149,12 +149,10 @@ def _tool_call(tool_call_id: str, block: dict[str, Any]) -> NeMoGymResponseFunct
     )
 
 
-def _tool_result(event: dict[str, Any], block: dict[str, Any]) -> NeMoGymFunctionCallOutput:
-    event_id = event.get("uuid")
+def _tool_result(block: dict[str, Any]) -> NeMoGymFunctionCallOutput:
     return NeMoGymFunctionCallOutput(
         call_id=block["tool_use_id"],
         output=_text(block.get("content")),
-        id=event_id if isinstance(event_id, str) else None,
         status="completed",
     )
 
@@ -207,6 +205,9 @@ def extract_claude_code_observations(
     config_dir: Path,
     *,
     model_ref: ModelServerRef | None = None,
+    root_status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown",
+    root_duration_ms: float | None = None,
+    root_error_type: str | None = None,
 ) -> AgentObservationBundle:
     """Extract exact relationships available in one ``CLAUDE_CONFIG_DIR``.
 
@@ -375,7 +376,7 @@ def extract_claude_code_observations(
                             add_gap("tool_result_id_missing")
                             continue
                         tool_status = _status(block, result_metadata)
-                        items.append(_tool_result(event, block))
+                        items.append(_tool_result(block))
                         finishes[(invocation_id, tool_call_id)].append(
                             (_timestamp(event.get("timestamp")), tool_status)
                         )
@@ -468,19 +469,27 @@ def extract_claude_code_observations(
     invocations_by_id: dict[str, AgentInvocation] = {}
     for invocation_id in all_invocation_ids:
         parent = parent_by_invocation.get(invocation_id)
-        if parent is None:
+        is_root = parent is None and invocation_id not in agent_invocations
+        if parent is None and (not is_root or root_status == "unknown"):
             gaps.append(_gap("invocation_outcome_unavailable", invocation_id=invocation_id))
+        status = "unknown"
+        duration_ms = None
+        error_type = None
+        if is_root:
+            status = root_status
+            duration_ms = root_duration_ms
+            error_type = root_error_type
+        elif parent is not None:
+            status = "incomplete" if parent[2] in {"timeout", "cancelled"} else parent[2]
+            if parent[2] in {"failed", "timeout", "cancelled"}:
+                error_type = parent[2]
         invocations_by_id[invocation_id] = AgentInvocation(
             invocation_id=invocation_id,
             parent_invocation_id=parent[0] if parent else None,
             spawned_by_tool_call_id=parent[1] if parent else None,
-            status=(
-                "incomplete"
-                if parent and parent[2] in {"timeout", "cancelled"}
-                else parent[2]
-                if parent
-                else "unknown"
-            ),
+            status=status,
+            duration_ms=duration_ms,
+            error_type=error_type,
             model_calls=model_calls[invocation_id],
             conversation=conversations[invocation_id],
         )

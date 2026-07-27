@@ -8,6 +8,7 @@ from typing import TypeVar
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import NeMoGymFunctionCallOutput
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -146,13 +147,20 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
         ),
     )
 
-    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    bundle = extract_claude_code_observations(
+        tmp_path,
+        model_ref=MODEL_REF,
+        root_status="completed",
+        root_duration_ms=5000,
+    )
 
     invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
     assert set(invocations) == {session, child, grandchild}
     root_invocation = invocations[session]
     child_invocation = invocations[child]
     grandchild_invocation = invocations[grandchild]
+    assert root_invocation.status == "completed"
+    assert root_invocation.duration_ms == 5000
     assert child_invocation.parent_invocation_id == session
     assert child_invocation.spawned_by_tool_call_id == "tool-child"
     assert grandchild_invocation.parent_invocation_id == child
@@ -172,6 +180,7 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
         "function_call_output",
         "function_call_output",
     ]
+    assert all(item.id is None for item in root_invocation.conversation if isinstance(item, NeMoGymFunctionCallOutput))
 
     timings = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
     assert timings["tool-fast"].duration_ms == pytest.approx(1000)
@@ -179,7 +188,7 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
     assert timings["tool-grandchild"].duration_ms == pytest.approx(1000)
     assert timings["tool-grandchild"].status == "timeout"
     assert all(tool.timing_source == "artifact" for tool in timings.values())
-    assert [(gap.code, gap.invocation_id) for gap in bundle.gaps] == [("invocation_outcome_unavailable", session)]
+    assert bundle.gaps == []
 
 
 def test_extracts_explicit_compaction_markers(tmp_path: Path) -> None:
