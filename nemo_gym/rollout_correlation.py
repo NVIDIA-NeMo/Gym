@@ -33,20 +33,19 @@ _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", defau
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
     """Build the capture key stamped by rollout collection."""
-    if isinstance(body, BaseModel):
-        data = body.model_dump()
-    elif isinstance(body, Mapping):
-        data = body
-    else:
+    if not isinstance(body, (BaseModel, Mapping)):
         return None
 
-    task = data.get(TASK_INDEX_KEY_NAME)
-    rollout = data.get(ROLLOUT_INDEX_KEY_NAME)
+    def field(key: str) -> Any:
+        return body.get(key) if isinstance(body, Mapping) else getattr(body, key, None)
+
+    task = field(TASK_INDEX_KEY_NAME)
+    rollout = field(ROLLOUT_INDEX_KEY_NAME)
     if task is None or rollout is None:
         return None
 
     rollout_id = f"{task}-{rollout}"
-    attempt = data.get(ATTEMPT_INDEX_KEY_NAME)
+    attempt = field(ATTEMPT_INDEX_KEY_NAME)
     if attempt is not None and int(attempt) > 0:
         rollout_id = f"{rollout_id}-a{int(attempt)}"
     return rollout_id

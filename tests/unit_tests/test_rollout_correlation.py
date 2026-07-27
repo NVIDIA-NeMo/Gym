@@ -38,6 +38,7 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.server_utils import ServerClient, get_response_json
 
 
@@ -78,6 +79,19 @@ def _model_app(capture_dir, name: str) -> FastAPI:
 
 
 class _JudgeResourcesServer(SimpleResourcesServer):
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/tool")(self.tool)
+        return app
+
+    async def tool(self, body: dict = Body()) -> dict:
+        tool_model = await self.server_client.post(
+            server_name="tool_model",
+            url_path="/v1/responses",
+            json={"input": body["input"]},
+        )
+        return await get_response_json(tool_model)
+
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         judge = await self.server_client.post(
             server_name="judge",
@@ -103,6 +117,12 @@ class _Agent(SimpleResponsesAPIAgent):
             json=body.responses_create_params,
         )
         response = orjson.loads(await policy.read())
+        tool = await self.server_client.post(
+            server_name="resources",
+            url_path="/tool",
+            json={"input": "lookup"},
+        )
+        await get_response_json(tool)
         verify = await self.server_client.post(
             server_name="resources",
             url_path="/verify",
@@ -132,6 +152,7 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
         {
             "observability_enabled": True,
             "policy": {"responses_api_models": {"model": {"host": "policy.test", "port": 80}}},
+            "tool_model": {"responses_api_models": {"model": {"host": "tool-model.test", "port": 80}}},
             "judge": {"responses_api_models": {"model": {"host": "judge.test", "port": 80}}},
             "resources": {"resources_servers": {"judge": {"host": "resources.test", "port": 80}}},
             "agent": {"responses_api_agents": {"agent": {"host": "agent.test", "port": 80}}},
@@ -161,6 +182,7 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
     )
     clients = {
         "policy.test": TestClient(_model_app(capture_dir, "policy")),
+        "tool-model.test": TestClient(_model_app(capture_dir, "tool_model")),
         "judge.test": TestClient(_model_app(capture_dir, "judge")),
         "resources.test": TestClient(resources.setup_webserver()),
         "agent.test": TestClient(agent.setup_webserver()),
@@ -188,7 +210,7 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
     capture_path = store.path_for("4-2")
     assert capture_path.is_file()
     exchanges = store.read("4-2")
-    assert [exchange["model_ref"]["name"] for exchange in exchanges] == ["policy", "judge"]
+    assert [exchange["model_ref"]["name"] for exchange in exchanges] == ["policy", "tool_model", "judge"]
     assert all(exchange.get("request") is not None or exchange.get("request_raw") for exchange in exchanges)
     assert all(exchange.get("response") is not None or exchange.get("response_raw") for exchange in exchanges)
 
@@ -196,3 +218,19 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
     merge_model_call_capture_into_record(rollout, [capture_dir])
     assert capture_path.is_file()
     assert len(capture_path.read_bytes()) > 0
+
+
+def test_rollout_id_does_not_serialize_run_body() -> None:
+    class UndumpableRunRequest(_AgentRunRequest):
+        def model_dump(self, *args, **kwargs):
+            raise AssertionError("run body must not be serialized")
+
+    body = UndumpableRunRequest.model_validate(
+        {
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 2,
+            "responses_create_params": {"input": "solve"},
+        }
+    )
+
+    assert maybe_rollout_id_from_run_body(body) == "4-2"
