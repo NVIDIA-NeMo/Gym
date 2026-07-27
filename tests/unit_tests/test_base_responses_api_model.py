@@ -30,11 +30,11 @@ from pydantic import BaseModel, ConfigDict
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModel,
     BaseResponsesAPIModelConfig,
-    CaptureStore,
     ModelCallRecord,
     SimpleResponsesAPIModel,
     maybe_rollout_id_from_run_body,
 )
+from nemo_gym.capture_records import CaptureStore
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (

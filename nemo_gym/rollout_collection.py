@@ -34,10 +34,9 @@ from wandb import Table
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
-    CaptureStore,
-    ModelCallCaptureConfig,
     maybe_rollout_id_from_run_body,
 )
+from nemo_gym.capture_records import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,

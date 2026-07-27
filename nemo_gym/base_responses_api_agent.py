@@ -24,7 +24,8 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, maybe_rollout_id_from_run_body
+from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+from nemo_gym.capture_records import ModelCallCaptureConfig
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.openai_utils import (
     NeMoGymResponse,

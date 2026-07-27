@@ -14,27 +14,21 @@
 # limitations under the License.
 """Model server base classes and per-rollout model-call capture."""
 
-import fcntl
 import inspect
 import logging
-import os
-import threading
 from abc import abstractmethod
-from pathlib import Path
-from shutil import rmtree
 from time import perf_counter
 from traceback import format_exc
-from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Mapping, Optional, Union
+from typing import Any, AsyncGenerator, Awaitable, Callable, Mapping, Optional
 
-import orjson
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, ValidationError
 from starlette.background import BackgroundTask
 
-from nemo_gym import RESULTS_DIR
 from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.capture_records import ModelCallRecord
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
@@ -78,127 +72,6 @@ class BaseResponsesAPIModel(BaseServer):
     config: BaseResponsesAPIModelConfig
 
 
-class ModelCallCaptureConfig(BaseModel):
-    """Run-wide model-call capture settings from Gym's global config."""
-
-    should_capture_model_calls: bool = False
-    model_call_capture_dir: Optional[Path] = None
-
-    @model_validator(mode="after")
-    def validate_capture_dir(self) -> "ModelCallCaptureConfig":
-        if not self.should_capture_model_calls:
-            return self
-
-        if self.model_call_capture_dir is None:
-            raise ValueError("model_call_capture_dir is required when should_capture_model_calls=true")
-
-        if not self.model_call_capture_dir.is_absolute():
-            self.model_call_capture_dir = RESULTS_DIR / self.model_call_capture_dir
-
-        return self
-
-
-class ModelCallRecord(BaseModel):
-    """Observability record derived from one captured model-server exchange."""
-
-    # Rollout ID
-    rollout_id: str
-
-    # HTTP information
-    status_code: int
-    route: str
-
-    # Timing information
-    timestamp_start: float
-    timestamp_end: float
-
-    # Gym information
-    model_ref: ModelServerRef
-
-    # Model-call record
-    request: NeMoGymResponseCreateParamsNonStreaming
-    response: Optional[NeMoGymResponse]  # Only present if the call succeeded
-    error_response: Optional[str]  # Only present if the call failed
-
-    # Raw information that is only logged if it differs from the standard request and response types
-    # e.g. if it is the /v1/responses route, this will be None
-    raw_request: Optional[Dict[str, Any]]
-    # List[str] for streaming responses
-    raw_response: Optional[Union[Dict[str, Any], List[str]]]
-
-
-class AggregateModelCallRecords(BaseModel):
-    # Any other typically useful aggregate information can be added here
-    records: List[ModelCallRecord]
-
-    @classmethod
-    def from_records(cls, records: List[ModelCallRecord]) -> "AggregateModelCallRecords":
-        return cls(records=records)
-
-
-class CaptureStore:
-    """Append-only, rollout-keyed JSONL sink for model exchanges."""
-
-    def __init__(self, root: str | Path) -> None:
-        self._root = Path(root)
-        self._root.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-
-    @property
-    def root(self) -> Path:
-        return self._root
-
-    def path_for(self, rollout_id: str) -> Path:
-        return self._root / f"{rollout_id}.capture.jsonl"
-
-    def record(self, model_call_record: ModelCallRecord) -> None:
-        """Append one exchange and fsync (durable across a killed box).
-
-        ``flock`` serializes appends across worker processes (a model server may run with
-        ``num_workers > 1``, where the in-process lock can't coordinate); the in-process lock
-        serializes threads. This does blocking file IO + fsync, so callers run it off the event
-        loop (the capture middleware offloads it via ``asyncio.to_thread``).
-        """
-        line = orjson.dumps(model_call_record.model_dump(), default=str, option=orjson.OPT_APPEND_NEWLINE)
-        path = self.path_for(model_call_record.rollout_id)
-        with self._lock:
-            with path.open("ab") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    handle.write(line)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    def read(self, rollout_id: str) -> List[ModelCallRecord]:
-        path = self.path_for(rollout_id)
-        if not path.exists():
-            return []
-
-        exchanges: List[ModelCallRecord] = []
-        # Stream line-by-line; a capture can be large (token-ids / logprobs).
-        with self._lock:
-            with path.open("rb") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-                try:
-                    for line in handle:
-                        stripped = line.strip()
-                        if not stripped:
-                            continue
-                        exchanges.append(ModelCallRecord.model_validate(orjson.loads(stripped)))
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return exchanges
-
-    def clear(self) -> None:
-        rmtree(self.root, ignore_errors=True)
-
-    def aggregate(self, rollout_id: str) -> AggregateModelCallRecords:
-        records = self.read(rollout_id)
-        return AggregateModelCallRecords.from_records(records)
-
-
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
     """Per-rollout model-call capture id from a run-request's task/rollout indices.
 
@@ -236,16 +109,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
 
-        self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        if self._capture_config.should_capture_model_calls:
-            # Model call capture middleware must be the final middleware added so
-            # 1. It is run first on request, the closest to the original request sent to the endpoint
-            # 2. It is run last on response, so it can capture the response closest to what is sent back.
-            # Here, we setup the exception middleware first so that we guarantee the ordering
-            self.setup_exception_middleware(app)
-            self.setup_model_call_capture_middleware(app)
-            print(f"Set up model call capture middleware for {self.config.name}")
+        # Setup the capture middleware for model calls.
+        self.setup_model_call_capture_middleware(app)
+        # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
+        # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
+        app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.chat_completions_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(self.chat_completions_with_call_capture)
 
+        app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(self.responses_with_call_capture)
+
+        app.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.messages_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(self.messages_with_call_capture)
+
+        # Setup the canonical routes.
         app.post("/v1/chat/completions")(self.chat_completions)
 
         app.post("/v1/responses")(self.responses_dispatch)
@@ -258,54 +135,35 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         return app
 
-    def setup_model_call_capture_middleware(self, app: FastAPI) -> None:
-        server = self
-        self._store = CaptureStore(self._capture_config.model_call_capture_dir)
+    async def model_call_capture_middleware(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        request.state.model_call_record_dict = {
+            "timestamp_start": perf_counter(),
+            "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
+        }
 
-        # This function is within this closure so it has access to `self._store`
-        @app.middleware("http")
-        async def model_call_capture_middleware(
-            request: Request, call_next: Callable[[Request], Awaitable[Response]]
-        ) -> Response:
-            request.state.model_call_record_dict = {
-                "timestamp_start": perf_counter(),
-                "model_ref": ModelServerRef(type="responses_api_models", name=server.config.name),
-            }
+        response = await call_next(request)
 
-            response = await call_next(request)
+        # Grab the rollout_id here after the route handler has run to populate the path_params
+        rollout_id = request.path_params.get("rollout_id")
 
-            # Grab the rollout_id here after the route handler has run to populate the path_params
-            rollout_id = request.path_params.get("rollout_id")
-
-            if not rollout_id:
-                return response
-
-            request.state.model_call_record_dict["rollout_id"] = rollout_id
-            request.state.model_call_record_dict["timestamp_end"] = perf_counter()
-            request.state.model_call_record_dict["status_code"] = response.status_code
-
-            # Record in the background to not block the response
-            # The background task only runs after streaming has finished
-            task = BackgroundTask(
-                server._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict)
-            )
-
-            # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
-            assert not response.background
-            response.background = task
-
+        if not rollout_id:
             return response
 
-        # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
-        # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
-        app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.chat_completions_with_call_capture)
-        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(self.chat_completions_with_call_capture)
+        request.state.model_call_record_dict["rollout_id"] = rollout_id
+        request.state.model_call_record_dict["timestamp_end"] = perf_counter()
+        request.state.model_call_record_dict["status_code"] = response.status_code
 
-        app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
-        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(self.responses_with_call_capture)
+        # Record in the background to not block the response
+        # The background task only runs after streaming has finished
+        task = BackgroundTask(self._store.record, ModelCallRecord.model_validate(request.state.model_call_record_dict))
 
-        app.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.messages_with_call_capture)
-        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(self.messages_with_call_capture)
+        # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
+        assert not response.background
+        response.background = task
+
+        return response
 
     @abstractmethod
     async def chat_completions(

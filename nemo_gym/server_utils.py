@@ -27,7 +27,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, Awaitable, Callable, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -52,6 +52,7 @@ from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, Field
 from requests.exceptions import ConnectionError
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
@@ -587,6 +588,33 @@ repr(e): {repr(e)}"""
                     f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
+
+    def setup_model_call_capture_middleware(self, app: FastAPI) -> None:
+        # TODO @bxyu-nvidia: We nested import here to avoid circular dependencies.
+        # server_utils -> openai_utils, openai_utils -> capture_records, capture_records -> openai_utils
+        # We can fix this by taking out NeMoGymAsyncOpenAI from the openai_utils
+        from nemo_gym.capture_records import CaptureStore, ModelCallCaptureConfig
+
+        self._capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        if not self._capture_config.should_capture_model_calls:
+            return
+
+        # Model call capture middleware must be the final middleware added so
+        # 1. It is run first on request, the closest to the original request sent to the endpoint
+        # 2. It is run last on response, so it can capture the response closest to what is sent back.
+        # Here, we setup the exception middleware first so that we guarantee the ordering
+        self.setup_exception_middleware(app)
+
+        self._store = CaptureStore(self._capture_config.model_call_capture_dir)
+        app.add_middleware(BaseHTTPMiddleware, dispatch=self.model_call_capture_middleware)
+
+        print(f"Set up model call capture middleware for {self.config.name}")
+
+    async def model_call_capture_middleware(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        # This method is to be overridden by inner classes that need it.
+        raise NotImplementedError
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
