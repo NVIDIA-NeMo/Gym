@@ -35,6 +35,22 @@ from typing import Any
 
 MAX_TOTAL_CHARS = 20_000
 
+# Caps on *text* content blocks in the multimodal judging path. ``read_deliverable_files``
+# has always bounded its output at ``MAX_TOTAL_CHARS``; ``convert_deliverables_to_content_blocks``
+# bounded nothing, so a single large text file went into the judge prompt whole. Observed:
+# a 2.8 MB file produced a 720,898-token request against a 786,432-token judge, came back
+# 400, and surfaced to the caller as a transient 500 -- so the task was not judged badly,
+# it was not judged at all, and the run still exited 0.
+#
+# The largest genuine text deliverable in the GDPVal/Mercor corpus is 101 KB (per-task
+# total also 101 KB), so these caps leave real submissions byte-for-byte intact and only
+# bite pathological files. Truncating loses a tail; not truncating loses the task.
+MAX_TEXT_BLOCK_CHARS = 200_000
+MAX_TOTAL_TEXT_BLOCK_CHARS = 400_000
+# Reserved per text block for its header and any truncation notice, so a directory
+# of many small files cannot blow the request on framing alone.
+TEXT_BLOCK_OVERHEAD_CHARS = 120
+
 # Stirrup persists its own run state into the very directory it writes
 # deliverables to: the finish payload, the full message history, and run
 # metadata. ``.json`` is in ``TEXT_EXTS``, so without this filter the judge is
@@ -266,6 +282,26 @@ def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | N
             shutil.rmtree(stage_dir, ignore_errors=True)
 
 
+def _fair_text_allowances(sizes: list[int], total_budget: int, per_file_cap: int) -> list[int]:
+    """Max-min fair split of *total_budget* across text deliverables of *sizes*.
+
+    Smallest first: each file may take an equal share of what is left divided by how
+    many files still need one. Files under their share take only what they need and
+    hand the surplus back, so a small real deliverable is never starved by a large
+    one that happens to sort earlier. Returned in the order *sizes* was given.
+    """
+    allowances = [0] * len(sizes)
+    remaining = total_budget
+    order = sorted(range(len(sizes)), key=lambda i: sizes[i])
+    for position, idx in enumerate(order):
+        still_to_serve = len(order) - position
+        share = remaining // still_to_serve
+        take = max(0, min(sizes[idx], per_file_cap, share))
+        allowances[idx] = take
+        remaining -= take
+    return allowances
+
+
 def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, Any]]:
     """Convert deliverable files to OpenAI-compatible content blocks for multimodal judging.
 
@@ -297,6 +333,43 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
         if is_deliverable(entry) and entry.suffix.lower() in OFFICE_EXTS:
             office_stem_counts[entry.stem] = office_stem_counts.get(entry.stem, 0) + 1
 
+    # Allot the aggregate budget up front rather than first-come-first-served. Files
+    # are visited in sorted order, so a spend-as-you-go budget would let two big
+    # ``000_*.txt`` files starve a real ``Report.md`` -- renaming a file would change
+    # the score. Max-min fair shares make a deliverable's allowance independent of
+    # what it is called. Per-block overhead (header, truncation notice) is reserved
+    # before allotting, because it is tokens too.
+    text_files = [p for p in entries if is_deliverable(p) and p.suffix.lower() in TEXT_EXTS]
+    body_budget = max(0, MAX_TOTAL_TEXT_BLOCK_CHARS - len(text_files) * TEXT_BLOCK_OVERHEAD_CHARS)
+    allowance_by_name = dict(
+        zip(
+            (p.name for p in text_files),
+            _fair_text_allowances([p.stat().st_size for p in text_files], body_budget, MAX_TEXT_BLOCK_CHARS),
+        )
+    )
+
+    emitted_chars = 0
+    omitted_names: list[str] = []
+
+    def _text_block(header: str, body: str, allowance: int) -> dict[str, Any] | None:
+        """A text block for *body*, trimmed to *allowance*.
+
+        Returns ``None`` once the aggregate budget is spent: with enough files even
+        the headers alone would blow the request, so past that point they are counted
+        into a single summary block rather than named one by one.
+        """
+        nonlocal emitted_chars
+        if emitted_chars >= MAX_TOTAL_TEXT_BLOCK_CHARS:
+            return None
+        cap = max(0, min(MAX_TEXT_BLOCK_CHARS, allowance))
+        if len(body) > cap:
+            shown = body[:cap] + f"\n[...truncated: {len(body) - cap:,} of {len(body):,} chars omitted]"
+        else:
+            shown = body
+        block = {"type": "text", "text": f"\n{header}\n{shown}"}
+        emitted_chars += len(block["text"])
+        return block
+
     for fpath in entries:
         if not is_deliverable(fpath):
             continue
@@ -307,7 +380,8 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
             if ext in TEXT_EXTS:
                 text = fpath.read_text(encoding="utf-8", errors="replace").strip()
                 if text:
-                    blocks.append({"type": "text", "text": f"\n{fpath.name}:\n{text}"})
+                    block = _text_block(f"{fpath.name}:", text, allowance_by_name.get(fpath.name, 0))
+                    blocks.append(block) if block else omitted_names.append(fpath.name)
 
             elif ext in OFFICE_EXTS:
                 # A preconversion pass may already have written a sibling PDF
@@ -338,9 +412,12 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                     )
                 else:
                     # Fallback to text extraction
+                    # No pre-allotted share: an Office file only lands here when its
+                    # conversion failed, so it competes for whatever budget is left.
                     text = _extract_text(fpath, ext)
                     if text:
-                        blocks.append({"type": "text", "text": f"\n{fpath.name} (text fallback):\n{text}"})
+                        block = _text_block(f"{fpath.name} (text fallback):", text, MAX_TEXT_BLOCK_CHARS)
+                        blocks.append(block) if block else omitted_names.append(fpath.name)
 
             elif ext == ".pdf":
                 data = fpath.read_bytes()
@@ -366,6 +443,17 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                 )
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
+
+    if omitted_names:
+        shown = ", ".join(omitted_names[:20])
+        if len(omitted_names) > 20:
+            shown += f", and {len(omitted_names) - 20} more"
+        blocks.append(
+            {
+                "type": "text",
+                "text": f"\n[{len(omitted_names)} text deliverable(s) omitted, budget exhausted: {shown}]",
+            }
+        )
 
     # Clean up only what this pass created, which lives entirely in tempdirs.
     for scratch in scratch_dirs:
