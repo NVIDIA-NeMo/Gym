@@ -248,7 +248,7 @@ class TestExec:
         # (e.g. the tmux server) inherit the affinity.
         assert command.startswith("__osb_w=4; ")
         assert command.endswith("$__osb_pin bash -ic 'tmux -V'")
-        assert 'taskset -c $__osb_s-$((__osb_s + __osb_w - 1))' in command
+        assert "taskset -c $__osb_s-$((__osb_s + __osb_w - 1))" in command
         # Fail-open branch present: unpinned when taskset/nproc can't cooperate.
         assert '__osb_pin=""' in command
 

@@ -31,7 +31,9 @@ from pathlib import Path
 
 
 REPO_URL = "https://github.com/harbor-framework/terminal-bench-2-1.git"
-PINNED_COMMIT = "36d417f56c293b8271b306a0e4c566f58e98c153"
+PINNED_COMMIT = (
+    "36d417f56c293b8271b306a0e4c566f58e98c153"  # pragma: allowlist secret  (git commit SHA, not a credential)
+)
 
 AGENT_DIR = Path(__file__).parent
 OUTPUT_FPATH = AGENT_DIR / "example" / "terminal_bench_2_1_input.jsonl"

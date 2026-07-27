@@ -555,13 +555,13 @@ async def test_exec_background_without_timeout_skips_hard_cap(monkeypatch: pytes
         probe={"command": None},
         operations={"background_exec": True, "background_poll_interval_s": 0.01},
     )
-    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-uncapped", provider_name="opensandbox", raw=FakeRaw())
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-uncapped", provider_name="opensandbox", raw=FakeRaw()
+    )
 
     result = await provider.exec(handle, "echo hi")
 
-    assert result == opensandbox_provider.SandboxExecResult(
-        stdout="ok", stderr=None, return_code=0, error_type=None
-    )
+    assert result == opensandbox_provider.SandboxExecResult(stdout="ok", stderr=None, return_code=0, error_type=None)
 
 
 async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:

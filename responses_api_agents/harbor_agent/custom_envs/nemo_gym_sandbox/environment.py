@@ -71,7 +71,7 @@ def _cpu_pin_prefix(width: int) -> str:
     ``$__osb_pin`` empty and the command runs unpinned.
     """
     return (
-        f'__osb_w={width}; __osb_n=$(nproc 2>/dev/null || echo 0); '
+        f"__osb_w={width}; __osb_n=$(nproc 2>/dev/null || echo 0); "
         f'if [ "$__osb_n" -gt "$__osb_w" ] && command -v taskset >/dev/null 2>&1; then '
         f'__osb_s=$(( $(od -An -N2 -tu2 /dev/urandom | tr -d " ") % (__osb_n - __osb_w) )); '
         f'__osb_pin="taskset -c $__osb_s-$((__osb_s + __osb_w - 1))"; '
