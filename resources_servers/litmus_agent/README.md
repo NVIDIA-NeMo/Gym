@@ -2,18 +2,15 @@
 
 ## Overview
 
-`litmus_agent` is a **domain-agnostic** answer verifier. It is the generic
-generalization of the `rdkit_chemistry` scorer: the scoring path never depended
-on chemistry, so this server keeps only that path and drops everything
-RDKit-specific. It supersedes `rdkit_chemistry` (now deprecated); legacy
-chemistry rows port over via the `property_type` → `answer_type` back-compat
-mapping described below.
+`litmus_agent` is a **domain-agnostic** answer verifier. It extracts a value
+from a model response, parses that value according to the row schema, and
+compares it with a known answer.
 
 It does three things:
 
 1. Extracts the model's final answer text from the rollout trajectory.
-2. Pulls a value out of that text with the requested `answer_format` regex (the
-   `fmt_00`–`fmt_30` wrapper-syntax family).
+2. Pulls a value out of that text with a row-provided `output_regex`, or with the
+   requested `answer_format` regex (the `fmt_00`–`fmt_30` wrapper family).
 3. Scores it against `expected_answer` using a small `answer_type` taxonomy.
 
 Reward is `1.0` on match, `0.0` otherwise (including when no value can be
@@ -21,11 +18,9 @@ extracted).
 
 ### What it deliberately is *not*
 
-- **Not tied to any domain.** There is no `chembl_id`, `smiles`, or property
-  enum. Domain-context fields ride along as *pass-through* fields
-  (`extra="allow"`): accepted, preserved, and echoed back, but never required or
-  interpreted by the scorer. The example dataset uses chemistry questions purely
-  to illustrate this — the scorer never reads `smiles` or `property`.
+- **Not tied to any domain.** Domain-context fields ride along as *pass-through*
+  fields (`extra="allow"`): accepted, preserved, and echoed back, but never
+  required or interpreted by the scorer.
 - **Executes tools only when configured to.** By default it is a pure verifier
   and scoring a tool-using rollout is identical to scoring a direct one (extract
   value → compare). When `sandbox_provider` is set it *additionally* hosts a
@@ -90,29 +85,32 @@ Register a custom rule by adding an entry to `REWARD_RULES` (name → callable
 taking `(predicted, expected, **params)` and returning a float in `[0.0, 1.0]`).
 Rows then reference it by name in `match`.
 
-### Legacy `property_type` back-compat
+### Numeric `property_type` compatibility
 
-Rows exported before the switch to `answer_type` may carry chemistry's
-`property_type` instead. These are mapped automatically:
+Rows without an explicit `answer_type` may carry `property_type` instead. These
+values are mapped to the answer-type taxonomy for reporting:
 
 | `property_type` | → `answer_type` |
 |---|---|
 | `float`, `count`, `fragment` | `float` |
 | `bool`, `presence` | `bool` |
 
-(`count`/`fragment` were integer kinds; they map to `float` because int-vs-float
-is a scoring concern. A row needing rounded matching adds `match={"rule": "exact"}`.)
+Compatibility rows retain their numeric scoring policy: `count`, `fragment`,
+`bool`, and `presence` are parsed as numbers and default to rounded `exact`
+matching, while `float` defaults to `isclose`. An explicit `answer_type` selects
+the modern parsing policy, and an explicit `match` overrides either default.
 
 A row with neither a supported `answer_type` nor a mappable `property_type`
 fails loudly rather than silently scoring `0.0`.
 
 ## Answer Extraction
 
-The `answer_format` key (`fmt_00`–`fmt_30`) selects the regex used to locate the
-final answer in the response (e.g. `fmt_00` → `((answer))`, `fmt_07` →
-`\boxed{answer}`, `fmt_15` → `<final_answer>answer</final_answer>`). The last
-match in the text wins, so a self-correcting model's final value is the one
-scored.
+When present, `output_regex` is the preferred extractor and must contain exactly
+one capture group. Otherwise, `answer_format` (`fmt_00`–`fmt_30`) selects the
+registered regex used to locate the final answer (e.g. `fmt_00` → `((answer))`,
+`fmt_07` → `\boxed{answer}`, `fmt_15` →
+`<final_answer>answer</final_answer>`). The last match in the text wins, so a
+self-correcting model's final value is the one scored.
 
 Legacy rows without `answer_format` fall back to `use_box_format`:
 `use_box_format: true` → boxed (`fmt_07`), `use_box_format: false` → double
@@ -124,8 +122,7 @@ parentheses (`fmt_00`). When `answer_format` is present it takes precedence.
 > end of line) this can misparse — e.g. `Final Answer: 42 (my 7th attempt)`
 > captures `42 (my 7th attempt)` and scores `7`, and `12.5 g/mol at 298K` scores
 > `298`. For numeric answers, prefer a delimited format (`fmt_00` `((...))`,
-> `fmt_07` `\boxed{...}`) so the value is bounded by the delimiters. This
-> behavior is inherited verbatim from `rdkit_chemistry`.
+> `fmt_07` `\boxed{...}`) so the value is bounded by the delimiters.
 
 ## Reward Signal
 
@@ -139,10 +136,12 @@ Each JSONL row:
 
 - `responses_create_params.input`: the input messages (Responses API format)
 - `responses_create_params.tools`: `[]` for direct answering; a tool spec when
-  paired with a tool server
+  the optional code-execution route is enabled
 - `expected_answer`: ground-truth value (string, int, or float)
 - `answer_type`: one of `float`, `bool`, `string` (optional if a mappable legacy
   `property_type` is present)
+- `output_regex`: optional row-specific regex with exactly one capture group;
+  takes precedence over `answer_format`
 - `answer_format`: optional key `fmt_00`–`fmt_30` selecting the extraction regex
 - `match`: optional reward-rule override `{"rule": <name>, **params}`; defaults
   to the rule for the resolved `answer_type`
@@ -181,11 +180,8 @@ gym eval run --no-serve \
 
 ## Sandbox-backed code-execution tool
 
-For rows whose `method` requires tool use, `litmus_agent` can host its own
-stateful Python code-execution tool instead of pairing a separate tool server.
-This replaces the old `ns_tools` + `sandbox_launcher` pairing that
-`rdkit_chemistry` used; the agent's `resources_server` points directly at
-`litmus_agent`.
+For rows that require tool use, `litmus_agent` can host a stateful Python
+code-execution tool directly.
 
 **Enabling it.** Set `sandbox_provider` (a single-key
 [`nemo_gym.sandbox`](../../nemo_gym/sandbox) provider config, e.g.
@@ -205,8 +201,7 @@ replaying every prior **known-good** cell — with its stdout/stderr suppressed 
 ahead of the newest cell, so only the newest cell's output is returned. A cell is
 retained in the session's history only after it runs cleanly; a cell that raises
 returns its traceback and is dropped. This is faithful for pure, deterministic
-code (the litmus domain); its one cost — prior cells re-running their side
-effects each call — does not apply when cells only compute and print.
+code; the tradeoff is that prior cells repeat their side effects on every call.
 
 > **Replay cost is O(N²) and shares one timeout.** Each call replays all prior
 > cells before the newest one, so a session's total exec work grows quadratically

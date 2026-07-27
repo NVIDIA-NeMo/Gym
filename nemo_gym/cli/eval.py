@@ -14,33 +14,36 @@
 # limitations under the License.
 
 import asyncio
-import difflib
 import importlib
 import json
 from copy import deepcopy
-from glob import glob
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym.benchmarks import (
-    BENCHMARKS_DIR,
     BenchmarkConfig,
-    _load_benchmarks_from_config_paths,
-    _parse_no_environment_tolerating_unset_values,
+    discover_benchmarks,
 )
 from nemo_gym.cli.env import RunHelper
-from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
+from nemo_gym.cli.utils import (
+    exit_cleanly_on_config_error,
+    exit_unknown_component,
+    fuzzy_matches,
+    print_no_matches,
+    print_rich_table,
+    render_component_inspection,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.discovery import read_config_metadata
 from nemo_gym.global_config import (
+    COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
-    POLICY_MODEL_KEY_NAME,
     QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -48,67 +51,47 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
-from nemo_gym.rollout_collection import (
-    E2ERolloutCollectionConfig,
-    RolloutAggregationConfig,
-    RolloutAggregationHelper,
-    RolloutCollectionConfig,
-    RolloutCollectionHelper,
-    loads_jsonl_line,
-)
-from nemo_gym.train_data_utils import TrainDataProcessor
 
 
-def _fuzzy_matches(query: str, *fields: str) -> bool:
-    """Whether `query` fuzzily matches any of `fields`: a substring or a close difflib match (token-aware)."""
-    needle = query.lower()
-    for field in fields:
-        if not field:
-            continue
-        haystack = field.lower()
-        if needle in haystack:
-            return True
-        tokens = haystack.replace("_", " ").replace("-", " ").split()
-        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.70):
-            return True
-    return False
+# NOTE: `reward_profile`, `rollout_collection`, and `train_data_utils` are imported lazily inside the run/aggregate/
+# profile commands below: they pull in heavy deps (wandb, mlflow, anthropic) that the fast `list`/`search`
+# commands in this module must not pay for on every invocation.
 
 
-def _benchmark_domain(bench: BenchmarkConfig) -> str:
-    """Resolve a benchmark's config to its `domain` (for the domain column and `gym search`).
+def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
+    """Render the ``gym list benchmarks <name>`` inspect view for one benchmark."""
+    bench = benchmarks.get(name)
+    if bench is None:
+        exit_unknown_component(name, benchmarks, "benchmark")
+        return
 
-    `BenchmarkConfig` flattens away the `domain`, so we re-resolve the config with the tolerant listing
-    parser (so chained `config_paths` / `_inherit_from` are applied) and read the field back out. `domain`
-    may be declared on any server config — a resources server (e.g. `aime24`) or an agent (e.g. `tau2`) —
-    so we scan every server group.
-    """
-    initial_config_dict = OmegaConf.load(bench.path)
-    if POLICY_MODEL_KEY_NAME not in initial_config_dict:
-        initial_config_dict = OmegaConf.merge(
-            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
-        )
-    resolved = _parse_no_environment_tolerating_unset_values(initial_config_dict)
-
-    for instance_name in resolved:
-        instance = resolved[instance_name]
-        if not isinstance(instance, (dict, DictConfig)):
-            continue
-
-        for group_key in ("resources_servers", "responses_api_agents", "responses_api_models"):
-            servers = instance.get(group_key)
-            if not servers:
-                continue
-            for server_config in servers.values():
-                found_domain = (server_config or {}).get("domain")
-                if found_domain:
-                    return str(found_domain)
-
-    return ""
+    domain, description = read_config_metadata(bench.path)
+    details = {
+        "config": str(bench.path.resolve()),
+        "agent": bench.agent_name,
+        "num repeats": str(bench.num_repeats),
+        "dataset": str(bench.dataset.jsonl_fpath),
+        "prepare script": str(bench.dataset.prepare_script),
+    }
+    render_component_inspection(
+        json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
+        name=name,
+        type_noun="benchmark",
+        domain=domain,
+        description=description,
+        details=details,
+        usage=f"gym eval prepare --benchmark {name}\ngym eval run --benchmark {name} --model-type vllm_model",
+    )
 
 
 def list_benchmarks() -> None:
-    """CLI command: list available benchmarks, optionally filtered by a `query` (the `gym search` entry point)."""
+    """List available benchmarks, or inspect one by name (``gym list benchmarks <name>``). Optionally filtered
+    by a `query` (the `gym search` entry point).
+
+    A benchmark is a specific kind of environment, so it shares `gym list environments`' columns (name,
+    domain, description) and reads them through the same `read_config_metadata` helper. ``--search-dir``
+    adds extra roots to scan on top of the cwd and built-ins.
+    """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
@@ -116,34 +99,35 @@ def list_benchmarks() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
+    benchmarks = discover_benchmarks()
 
-    # A config defines a benchmark iff it declares a `type: benchmark` dataset (see `BenchmarkConfig`),
-    # regardless of its filename. So discovery is content-based: scan every yaml and keep the ones that
-    # literally declare such a dataset. That text check is a cheap prefilter so we only pay the resolve
-    # cost on real candidates (not every prompt/endpoint yaml), and it finds benchmarks whose config
-    # isn't named `config.yaml` — e.g. tau2's `configs/*.yaml` and livecodebench's `cascade.yaml`.
-    config_paths = [BENCHMARKS_DIR / p for p in glob("**/*.yaml", root_dir=BENCHMARKS_DIR, recursive=True)]
-    config_paths = sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
+    name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
+    if name:
+        _inspect_benchmark(name, benchmarks, global_config_dict)
+        return
 
-    benchmarks = _load_benchmarks_from_config_paths(config_paths)
-
-    # Resolve the domain once per benchmark, for the domain column and `gym search`.
-    domains = {name: _benchmark_domain(bench) for name, bench in benchmarks.items()}
+    # Resolve domain + description once per benchmark, via the shared component-metadata reader —
+    # the same one `gym list environments` uses — for the columns and `gym search`.
+    metadata = {name: read_config_metadata(bench.path) for name, bench in benchmarks.items()}
 
     # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches
-    # across the benchmark name and domain.
+    # across the benchmark config name, its dataset name, domain, and description.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
-        benchmarks = {name: bench for name, bench in benchmarks.items() if _fuzzy_matches(query, name, domains[name])}
+        benchmarks = {
+            name: bench
+            for name, bench in benchmarks.items()
+            if fuzzy_matches(query, name, bench.name, metadata[name][0] or "", metadata[name][1] or "")
+        }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [
             {
                 "name": name,
                 "agent_name": bench.agent_name,
-                "domain": domains[name],
+                "domain": metadata[name][0] or "",
                 "num_repeats": bench.num_repeats,
+                "description": metadata[name][1] or "",
             }
             for name, bench in benchmarks.items()
         ]
@@ -151,11 +135,7 @@ def list_benchmarks() -> None:
         return
 
     if not benchmarks:
-        if query:
-            rich.print(f"[yellow]No benchmarks match '{query}'.[/yellow]")
-            return
-        rich.print("[yellow]No benchmarks found.[/yellow]")
-        rich.print(f"Expected benchmarks directory: {BENCHMARKS_DIR}")
+        print_no_matches("benchmarks", query)
         return
 
     title = (
@@ -164,13 +144,16 @@ def list_benchmarks() -> None:
         else f"Available benchmarks in NeMo Gym ({len(benchmarks)})"
     )
     table = Table(title=title)
-    table.add_column("Benchmark name")
+    # Shared environment columns first (name, domain, description), then benchmark-specific ones.
+    table.add_column("Name")
     table.add_column("Domain")
+    table.add_column("Description")
     table.add_column("Agent name")
     table.add_column("Num repeats")
 
     for name, bench in benchmarks.items():
-        table.add_row(name, domains[name], bench.agent_name, str(bench.num_repeats))
+        domain, description = metadata[name]
+        table.add_row(name, domain or "", description or "", bench.agent_name, str(bench.num_repeats))
 
     print_rich_table(table)
 
@@ -338,6 +321,13 @@ def prepare_benchmark() -> None:
 
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
+    from nemo_gym.rollout_collection import (
+        E2ERolloutCollectionConfig,
+        RolloutCollectionConfig,
+        RolloutCollectionHelper,
+    )
+    from nemo_gym.train_data_utils import TrainDataProcessor
+
     global_config_dict = get_global_config_dict()
 
     # Ensure we have the right config first thing
@@ -416,6 +406,8 @@ def e2e_rollout_collection():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
     rch = RolloutCollectionHelper()
 
@@ -424,6 +416,8 @@ def collect_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+
     config = RolloutAggregationConfig.model_validate(get_global_config_dict())
     rah = RolloutAggregationHelper()
 
@@ -432,6 +426,9 @@ def aggregate_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
+    from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
+    from nemo_gym.rollout_collection import loads_jsonl_line
+
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
     if not Path(config.materialized_inputs_jsonl_fpath).exists():
