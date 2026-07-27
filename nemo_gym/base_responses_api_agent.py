@@ -139,12 +139,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             pass
 
         params = {"body": body}
-        self._maybe_inject_request(self.responses, request, body)
+        self._maybe_inject_request(self.responses, request, params)
         return await self.responses(**params)
 
     async def run_with_call_capture(
         self, rollout_id: str, request: Request, body: BaseRunRequest = Body()
     ) -> BaseVerifyResponse:
         params = {"body": body}
-        self._maybe_inject_request(self.run, request, body)
+        self._maybe_inject_request(self.run, request, params)
         return await self.run(**params)
