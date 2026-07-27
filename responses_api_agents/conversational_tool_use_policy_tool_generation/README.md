@@ -37,25 +37,51 @@ completion; judge completions remain in `generation_trace`.
 
 ## Configuration
 
-Compose
-[`configs/conversational_tool_use_policy_tool_generation.yaml`](configs/conversational_tool_use_policy_tool_generation.yaml)
-with model servers named `policy_generation_model` and `policy_tool_judge_model`.
+The config creates `policy_generation_model` and `policy_tool_judge_model` as independent copies of Gym's standard
+`policy_model`. They use one model by default but can be overridden independently.
+
+Start the agent and its model servers:
+
+```bash
+gym env start \
+  --config responses_api_agents/conversational_tool_use_policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml \
+  --model-type openai_model \
+  --model-url "$MODEL_BASE_URL" \
+  --model "$MODEL_NAME" \
+  '+policy_api_key=${oc.env:MODEL_API_KEY}'
+```
+
+`gym env start` stays in the foreground. In a separate terminal, collect from the materialized input JSONL:
+
+```bash
+gym eval run --no-serve \
+  --agent conversational_tool_use_policy_tool_generation \
+  --input /tmp/conversational_tool_use/policy_tool_inputs.jsonl \
+  --output /tmp/conversational_tool_use/policy_tool_rollouts.jsonl \
+  --limit 1 \
+  --num-repeats 1 \
+  --concurrency 1
+```
 
 ## Materialization
 
 Convert accepted rollout JSONL into scenario-generation Gym input JSONL with explicit paths:
 
 ```bash
-uv run python -m responses_api_agents.conversational_tool_use_policy_tool_generation.materialize \
+python -m responses_api_agents.conversational_tool_use_policy_tool_generation.materialize \
   --input-path /path/to/policy_tool_rollouts.jsonl \
   --output-path /path/to/scenario_generation_inputs.jsonl
 ```
 
-Rows retain accepted input order and contain only the next agent's request fields: empty Responses input, agent
-reference, sanitized domain name, policy, and parsed tools. The rollout JSONL remains the generation record.
+Rows retain accepted input order and contain the next agent's request fields: stable ID, empty Responses input, agent
+reference, generation profile, sanitized domain name, policy, parsed tools, and source lineage. The rollout JSONL
+remains the complete generation trace. IDs and lineage include available Gym task, rollout, and retry-attempt
+coordinates.
 
 ## Tests
 
 ```bash
-uv run pytest responses_api_agents/conversational_tool_use_policy_tool_generation/tests
+gym env test \
+  +entrypoint=responses_api_agents/conversational_tool_use_policy_tool_generation \
+  +should_validate_data=false
 ```

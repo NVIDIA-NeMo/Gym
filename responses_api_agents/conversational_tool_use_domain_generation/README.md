@@ -47,13 +47,35 @@ correlated with the sampler rollout.
 
 ## Prompts
 
-`prompts/domain_generation.txt` is the active domain-generation prompt. Additional package-owned prompt variants are
-kept under `prompts/archive/`; every prompt filename is whitespace-free.
+`prompts/domain_generation.txt` is the active domain-generation prompt.
 
 ## Configuration
 
-Combine `configs/conversational_tool_use_domain_generation.yaml` with a model-server configuration defining
-`policy_model`, then collect the desired number of rollouts from `data/example.jsonl`.
+Start the sampler and any supported model server. This example uses the generic OpenAI-compatible model server:
+
+```bash
+gym env start \
+  --config responses_api_agents/conversational_tool_use_domain_generation/configs/conversational_tool_use_domain_generation.yaml \
+  --model-type openai_model \
+  --model-url "$MODEL_BASE_URL" \
+  --model "$MODEL_NAME" \
+  '+policy_api_key=${oc.env:MODEL_API_KEY}'
+```
+
+`gym env start` stays in the foreground. In a separate terminal, collect from an explicit input JSONL:
+
+```bash
+gym eval run --no-serve \
+  --agent conversational_tool_use_domain_generation \
+  --input responses_api_agents/conversational_tool_use_domain_generation/data/example.jsonl \
+  --output /tmp/conversational_tool_use/domain_rollouts.jsonl \
+  --limit 1 \
+  --num-repeats 1 \
+  --concurrency 1
+```
+
+The config creates `domain_generation_model` as an independent copy of Gym's standard `policy_model` instance supplied
+by `--model-type`. Override that copy when domain sampling should use a different model from later stages.
 
 ## Policy/tool materialization
 
@@ -66,11 +88,13 @@ python -m responses_api_agents.conversational_tool_use_domain_generation.materia
   --profile general
 ```
 
-Each candidate is preserved unchanged under `domain`. The output adds an empty Gym `responses_create_params.input` and
-the `conversational_tool_use_policy_tool_generation` agent reference. `--profile` is required and must be `general` or
-`proactive`; its value is stored on every output row so the same domain rollouts can materialize inputs for both policy
-profiles. Candidates are deduplicated by `candidate["name"].casefold()` with the first occurrence winning. Punctuation
-and whitespace are significant, and default output order follows the rollout file and candidate-list order.
+Each candidate is preserved unchanged under `domain`. The output adds an empty Gym `responses_create_params.input`, a
+stable candidate ID, source lineage, and the `conversational_tool_use_policy_tool_generation` agent reference. IDs and
+lineage include available Gym task, rollout, and retry-attempt coordinates.
+`--profile` is required and must be `general` or `proactive`; its value is stored on every output row so the same domain
+rollouts can materialize inputs for both policy profiles. Candidates are deduplicated by
+`candidate["name"].casefold()` with the first occurrence winning. Punctuation and whitespace are significant, and
+default output order follows the rollout file and candidate-list order.
 
 Shuffling is opt-in and requires an explicit integer:
 
@@ -87,6 +111,7 @@ The shuffle uses an isolated `random.Random(seed)` instance.
 ## Tests
 
 ```bash
-python -m pytest -p no:cacheprovider \
-  responses_api_agents/conversational_tool_use_domain_generation/tests
+gym env test \
+  +entrypoint=responses_api_agents/conversational_tool_use_domain_generation \
+  +should_validate_data=false
 ```

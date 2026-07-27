@@ -25,6 +25,12 @@ output items from a nonconforming provider response are removed before the respo
 server, or included in the next policy-model request. Non-function output items, including assistant content and
 reasoning, are preserved.
 
+Before the rollout starts, the agent checks that the materialized policy prompt and model-visible tool definitions are
+the canonical renderings of the top-level policy and simulator tools. A mismatched row is rejected instead of letting
+the policy model and verifier see different contracts. If a provider emits assistant text and function calls in one
+response, the agent records the selected items in provider order before executing any call so both transcript views
+remain aligned. Parallel tool results are appended only after all selected response items.
+
 Tool results are returned to the policy as the raw tool-simulator text. Resource-server diagnostics such as
 `schema_valid`, `error`, `should_continue`, and `terminal_state` control the rollout and remain available in the
 internal trajectory, but are not embedded in the policy-visible tool message.
@@ -41,3 +47,9 @@ sidecar contract. The agent returns `_ng_failure_class: transient`, so the colle
 `<output_stem>_failures.jsonl` and a resumed run can retry it up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. These failures
 do not enter the scored rollout JSONL. Semantic policy-agent failures remain ordinary verified rollouts and are not
 retried through this mechanism.
+
+Gym's rollout prefix is propagated through the agent self-call and downstream policy-model call. The seed request also
+passes the same correlation ID to the resource server, which applies it to simulator and judge calls.
+
+If a seeded `/run` exits before successful verification, the agent makes an idempotent `/discard_session` call.
+Rollout errors, verification errors, and cancelled attempts therefore cannot leave abandoned session state behind.
