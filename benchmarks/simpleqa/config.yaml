@@ -15,6 +15,6 @@ simpleqa_simpleqa_simple_agent:
       - name: simpleqa
         type: benchmark
         jsonl_fpath: benchmarks/simpleqa/data/simpleqa_benchmark.jsonl
-        prompt_config: benchmarks/simpleqa/prompts/default.yaml
+        prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/simpleqa/prepare.py
         license: MIT

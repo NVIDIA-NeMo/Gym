@@ -17,6 +17,6 @@ math_500_math_with_judge_simple_agent:
         - name: math-500
           type: benchmark
           jsonl_fpath: benchmarks/math-500/data/math-500_benchmark.jsonl
-          prompt_config: benchmarks/prompts/generic_math.yaml
+          prompt_config: benchmarks/prompts/generic/math.yaml
           prepare_script: benchmarks/math-500/prepare.py
           num_repeats: 1

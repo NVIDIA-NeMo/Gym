@@ -26,7 +26,7 @@ Solve the following math problem. Make sure to put the answer (and only answer) 
 ## Data preparation
 
 ```bash
-ng_prepare_benchmark '+config_paths=[benchmarks/apex_shortlist/config.yaml]'
+gym eval prepare --benchmark apex_shortlist
 ```
 
 Writes `data/apex_shortlist_benchmark.jsonl` with one row per problem:
@@ -35,17 +35,17 @@ Writes `data/apex_shortlist_benchmark.jsonl` with one row per problem:
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/apex_shortlist/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark apex_shortlist
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=apex_shortlist_math_with_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl \
-    +output_jsonl_fpath=results/apex_shortlist_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent apex_shortlist_math_with_judge_simple_agent \
+    --input benchmarks/apex_shortlist/data/apex_shortlist_benchmark.jsonl \
+    --output results/apex_shortlist_rollouts.jsonl \
+    --num-repeats 4
 ```

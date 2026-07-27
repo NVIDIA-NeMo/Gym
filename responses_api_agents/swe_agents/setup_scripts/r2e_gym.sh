@@ -14,14 +14,14 @@ cd $setup_dir
 
 export UV_INSTALL_DIR="$uv_dir"
 export UV_PYTHON_INSTALL_DIR="$python_dir"
-if [ ! -f "$uv_dir/bin/uv" ]; then
+if [ ! -f "$uv_dir/uv" ]; then
     echo "Installing uv to $uv_dir..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
 else
     echo "uv already installed at $uv_dir"
 fi
 
-export PATH="$uv_dir/bin:$PATH"
+export PATH="$uv_dir:$PATH"
 echo "Verifying uv installation..."
 which uv
 uv --version

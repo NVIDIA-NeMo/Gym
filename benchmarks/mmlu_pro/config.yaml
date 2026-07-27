@@ -20,6 +20,6 @@ mmlu_pro_mcqa_simple_agent:
       - name: mmlu_pro
         type: benchmark
         jsonl_fpath: benchmarks/mmlu_pro/data/mmlu_pro_benchmark.jsonl
-        prompt_config: benchmarks/mmlu_pro/prompts/default.yaml
+        prompt_config: benchmarks/prompts/eval/aai/mcq-10choices.yaml
         prepare_script: benchmarks/mmlu_pro/prepare.py
         num_repeats: 1

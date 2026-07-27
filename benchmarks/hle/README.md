@@ -25,7 +25,7 @@ huggingface-cli login
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/hle/config.yaml]"
+gym eval prepare --benchmark hle
 ```
 
 Downloads `cais/hle`, filters to text-only questions, and writes
@@ -34,9 +34,9 @@ Downloads `cais/hle`, filters to text-only questions, and writes
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/hle/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark hle
 ```
 
 Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in
@@ -45,13 +45,13 @@ Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=hle_equivalence_llm_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/hle/data/hle_benchmark.jsonl \
-    +output_jsonl_fpath=results/hle_rollouts.jsonl \
-    +prompt_config=benchmarks/hle/prompts/default.yaml \
-    +num_repeats=1 \
-    "++responses_create_params={temperature: 0.0}"
+gym eval run --no-serve \
+    --agent hle_equivalence_llm_judge_simple_agent \
+    --input benchmarks/hle/data/hle_benchmark.jsonl \
+    --output results/hle_rollouts.jsonl \
+    --prompt-config benchmarks/hle/prompts/default.yaml \
+    --num-repeats 1 \
+    --temperature 0.0
 ```
 
 Use `temperature: 0.0` to match the nemo-skills evaluation setup and ensure reproducible scores.

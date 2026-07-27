@@ -1,0 +1,10 @@
+# prompt for any benchmarks evaluated with boxed (e.g. math, mmlu-pro, gpqa).
+# Mirrors nemo_skills/prompt/config/generic/general-boxed.yaml. Skills' file
+# also ships a `few_shot_examples:` block (BM25 retrieval scaffolding); Gym
+# does not consume few-shot examples, so it is omitted here and the
+# `{examples}` placeholder collapses out.
+
+user: |-
+  Solve the following problem. Make sure to put the answer (and only answer) inside \boxed{{}}.
+
+  {problem}

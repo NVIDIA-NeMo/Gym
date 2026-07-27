@@ -54,9 +54,9 @@ python run.py --verbose \
 ### Prepare data
 First run the VLMEvalKit server to install dependencies.
 ```bash
-config_paths="resources_servers/vlm_eval_kit/configs/vlm_eval_kit.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --resources-server vlm_eval_kit \
+    --model-type openai_model
 ```
 
 Then cd into this directory and activate the Python environment
@@ -75,15 +75,14 @@ python prepare_data.py
 ```bash
 WANDB_PROJECT=
 EXPERIMENT_NAME=vlmevalkit/gpt-4o-mini-20240718
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/vlm_eval_kit/configs/vlm_eval_kit.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
+gym eval run \
+    --model-type openai_model \
+    --resources-server vlm_eval_kit \
+    --output results/$EXPERIMENT_NAME.jsonl \
+    --split validation \
+    --model gpt-4o-mini-2024-07-18 \
     +wandb_project=$WANDB_PROJECT \
-    +wandb_name=$EXPERIMENT_NAME \
-    ++output_jsonl_fpath=results/$EXPERIMENT_NAME.jsonl \
-    ++split=validation \
-    ++policy_model_name=gpt-4o-mini-2024-07-18
+    +wandb_name=$EXPERIMENT_NAME
 ```
 
 # Licensing information

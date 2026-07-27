@@ -16,5 +16,5 @@ gsm8k_math_with_judge_simple_agent:
       - name: gsm8k
         type: benchmark
         jsonl_fpath: benchmarks/gsm8k/data/gsm8k_benchmark.jsonl
-        prompt_config: benchmarks/prompts/generic_math.yaml
+        prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/gsm8k/prepare.py

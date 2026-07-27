@@ -19,6 +19,7 @@ from typing import (
     Dict,
     List,
     Literal,
+    NotRequired,
     Optional,
     Required,
     TypeAlias,
@@ -85,6 +86,11 @@ from openai.types.responses.response_create_params import (
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
+from openai.types.responses.response_output_item import (
+    McpApprovalRequest,
+    McpCall,
+    McpListTools,
+)
 from openai.types.responses.response_output_text_param import Annotation, Logprob
 from openai.types.responses.response_reasoning_item import (
     Summary,
@@ -111,17 +117,25 @@ from nemo_gym.server_utils import (
 # Training-specific
 ########################################
 
+# Per-token routed expert indices with shape [tokens, num_moe_layers, topk], either as
+# nested int lists or as an opaque string envelope produced by the training framework
+# (e.g. NeMo-RL's "nrlre1:<dtype>:<SxLxK>:<base64>"). Gym never inspects the value; the
+# string form keeps multi-MB payloads cheap to validate and re-serialize at every hop.
+RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
+
 
 class TokenIDLogProbMixin(BaseModel):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
+    routed_experts: Optional[RoutedExperts] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
+    routed_experts: NotRequired[RoutedExperts]
 
 
 ########################################
@@ -376,6 +390,53 @@ class NeMoGymComputerCallOutput(BaseModel):
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymResponseMcpCall(McpCall):
+    """A hosted-MCP tool call (OpenAI Responses ``mcp_call`` output item).
+
+    Emitted when the upstream endpoint executes a tool *server-side* (e.g.
+    NVIDIA-hosted gpt-oss surfacing its built-in python tool as MCP) instead of
+    returning a client-executed ``function_call``. The ``output``/``error``
+    fields are already populated by the server, so the agent parses and passes
+    it through; there is no client-side execution and hence no training variant.
+
+    Inherits the upstream ``McpCall`` typing and only relaxes the fields
+    NVIDIA-hosted endpoints may omit or widen: ``id``/``server_label`` are made
+    optional and ``status`` accepts any string (upstream pins it to a Literal).
+    """
+
+    type: Literal["mcp_call"] = "mcp_call"
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+    status: Optional[str] = None
+
+
+class NeMoGymResponseMcpListTools(McpListTools):
+    """A hosted-MCP tool listing (OpenAI Responses ``mcp_list_tools`` output item).
+
+    Inherits the upstream ``McpListTools`` typing; only ``id``/``server_label``
+    are relaxed to optional (NVIDIA-hosted endpoints may omit them) and ``tools``
+    is widened to ``List[Any]`` so raw tool entries pass through without being
+    coerced into the upstream ``McpListToolsTool`` schema.
+    """
+
+    type: Literal["mcp_list_tools"] = "mcp_list_tools"
+    tools: List[Any] = Field(default_factory=list)
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+
+
+class NeMoGymResponseMcpApprovalRequest(McpApprovalRequest):
+    """A hosted-MCP approval request (OpenAI Responses ``mcp_approval_request`` item).
+
+    Inherits the upstream ``McpApprovalRequest`` typing; ``id``/``server_label``
+    are relaxed to optional to tolerate endpoints that omit them.
+    """
+
+    type: Literal["mcp_approval_request"] = "mcp_approval_request"
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -418,6 +479,9 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseReasoningItem,
     NeMoGymResponseComputerToolCall,
     NeMoGymComputerCallOutput,
+    NeMoGymResponseMcpCall,
+    NeMoGymResponseMcpListTools,
+    NeMoGymResponseMcpApprovalRequest,
     # For training:
     NeMoGymEasyInputMessageForTraining,
     NeMoGymMessageForTraining,
@@ -664,8 +728,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
     )
 
+    default_headers: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra headers to include in every request.",
+    )
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
-        headers = {
+        headers = self.default_headers | {
             "Authorization": f"Bearer {self.api_key}",
         }
         if self.organization:
@@ -674,7 +743,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "headers": headers,
             "_internal": self.internal,
         }
+        return await self._request_with_retry(**request_kwargs)
 
+    async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         max_num_tries = MAX_NUM_TRIES
         tries = 0
         while tries < max_num_tries:

@@ -50,19 +50,19 @@ workaround until the schema is extended.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/asr_with_pc/configs/asr_with_pc.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server asr_with_pc
 ```
 
 ## Collecting rollouts (5-example smoke test)
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=asr_with_pc_simple_agent \
-    +input_jsonl_fpath=resources_servers/asr_with_pc/data/example.jsonl \
-    +output_jsonl_fpath=results/asr_with_pc_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent asr_with_pc_simple_agent \
+    --input resources_servers/asr_with_pc/data/example.jsonl \
+    --output results/asr_with_pc_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 ## Regenerating example data

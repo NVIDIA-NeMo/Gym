@@ -16,6 +16,6 @@ livecodebench_v6_code_gen_simple_agent:
       - name: livecodebench_v6
         type: benchmark
         jsonl_fpath: benchmarks/livecodebench/v6_2408_2505/data/livecodebench_v6_validation.jsonl
-        prompt_config: benchmarks/livecodebench/prompts/default.yaml
+        prompt_config: benchmarks/prompts/eval/livecodebench/default_reasoning.yaml
         prepare_script: benchmarks/livecodebench/v6_2408_2505/prepare.py
         num_repeats: 3

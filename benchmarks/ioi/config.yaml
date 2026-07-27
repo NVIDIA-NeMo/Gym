@@ -18,6 +18,6 @@ ioi_simple_agent:
         - name: ioi
           type: benchmark
           jsonl_fpath: benchmarks/ioi/data/ioi24_benchmark.jsonl
-          prompt_config: benchmarks/prompts/generic_default.yaml
+          prompt_config: benchmarks/prompts/generic/default.yaml
           prepare_script: benchmarks/ioi/prepare.py
           num_repeats: 50

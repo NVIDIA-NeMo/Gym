@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maven settings that redirect Maven Central to the Google-hosted mirror
+  (https://maven-central.storage-download.googleapis.com/maven2/). The
+  mirror is a read-through copy of Maven Central with much higher rate
+  limits, used to avoid HTTP 429 throttling when many parallel containers
+  fetch dependencies simultaneously.
+
+  We mirror only `central` (not `*`) so per-project snapshot repos and
+  internal repositories continue to resolve from their original URLs.
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                              https://maven.apache.org/xsd/settings-1.0.0.xsd">
+  <mirrors>
+    <mirror>
+      <id>google-maven-central</id>
+      <name>Google Maven Central Mirror</name>
+      <mirrorOf>central</mirrorOf>
+      <url>https://maven-central.storage-download.googleapis.com/maven2/</url>
+    </mirror>
+  </mirrors>
+</settings>

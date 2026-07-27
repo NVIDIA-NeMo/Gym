@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nemo Gym Pivot Datasets"
+  short_description: "Build and validate Gym pivot JSONL"
+  default_prompt: "Use $nemo-gym-pivot-datasets to convert rollout artifacts into Gym pivot JSONL and matching configs."

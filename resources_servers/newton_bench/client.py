@@ -24,7 +24,7 @@ interacting with the NewtonBench resources server:
 4. Discover the underlying physical law
 
 Prerequisites:
-- NewtonBench server running via ng_run
+- NewtonBench server running via gym env start
 - NewtonBench repo cloned in project root (for run_experiment to work)
 
 Usage:

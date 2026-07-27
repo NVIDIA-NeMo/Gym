@@ -13,6 +13,10 @@
 # limitations under the License.
 """SWE-Bench-Ext test output parsing utilities for swe_agents.
 
+Thin wrapper around lighthouse's parsing library (the same one used by
+swe_bench_ext_agent). All parsing, normalization, and fuzzy matching
+logic is delegated to lighthouse — no custom parsers here.
+
 Usage from SweBenchExtDatasetProcessor.postprocess_after_run():
 
     from responses_api_agents.swe_agents.swe_bench_ext.utils import parse_and_check_tests
@@ -94,7 +98,17 @@ def parse_and_check_tests(
     pass_to_pass: List[str],
     instance_id: str = "",
 ) -> Dict[str, Any]:
-    """Parse test output and check FAIL_TO_PASS / PASS_TO_PASS resolution."""
+    """Parse test output and check FAIL_TO_PASS / PASS_TO_PASS resolution.
+
+    Uses the same lighthouse parsing pipeline as swe_bench_ext_agent:
+    1. Extract structured output from markers (if present)
+    2. parse_test_output() with framework dispatcher
+    3. normalize_test_id() on both parsed and expected IDs
+    4. Fuzzy match each expected test
+    5. Compute resolved = all F2P passed AND all P2P passed
+
+    Returns a report dict suitable for writing to report.json.
+    """
     # Try to extract result file content from markers (same as task.py)
     result_file_content = _extract_between_markers(test_output, _RESULT_FILE_START, _RESULT_FILE_END)
 

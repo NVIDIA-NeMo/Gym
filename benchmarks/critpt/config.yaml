@@ -1,0 +1,22 @@
+# Chain to the resources server + custom agent config (server, agent, example dataset
+# are all defined in critpt.yaml). This benchmark config narrows the agent's dataset
+# list to just the benchmark dataset.
+config_paths:
+  - resources_servers/critpt/configs/critpt.yaml
+
+critpt_benchmark_resources_server:
+  _inherit_from: critpt_resources_server
+
+critpt_benchmark_agent:
+  _inherit_from: critpt_agent
+  responses_api_agents:
+    critpt_agent:
+      resources_server:
+        name: critpt_benchmark_resources_server
+      datasets:
+        - name: critpt
+          type: benchmark
+          jsonl_fpath: benchmarks/critpt/data/critpt_benchmark.jsonl
+          prompt_config: benchmarks/critpt/prompts/turn1.yaml
+          prepare_script: benchmarks/critpt/prepare.py
+          license: Apache 2.0
