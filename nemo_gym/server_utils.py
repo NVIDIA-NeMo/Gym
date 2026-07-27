@@ -635,12 +635,16 @@ repr(e): {repr(e)}"""
         base_url_or_path = base_url_or_path.rstrip("/")
         return create_call_path(base_url_or_path, maybe_rollout_id)
 
-    def _maybe_inject_request(self, fn: Callable, request: Request, params: Dict[str, Any]) -> None:
+    def _maybe_inject_request(
+        self, fn: Callable, request: Request, response: Response, params: Dict[str, Any]
+    ) -> None:
         # responses() and other function signatures vary across servers: some take a leading `request` injected by FastAPI, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for all of them.
         # This function will modify the params dict to include a request parameter if the function signature requires one.
-        if "request" in signature(self.responses).parameters:
+        if "request" in signature(fn).parameters:
             params["request"] = request
+        if "response" in signature(fn).parameters:
+            params["response"] = response
 
     async def call_capture_middleware(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]

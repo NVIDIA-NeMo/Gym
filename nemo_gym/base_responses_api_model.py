@@ -142,7 +142,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
-    async def responses_dispatch(self, request: Request, body: dict = Body()):
+    async def responses_dispatch(self, request: Request, response: Response, body: dict = Body()):
         """Default ``/v1/responses`` entrypoint shared by every Gym model server.
 
         A plain JSON request validates strictly against
@@ -158,7 +158,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
-            return await self._invoke_responses(request, params)
+            return await self._invoke_responses(request, response, params)
 
         cleaned, ns_map = sanitize_streaming_responses_body(body)
         try:
@@ -167,7 +167,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
         try:
-            response = await self._invoke_responses(request, params)
+            response = await self._invoke_responses(request, response, params)
             response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
         except Exception as exc:
             # The streaming contract is already the response's shape, so a backend failure must be a
@@ -182,7 +182,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             media_type="text/event-stream",
         )
 
-    async def messages(self, request: Request, body: dict = Body()):
+    async def messages(self, request: Request, response: Response, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
 
         Translates the inbound Anthropic Messages request to the Responses API, delegates to this
@@ -192,7 +192,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
         params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
-        response = await self._invoke_responses(request, params)
+        response = await self._invoke_responses(request, response, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
         if body.get("stream"):
@@ -203,10 +203,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return anthropic_response
 
     async def _invoke_responses(
-        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
+        self, request: Request, response: Response, params: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
         params = {"body": params}
-        self._maybe_inject_request(self.responses, request, params)
+        self._maybe_inject_request(self.responses, request, response, params)
         return await self.responses(**params)
 
     # Model call capture methods
@@ -258,7 +258,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return response
 
     async def responses_with_call_capture(
-        self, rollout_id: str, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+        self,
+        rollout_id: str,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         request.state.model_call_record_dict["route"] = "/v1/responses"
 
@@ -273,7 +277,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
-            response = await self._invoke_responses(request, body)
+            response = await self._invoke_responses(request, response, body)
             request.state.model_call_record_dict["response"] = response
             # The raw response is identical to the response, so we dedupe
             request.state.model_call_record_dict["raw_response"] = None

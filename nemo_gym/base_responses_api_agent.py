@@ -113,38 +113,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
 
     async def responses_with_call_capture(
-        self, rollout_id: str, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+        self,
+        rollout_id: str,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        # TODO @bxyu-nvidia: Implement agent recording.
-
-        # request.state.model_call_record_dict["route"] = "/v1/responses"
-
-        # # Directly use the input body since it's already in Responses format
-        # request.state.model_call_record_dict["request"] = body
-        # # The raw request is identical to the response, so we dedupe
-        # request.state.model_call_record_dict["raw_request"] = None
-
-        # assert not request.state.model_call_record_dict["request"].stream, (
-        #     "Model call capture for /v1/responses with streaming is currently not supported!"
-        # )
-
-        # # Application-level exception catching before it's caught by FastAPI exception middleware
-        try:
-            response = await self._invoke_responses(request, body)
-            request.state.model_call_record_dict["response"] = response
-            # The raw response is identical to the response, so we dedupe
-            request.state.model_call_record_dict["raw_response"] = None
-            request.state.model_call_record_dict["error_response"] = None
-        finally:
-            pass
-
         params = {"body": body}
-        self._maybe_inject_request(self.responses, request, params)
+        self._maybe_inject_request(self.responses, request, response, params)
         return await self.responses(**params)
 
     async def run_with_call_capture(
-        self, rollout_id: str, request: Request, body: BaseRunRequest = Body()
+        self, rollout_id: str, request: Request, response: Response, body: BaseRunRequest = Body()
     ) -> BaseVerifyResponse:
         params = {"body": body}
-        self._maybe_inject_request(self.run, request, params)
+        self._maybe_inject_request(self.run, request, response, params)
         return await self.run(**params)

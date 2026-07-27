@@ -145,7 +145,8 @@ class CaptureStore:
         return exchanges
 
     def clear(self) -> None:
-        rmtree(self.root, ignore_errors=True)
+        rmtree(self._root, ignore_errors=True)
+        self._root.mkdir(parents=True, exist_ok=True)
 
     def aggregate(self, rollout_id: str) -> AggregateCallRecords:
         records = self.read(rollout_id)
