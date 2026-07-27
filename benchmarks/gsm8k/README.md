@@ -13,17 +13,17 @@ the expected answer is integer-valued), then renames `problem` ->
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/gsm8k/config.yaml]"
+gym eval prepare --benchmark gsm8k
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/gsm8k/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark gsm8k
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=gsm8k_math_with_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/gsm8k/data/gsm8k_benchmark.jsonl \
-    +output_jsonl_fpath=results/gsm8k_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent gsm8k_math_with_judge_simple_agent \
+    --input benchmarks/gsm8k/data/gsm8k_benchmark.jsonl \
+    --output results/gsm8k_rollouts.jsonl \
+    --num-repeats 4
 ```

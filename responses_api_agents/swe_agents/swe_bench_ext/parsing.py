@@ -1,16 +1,19 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """
 Test parsing utilities for build.py.
 
@@ -527,6 +530,39 @@ def parse_mocha_json(json_output: str) -> Optional[Dict[str, str]]:
     return results
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", s)
+
+
+def parse_gtest_text(text_output: str) -> Dict[str, str]:
+    """Parse Google Test console text output (the [ RUN ] / [ OK ] / [ FAILED ] format).
+
+    Used as a fallback when gtest is run without --gtest_output=json.
+    """
+    results: Dict[str, str] = {}
+    text_clean = _strip_ansi(text_output)
+    # `[ RUN      ] Suite.Test` opens a case; the matching close line is one of
+    # `[       OK ]`, `[  FAILED  ]`, or `[  SKIPPED ]` followed by the same id.
+    case_pattern = re.compile(
+        r"^\s*\[\s*(OK|FAILED|SKIPPED)\s*\]\s+([A-Za-z_][\w]*\.[A-Za-z_][\w/]*)",
+        re.MULTILINE,
+    )
+    for match in case_pattern.finditer(text_clean):
+        status_token, raw_id = match.group(1), match.group(2)
+        # Normalize gtest "Suite.Test" → "Suite::Test" to align with normalize_test_id.
+        test_id = raw_id.replace(".", "::", 1)
+        if status_token == "OK":
+            results[test_id] = "PASSED"
+        elif status_token == "FAILED":
+            results[test_id] = "FAILED"
+        else:
+            results[test_id] = "SKIPPED"
+    return results
+
+
 def parse_gtest_json(json_output: str) -> Dict[str, str]:
     """Parse Google Test JSON output.
 
@@ -581,6 +617,14 @@ def parse_gtest_json(json_output: str) -> Dict[str, str]:
         # Validate extracted JSON has 'testsuites'
         if "testsuites" not in data:
             return None
+
+    # If still no JSON, try parsing the gtest console text format
+    # ([ RUN      ] / [       OK ] / [  FAILED  ]) emitted by stock gtest runners.
+    if data is None:
+        text_results = parse_gtest_text(json_output)
+        if text_results:
+            return text_results
+        return results
 
     # At this point, we have valid GTest JSON with 'testsuites'
     # Parse test results even if some tests failed - those are legitimate results
@@ -1552,6 +1596,7 @@ def parse_test_output(output: str, framework: str) -> Dict[str, str]:
         "maven": parse_maven_text_output,
         "gtest": parse_gtest_json,
         "cargo-nextest": parse_cargo_nextest,
+        "cargo": parse_cargo_nextest,
         "go": parse_go_json,
         "jest": parse_jest_vitest_json,
         "vitest": parse_jest_vitest_json,

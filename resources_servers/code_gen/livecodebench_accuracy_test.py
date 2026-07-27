@@ -26,7 +26,7 @@ Run the comp coding server via:
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/code_gen/configs/code_gen.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start "+config_paths=[${config_paths}]"
 ```
 """
 

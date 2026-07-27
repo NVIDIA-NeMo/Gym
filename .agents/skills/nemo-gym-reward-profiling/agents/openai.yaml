@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nemo Gym Reward Profiling"
+  short_description: "Get started with Nemo Gym reward profiling"
+  default_prompt: "Use $nemo-gym-reward-profiling to start or explain a Nemo Gym reward profiling run."

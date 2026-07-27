@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,9 +16,10 @@
 from collections import defaultdict
 from os import environ
 from pathlib import Path
-from subprocess import run
 from time import time
 from typing import Any, Dict, List, Literal, Optional
+
+from responses_api_agents.tau2.source import ensure_tau2_data_dir
 
 
 DATA_DIR = Path(__file__).parent / "tau2_data"
@@ -26,7 +27,7 @@ environ["TAU2_DATA_DIR"] = str(DATA_DIR)
 
 from fastapi import Body
 from loguru import logger
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -61,6 +62,8 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
 
 
 class Tau2RunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
     config: TextRunConfig
     task: Task
     seed: int
@@ -95,20 +98,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     __key_metrics: Optional[List[str]] = None
 
     def setup_webserver(self):
-        cwd = Path(__file__).parent
-        if not DATA_DIR.exists():
-            run(
-                """git clone https://github.com/bxyu-nvidia/tau2-bench \
-&& cd tau2-bench \
-&& git checkout bxyu/nemo_gym_stable \
-&& cd .. \
-&& mv tau2-bench/data tau2_data \
-&& rm -rf tau2-bench""",
-                shell=True,
-                cwd=cwd,
-                check=True,
-                executable="/bin/bash",
-            )
+        ensure_tau2_data_dir(DATA_DIR)
 
         if not self.config.debug:
             print("Removing loguru logging since `debug=False`")
@@ -131,7 +121,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         # Need `openai/` provider prefix for LiteLLM
         config.llm_user = "openai/dummy user model"
         config.llm_args_user |= {
-            "api_base": f"{get_server_url(self.config.user_model_server.name)}/v1",
+            "api_base": f"{self.base_url_for_run(get_server_url(self.config.user_model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | self.config.user_llm_args
 
@@ -143,7 +133,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         # Need `openai/` provider prefix for LiteLLM
         config.llm_agent = "openai/dummy agent model"
         config.llm_args_agent = {
-            "api_base": f"{get_server_url(self.config.model_server.name)}/v1",
+            "api_base": f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | extra_agent_args
 

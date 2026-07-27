@@ -1,0 +1,137 @@
+---
+title: "Quickstart"
+description: "Run your first agent evaluation with NeMo Gym."
+position: 3
+---
+
+<Info>
+See [Installation](/get-started/installation) if you need to install NeMo Gym.
+</Info>
+
+## Configure Your Model
+
+Create an `env.yaml` file in the project root with your model endpoint credentials:
+
+```yaml
+policy_base_url: https://api.openai.com/v1
+policy_api_key: <your-openai-api-key>
+policy_model_name: gpt-4.1-2025-04-14
+```
+
+<Note>
+This quickstart uses OpenAI. NeMo Gym supports local and hosted inference — see [Configure Model](/model-server) for vLLM, Fireworks, OpenRouter, and others.
+</Note>
+
+## Run Evaluation
+
+Run your agent on a set of tasks and score the results. This example uses a simple tool calling agent [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) with the [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa) (multiple-choice Q&A) environment and its included example data.
+
+**1. Start servers**
+
+NeMo Gym uses local servers to coordinate your model, agent, and task verification. Start them first:
+
+```bash
+environment_config="resources_servers/mcqa/configs/mcqa.yaml"
+model_config="responses_api_models/openai_model/configs/openai_model.yaml"
+
+ng_run "+config_paths=[${environment_config},${model_config}]"
+```
+
+You should see three server instances starting:
+
+```text
+[1] mcqa (resources_servers/mcqa)
+[2] mcqa_simple_agent (responses_api_agents/simple_agent)
+[3] policy_model (responses_api_models/openai_model)
+```
+
+**2. Evaluate your agent**
+
+In a new terminal, run your agent on a single task to verify everything works:
+
+```bash
+source .venv/bin/activate
+
+ng_collect_rollouts \
+    +agent_name=mcqa_simple_agent \
+    +input_jsonl_fpath=resources_servers/mcqa/data/example.jsonl \
+    +output_jsonl_fpath=results/mcqa_rollouts.jsonl \
+    +limit=5 \
+    +num_repeats=1
+```
+
+You should see a progress bar followed by aggregate metrics:
+
+```text
+Collecting rollouts: 100%|██████| 5/5 [01:22<00:00, 16.44s/it]
+
+Key metrics for mcqa_simple_agent:
+{
+    "mean/reward": 0.8,
+    "pass@1[avg-of-1]/accuracy": 80.0,
+    "pass@1/accuracy": 80.0
+}
+Finished rollout collection! View results at:
+Fully materialized inputs: results/mcqa_rollouts_materialized_inputs.jsonl
+Rollouts: results/mcqa_rollouts.jsonl
+Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
+```
+
+For per-task pass rates, see `ng_reward_profile` in the [CLI Reference](/reference/cli-commands).
+
+## Explore
+
+Now that you have a working setup, explore what's available.
+
+NeMo Gym ships with environments across many domains. You can use these existing environments in addition to building your own.
+
+```bash
+ng_list_benchmarks
+```
+
+```text
+Available benchmarks in NeMo Gym
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ Benchmark name   ┃ Agent name                        ┃ Num repeats ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ aalcr            │ aalcr_benchmark_simple_agent      │ 16          │
+│ aime25           │ aime25_math_with_judge_simple_ag… │ 32          │
+│ browsecomp       │ browsecomp_tavily_search_simple_… │ 1           │
+│ gpqa             │ gpqa_mcqa_simple_agent            │ 8           │
+│ ifbench          │ ifbench_benchmark_simple_agent    │ 5           │
+| ...              | ...                               | ...         |
+│ tau2             │ tau2_benchmark_agent              │ 8           │
+│ xstest           │ xstest_benchmark_simple_agent     │ 4           │
+└──────────────────┴───────────────────────────────────┴─────────────┘
+```
+
+This lists benchmarks with pre-configured agents. For the full set of environments (including training environments), see the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table.
+
+Every CLI command supports `+h=true` or `+help=true` for detailed usage information:
+
+```bash
+ng_help
+ng_run +help=true
+```
+
+## Next Steps
+
+<Cards>
+
+<Card title="Browse Environments" href="https://github.com/NVIDIA-NeMo/Gym#-available-environments">
+Browse available environments for evaluation and training.
+</Card>
+
+<Card title="Agents" href="/agent-server">
+Explore available agent harnesses and learn how to integrate your own agent.
+</Card>
+
+<Card title="Training" href="/training-tutorials">
+Improve your agent or model with RL or fine-tuning.
+</Card>
+
+<Card title="Build Custom Environments" href="/environment-tutorials">
+Create your own evaluation or training environments.
+</Card>
+
+</Cards>

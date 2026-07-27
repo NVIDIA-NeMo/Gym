@@ -35,6 +35,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import TextIO
 
 from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
 from stirrup.tools.code_backends.base import (
@@ -95,6 +96,7 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
         self._temp_dir: Path | None = None
         self._patch: str | None = None
         self._stderr_log: Path | None = None
+        self._stderr_fh: TextIO | None = None
         self._has_timeout_cmd: bool = False
 
     def _serializable_kwargs(self) -> dict:
@@ -160,42 +162,76 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             exec_cmd = f"ulimit -v {memory_kb} && {exec_cmd}"
 
         self._stderr_log = self._temp_dir / "apptainer_stderr.log"
-        stderr_fh = open(self._stderr_log, "w")
+        self._stderr_fh = open(self._stderr_log, "w")
 
         self._process = await asyncio.create_subprocess_shell(
             exec_cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=stderr_fh,
+            stderr=self._stderr_fh,
         )
 
-        # Verify the shell is alive by running a trivial command
-        rc, _, _ = await self._exec("echo ready", timeout=30)
-        if rc != 0:
-            appt_stderr = ""
-            if self._stderr_log and self._stderr_log.exists():
-                appt_stderr = self._stderr_log.read_text(errors="replace")[:2000]
-            raise RuntimeError(f"Failed to start Apptainer shell for {self._sif_path}: {appt_stderr}")
+        # __aexit__ is skipped when __aenter__ raises, so a readiness failure
+        # here must release the subprocess, stderr handle, and temp dir itself.
+        try:
+            # Verify the shell is alive by running a trivial command
+            rc, _, _ = await self._exec("echo ready", timeout=30)
+            if rc != 0:
+                appt_stderr = ""
+                if self._stderr_log and self._stderr_log.exists():
+                    appt_stderr = self._stderr_log.read_text(errors="replace")[:2000]
+                raise RuntimeError(f"Failed to start Apptainer shell for {self._sif_path}: {appt_stderr}")
 
-        # Mark all directories as safe for git (needed because --cleanenv
-        # strips the environment, and the container user may differ from the
-        # owner of /testbed).
-        await self._exec("git config --global --add safe.directory '*'", timeout=10)
+            # Mark all directories as safe for git (needed because --cleanenv
+            # strips the environment, and the container user may differ from the
+            # owner of /testbed).
+            await self._exec("git config --global --add safe.directory '*'", timeout=10)
 
-        # Check if GNU `timeout` is available for per-command time limits.
-        # When present, each command is wrapped so that a hung command is
-        # killed by the OS instead of blocking all subsequent commands on the
-        # shared stdin/stdout stream.
-        rc_to, _, _ = await self._exec("command -v timeout >/dev/null 2>&1", timeout=5)
-        self._has_timeout_cmd = rc_to == 0
-        if not self._has_timeout_cmd:
-            logger.warning(
-                "timeout command not found in container — "
-                "in-shell time limits disabled; hung commands will block the stream"
-            )
+            # Check if GNU `timeout` is available for per-command time limits.
+            # When present, each command is wrapped so that a hung command is
+            # killed by the OS instead of blocking all subsequent commands on the
+            # shared stdin/stdout stream.
+            rc_to, _, _ = await self._exec("command -v timeout >/dev/null 2>&1", timeout=5)
+            self._has_timeout_cmd = rc_to == 0
+            if not self._has_timeout_cmd:
+                logger.warning(
+                    "timeout command not found in container — "
+                    "in-shell time limits disabled; hung commands will block the stream"
+                )
+        except BaseException:
+            await self._cleanup_failed_start()
+            raise
 
         logger.info("Started Apptainer shell (pid=%s) from %s", self._process.pid, self._sif_path)
         return self.get_code_exec_tool()
+
+    async def _cleanup_failed_start(self) -> None:
+        """Tear down a partially-started session: terminate -> wait -> kill ->
+        wait the shell, close the stderr log handle, and remove the temp dir."""
+        proc = self._process
+        if proc is not None and proc.returncode is None:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+        self._process = None
+
+        if self._stderr_fh is not None:
+            try:
+                self._stderr_fh.close()
+            finally:
+                self._stderr_fh = None
+
+        if self._temp_dir is not None and self._temp_dir.exists():
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
+        self._temp_dir = None
 
     async def __aexit__(
         self,
@@ -271,6 +307,12 @@ class ApptainerCodeExecToolProvider(CodeExecToolProvider):
             f"(len={len(self._patch) if self._patch else 0})",
             flush=True,
         )
+
+        if self._stderr_fh is not None:
+            try:
+                self._stderr_fh.close()
+            finally:
+                self._stderr_fh = None
 
         if self._temp_dir and self._temp_dir.exists():
             shutil.rmtree(self._temp_dir, ignore_errors=True)

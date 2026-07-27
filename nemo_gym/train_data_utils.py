@@ -25,6 +25,7 @@ from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tqdm.auto import tqdm
 
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
@@ -40,7 +41,6 @@ from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
     GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
 from nemo_gym.hf_utils import (
@@ -58,7 +58,7 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     ```bash
     config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\\
     responses_api_models/openai_model/configs/openai_model.yaml"
-    ng_prepare_data "+config_paths=[${config_paths}]" \
+    gym dataset collate "+config_paths=[${config_paths}]" \
         +output_dirpath=data/example_multi_step \
         +mode=example_validation
     ```
@@ -410,10 +410,10 @@ class TrainDataProcessor(BaseModel):
             server_names_list_str += f"{server_str}{datasets_str}"
         print(f"In scope dataset types for `{config.mode}` mode: {in_scope_dataset_types}")
         print(
-            f"Found {len(agent_configs_with_data)} agent server instance configs with in-scope datasets:{server_names_list_str}"
+            f"Found {len(agent_configs_with_in_scope_datasets)} agent server instance configs with in-scope datasets:{server_names_list_str}"
         )
 
-        return agent_configs_with_data
+        return agent_configs_with_in_scope_datasets
 
     def load_datasets(
         self,
@@ -425,7 +425,9 @@ class TrainDataProcessor(BaseModel):
         local_datasets_not_found: Dict[str, List[DatasetConfig]] = defaultdict(list)
         for c in server_instance_configs:
             for d in c.datasets:
-                jsonl_fpath = Path(d.jsonl_fpath)
+                # Read check: a built-in dataset path resolves under the install root too, so a
+                # bundled example dataset counts as "found" (no download) from an external cwd.
+                jsonl_fpath = _resolve_under_cwd_or_install(d.jsonl_fpath)
                 if jsonl_fpath.exists():
                     local_datasets_found[c.name].append(d)
                 else:
@@ -524,7 +526,7 @@ class TrainDataProcessor(BaseModel):
             )
 
         # Don't load everything into memory at once. Throw things away immediately.
-        with open(dataset_config.jsonl_fpath) as f:
+        with open(_resolve_under_cwd_or_install(dataset_config.jsonl_fpath)) as f:
             for line in tqdm(f, desc=f"{dataset_config.jsonl_fpath}"):
                 for _ in range(repeats):
                     yield line
@@ -662,6 +664,9 @@ class TrainDataProcessor(BaseModel):
                     else:
                         continue
 
+                # Ensure the artifact dir exists: the metrics file is written next to the dataset's
+                # (cwd-relative) jsonl_fpath, which may not exist yet when collating from a fresh cwd.
+                metrics_fpath.parent.mkdir(parents=True, exist_ok=True)
                 with open(metrics_fpath, "w") as f:
                     json.dump(aggregate_metrics_dict, f, indent=4)
 
@@ -707,6 +712,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
 
                 data_path = Path(d.jsonl_fpath)
                 prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
+                # Create the artifact dir if needed (the prepared file is written next to the
+                # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).
+                prepare_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(prepare_path, "w") as target:
                     for line in self._iter_dataset_lines(d):
                         d = json.loads(line)
@@ -825,12 +833,14 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
     return True, ""
 
 
-def prepare_data():  # pragma: no cover
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
+# Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
 
-    data_processor = TrainDataProcessor()
-    data_processor.run(global_config_dict)
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "prepare_data": "nemo_gym.cli.dataset",
+    },
+)

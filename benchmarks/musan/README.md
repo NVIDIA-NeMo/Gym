@@ -40,7 +40,7 @@ row.
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/musan/config.yaml]"
+gym eval prepare --benchmark musan
 ```
 
 Downloads the MUSAN OpenSLR archive, extracts it under
@@ -53,18 +53,18 @@ points at `/data/musan/<cat>/audio/musan_<cat>_NNNNNN.wav` by default
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/musan/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark musan
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=musan_asr_with_pc_simple_agent \
-    +output_jsonl_fpath=results/musan_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent musan_asr_with_pc_simple_agent \
+    --output results/musan_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Verification

@@ -22,7 +22,7 @@ for the judging protocol and metric details.
 ## Data
 
 Runtime download only — benchmark JSONL is not committed. Run
-[`prepare.py`](prepare.py) (or `ng_prepare_benchmark`) to populate
+[`prepare.py`](prepare.py) (or `gym eval prepare`) to populate
 `data/m_arena_hard_v2_benchmark.jsonl`. The prepare script loads the HF
 dataset across all 23 language configs, iterates each split, and emits
 one row per `(language, question_id)` with `uid`, `question`,
@@ -55,19 +55,19 @@ python benchmarks/m_arena_hard_v2/prepare.py \
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/m_arena_hard_v2/config.yaml]"
+gym eval prepare --benchmark m_arena_hard_v2
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/m_arena_hard_v2/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark m_arena_hard_v2
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=m_arena_hard_v2_arena_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/m_arena_hard_v2/data/m_arena_hard_v2_benchmark.jsonl \
-    +output_jsonl_fpath=results/m_arena_hard_v2_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent m_arena_hard_v2_arena_judge_simple_agent \
+    --input benchmarks/m_arena_hard_v2/data/m_arena_hard_v2_benchmark.jsonl \
+    --output results/m_arena_hard_v2_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Metrics

@@ -1,0 +1,9 @@
+# Default prompt for multuple choice benchmarks with four answer choices (e.g. GPQA, MMLU).
+# It's intended for instruction-following models.
+# Based on https://artificialanalysis.ai/methodology/intelligence-benchmarking#intelligence-index-evaluation-suite-overview
+# Mirrors nemo_skills/prompt/config/eval/aai/mcq-4choices.yaml char-for-char.
+
+user: |-
+  Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: A/B/C/D' (e.g. 'Answer: A').
+
+  {problem}

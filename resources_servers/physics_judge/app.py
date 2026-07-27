@@ -113,7 +113,9 @@ class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
         # Symbolic-first: math_verify is cheap; the LLM judge only runs on a miss.
         # This matches Skills' physics pipeline, which runs `eval_type=math` for
         # symbolic checking before invoking the LLM judge.
-        library_reward, extracted_answer = self._verify_answer_with_library(expected_answer, generated_answer)
+        library_reward, extracted_answer = await self._verify_answer_with_library_async(
+            expected_answer, generated_answer
+        )
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 

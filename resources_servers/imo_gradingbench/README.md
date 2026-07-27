@@ -68,14 +68,14 @@ grade.
 
 ```bash
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/imo_gradingbench/configs/imo_gradingbench.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server imo_gradingbench
 
 # Collecting rollouts (5-example smoke test)
-ng_collect_rollouts \
-    +agent_name=imo_gradingbench_simple_agent \
-    +input_jsonl_fpath=resources_servers/imo_gradingbench/data/example.jsonl \
-    +output_jsonl_fpath=results/imo_gradingbench_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent imo_gradingbench_simple_agent \
+    --input resources_servers/imo_gradingbench/data/example.jsonl \
+    --output results/imo_gradingbench_rollouts.jsonl \
+    --num-repeats 1
 ```

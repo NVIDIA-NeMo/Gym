@@ -1,0 +1,22 @@
+-e nemo-gym[dev] @ ../../
+# SEGALE: forked from bc19b2b with numpy==1.23.5 → >=1.23.5 to resolve
+# the pandas==2.2.3 conflict (pandas requires numpy>=1.26.0) and also vecalign 2.0.0
+segale @ git+https://github.com/jeffwillette/SEGALE.git@ab5e0d722e03f1b97846b7ed057ab7558218b035
+# Bumped torch 2.5.0 → 2.12.0 on Sun Jun 22, 2026 for CVE remediation.
+# torchmetrics imports pkg_resources which setuptools 81 removed; pin <81.
+setuptools>=70,<81
+torch==2.12.0
+torchvision==0.27.0
+
+# SEGALE judge models
+# Forked from facebookresearch/LASER: fairseq removed from install_requires,
+# fairseq imports wrapped in try/except so the module loads without fairseq
+# (which conflicts with nemo-gym's omegaconf>=2.1 requirement).
+laser-encoders @ git+https://github.com/jeffwillette/LASER.git@14ba8c31efe48c351333ff0159fe2d25a6aaee37
+ersatz @ git+https://github.com/jeffwillette/ersatz.git@d21f40499be09668d7f9ecb19468be1acf1b17be
+unbabel-comet>=2.2
+# Utilities
+scipy
+joblib
+langdetect
+sacrebleu[ja,ko]>=2.4
