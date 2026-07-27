@@ -64,7 +64,7 @@ def main() -> None:
     if key == "reinstall":
         print(
             f"⚠  `{alias}` is deprecated and will be removed in a future release; "
-            f"run `uv sync --extra dev --group docs` instead.",
+            f"run `uv sync --extra dev` instead.",
             file=sys.stderr,
         )
         dispatch("nemo_gym.cli.general:reinstall", sys.argv[1:])
