@@ -696,9 +696,7 @@ class TestApp:
         result = server._preprocess_chat_completion_create_params(MagicMock(), body)
         assert "return_token_ids" not in result
 
-    def test_chat_completion_preprocess_requests_token_ids_for_observability(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    def test_chat_completion_preprocess_requests_token_ids_for_observability(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch)
         server.config.return_token_id_information = True
         body = {
