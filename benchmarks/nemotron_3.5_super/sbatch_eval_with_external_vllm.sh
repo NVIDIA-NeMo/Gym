@@ -8,11 +8,11 @@
 # SBATCH_PARTITION=batch \
 # CONTAINER=/path/to/vllm/container \
 # MOUNTS=/shared/fs:/shared/fs \
-# bash benchmarks/nemotron_3_ultra/sbatch_eval_with_external_vllm.sh \
+# bash benchmarks/nemotron_3.5_super/sbatch_eval_with_external_vllm.sh \
 # --config benchmarks/my-benchmark/config.yaml
 # 
 # This script assumes:
-# - The container is one built via benchmarks/nemotron_3_ultra/build_eval_container.sh
+# - The container is one built via benchmarks/nemotron_3.5_super/build_eval_container.sh
 # - GB200s which are 4 GPUs per node. If you want to use 8 GPUs per node, update the --tensor-parallel-size and --gres=gpu arguments to 8.
 # - Nemotron 3 Ultra configs e.g. with the parser configs.
 # 

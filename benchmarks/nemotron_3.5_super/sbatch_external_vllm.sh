@@ -7,7 +7,7 @@
 # SBATCH_PARTITION=batch \
 # CONTAINER=/path/to/vllm/container \
 # MOUNTS=/shared/fs:/shared/fs \
-# bash benchmarks/nemotron_3_ultra/sbatch_external_vllm.sh
+# bash benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh
 # 
 # This script assumes:
 # - GB200s which are 4 GPUs per node. If you want to use 8 GPUs per node, update the --tensor-parallel-size and --gres=gpu arguments to 8.
