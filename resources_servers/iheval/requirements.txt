@@ -1,0 +1,7 @@
+-e nemo-gym[dev] @ ../../
+# Scoring: translation ROUGE-L + tensortrust ROUGE-1 recall (task-execution / safety).
+rouge-score>=0.1.2
+# Rule-following: vendored IFEval checkers (ifeval/) depend on these.
+immutabledict>=2.0
+langdetect>=1.0.9
+nltk>=3.9

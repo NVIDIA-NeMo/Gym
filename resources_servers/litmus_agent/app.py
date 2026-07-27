@@ -13,39 +13,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Answer Scorer -- Nemo-Gym Resources Server
+Litmus Answer Scorer -- NeMo Gym Resources Server
 
-Domain-agnostic verifier that scores a model's *answer* against a known
-``expected_answer``. It is the generic generalization of the
-``rdkit_chemistry`` verifier: the scoring path never depended on chemistry, so
-this server keeps only that path and drops everything RDKit-specific.
+Domain-agnostic verifier that scores a model's final answer against a known
+``expected_answer``. Domain context is accepted as pass-through metadata and is
+never interpreted by the scorer.
 
 What it does
 ------------
 1. Extracts the model's final answer text from the rollout trajectory.
 2. Pulls a value out of that text using the row's ``output_regex`` when present,
-   otherwise the requested ``answer_format`` regex (the ``fmt_XX`` family) -- the
-   same wrapper-syntax extraction the chemistry server used, which was already
-   domain-independent.
+   otherwise the requested ``answer_format`` regex (the ``fmt_XX`` family).
 3. Scores it against ``expected_answer`` using a small ``answer_type`` taxonomy
    that selects the comparison rule.
 
 What it deliberately is NOT
 ---------------------------
-* It is **not** tied to any domain: there is no ``chembl_id``, ``smiles``, or
-  RDKit property enum. Domain context fields ride along as *pass-through*
-  fields (``model_config = ConfigDict(extra="allow")``) -- accepted, preserved,
-  echoed back, but never required or interpreted by the scorer.
+* It is **not** tied to any domain. Domain context fields ride along as
+  *pass-through* fields (``model_config = ConfigDict(extra="allow")``) --
+  accepted, preserved, echoed back, but never required or interpreted.
 * It executes tools **only when configured to**. By default it is a pure
   verifier, and scoring a tool-using rollout is identical to scoring a direct
   one (extract value -> compare). When ``sandbox_provider`` is set, the server
   additionally hosts a single stateful code-execution tool (default name
   ``stateful_python_code_exec``) backed by the provider-neutral
-  ``nemo_gym.sandbox`` facade, so tool-using rows can run code without pairing a
-  separate tool server (the ``ns_tools`` + ``sandbox_launcher`` pairing that
-  ``rdkit_chemistry`` used). The sandbox runs commands, not a live kernel, so
+  ``nemo_gym.sandbox`` facade. The sandbox runs commands, not a live kernel, so
   statefulness across calls within a session is emulated by replaying prior
-  (known-good) cells with their output suppressed before each new cell.
+  known-good cells with their output suppressed before each new cell.
 * It does **not** read the question. The question lives in
   ``responses_create_params.input`` and is the model's concern; the scorer only
   sees the model's response and ``expected_answer``.
@@ -80,6 +74,14 @@ integer (``exact``) in another, and within a tolerance window in a third. Custom
 rules are added by registering a new entry in ``REWARD_RULES``.
 
 Reward is 0.0 for an unextractable (None) or NaN prediction.
+
+Legacy numeric-property rows
+----------------------------
+Rows without an explicit ``answer_type`` may instead carry ``property_type``.
+For compatibility, ``count``, ``fragment``, ``bool``, and ``presence`` captures
+are parsed numerically and default to rounded exact matching; ``float`` defaults
+to ``isclose``. An explicit ``answer_type`` selects the modern parsing policy,
+and an explicit ``match`` always selects the comparison rule.
 """
 
 from __future__ import annotations
@@ -119,11 +121,9 @@ BOOL = "bool"
 STRING = "string"
 _SUPPORTED_ANSWER_TYPES = {FLOAT, BOOL, STRING}
 
-# Back-compat: map litmus-bench's chemistry ``property_type`` onto an
-# ``answer_type`` so rows exported before the export switches to ``answer_type``
-# still score. Remove once the export emits ``answer_type`` directly. Integer
-# kinds (count/fragment) map to ``float`` -- the int-vs-float distinction is a
-# scoring concern (reward rule), not a parsing one.
+# Back-compat: map legacy ``property_type`` values onto the generic answer-type
+# taxonomy. Verification applies the legacy numeric parsing and reward policy
+# separately when no explicit ``answer_type`` is present.
 _PROPERTY_TYPE_TO_ANSWER_TYPE = {
     "float": FLOAT,
     "count": FLOAT,
@@ -131,15 +131,14 @@ _PROPERTY_TYPE_TO_ANSWER_TYPE = {
     "bool": BOOL,
     "presence": BOOL,
 }
+_LEGACY_DISCRETE_PROPERTY_TYPES = {"count", "fragment", "bool", "presence"}
 
 _TRUE_TOKENS = {"1", "1.0", "true", "yes", "present", "t", "y"}
 _FALSE_TOKENS = {"0", "0.0", "false", "no", "absent", "f", "n"}
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
 
-# Answer-format wrapper regexes. Lifted verbatim from rdkit_chemistry: the
-# capture syntax is domain-independent (it just locates the answer in arbitrary
-# wrapper text), so it is reused unchanged.
+# Answer-format wrapper regexes locate the answer in arbitrary wrapper text.
 _ANSWER_FORMAT_REGEXES: dict[str, re.Pattern[str]] = {
     "fmt_00": re.compile(r"\(\((.*?)\)\)", re.S),
     "fmt_01": re.compile(r"\(Answer:\s*(.+?)\)", re.S),
@@ -182,9 +181,8 @@ _ANSWER_FORMAT_REGEXES: dict[str, re.Pattern[str]] = {
 # The sandbox runs one-shot commands, not a live Python kernel, so per-session
 # statefulness is emulated by replaying every prior (known-good) cell with its
 # output suppressed before running the newest cell. Only the newest cell's
-# stdout/stderr is returned. This is faithful for pure, deterministic code (the
-# litmus domain): the one cost -- prior cells re-run their side effects each
-# call -- does not apply when cells only compute and print.
+# stdout/stderr is returned. This is faithful for pure, deterministic code; the
+# tradeoff is that prior cells repeat their side effects on every call.
 
 # Where the driver is uploaded inside the sandbox and the env var carrying the
 # base64-encoded JSON list of cells for a single invocation.
@@ -379,6 +377,31 @@ def resolve_answer_type(answer_type: Optional[str], extra: Dict[str, Any]) -> st
             f"set one of {sorted(_SUPPORTED_ANSWER_TYPES)}"
         )
     return mapped
+
+
+def _resolve_verification_policy(
+    answer_type: Optional[str],
+    extra: Dict[str, Any],
+    match: Optional[Dict[str, Any]],
+) -> tuple[str, str, Optional[Dict[str, Any]]]:
+    """Resolve reported type, parsing type, and comparison policy for a row.
+
+    Explicit modern fields retain precedence. Legacy rows have no
+    ``answer_type`` and historically treated every property as numeric: the
+    four discrete property kinds used rounded exact matching, while ``float``
+    used tight numeric equality. In particular, legacy bool/presence captures
+    must remain numeric so values such as ``2`` are not coerced to true.
+    """
+    resolved_answer_type = resolve_answer_type(answer_type, extra)
+    parsing_answer_type = resolved_answer_type
+    effective_match = match
+
+    if answer_type is None and extra.get("property_type") in _LEGACY_DISCRETE_PROPERTY_TYPES:
+        parsing_answer_type = FLOAT
+        if match is None:
+            effective_match = {"rule": "exact"}
+
+    return resolved_answer_type, parsing_answer_type, effective_match
 
 
 def _capture_with_pattern(text: str, pattern: re.Pattern[str]) -> Optional[str]:
@@ -752,28 +775,33 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         End of a rollout is the natural point to drop the session's sandbox so
         it does not leak; scoring is delegated unchanged to ``verify``.
         """
-        response = await self.verify(body)
-        await self._cleanup_session(request.session.get(SESSION_ID_KEY))
-        return response
+        try:
+            return await self.verify(body)
+        finally:
+            await self._cleanup_session(request.session.get(SESSION_ID_KEY))
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
         extra = body.model_extra or {}
-        answer_type = resolve_answer_type(body.answer_type, extra)
+        answer_type, parsing_answer_type, effective_match = _resolve_verification_policy(
+            body.answer_type,
+            extra,
+            body.match,
+        )
 
         text = _extract_last_assistant_text(body)
         predicted = extract_predicted_value(
             text,
-            answer_type,
+            parsing_answer_type,
             output_regex=body.output_regex,
             answer_format=body.answer_format,
             use_box_format=body.use_box_format,
         )
-        rule_name, _ = resolve_reward_rule(answer_type, body.match)
+        rule_name, _ = resolve_reward_rule(answer_type, effective_match)
         reward = compute_reward(
             predicted,
             body.expected_answer,
             answer_type,
-            match=body.match,
+            match=effective_match,
             float_rel_tol=self.config.float_rel_tol,
             float_abs_tol=self.config.float_abs_tol,
         )
