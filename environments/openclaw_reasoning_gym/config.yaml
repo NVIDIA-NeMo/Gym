@@ -1,0 +1,45 @@
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: OpenClaw agent harness on Reasoning Gym tasks
+      value: Evaluate model reasoning capabilities in the OpenClaw agent harness
+
+openclaw_reasoning_gym_agent:
+  responses_api_agents:
+    openclaw_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      concurrency: 8
+      command: openclaw
+      model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+      openclaw_version: 2026.6.11
+      thinking: "off"
+      setup_timeout: 900
+      timeout: 900
+      system_prompt: |
+        You are a precise reasoning assistant with an exec tool. Use Python to calculate or verify results when helpful.
+        Follow the requested final-answer format exactly.
+      openclaw_config:
+        models:
+          providers:
+            nvinf:
+              api: openai-completions
+              baseUrl: ${policy_base_url}
+              apiKey: ${policy_api_key}
+              models:
+              - id: nvidia/qwen/qwen3-next-80b-a3b-instruct
+                name: nvidia/qwen/qwen3-next-80b-a3b-instruct
+                api: openai-completions
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/openclaw_reasoning_gym/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: environments/openclaw_reasoning_gym/data/train_knights_knaves.jsonl
+        license: Apache 2.0
