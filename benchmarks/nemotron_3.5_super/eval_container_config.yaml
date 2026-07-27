@@ -5,7 +5,7 @@ config_paths:
 - env.yaml
 
 policy_base_url: dummy
-policy_api_key: dummy
+policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
 
 # The following secrets must be filled in via env.yaml at runtime
