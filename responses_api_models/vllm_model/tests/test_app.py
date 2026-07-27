@@ -727,6 +727,54 @@ class TestApp:
         result = server._preprocess_chat_completion_create_params(MagicMock(), body)
         assert result["return_token_ids"] is False
 
+    def test_responses_model_server_forwards_return_token_ids_for_observability(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.return_token_id_information = True
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessageForTraining(
+                        role="assistant",
+                        content="response",
+                        tool_calls=[],
+                        prompt_token_ids=[1, 2, 3],
+                        generation_token_ids=[4, 5],
+                        generation_log_probs=[-0.1, -0.2],
+                    ),
+                )
+            ],
+        )
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=AssertionError("tokenize fallback should not be needed"))
+        server._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"input": "hello", "max_output_tokens": 2},
+        )
+
+        assert response.status_code == 200
+        assert captured_kwargs["return_token_ids"] is True
+        assert captured_kwargs["return_tokens_as_token_ids"] is True
+        assert captured_kwargs["logprobs"] is True
+
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         app = server.setup_webserver()
