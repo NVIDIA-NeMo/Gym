@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
@@ -145,6 +157,7 @@ def agent(client: Any) -> ConversationalToolUseScenarioGenerationAgent:
 def run_request() -> ScenarioGenerationRunRequest:
     return ScenarioGenerationRunRequest(
         id="domain-1",
+        profile="general",
         domain_name="order support",
         policy="Authenticate before changing an order.\n",
         tools=[],
@@ -180,6 +193,7 @@ def test_prompt_and_schema_bytes() -> None:
 
 def test_config_and_example_data_contract() -> None:
     raw_config = OmegaConf.load(PACKAGE_DIR / "configs" / "conversational_tool_use_scenario_generation.yaml")
+    assert raw_config["scenario_generation_model"]["_copy"] == "policy_model"
     inner = OmegaConf.to_container(
         raw_config["conversational_tool_use_scenario_generation"]["responses_api_agents"][
             "conversational_tool_use_scenario_generation"
@@ -200,12 +214,14 @@ def test_config_and_example_data_contract() -> None:
     example = json.loads((PACKAGE_DIR / "data" / "example.jsonl").read_text(encoding="utf-8"))
     assert set(example) == {
         "id",
+        "profile",
         "domain_name",
         "policy",
         "tools",
         "responses_create_params",
         "agent_ref",
     }
+    assert example["profile"] == "general"
     parsed_request = ScenarioGenerationRunRequest.model_validate(example)
     assert parsed_request.domain_name == "order support"
     assert parsed_request.responses_create_params.input == []
@@ -327,7 +343,10 @@ async def test_failures_are_isolated_and_completion_order_controls_dedup(
         duplicate = app.CustomerScenario.model_validate(scenario("duplicate", persona=f"winner-{request_index}"))
         duplicate.representative_domain = body.domain_name
         duplicate.outside_policy_scope = outside_policy_scope
-        if request_index in {1, 3}:
+        if request_index == 1:
+            duplicate.customer_persona = "SAME PERSONA"
+            duplicate.reason_for_contact = "DUPLICATE"
+        elif request_index == 3:
             duplicate.customer_persona = "same persona"
         completion = app.NeMoGymChatCompletion.model_validate(
             chat_completion(

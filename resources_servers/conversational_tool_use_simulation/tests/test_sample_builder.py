@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 from pathlib import Path
 
@@ -11,6 +24,7 @@ from resources_servers.conversational_tool_use_simulation.scripts.build_conversa
     ArtifactValidationError,
     agent_system_message,
     build_sample_dataset,
+    default_source_dirs_from_env,
     validate_tool_schema,
 )
 
@@ -117,6 +131,7 @@ def test_build_sample_dataset_converts_raw_seed_row(tmp_path: Path) -> None:
     assert report["sources"][0]["domains_accepted"] == 1
     row = json.loads(output_path.read_text(encoding="utf-8"))
     assert row["domain_name"] == "order support"
+    assert row["profile"] == "general"
     assert row["tools"][0]["doc"] == "Look up an order."
     assert row["tools"][0]["params"]["required"] == ["order_id"]
     assert row["tools"][0]["description"] == "Look up an order."
@@ -142,9 +157,13 @@ def test_build_sample_dataset_converts_raw_seed_row(tmp_path: Path) -> None:
         }
     ]
     assert row["responses_create_params"]["parallel_tool_calls"] is False
+    assert "temperature" not in row["responses_create_params"]
+    assert "max_output_tokens" not in row["responses_create_params"]
     assert row["metadata"] == {
         "dataset_name": "conversational_tool_use_sample",
+        "dataset_schema_version": 1,
         "domain_generator_model": "Qwen3-235B-A22B-Thinking-2507",
+        "generation_profile": "general",
         "policy_tools_model": "DeepSeek-R1-0528",
         "scenario_generator_model": "Qwen3-235B-A22B-Thinking-2507",
         "source_name": "source_0",
@@ -377,4 +396,63 @@ def test_build_sample_dataset_reads_optional_seed_manifest_metadata(tmp_path: Pa
     assert row["metadata"]["domain_generator_model"] == "domain-model"
     assert row["metadata"]["policy_tools_model"] == "policy-model"
     assert row["metadata"]["scenario_generator_model"] == "scenario-model"
+    assert row["profile"] == "proactive"
     assert row["source_artifacts"]["domain_id"] == "domain-123"
+
+
+def test_build_sample_dataset_rejects_conflicting_profile_metadata(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    domain_dir = make_domain(source_dir)
+    (domain_dir / "domain.json").write_text(
+        json.dumps({"generation_profile": "proactive"}),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "sample.jsonl"
+    report_path = tmp_path / "sample.report.json"
+    output_path.write_text("existing output\n", encoding="utf-8")
+    report_path.write_text("existing report\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="declares generation profile 'proactive'"):
+        build_sample_dataset(
+            [source_dir],
+            output_path,
+            report_path,
+            max_rows=1,
+            source_profiles=["general"],
+        )
+
+    assert output_path.read_text(encoding="utf-8") == "existing output\n"
+    assert report_path.read_text(encoding="utf-8") == "existing report\n"
+
+
+def test_build_sample_dataset_ids_distinguish_scenario_run_directories(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    domain_dir = make_domain(source_dir)
+    write_jsonl(
+        domain_dir / "scenarios" / "second-run" / "scenarios_0000.jsonl",
+        [default_scenario(reason_for_contact="Check another order.")],
+    )
+    output_path = tmp_path / "sample.jsonl"
+
+    build_sample_dataset(
+        [source_dir],
+        output_path,
+        tmp_path / "sample.report.json",
+        max_rows=2,
+        max_rows_per_domain=None,
+    )
+
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert len({row["id"] for row in rows}) == 2
+    assert len({row["source_artifacts"]["scenario_file"] for row in rows}) == 2
+
+
+def test_default_source_dirs_can_resolve_one_subset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    general_source = tmp_path / "general"
+    monkeypatch.setenv("CONVERSATIONAL_TOOL_USE_GENERAL_SOURCE_DIR", str(general_source))
+    monkeypatch.delenv("CONVERSATIONAL_TOOL_USE_PROACTIVE_SOURCE_DIR", raising=False)
+
+    assert default_source_dirs_from_env((0,)) == [general_source]
+    with pytest.raises(ValueError, match="CONVERSATIONAL_TOOL_USE_PROACTIVE_SOURCE_DIR"):
+        default_source_dirs_from_env((1,))

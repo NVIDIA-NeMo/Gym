@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
@@ -30,6 +42,7 @@ def accepted_rollout(
         "id": artifact_id,
         "_ng_task_index": 4,
         "_ng_rollout_index": 2,
+        "_ng_attempt_index": 1,
         "reward": 1.0,
         "result": {
             "accepted": True,
@@ -80,12 +93,26 @@ def test_materializer_keeps_accepted_order_and_next_agent_fields(tmp_path: Path)
         "type": "responses_api_agents",
         "name": "conversational_tool_use_scenario_generation",
     }
+    assert written[0]["id"] == "first_ng_t4_r2_a1"
+    assert written[0]["profile"] == "general"
+    assert written[0]["source_artifacts"] == {
+        "policy_tool_generation": {
+            "id": "first",
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 2,
+            "_ng_attempt_index": 1,
+            "attempt_count": 3,
+        }
+    }
     assert set(written[0]) == {
         "agent_ref",
+        "id",
         "responses_create_params",
+        "profile",
         "domain_name",
         "policy",
         "tools",
+        "source_artifacts",
     }
     for row in written:
         ScenarioGenerationRunRequest.model_validate(row)
@@ -119,3 +146,32 @@ def test_cli_requires_explicit_paths(tmp_path: Path, monkeypatch, capsys) -> Non
     assert output_path.is_file()
     with pytest.raises(ValueError, match="must differ"):
         materialize(input_path, input_path)
+
+
+def test_materializer_rejects_duplicate_ids_without_replacing_output(tmp_path: Path) -> None:
+    input_path = tmp_path / "rollouts.jsonl"
+    output_path = tmp_path / "scenario-inputs.jsonl"
+    rows = [
+        accepted_rollout(
+            "duplicate",
+            domain="Order Support",
+            policy="First policy.",
+            tools_jsonl='{"name":"a","doc":"A","params":null,"returns":null}\n',
+        ),
+        accepted_rollout(
+            "duplicate",
+            domain="Billing Support",
+            policy="Second policy.",
+            tools_jsonl='{"name":"b","doc":"B","params":null,"returns":null}\n',
+        ),
+    ]
+    input_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    output_path.write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate materialized row id"):
+        materialize(input_path, output_path)
+
+    assert output_path.read_text(encoding="utf-8") == "existing\n"

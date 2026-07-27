@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,6 +22,7 @@ from fastapi import HTTPException
 from starlette.responses import Response
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -22,10 +36,23 @@ from responses_api_agents.conversational_tool_use_agent.app import (
     ConversationalToolUseAgent,
     ConversationalToolUseAgentConfig,
     ConversationalToolUseAgentRunRequest,
+    ConversationalToolUseAgentVerifyResponse,
 )
+from responses_api_agents.conversational_tool_use_agent.prompt import agent_system_message
 
 
-def make_agent(max_agent_steps: int = 50) -> ConversationalToolUseAgent:
+POLICY = "Follow policy."
+TOP_LEVEL_TOOLS = [
+    {
+        "name": "lookup",
+        "doc": "Look up state.",
+        "params": {"type": "object", "properties": {}},
+        "returns": {"type": "object", "properties": {}},
+    }
+]
+
+
+def make_agent(max_agent_steps: int = 50, *, observability: bool = False) -> ConversationalToolUseAgent:
     config = ConversationalToolUseAgentConfig(
         host="0.0.0.0",
         port=0,
@@ -36,7 +63,9 @@ def make_agent(max_agent_steps: int = 50) -> ConversationalToolUseAgent:
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         max_agent_steps=max_agent_steps,
     )
-    return ConversationalToolUseAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {"observability_enabled": observability}
+    return ConversationalToolUseAgent(config=config, server_client=server_client)
 
 
 def assistant_message(message_id: str, text: str) -> dict:
@@ -63,7 +92,9 @@ def response_payload(output: list[dict]) -> dict:
 
 
 class RequestStub:
-    cookies: dict = {}
+    def __init__(self, *, cookies: dict | None = None, path_params: dict | None = None) -> None:
+        self.cookies = cookies or {}
+        self.path_params = path_params or {}
 
 
 class JsonResponseStub:
@@ -124,6 +155,30 @@ def test_canonicalize_run_transcript_moves_leading_user_items_to_input() -> None
     assert canonical_response["output"][0]["content"][0]["text"] == "I can help."
 
 
+def test_canonicalize_run_transcript_moves_user_only_terminal_output_to_input() -> None:
+    agent = make_agent()
+    responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[NeMoGymEasyInputMessage(role="system", content="Follow policy.")],
+    )
+
+    canonical_params, canonical_response = agent._canonicalize_run_transcript(
+        responses_create_params,
+        response_payload(
+            [
+                {
+                    "role": "user",
+                    "content": "###STOP###",
+                    "type": "message",
+                }
+            ]
+        ),
+    )
+
+    assert [item.role for item in canonical_params.input] == ["system", "user"]
+    assert canonical_params.input[-1].content == "###STOP###"
+    assert canonical_response["output"] == []
+
+
 def test_normalize_response_input_items_preserves_default_message_type() -> None:
     agent = make_agent()
 
@@ -144,7 +199,7 @@ def test_normalize_response_input_items_adds_function_call_output_type() -> None
 
 def materialized_params() -> NeMoGymResponseCreateParamsNonStreaming:
     return NeMoGymResponseCreateParamsNonStreaming(
-        input=[NeMoGymEasyInputMessage(role="system", content="Follow policy.")],
+        input=[NeMoGymEasyInputMessage(role="system", content=agent_system_message(POLICY))],
         tools=[
             {
                 "type": "function",
@@ -158,19 +213,54 @@ def materialized_params() -> NeMoGymResponseCreateParamsNonStreaming:
     )
 
 
+def materialized_run_request(**kwargs) -> ConversationalToolUseAgentRunRequest:
+    return ConversationalToolUseAgentRunRequest(
+        responses_create_params=materialized_params(),
+        profile="general",
+        policy=POLICY,
+        tools=TOP_LEVEL_TOOLS,
+        **kwargs,
+    )
+
+
+def typed_trajectory_result() -> dict:
+    return {
+        "profile": "general",
+        "source_artifacts": {},
+        "trajectory": {
+            "messages": [],
+            "prefill_message_count": 0,
+            "continuation_start_index": 0,
+            "terminal_state": "complete",
+            "generation_invalid_reason": None,
+            "terminal_error": None,
+            "agent_verification_result": None,
+            "user_verification_result": None,
+            "environment_verification_result": None,
+        },
+    }
+
+
+def test_scored_verify_response_requires_typed_result() -> None:
+    payload = materialized_run_request().model_dump(mode="json") | {
+        "response": response_payload([]),
+        "reward": 1.0,
+    }
+
+    with pytest.raises(ValueError, match="require a typed result"):
+        ConversationalToolUseAgentVerifyResponse.model_validate(payload)
+
+
 def test_materialized_responses_create_params_validation_accepts_system_prompt_and_tools() -> None:
     agent = make_agent()
 
-    agent._validate_materialized_responses_create_params(materialized_params())
+    agent._validate_materialized_responses_create_params(materialized_run_request())
 
 
 def test_initial_user_message_is_materialized_into_policy_input() -> None:
     agent = make_agent()
     synchronized = agent._materialize_initial_user_message(
-        ConversationalToolUseAgentRunRequest(
-            responses_create_params=materialized_params(),
-            initial_user_message="Start from this request.",
-        )
+        materialized_run_request(initial_user_message="Start from this request.")
     )
 
     items = agent._input_items(synchronized.responses_create_params)
@@ -212,11 +302,11 @@ def test_prefilled_history_resumes_pending_tool_calls() -> None:
 
 def test_materialized_responses_create_params_validation_rejects_missing_system_prompt() -> None:
     agent = make_agent()
-    params = materialized_params()
-    params.input = []
+    body = materialized_run_request()
+    body.responses_create_params.input = []
 
     with pytest.raises(HTTPException) as exc_info:
-        agent._validate_materialized_responses_create_params(params)
+        agent._validate_materialized_responses_create_params(body)
 
     assert exc_info.value.status_code == 400
     assert "system prompt" in exc_info.value.detail
@@ -224,14 +314,32 @@ def test_materialized_responses_create_params_validation_rejects_missing_system_
 
 def test_materialized_responses_create_params_validation_rejects_missing_tools() -> None:
     agent = make_agent()
-    params = materialized_params()
-    params.tools = []
+    body = materialized_run_request()
+    body.responses_create_params.tools = []
 
     with pytest.raises(HTTPException) as exc_info:
-        agent._validate_materialized_responses_create_params(params)
+        agent._validate_materialized_responses_create_params(body)
 
     assert exc_info.value.status_code == 400
     assert "materialized policy tools" in exc_info.value.detail
+
+
+def test_materialized_policy_prompt_must_match_top_level_policy() -> None:
+    agent = make_agent()
+    body = materialized_run_request()
+    body.policy = "A different policy."
+
+    with pytest.raises(HTTPException, match="top-level policy"):
+        agent._validate_materialized_responses_create_params(body)
+
+
+def test_materialized_tools_must_match_top_level_tools() -> None:
+    agent = make_agent()
+    body = materialized_run_request()
+    body.tools[0]["doc"] = "A different tool."
+
+    with pytest.raises(HTTPException, match="top-level tool definitions"):
+        agent._validate_materialized_responses_create_params(body)
 
 
 def test_max_agent_steps_is_required_positive_primary_agent_call_cap() -> None:
@@ -269,7 +377,7 @@ async def test_responses_resumes_after_prefilled_assistant_with_user_simulator()
             assert input_items[-1]["role"] == "user"
             assert input_items[-1]["content"] == "My account ID is A-1."
             return JsonResponseStub(response_payload([assistant_message("msg_2", "Thanks.")]))
-        if kwargs["url_path"] == "/record_agent_message":
+        if kwargs["url_path"] == "/record_agent_outputs":
             return JsonResponseStub({"should_continue": False})
         raise AssertionError(f"Unexpected request: {kwargs}")
 
@@ -285,9 +393,31 @@ async def test_responses_resumes_after_prefilled_assistant_with_user_simulator()
     assert [request["url_path"] for request in requests] == [
         "/next_user_message",
         "/v1/responses",
-        "/record_agent_message",
+        "/record_agent_outputs",
     ]
     assert any(agent._item_role(item) == "user" for item in response.output)
+
+
+async def test_responses_forwards_inbound_rollout_prefix_to_policy_model() -> None:
+    agent = make_agent()
+
+    async def route_post(**kwargs):
+        if kwargs["server_name"] == "policy_model":
+            assert kwargs["url_path"] == "/ng-rollout/7-2/v1/responses"
+            return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
+        if kwargs["url_path"] == "/record_agent_outputs":
+            return JsonResponseStub({"should_continue": False})
+        raise AssertionError(f"Unexpected request: {kwargs}")
+
+    agent.server_client.post = AsyncMock(side_effect=route_post)
+    body = materialized_params()
+    body.input = agent._input_items(body) + [NeMoGymEasyInputMessage(role="user", content="Help me.")]
+
+    await agent.responses(
+        RequestStub(path_params={"rollout_id": "7-2"}),
+        Response(),
+        body,
+    )
 
 
 async def test_responses_executes_prefilled_pending_tool_call_before_policy() -> None:
@@ -308,7 +438,7 @@ async def test_responses_executes_prefilled_pending_tool_call_before_policy() ->
             assert kwargs["json"]["input"][-1]["type"] == "function_call_output"
             assert kwargs["json"]["input"][-1]["call_id"] == "call_1"
             return JsonResponseStub(response_payload([assistant_message("msg_2", "Your account is active.")]))
-        if kwargs["url_path"] == "/record_agent_message":
+        if kwargs["url_path"] == "/record_agent_outputs":
             return JsonResponseStub({"should_continue": False})
         raise AssertionError(f"Unexpected request: {kwargs}")
 
@@ -328,7 +458,7 @@ async def test_responses_executes_prefilled_pending_tool_call_before_policy() ->
     assert [request["url_path"] for request in requests] == [
         "/execute_agent_tool_call",
         "/v1/responses",
-        "/record_agent_message",
+        "/record_agent_outputs",
     ]
 
 
@@ -346,6 +476,12 @@ async def test_responses_executes_all_parallel_function_calls_in_one_model_turn(
                     ]
                 )
             )
+        if kwargs["url_path"] == "/record_agent_outputs":
+            assert [output["tool_call_id"] for output in kwargs["json"]["outputs"]] == [
+                "call_1",
+                "call_2",
+            ]
+            return JsonResponseStub({"should_continue": True})
         tool_requests.append(kwargs["json"])
         return JsonResponseStub(
             {
@@ -381,7 +517,91 @@ async def test_responses_executes_all_parallel_function_calls_in_one_model_turn(
     assert [output.call_id for output in function_outputs] == ["call_1", "call_2"]
 
 
-async def test_responses_treats_mixed_parallel_output_as_tool_calls_only() -> None:
+async def test_responses_stops_parallel_tool_execution_after_terminal_result() -> None:
+    agent = make_agent()
+    tool_requests = []
+
+    async def route_post(**kwargs):
+        if kwargs["server_name"] == "policy_model":
+            return JsonResponseStub(
+                response_payload(
+                    [
+                        function_call("call_1", "lookup_order", '{"order_id":"ORD-1"}'),
+                        function_call("call_2", "lookup_order", '{"order_id":"ORD-2"}'),
+                    ]
+                )
+            )
+        if kwargs["url_path"] == "/record_agent_outputs":
+            return JsonResponseStub({"should_continue": True})
+        tool_requests.append(kwargs["json"])
+        return JsonResponseStub(
+            {
+                "output": {"status": "terminal"},
+                "schema_valid": True,
+                "should_continue": False,
+            }
+        )
+
+    agent.server_client.post = AsyncMock(side_effect=route_post)
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            NeMoGymEasyInputMessage(role="system", content="Follow policy."),
+            NeMoGymEasyInputMessage(role="user", content="I need help."),
+        ],
+        tools=[
+            {
+                "type": "function",
+                "name": "lookup_order",
+                "description": "Look up an order.",
+                "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}}},
+                "strict": True,
+            }
+        ],
+        parallel_tool_calls=True,
+    )
+
+    model_response = await agent.responses(RequestStub(), Response(), body)
+
+    function_calls = [output for output in model_response.output if output.type == "function_call"]
+    function_outputs = [output for output in model_response.output if output.type == "function_call_output"]
+    assert [request["tool_call_id"] for request in tool_requests] == ["call_1"]
+    assert [output.call_id for output in function_calls] == ["call_1", "call_2"]
+    assert [output.call_id for output in function_outputs] == ["call_1"]
+
+
+async def test_resumed_parallel_tool_execution_stops_after_terminal_result() -> None:
+    agent = make_agent()
+    tool_requests = []
+
+    async def route_post(**kwargs):
+        if kwargs["url_path"] == "/execute_agent_tool_call":
+            tool_requests.append(kwargs["json"])
+            return JsonResponseStub(
+                {
+                    "output": {"status": "terminal"},
+                    "schema_valid": True,
+                    "should_continue": False,
+                }
+            )
+        raise AssertionError(f"Unexpected request: {kwargs}")
+
+    agent.server_client.post = AsyncMock(side_effect=route_post)
+    body = materialized_params()
+    body.parallel_tool_calls = True
+    body.input = agent._input_items(body) + [
+        NeMoGymEasyInputMessage(role="user", content="Check both orders."),
+        function_call("call_1", "lookup", "{}"),
+        function_call("call_2", "lookup", "{}"),
+    ]
+
+    model_response = await agent.responses(RequestStub(), Response(), body)
+
+    function_outputs = [output for output in model_response.output if output.type == "function_call_output"]
+    assert [request["tool_call_id"] for request in tool_requests] == ["call_1"]
+    assert [output.call_id for output in function_outputs] == ["call_1"]
+
+
+async def test_responses_records_mixed_parallel_output_in_provider_order_before_tool_results() -> None:
     agent = make_agent()
     resource_requests = []
 
@@ -390,18 +610,20 @@ async def test_responses_treats_mixed_parallel_output_as_tool_calls_only() -> No
             return JsonResponseStub(
                 response_payload(
                     [
-                        assistant_message("msg_1", "I need to check that."),
                         function_call("call_1", "lookup_order", '{"order_id":"ORD-1"}'),
+                        assistant_message("msg_1", "I need to check that."),
                         function_call("call_2", "lookup_order", '{"order_id":"ORD-2"}'),
                     ]
                 )
             )
         resource_requests.append(kwargs)
+        if kwargs["url_path"] == "/record_agent_outputs":
+            return JsonResponseStub({"should_continue": True})
         return JsonResponseStub(
             {
                 "output": {"status": "ok"},
                 "schema_valid": True,
-                "should_continue": len(resource_requests) < 2,
+                "should_continue": len(resource_requests) < 3,
             }
         )
 
@@ -428,11 +650,17 @@ async def test_responses_treats_mixed_parallel_output_as_tool_calls_only() -> No
     function_calls = [output for output in model_response.output if output.type == "function_call"]
     function_outputs = [output for output in model_response.output if output.type == "function_call_output"]
     assert [request["url_path"] for request in resource_requests] == [
+        "/record_agent_outputs",
         "/execute_agent_tool_call",
         "/execute_agent_tool_call",
     ]
     assert [output.call_id for output in function_calls] == ["call_1", "call_2"]
     assert [output.call_id for output in function_outputs] == ["call_1", "call_2"]
+    assert [output["type"] for output in resource_requests[0]["json"]["outputs"]] == [
+        "function_call",
+        "message",
+        "function_call",
+    ]
     raw_response_calls = [
         output["call_id"]
         for output in resource_requests[0]["json"]["response"]["output"]
@@ -441,7 +669,61 @@ async def test_responses_treats_mixed_parallel_output_as_tool_calls_only() -> No
     assert raw_response_calls == ["call_1", "call_2"]
 
 
-async def test_responses_treats_mixed_single_output_as_first_tool_call_only() -> None:
+async def test_responses_drops_whitespace_only_message_adjacent_to_tool_call() -> None:
+    agent = make_agent()
+    resource_requests = []
+
+    async def route_post(**kwargs):
+        if kwargs["server_name"] == "policy_model":
+            return JsonResponseStub(
+                response_payload(
+                    [
+                        function_call("call_1", "lookup_order", '{"order_id":"ORD-1"}'),
+                        assistant_message("msg_empty", "\n\n"),
+                    ]
+                )
+            )
+        resource_requests.append(kwargs)
+        if kwargs["url_path"] == "/record_agent_outputs":
+            return JsonResponseStub({"should_continue": True})
+        return JsonResponseStub(
+            {
+                "output": {"status": "ok"},
+                "schema_valid": True,
+                "should_continue": False,
+            }
+        )
+
+    agent.server_client.post = AsyncMock(side_effect=route_post)
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            NeMoGymEasyInputMessage(role="system", content="Follow policy."),
+            NeMoGymEasyInputMessage(role="user", content="I need help."),
+        ],
+        tools=[
+            {
+                "type": "function",
+                "name": "lookup_order",
+                "description": "Look up an order.",
+                "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}}},
+                "strict": True,
+            }
+        ],
+        parallel_tool_calls=True,
+    )
+
+    model_response = await agent.responses(RequestStub(), Response(), body)
+
+    assert [output.type for output in model_response.output] == ["function_call", "function_call_output"]
+    assert [request["url_path"] for request in resource_requests] == [
+        "/record_agent_outputs",
+        "/execute_agent_tool_call",
+    ]
+    assert [output["type"] for output in resource_requests[0]["json"]["outputs"]] == ["function_call"]
+    assert [output["type"] for output in resource_requests[0]["json"]["response"]["output"]] == ["function_call"]
+
+
+async def test_responses_records_mixed_single_output_and_executes_first_tool_call_only() -> None:
     agent = make_agent()
     resource_requests = []
 
@@ -457,6 +739,8 @@ async def test_responses_treats_mixed_single_output_as_first_tool_call_only() ->
                 )
             )
         resource_requests.append(kwargs)
+        if kwargs["url_path"] == "/record_agent_outputs":
+            return JsonResponseStub({"should_continue": True})
         return JsonResponseStub(
             {
                 "output": '  {"status":"ok"}\n',
@@ -487,7 +771,10 @@ async def test_responses_treats_mixed_single_output_as_first_tool_call_only() ->
 
     function_calls = [output for output in model_response.output if output.type == "function_call"]
     function_outputs = [output for output in model_response.output if output.type == "function_call_output"]
-    assert [request["url_path"] for request in resource_requests] == ["/execute_agent_tool_call"]
+    assert [request["url_path"] for request in resource_requests] == [
+        "/record_agent_outputs",
+        "/execute_agent_tool_call",
+    ]
     assert [output.call_id for output in function_calls] == ["call_1"]
     assert [output.call_id for output in function_outputs] == ["call_1"]
     assert function_outputs[0].output == '  {"status":"ok"}\n'
@@ -519,7 +806,7 @@ async def test_nonparallel_next_policy_request_contains_only_selected_tool_call(
             return JsonResponseStub(response_payload([assistant_message("msg_2", "The lookup is complete.")]))
         if kwargs["url_path"] == "/execute_agent_tool_call":
             return JsonResponseStub({"output": '{"status":"ok"}', "schema_valid": True, "should_continue": True})
-        if kwargs["url_path"] == "/record_agent_message":
+        if kwargs["url_path"] == "/record_agent_outputs":
             return JsonResponseStub({"should_continue": True})
         if kwargs["url_path"] == "/next_user_message":
             return JsonResponseStub({"message": "###STOP###", "should_continue": False, "terminal_state": "complete"})
@@ -564,7 +851,7 @@ async def test_final_agent_text_allows_user_stop_without_step_limit_failure() ->
         if kwargs["server_name"] == "policy_model":
             return JsonResponseStub(response_payload([assistant_message("msg_1", "Your request is complete.")]))
         resource_paths.append(kwargs["url_path"])
-        if kwargs["url_path"] == "/record_agent_message":
+        if kwargs["url_path"] == "/record_agent_outputs":
             return JsonResponseStub({"should_continue": True})
         if kwargs["url_path"] == "/next_user_message":
             return JsonResponseStub({"message": "###STOP###", "should_continue": False, "terminal_state": "complete"})
@@ -576,7 +863,7 @@ async def test_final_agent_text_allows_user_stop_without_step_limit_failure() ->
 
     response = await agent.responses(RequestStub(), Response(), body)
 
-    assert resource_paths == ["/record_agent_message", "/next_user_message"]
+    assert resource_paths == ["/record_agent_outputs", "/next_user_message"]
     assert [output.type for output in response.output] == ["message"]
 
 
@@ -588,7 +875,7 @@ async def test_final_agent_text_records_step_limit_after_nonterminal_user_reply(
         if kwargs["server_name"] == "policy_model":
             return JsonResponseStub(response_payload([assistant_message("msg_1", "What else can I help with?")]))
         resource_requests.append(kwargs)
-        if kwargs["url_path"] == "/record_agent_message":
+        if kwargs["url_path"] == "/record_agent_outputs":
             return JsonResponseStub({"should_continue": True})
         if kwargs["url_path"] == "/next_user_message":
             return JsonResponseStub({"message": "I still need help.", "should_continue": True})
@@ -603,7 +890,7 @@ async def test_final_agent_text_records_step_limit_after_nonterminal_user_reply(
     response = await agent.responses(RequestStub(), Response(), body)
 
     assert [request["url_path"] for request in resource_requests] == [
-        "/record_agent_message",
+        "/record_agent_outputs",
         "/next_user_message",
         "/record_agent_step_limit",
     ]
@@ -627,6 +914,8 @@ async def test_final_agent_tool_calls_terminate_without_tool_simulation_or_dummy
                 )
             )
         resource_requests.append(kwargs)
+        if kwargs["url_path"] == "/record_agent_outputs":
+            return JsonResponseStub({"should_continue": True})
         if kwargs["url_path"] == "/record_agent_step_limit":
             return JsonResponseStub({"should_continue": False, "terminal_state": "incomplete"})
         raise AssertionError(f"Unexpected request: {kwargs}")
@@ -651,8 +940,15 @@ async def test_final_agent_tool_calls_terminate_without_tool_simulation_or_dummy
 
     response = await agent.responses(RequestStub(), Response(), body)
 
-    assert [request["url_path"] for request in resource_requests] == ["/record_agent_step_limit"]
-    assert [call["tool_call_id"] for call in resource_requests[0]["json"]["tool_calls"]] == ["call_1", "call_2"]
+    assert [request["url_path"] for request in resource_requests] == [
+        "/record_agent_outputs",
+        "/record_agent_step_limit",
+    ]
+    assert [output["tool_call_id"] for output in resource_requests[0]["json"]["outputs"]] == [
+        "call_1",
+        "call_2",
+    ]
+    assert resource_requests[1]["json"]["tool_calls"] == []
     assert [output.type for output in response.output] == ["function_call", "function_call"]
     assert not any(output.type == "function_call_output" for output in response.output)
 
@@ -665,13 +961,16 @@ async def test_run_routes_rollout_5xx_to_transient_failure_sidecar_contract() ->
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
         if kwargs["url_path"] == "/v1/responses":
             raise http_error(503)
+        if kwargs["url_path"] == "/discard_session":
+            assert kwargs["cookies"] == {"session_id": "session-1"}
+            return JsonResponseStub({"discarded": True})
         raise AssertionError(f"Unexpected request: {kwargs}")
 
     agent.server_client.post = AsyncMock(side_effect=route_post)
 
     result = await agent.run(
         RequestStub(),
-        ConversationalToolUseAgentRunRequest(responses_create_params=materialized_params()),
+        materialized_run_request(),
     )
     result_payload = result.model_dump(mode="json")
 
@@ -682,7 +981,46 @@ async def test_run_routes_rollout_5xx_to_transient_failure_sidecar_contract() ->
     assert "503" in result_payload["error_message"]
     assert result.instance_config == {"mask_sample": True}
     assert result.response.id == "conversational_tool_use_rollout_failed"
-    assert agent.server_client.post.await_count == 2
+    assert agent.server_client.post.await_count == 3
+
+
+async def test_run_correlates_self_and_resource_model_calls_with_rollout_identity() -> None:
+    agent = make_agent(observability=True)
+    requests = []
+
+    async def route_post(**kwargs):
+        requests.append(kwargs)
+        if kwargs["url_path"] == "/seed_session":
+            assert kwargs["json"]["rollout_id"] == "7-2"
+            return JsonResponseStub({}, cookies={"session_id": "session-1"})
+        if kwargs["url_path"] == "/ng-rollout/7-2/v1/responses":
+            return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
+        if kwargs["url_path"] == "/verify":
+            return JsonResponseStub(
+                kwargs["json"]
+                | {
+                    "reward": 1.0,
+                    "result": typed_trajectory_result(),
+                }
+            )
+        raise AssertionError(f"Unexpected request: {kwargs}")
+
+    agent.server_client.post = AsyncMock(side_effect=route_post)
+    body = materialized_run_request(
+        **{
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 2,
+        }
+    )
+
+    result = await agent.run(RequestStub(), body)
+
+    assert result.reward == 1.0
+    assert [request["url_path"] for request in requests] == [
+        "/seed_session",
+        "/ng-rollout/7-2/v1/responses",
+        "/verify",
+    ]
 
 
 async def test_run_routes_seed_rate_limit_to_transient_failure_sidecar_contract() -> None:
@@ -691,7 +1029,7 @@ async def test_run_routes_seed_rate_limit_to_transient_failure_sidecar_contract(
 
     result = await agent.run(
         RequestStub(),
-        ConversationalToolUseAgentRunRequest(responses_create_params=materialized_params()),
+        materialized_run_request(),
     )
     result_payload = result.model_dump(mode="json")
 
@@ -712,13 +1050,16 @@ async def test_run_routes_verify_5xx_to_transient_failure_sidecar_contract() -> 
             return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
         if kwargs["url_path"] == "/verify":
             raise http_error(502)
+        if kwargs["url_path"] == "/discard_session":
+            assert kwargs["cookies"] == {"session_id": "session-1"}
+            return JsonResponseStub({"discarded": True})
         raise AssertionError(f"Unexpected request: {kwargs}")
 
     agent.server_client.post = AsyncMock(side_effect=route_post)
 
     result = await agent.run(
         RequestStub(),
-        ConversationalToolUseAgentRunRequest(responses_create_params=materialized_params()),
+        materialized_run_request(),
     )
     result_payload = result.model_dump(mode="json")
 
@@ -726,7 +1067,7 @@ async def test_run_routes_verify_5xx_to_transient_failure_sidecar_contract() -> 
     assert result_payload["error_stage"] == "verify"
     assert "502" in result_payload["error_message"]
     assert result.instance_config == {"mask_sample": True}
-    assert agent.server_client.post.await_count == 3
+    assert agent.server_client.post.await_count == 4
 
 
 async def test_run_preserves_verified_semantic_zero_as_scored_result() -> None:
@@ -738,20 +1079,27 @@ async def test_run_preserves_verified_semantic_zero_as_scored_result() -> None:
         if kwargs["url_path"] == "/v1/responses":
             return JsonResponseStub(response_payload([assistant_message("msg_1", "Incorrect answer.")]))
         if kwargs["url_path"] == "/verify":
-            return JsonResponseStub(kwargs["json"] | {"reward": 0.0, "result": {"judge_label": "fail"}})
+            return JsonResponseStub(
+                kwargs["json"]
+                | {
+                    "reward": 0.0,
+                    "result": typed_trajectory_result() | {"judge_label": "fail"},
+                }
+            )
         raise AssertionError(f"Unexpected request: {kwargs}")
 
     agent.server_client.post = AsyncMock(side_effect=route_post)
 
     result = await agent.run(
         RequestStub(),
-        ConversationalToolUseAgentRunRequest(responses_create_params=materialized_params()),
+        materialized_run_request(),
     )
     result_payload = result.model_dump(mode="json")
 
     assert result.reward == 0.0
     assert NG_FAILURE_CLASS_KEY not in result_payload
-    assert result_payload["result"] == {"judge_label": "fail"}
+    assert result_payload["result"]["judge_label"] == "fail"
+    assert result_payload["result"]["profile"] == "general"
     assert result.instance_config == {"mask_sample": False}
 
 
@@ -763,6 +1111,8 @@ async def test_run_does_not_convert_non_retryable_4xx_to_transient_failure() -> 
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
         if kwargs["url_path"] == "/v1/responses":
             raise http_error(400)
+        if kwargs["url_path"] == "/discard_session":
+            return JsonResponseStub({"discarded": True})
         raise AssertionError(f"Unexpected request: {kwargs}")
 
     agent.server_client.post = AsyncMock(side_effect=route_post)
@@ -770,7 +1120,7 @@ async def test_run_does_not_convert_non_retryable_4xx_to_transient_failure() -> 
     with pytest.raises(ClientResponseError) as exc_info:
         await agent.run(
             RequestStub(),
-            ConversationalToolUseAgentRunRequest(responses_create_params=materialized_params()),
+            materialized_run_request(),
         )
 
     assert exc_info.value.status == 400

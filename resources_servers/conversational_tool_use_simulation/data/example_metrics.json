@@ -17,9 +17,9 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 1396.6,
-        "Min": 1376.0,
-        "Max": 1479.0,
+        "Average": 1392.6,
+        "Min": 1372.0,
+        "Max": 1475.0,
         "Standard deviation": 46.06
     },
     "Number of turns": {
@@ -30,10 +30,10 @@
         "Standard deviation": 0.0
     },
     "Temperature": {
-        "Total # non-null values": 5,
-        "Average": 0.6,
-        "Min": 0.6,
-        "Max": 0.6,
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
         "Standard deviation": 0.0
     },
     "id": {
@@ -45,6 +45,10 @@
         "total_count": 5
     },
     "policy": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "profile": {
         "unique_count": 2,
         "total_count": 5
     }

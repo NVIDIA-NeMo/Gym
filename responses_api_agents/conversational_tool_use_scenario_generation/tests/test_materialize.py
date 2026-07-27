@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
@@ -7,12 +19,13 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.conversational_tool_use_agent.app import (
-    ConversationalToolUseAgent,
+from responses_api_agents.conversational_tool_use_agent.prompt import (
+    AGENT_SYSTEM_MESSAGE_TEMPLATE,
 )
 from responses_api_agents.conversational_tool_use_scenario_generation.materialize import (
-    AGENT_SYSTEM_MESSAGE_TEMPLATE,
     main,
     materialize_rollouts,
 )
@@ -36,6 +49,10 @@ def test_materialize_preserves_rollout_and_scenario_order(tmp_path: Path) -> Non
     rollouts = [
         {
             "id": "rollout-a",
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 2,
+            "_ng_attempt_index": 1,
+            "profile": "general",
             "domain_name": "order support",
             "policy": "Authenticate first.",
             "tools": [
@@ -48,9 +65,11 @@ def test_materialize_preserves_rollout_and_scenario_order(tmp_path: Path) -> Non
                 }
             ],
             "result": {"scenarios": [scenario("first"), scenario("second")]},
+            "source_artifacts": {"policy_tool_generation": {"attempt_count": 3}},
         },
         {
             "id": "rollout-b",
+            "profile": "proactive",
             "domain_name": "billing support",
             "policy": "Explain charges.",
             "tools": [],
@@ -68,9 +87,12 @@ def test_materialize_preserves_rollout_and_scenario_order(tmp_path: Path) -> Non
     assert [row["customer_scenario"]["reason_for_contact"] for row in rows] == ["first", "second", "third"]
     assert set(rows[0]) == {
         "id",
+        "profile",
+        "domain_name",
         "policy",
         "tools",
         "customer_scenario",
+        "source_artifacts",
         "responses_create_params",
         "agent_ref",
     }
@@ -93,13 +115,25 @@ def test_materialize_preserves_rollout_and_scenario_order(tmp_path: Path) -> Non
     ]
     assert rows[0]["customer_scenario"]["unknown_info"] is None
     assert [row["id"] for row in rows] == [
-        "rollout-a_scenario_000000",
-        "rollout-a_scenario_000001",
+        "rollout-a_ng_t4_r2_a1_scenario_000000",
+        "rollout-a_ng_t4_r2_a1_scenario_000001",
         "rollout-b_scenario_000000",
     ]
     assert rows[0]["agent_ref"] == {
         "type": "responses_api_agents",
         "name": "conversational_tool_use_agent",
+    }
+    assert rows[0]["profile"] == "general"
+    assert rows[0]["domain_name"] == "order support"
+    assert rows[0]["source_artifacts"] == {
+        "policy_tool_generation": {"attempt_count": 3},
+        "scenario_generation": {
+            "id": "rollout-a",
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 2,
+            "_ng_attempt_index": 1,
+            "scenario_index": 0,
+        },
     }
     assert rows[0]["responses_create_params"]["input"] == [
         {
@@ -123,7 +157,6 @@ def test_materialize_preserves_rollout_and_scenario_order(tmp_path: Path) -> Non
         }
     ]
     NeMoGymResponseCreateParamsNonStreaming.model_validate(rows[0]["responses_create_params"])
-    assert AGENT_SYSTEM_MESSAGE_TEMPLATE == ConversationalToolUseAgent.AGENT_SYSTEM_MESSAGE_TEMPLATE
     assert "initial_user_message" not in rows[0]
 
 
@@ -138,6 +171,7 @@ def test_materialize_drops_omitted_unknown_info_and_retains_explicit_null(
         json.dumps(
             {
                 "id": "rollout",
+                "profile": "general",
                 "domain_name": "order support",
                 "policy": "Authenticate first.",
                 "tools": [],
@@ -161,6 +195,39 @@ def test_materialize_drops_omitted_unknown_info_and_retains_explicit_null(
     assert rows[0]["customer_scenario"]["unknown_info"] is None
 
 
+def test_materializer_rejects_same_input_and_output_path(tmp_path: Path) -> None:
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must differ"):
+        materialize_rollouts(path, path)
+
+    assert path.read_text(encoding="utf-8") == "{}\n"
+
+
+def test_materializer_rejects_duplicate_ids_without_replacing_output(tmp_path: Path) -> None:
+    input_path = tmp_path / "rollouts.jsonl"
+    output_path = tmp_path / "agent-inputs.jsonl"
+    rollout = {
+        "id": "duplicate",
+        "profile": "general",
+        "domain_name": "order support",
+        "policy": "Authenticate first.",
+        "tools": [],
+        "result": {"scenarios": [scenario("help")]},
+    }
+    input_path.write_text(
+        json.dumps(rollout) + "\n" + json.dumps(rollout) + "\n",
+        encoding="utf-8",
+    )
+    output_path.write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate materialized row id"):
+        materialize_rollouts(input_path, output_path)
+
+    assert output_path.read_text(encoding="utf-8") == "existing\n"
+
+
 def test_materialize_cli_uses_explicit_paths(
     tmp_path: Path,
     monkeypatch,
@@ -172,6 +239,7 @@ def test_materialize_cli_uses_explicit_paths(
         json.dumps(
             {
                 "id": "rollout",
+                "profile": "general",
                 "domain_name": "order support",
                 "policy": "Authenticate first.",
                 "tools": [],

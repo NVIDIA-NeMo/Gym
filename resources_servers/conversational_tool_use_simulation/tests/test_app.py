@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -7,7 +20,8 @@ import pytest
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.conversational_tool_use_simulation.app import (
     AgentToolCallRequest,
@@ -18,6 +32,7 @@ from resources_servers.conversational_tool_use_simulation.app import (
     ConversationMessage,
     MessageType,
     RecordAgentMessageRequest,
+    RecordAgentOutputsRequest,
     RecordAgentStepLimitRequest,
     SimulatedToolCallRequest,
     Source,
@@ -31,6 +46,17 @@ from resources_servers.conversational_tool_use_simulation.app import (
 class RequestStub:
     def __init__(self, session_id: str = "session_1") -> None:
         self.session = {SESSION_ID_KEY: session_id}
+
+
+class JsonResponseStub:
+    ok = True
+    cookies: dict = {}
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    async def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
 
 
 def make_server(
@@ -65,6 +91,25 @@ def make_verify_request() -> ConversationalToolUseVerifyRequest:
             },
         }
     )
+
+
+def test_simulator_sampling_is_owned_by_the_model_servers() -> None:
+    config = ConversationalToolUseSimulationConfig(
+        host="0.0.0.0",
+        port=0,
+        entrypoint="app.py",
+        name="conversational_tool_use_simulation",
+    )
+
+    for params in (
+        config.user_responses_create_params,
+        config.tool_simulator_responses_create_params,
+        config.judge_responses_create_params,
+    ):
+        assert params.input == []
+        assert params.temperature is None
+        assert params.top_p is None
+        assert params.max_output_tokens is None
 
 
 def make_judge_response(text: str) -> NeMoGymResponse:
@@ -109,6 +154,22 @@ def test_retry_defaults() -> None:
     assert server.config.enforce_transfer_ground_truth is False
 
 
+async def test_model_calls_use_the_seeded_rollout_correlation_prefix() -> None:
+    server = make_server()
+    server.server_client.post = AsyncMock(
+        return_value=JsonResponseStub(make_judge_response('{"ok":true}').model_dump(mode="json"))
+    )
+
+    await server._call_model(
+        model_server=ModelServerRef(type="responses_api_models", name="simulator_model"),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        messages=[NeMoGymEasyInputMessage(role="user", content="Generate.")],
+        rollout_id="7-2",
+    )
+
+    assert server.server_client.post.await_args.kwargs["url_path"] == "/ng-rollout/7-2/v1/responses"
+
+
 async def test_seed_session_starts_from_prefilled_policy_user_message() -> None:
     server = make_server()
     request = RequestStub()
@@ -116,6 +177,7 @@ async def test_seed_session_starts_from_prefilled_policy_user_message() -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "scenario fallback"},
             responses_create_params={
@@ -141,6 +203,7 @@ async def test_seed_session_rejects_conflicting_initial_user_messages() -> None:
             request,
             ConversationalToolUseSeedSessionRequest(
                 domain_name="subscription support",
+                profile="general",
                 policy="policy",
                 customer_scenario={"reason_for_contact": "scenario fallback"},
                 initial_user_message="First request.",
@@ -163,6 +226,7 @@ async def test_seed_session_hydrates_full_prefilled_history() -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             tools=[
                 {
@@ -211,8 +275,8 @@ async def test_seed_session_hydrates_full_prefilled_history() -> None:
     assert state.messages[3].schema_valid is True
     assert state.prefill_message_count == 6
     sidecar = server._trajectory_result(state)
-    assert sidecar["trajectory"]["prefill_message_count"] == 6
-    assert sidecar["trajectory"]["continuation_start_index"] == 6
+    assert sidecar.trajectory.prefill_message_count == 6
+    assert sidecar.trajectory.continuation_start_index == 6
     resume = await server.session_resume(request)
     assert resume.next_actor == "agent"
     assert resume.pending_tool_calls == []
@@ -225,6 +289,7 @@ async def test_resumed_pending_tool_call_is_not_recorded_twice(monkeypatch) -> N
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             tools=[
                 {
@@ -270,6 +335,141 @@ async def test_resumed_pending_tool_call_is_not_recorded_twice(monkeypatch) -> N
     assert state.messages[-1].type == MessageType.TOOL_EXECUTION
 
 
+async def test_agent_outputs_preserve_provider_order_before_parallel_tool_results(monkeypatch) -> None:
+    server = make_server()
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            tools=[
+                {
+                    "name": "lookup_subscription",
+                    "params": {"type": "object", "properties": {}},
+                    "returns": {"type": "object"},
+                }
+            ],
+            customer_scenario={"reason_for_contact": "scenario fallback"},
+            initial_user_message="Check both subscriptions.",
+        ),
+    )
+
+    recorded = await server.record_agent_outputs(
+        request,
+        RecordAgentOutputsRequest.model_validate(
+            {
+                "outputs": [
+                    {
+                        "type": "function_call",
+                        "tool_name": "lookup_subscription",
+                        "tool_call_id": "call_1",
+                        "arguments": "{}",
+                    },
+                    {"type": "message", "content": "I will check both."},
+                    {
+                        "type": "function_call",
+                        "tool_name": "lookup_subscription",
+                        "tool_call_id": "call_2",
+                        "arguments": "{}",
+                    },
+                ],
+                "response": {"id": "resp_policy"},
+            }
+        ),
+    )
+
+    async def tool_result(state, pending_tool_call=None):
+        assert pending_tool_call is not None
+        return json.dumps({"call_id": pending_tool_call.tool_call_id}), None
+
+    monkeypatch.setattr(server, "_generate_tool_result", tool_result)
+    for call_id in ("call_1", "call_2"):
+        result = await server.execute_agent_tool_call(
+            request,
+            AgentToolCallRequest(
+                tool_name="lookup_subscription",
+                tool_call_id=call_id,
+                arguments="{}",
+            ),
+        )
+        assert result.schema_valid is True
+
+    state = server.session_id_to_state["session_1"]
+    continuation = state.messages[state.prefill_message_count :]
+    assert [(message.type, message.tool_call_id, message.content) for message in continuation] == [
+        (MessageType.TOOL_CALL, "call_1", None),
+        (MessageType.TEXT, None, "I will check both."),
+        (MessageType.TOOL_CALL, "call_2", None),
+        (MessageType.TOOL_EXECUTION, "call_1", '{"call_id": "call_1"}'),
+        (MessageType.TOOL_EXECUTION, "call_2", '{"call_id": "call_2"}'),
+    ]
+    assert recorded.should_continue is True
+
+
+async def test_agent_outputs_reject_duplicate_tool_call_ids() -> None:
+    server = make_server()
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            tools=[{"name": "lookup_subscription", "params": {"type": "object"}}],
+            customer_scenario={"reason_for_contact": "scenario fallback"},
+        ),
+    )
+
+    recorded = await server.record_agent_outputs(
+        request,
+        RecordAgentOutputsRequest.model_validate(
+            {
+                "outputs": [
+                    {
+                        "type": "function_call",
+                        "tool_name": "lookup_subscription",
+                        "tool_call_id": "call_1",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call",
+                        "tool_name": "lookup_subscription",
+                        "tool_call_id": "call_1",
+                        "arguments": "{}",
+                    },
+                ]
+            }
+        ),
+    )
+
+    state = server.session_id_to_state["session_1"]
+    assert recorded.should_continue is False
+    assert recorded.terminal_state == "incomplete"
+    assert state.invalid_reasons == ["invalid_agent_tool_call"]
+    assert state.failure_labels == ["agent_failure"]
+    assert "not unique" in (state.terminal_error or "")
+
+
+async def test_discard_session_is_idempotent() -> None:
+    server = make_server()
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "scenario fallback"},
+        ),
+    )
+
+    assert (await server.discard_session(request)).discarded is True
+    assert (await server.discard_session(request)).discarded is False
+    assert "session_1" not in server.session_id_to_state
+
+
 async def test_user_stop_completes_and_agent_stop_does_not(monkeypatch) -> None:
     server = make_server()
     request = RequestStub()
@@ -278,6 +478,7 @@ async def test_user_stop_completes_and_agent_stop_does_not(monkeypatch) -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={
                 "reason_for_contact": "I need help canceling my subscription.",
@@ -307,10 +508,11 @@ async def test_user_stop_completes_and_agent_stop_does_not(monkeypatch) -> None:
     assert verified.num_user_messages == 2
     assert verified.num_agent_messages == 1
     assert verified.failure_labels == []
-    assert verified.result["trajectory"]["prefill_message_count"] == 0
-    assert verified.result["trajectory"]["continuation_start_index"] == 0
-    assert [message["source"] for message in verified.result["trajectory"]["messages"]] == ["user", "agent", "user"]
-    assert verified.result["trajectory"]["messages"][0]["text"] == user_message.message
+    assert verified.result.trajectory.prefill_message_count == 0
+    assert verified.result.trajectory.continuation_start_index == 0
+    assert [message.source for message in verified.result.trajectory.messages] == ["user", "agent", "user"]
+    assert verified.result.trajectory.messages[0].text == user_message.message
+    assert "session_1" not in server.session_id_to_state
 
 
 async def test_first_user_stop_is_invalid(monkeypatch) -> None:
@@ -321,6 +523,7 @@ async def test_first_user_stop_is_invalid(monkeypatch) -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I need help."},
         ),
@@ -348,6 +551,7 @@ async def test_tool_schema_failure_is_recorded() -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             tools=[
                 {
@@ -374,8 +578,8 @@ async def test_tool_schema_failure_is_recorded() -> None:
     assert verified.num_tool_schema_failures == 1
     assert verified.trajectory_invalid_reasons
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
-    assert verified.result["trajectory"]["messages"][-1]["source"] == "environment"
-    assert verified.result["trajectory"]["messages"][-1]["schema_valid"] is False
+    assert verified.result.trajectory.messages[-1].source == "environment"
+    assert verified.result.trajectory.messages[-1].schema_valid is False
 
 
 async def test_agent_step_limit_records_tool_calls_without_tool_simulation(monkeypatch) -> None:
@@ -385,6 +589,7 @@ async def test_agent_step_limit_records_tool_calls_without_tool_simulation(monke
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             tools=[
                 {
@@ -440,6 +645,7 @@ async def test_agent_step_limit_after_text_and_user_reply_preserves_messages() -
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I still need help."},
         ),
@@ -468,6 +674,7 @@ async def test_tool_argument_enum_is_validated_by_jsonschema() -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             tools=[
                 {
@@ -499,7 +706,7 @@ async def test_tool_argument_enum_is_validated_by_jsonschema() -> None:
     assert verified.trajectory_invalid_reasons == ["invalid_agent_tool_call"]
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
     assert verified.instance_config == {"mask_sample": False}
-    assert verified.result["trajectory"]["messages"][-1]["tool_name"] == "update_subscription"
+    assert verified.result.trajectory.messages[-1].tool_name == "update_subscription"
 
 
 async def test_user_generation_error_records_invalid_reason(monkeypatch) -> None:
@@ -510,6 +717,7 @@ async def test_user_generation_error_records_invalid_reason(monkeypatch) -> None
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I need help."},
         ),
@@ -544,6 +752,7 @@ async def test_tool_generation_error_records_invalid_reason(monkeypatch) -> None
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             tools=[
                 {
@@ -592,6 +801,7 @@ async def test_none_tool_schemas_skip_validation(monkeypatch) -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             tools=[
                 {
@@ -635,6 +845,7 @@ async def test_valid_tool_result_returns_exact_raw_simulator_content(monkeypatch
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             tools=[
                 {
@@ -681,6 +892,7 @@ async def test_llm_judge_uses_termination_order(monkeypatch) -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "Look up my subscription."},
         ),
@@ -728,9 +940,11 @@ async def test_llm_judge_uses_termination_order(monkeypatch) -> None:
     ]
     assert verified.failure_labels == []
     assert verified.judge_diagnostics["verification_type"] == "message"
-    agent_verification = verified.result["trajectory"]["agent_verification_result"]
-    assert agent_verification["overall_reward"] == 1
-    assert agent_verification["conversation_verification_result"]["reward"] == 1
+    agent_verification = verified.result.trajectory.agent_verification_result
+    assert agent_verification is not None
+    assert agent_verification.overall_reward == 1
+    assert agent_verification.conversation_verification_result is not None
+    assert agent_verification.conversation_verification_result.reward == 1
 
 
 @pytest.mark.parametrize(
@@ -749,6 +963,7 @@ async def test_transfer_ground_truth_mismatch_zeroes_reward_and_skips_judge(
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={
                 "reason_for_contact": "Look up my subscription.",
@@ -782,9 +997,11 @@ async def test_transfer_ground_truth_mismatch_zeroes_reward_and_skips_judge(
         "mismatch": True,
         "judge_skipped": True,
     }
-    agent_verification = verified.result["trajectory"]["agent_verification_result"]
-    assert agent_verification["overall_reward"] == 0
-    assert agent_verification["conversation_verification_result"]["reward"] == 0
+    agent_verification = verified.result.trajectory.agent_verification_result
+    assert agent_verification is not None
+    assert agent_verification.overall_reward == 0
+    assert agent_verification.conversation_verification_result is not None
+    assert agent_verification.conversation_verification_result.reward == 0
 
 
 async def test_matching_transfer_ground_truth_still_runs_judge(monkeypatch) -> None:
@@ -794,6 +1011,7 @@ async def test_matching_transfer_ground_truth_still_runs_judge(monkeypatch) -> N
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={
                 "reason_for_contact": "Look up my subscription.",
@@ -836,6 +1054,7 @@ async def test_llm_judge_labels_tool_response_failure_and_short_circuits(monkeyp
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "Look up my subscription."},
         ),
@@ -872,9 +1091,9 @@ async def test_llm_judge_labels_tool_response_failure_and_short_circuits(monkeyp
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
     assert verified.num_tool_failures == 1
     assert verified.instance_config == {"mask_sample": True}
-    assert verified.result["trajectory"]["agent_verification_result"]["trajectory_invalid_reasons"] == [
-        "no_reward_environment_message"
-    ]
+    agent_verification = verified.result.trajectory.agent_verification_result
+    assert agent_verification is not None
+    assert agent_verification.trajectory_invalid_reasons == ["no_reward_environment_message"]
 
 
 async def test_combined_verification_type_uses_single_judge_shape(monkeypatch) -> None:
@@ -886,6 +1105,7 @@ async def test_combined_verification_type_uses_single_judge_shape(monkeypatch) -
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "Look up my subscription."},
         ),
@@ -919,11 +1139,15 @@ async def test_combined_verification_type_uses_single_judge_shape(monkeypatch) -
     assert verified.instance_config == {"mask_sample": False}
     assert verified.judge_diagnostics["verification_type"] == "complete_trajectory_combined_evaluation"
     assert verified.judge_diagnostics["conversation_verification_result"]["reward"] == 0
-    trajectory_result = verified.result["trajectory"]
-    assert trajectory_result["user_verification_result"]["reward"] == 1
-    assert trajectory_result["environment_verification_result"]["reward"] == 1
-    assert trajectory_result["agent_verification_result"]["overall_reward"] == 0
-    assert trajectory_result["agent_verification_result"]["conversation_verification_result"]["reward"] == 0
+    trajectory_result = verified.result.trajectory
+    assert trajectory_result.user_verification_result is not None
+    assert trajectory_result.user_verification_result.reward == 1
+    assert trajectory_result.environment_verification_result is not None
+    assert trajectory_result.environment_verification_result.reward == 1
+    assert trajectory_result.agent_verification_result is not None
+    assert trajectory_result.agent_verification_result.overall_reward == 0
+    assert trajectory_result.agent_verification_result.conversation_verification_result is not None
+    assert trajectory_result.agent_verification_result.conversation_verification_result.reward == 0
 
 
 async def test_judge_provider_retries_transient_errors_with_bounded_backoff(monkeypatch) -> None:
@@ -936,6 +1160,7 @@ async def test_judge_provider_retries_transient_errors_with_bounded_backoff(monk
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I need help."},
         ),
@@ -969,6 +1194,7 @@ async def test_malformed_judge_output_uses_only_semantic_attempts(monkeypatch) -
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I need help."},
         ),
@@ -1000,6 +1226,7 @@ async def test_combined_judge_uses_provider_retry_path(monkeypatch) -> None:
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I need help."},
         ),
@@ -1040,6 +1267,7 @@ async def test_exhausted_judge_provider_errors_return_retryable_http_failure(mon
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I need help."},
         ),
@@ -1061,6 +1289,7 @@ async def test_exhausted_judge_provider_errors_return_retryable_http_failure(mon
     assert "failed after 2 attempts" in str(exc_info.value.detail)
     assert call_model.await_count == 2
     assert state.verification_reward is None
+    assert server.session_id_to_state["session_1"] is state
 
 
 async def test_nonretryable_judge_provider_errors_fail_without_retry(monkeypatch) -> None:
@@ -1072,6 +1301,7 @@ async def test_nonretryable_judge_provider_errors_fail_without_retry(monkeypatch
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I need help."},
         ),
@@ -1101,6 +1331,7 @@ async def test_judge_exception_is_synchronized_into_internal_sidecar(monkeypatch
         request,
         ConversationalToolUseSeedSessionRequest(
             domain_name="subscription support",
+            profile="general",
             policy="policy",
             customer_scenario={"reason_for_contact": "I need help."},
         ),
@@ -1125,9 +1356,11 @@ async def test_judge_exception_is_synchronized_into_internal_sidecar(monkeypatch
     assert verified.failure_labels == [VerificationFailureLabel.VERIFICATION_GENERATION_ERROR]
     assert verified.instance_config == {"mask_sample": True}
     assert verified.judge_generation_error == "RuntimeError: judge provider unavailable"
-    agent_verification = verified.result["trajectory"]["agent_verification_result"]
-    assert agent_verification["trajectory_invalid_reasons"] == ["verification_generation_error"]
-    assert agent_verification["conversation_verification_result"]["generation_error"] == (
+    agent_verification = verified.result.trajectory.agent_verification_result
+    assert agent_verification is not None
+    assert agent_verification.trajectory_invalid_reasons == ["verification_generation_error"]
+    assert agent_verification.conversation_verification_result is not None
+    assert agent_verification.conversation_verification_result.generation_error == (
         "RuntimeError: judge provider unavailable"
     )
 
@@ -1154,6 +1387,7 @@ def test_compute_metrics_reports_transfer_enforcement_rates() -> None:
     assert metrics["conversational_tool_use/transfer_rate"] == 0.5
     assert metrics["conversational_tool_use/transfer_ground_truth_mismatch_rate"] == 0.5
     assert metrics["conversational_tool_use/transfer_mismatch_judge_skip_rate"] == 0.5
+    assert metrics["conversational_tool_use/agent_failure_rate"] == 0.0
 
 
 def test_get_key_metrics_returns_headline_metric_dict() -> None:
@@ -1166,6 +1400,7 @@ def test_get_key_metrics_returns_headline_metric_dict() -> None:
         "conversational_tool_use/transfer_mismatch_judge_skip_rate": 0.05,
         "conversational_tool_use/tool_schema_failure_rate": 0.2,
         "conversational_tool_use/user_failure_rate": 0.3,
+        "conversational_tool_use/agent_failure_rate": 0.35,
         "conversational_tool_use/tool_failure_rate": 0.4,
         "conversational_tool_use/other_metric": 99,
     }
@@ -1177,5 +1412,6 @@ def test_get_key_metrics_returns_headline_metric_dict() -> None:
         "conversational_tool_use/transfer_mismatch_judge_skip_rate": 0.05,
         "conversational_tool_use/tool_schema_failure_rate": 0.2,
         "conversational_tool_use/user_failure_rate": 0.3,
+        "conversational_tool_use/agent_failure_rate": 0.35,
         "conversational_tool_use/tool_failure_rate": 0.4,
     }
