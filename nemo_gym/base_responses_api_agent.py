@@ -155,7 +155,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def run_with_call_capture(
         self, rollout_id: str, request: Request, body: BaseRunRequest = Body()
     ) -> BaseVerifyResponse:
-        # TODO @bxyu-nvidia: Implement agent recording.
         params = {"body": body}
         self._maybe_inject_request(self.run, request, body)
         return await self.run(**params)

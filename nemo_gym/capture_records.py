@@ -64,12 +64,12 @@ class ModelCallRecord(BaseRolloutRecord):
     raw_response: Optional[Union[Dict[str, Any], List[str]]]
 
 
-class AggregateModelCallRecords(BaseModel):
+class AggregateCallRecords(BaseModel):
     # Any other typically useful aggregate information can be added here
     records: List[ModelCallRecord]
 
     @classmethod
-    def from_records(cls, records: List[ModelCallRecord]) -> "AggregateModelCallRecords":
+    def from_records(cls, records: List[ModelCallRecord]) -> "AggregateCallRecords":
         return cls(records=records)
 
 
@@ -132,9 +132,9 @@ class CaptureStore:
     def clear(self) -> None:
         rmtree(self.root, ignore_errors=True)
 
-    def aggregate(self, rollout_id: str) -> AggregateModelCallRecords:
+    def aggregate(self, rollout_id: str) -> AggregateCallRecords:
         records = self.read(rollout_id)
-        return AggregateModelCallRecords.from_records(records)
+        return AggregateCallRecords.from_records(records)
 
 
 def create_call_path(base_url_or_path: str, rollout_id: str) -> str:
