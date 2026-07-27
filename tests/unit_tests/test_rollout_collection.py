@@ -126,6 +126,7 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: dict())
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "is_global_aiohttp_client_request_debug_enabled",
@@ -248,6 +249,7 @@ class TestRolloutCollection:
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert rows == [
             {
+                "rollout_id": "0-0",
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
                 "responses_create_params": {
@@ -259,6 +261,7 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my_agent"},
             },
             {
+                "rollout_id": "0-1",
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 1,
                 "responses_create_params": {
@@ -270,6 +273,7 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my_agent"},
             },
             {
+                "rollout_id": "1-0",
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 0,
                 "responses_create_params": {
@@ -281,6 +285,7 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my_agent"},
             },
             {
+                "rollout_id": "1-1",
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 1,
                 "responses_create_params": {
@@ -292,6 +297,7 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my_agent"},
             },
             {
+                "rollout_id": "2-0",
                 "_ng_task_index": 2,
                 "_ng_rollout_index": 0,
                 "responses_create_params": {
@@ -303,6 +309,7 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my_agent"},
             },
             {
+                "rollout_id": "2-1",
                 "_ng_task_index": 2,
                 "_ng_rollout_index": 1,
                 "responses_create_params": {
@@ -702,7 +709,7 @@ class TestRolloutCollection:
         assert "Clearing previously captured model calls" in capsys.readouterr().out
 
         assert len(results) == 1
-        assert "ng_model_call_capture" in results[0]
+        assert "_ng_call_capture" in results[0]
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
