@@ -36,15 +36,16 @@ class SubmitConfig(BaseModel):
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":
         compute_names = set(self.compute)
-        sole_compute = next(iter(compute_names)) if len(compute_names) == 1 else None
+
+        if len(compute_names) > 1:
+            raise ValueError(
+                f"Multiple compute resources are not supported yet ({', '.join(sorted(compute_names))})."
+            )
+
+        sole_compute = next(iter(compute_names))
 
         for service_name, service in self.services.items():
             if service.placement is None:
-                if sole_compute is None:
-                    raise ValueError(
-                        f"Service '{service_name}' has no placement and there are multiple compute resources "
-                        f"({', '.join(sorted(compute_names))}). Set placement explicitly."
-                    )
                 service.placement = sole_compute
             elif service.placement not in compute_names:
                 raise ValueError(
