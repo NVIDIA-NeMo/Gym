@@ -47,6 +47,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
@@ -95,7 +96,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
         install_model_call_capture(app, capture_config, model_server_name=self.config.name)
 
-        app.post("/v1/chat/completions")(self.chat_completions)
+        app.post("/v1/chat/completions")(self.chat_completions_dispatch)
 
         app.post("/v1/responses")(self.responses_dispatch)
 
@@ -157,6 +158,47 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             media_type="text/event-stream",
         )
 
+    async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
+        """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
+
+        A non-streaming request validates strictly against
+        ``NeMoGymChatCompletionCreateParamsNonStreaming`` and delegates to this server's own
+        ``chat_completions()``, preserving the historical non-streaming behavior (including the
+        standard 422 shape). When the client sends ``stream: true`` (blackbox
+        Chat-Completions-over-SSE harnesses like the OpenClaw agent always do), the request is
+        sanitized onto that same strict model (drop ``stream``/``stream_options``; see
+        ``nemo_gym.chat_streaming``), validated identically, delegated to the same
+        ``chat_completions()``, and the complete response is buffered and re-emitted as a
+        synthesized ``chat.completion.chunk`` SSE stream. This is buffer-then-replay, not
+        token-by-token streaming.
+
+        Only a genuine boolean ``stream: true`` takes the streaming path; any other value
+        (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
+        malformed ``stream`` with the same 422 as before.
+        """
+        if body.get("stream") is not True:
+            params = _validate_chat_params(body)
+            return await self._invoke_chat_completions(request, params)
+
+        cleaned, include_usage = sanitize_streaming_chat_body(body)
+        params = _validate_chat_params(cleaned)
+        completion = await self._invoke_chat_completions(request, params)
+        completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+        return StreamingResponse(
+            synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+            media_type="text/event-stream",
+        )
+
+    async def _invoke_chat_completions(
+        self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> NeMoGymChatCompletion:
+        # chat_completions() signatures vary across servers: some take a leading `request`, some
+        # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
+        # all of them.
+        if "request" in inspect.signature(self.chat_completions).parameters:
+            return await self.chat_completions(request=request, body=params)
+        return await self.chat_completions(body=params)
+
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
 
@@ -194,6 +236,21 @@ def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStre
         return NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
     except ValidationError as exc:
         raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+
+
+def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+    """Validate a /v1/chat/completions body dict, surfacing failures as FastAPI's standard 422.
+
+    ``include_url=False`` mirrors FastAPI's native body validation, which strips the
+    ``errors.pydantic.dev`` url from each detail entry, so the 422 body stays byte-for-byte
+    identical to the previous typed-``Body()`` binding.
+    """
+    try:
+        return NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)]
+        )
 
 
 # --- Capture configuration + rollout-keyed storage ---

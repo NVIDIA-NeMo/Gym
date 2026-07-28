@@ -78,7 +78,7 @@ When an environment requires an external tool (compiler, runtime, etc.), auto-in
 
 ```bash
 # Setup
-uv venv && uv sync --extra dev --group docs
+uv venv && uv sync --extra dev
 pre-commit install
 
 # Run servers
