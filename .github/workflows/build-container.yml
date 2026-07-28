@@ -52,7 +52,7 @@ jobs:
         run: az acr login --name nemoci
 
       - name: Smoke test — CLI
-        run: docker run --rm "${{ needs.build.outputs.container-uri }}" gym --help
+        run: docker run --rm "${{ needs.build.outputs.container-uri }}" --help
 
       - name: Smoke test — vLLM and FlashInfer versions
         run: |
