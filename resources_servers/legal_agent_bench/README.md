@@ -12,7 +12,7 @@ criterion with an OpenAI-compatible judge model.
 
 ## Requirements
 
-- Python 3.14 and [uv](https://docs.astral.sh/uv/)
+- Python 3.14.6 and [uv](https://docs.astral.sh/uv/)
 - Docker with a running daemon (the only supported container backend)
 - An OpenAI-compatible policy endpoint and judge endpoint
 - At least 10 GB of free working space for preparation and the first Docker build
