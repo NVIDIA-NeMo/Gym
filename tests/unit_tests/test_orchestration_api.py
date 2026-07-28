@@ -24,28 +24,29 @@ COMPUTE_TWO = {
     "cluster_b": {"type": "slurm", "hostname": "bar"},
 }
 
-SERVICE = {"container": "gym:latest", "type": "vllm"}
+SERVICE = {"container": "gym:latest", "type": "vllm", "model": "org/model"}
+DRIVER = {"container": "gym:latest", "benchmarks": [{"name": "gsm8k"}]}
+
+
+def _config(**overrides):
+    return {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, **overrides}
 
 
 def test_implicit_placement_single_compute():
-    config = SubmitConfig.model_validate({"services": {"svc": SERVICE}, "compute": COMPUTE})
+    config = SubmitConfig.model_validate(_config())
     assert config.services["svc"].placement == "cluster"
 
 
 def test_explicit_valid_placement():
-    config = SubmitConfig.model_validate(
-        {"services": {"svc": {**SERVICE, "placement": "cluster"}}, "compute": COMPUTE}
-    )
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "placement": "cluster"}}))
     assert config.services["svc"].placement == "cluster"
 
 
 def test_multiple_compute_raises():
     with pytest.raises(ValidationError, match="Multiple compute resources are not supported yet"):
-        SubmitConfig.model_validate({"services": {"svc": SERVICE}, "compute": COMPUTE_TWO})
+        SubmitConfig.model_validate(_config(compute=COMPUTE_TWO))
 
 
 def test_invalid_placement_raises():
     with pytest.raises(ValidationError, match="does not match any compute resource"):
-        SubmitConfig.model_validate(
-            {"services": {"svc": {**SERVICE, "placement": "nonexistent"}}, "compute": COMPUTE}
-        )
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "placement": "nonexistent"}}))

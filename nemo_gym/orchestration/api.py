@@ -3,13 +3,25 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Discriminator, Tag, model_validator
 
 
+class HealthCheckConfig(BaseModel):
+    path: str = "/health"
+    port: int
+    timeout_seconds: int = 60
+
+
 class BaseServiceConfig(BaseModel):
     container: str
     placement: str | None = None
+    health_check: HealthCheckConfig | None = None
 
 
 class VllmServiceConfig(BaseServiceConfig):
     type: Literal["vllm"]
+    model: str
+    port: int = 8000
+    tensor_parallel_size: int = 1
+    pipeline_parallel_size: int = 1
+    trust_remote_code: bool = False
 
 
 class RayServiceConfig(BaseServiceConfig):
@@ -29,9 +41,19 @@ class ComputeConfig(BaseModel):
     node_pools: dict[str, dict] | None = None
 
 
+class BenchmarkRunConfig(BaseModel):
+    name: str
+
+
+class DriverConfig(BaseModel):
+    container: str
+    benchmarks: list[BenchmarkRunConfig]
+
+
 class SubmitConfig(BaseModel):
     services: dict[str, ServiceConfig]
     compute: dict[str, ComputeConfig]
+    driver: DriverConfig
 
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":
