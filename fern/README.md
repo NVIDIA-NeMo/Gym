@@ -19,7 +19,7 @@ All new pages and edits should land here. The retired Sphinx tree has been remov
 First time on this machine (run from the repo root):
 
 ```bash
-# 1. Install the Fern CLI globally (one-time)
+# 1. Install Node.js 22+, then install the Fern CLI globally (one-time)
 npm install -g fern-api
 # or use it ad-hoc via:  npx -y fern-api@latest <subcommand>
 
