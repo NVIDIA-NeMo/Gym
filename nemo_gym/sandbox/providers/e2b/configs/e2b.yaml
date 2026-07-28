@@ -40,13 +40,32 @@ sandbox:
       #   1. SandboxSpec.provider_options.template
       #   2. this template_map, keyed by SandboxSpec.image
       #   3. SandboxSpec.image itself, when it is already a valid alias
-      #   4. this `template` fallback
+      #   4. build one from the image, when auto_build_from_image is true
+      #   5. this `template` fallback
       #
       # Map image references that are not valid aliases, e.g.:
       #   template_map:
       #     "ghcr.io/acme/task:1.0": acme-task-1-0
       template: null
       template_map: {}
+
+      # Build a template from SandboxSpec.image on first use, so callers can
+      # pass ordinary OCI references instead of pre-registering every image.
+      # The alias is derived deterministically as `<image-stem>__<12-hex>`,
+      # built once per process (concurrent creates on the same image wait on a
+      # single build) and reused afterwards. Requires a working template
+      # builder on the target deployment.
+      auto_build_from_image: false
+      # Resources for auto-built templates. E2B fixes cpu/memory at BUILD time,
+      # so on this path a SandboxSpec.resources request IS honoured and takes
+      # precedence over these defaults. The digest above covers the resources,
+      # so differing requests never share one template.
+      build_cpu_count: 2
+      build_memory_mb: 1024
+      build_timeout_s: 3600.0
+      # Credentials for pulling from a private registry during the build.
+      registry_username: null
+      registry_password: null
       # Sandbox lifetime; E2B kills the sandbox when it elapses. Overridden per
       # sandbox by SandboxSpec.ttl_s.
       timeout_s: 3600.0
