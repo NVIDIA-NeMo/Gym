@@ -29,11 +29,10 @@ from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, T
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
-    NG_FAILURE_CLASS_KEY,
-    NG_TERMINAL_KEY,
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
