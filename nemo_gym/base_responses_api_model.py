@@ -16,7 +16,7 @@
 
 import logging
 from abc import abstractmethod
-from time import perf_counter
+from time import time
 from traceback import format_exc
 from typing import AsyncGenerator, Awaitable, Callable
 
@@ -107,7 +107,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         request.state.model_call_record_dict = {
-            "timestamp_start": perf_counter(),
+            "timestamp_start": time(),
             "model_ref": ModelServerRef(type="responses_api_models", name=self.config.name),
         }
 
@@ -117,7 +117,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if not rollout_id:
             return response
 
-        request.state.model_call_record_dict["timestamp_end"] = perf_counter()
+        request.state.model_call_record_dict["timestamp_end"] = time()
         request.state.model_call_record_dict["status_code"] = response.status_code
 
         # Record in the background to not block the response

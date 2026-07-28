@@ -40,7 +40,7 @@ class ModelCallRecord(BaseModel):
     status_code: int
     route: str
 
-    # Timing information
+    # Timing information. All timestamps are in time since epoch.
     timestamp_start: float
     timestamp_end: float
 
@@ -64,6 +64,7 @@ class BaseEvent(BaseModel):
 
 
 class ToolCallEvent(BaseEvent):
+    call_id: str
     timestamp_start: float
     timestamp_end: float
 
