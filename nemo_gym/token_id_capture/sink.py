@@ -35,11 +35,16 @@ import logging
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
+from nemo_gym.token_id_capture.lineage import (
+    LineageIndex,
+    assistant_turn_from_output_items,
+)
 from nemo_gym.token_id_capture.protocols import TokenSink
 from nemo_gym.token_id_capture.records import (
     TokenEntry,
+    cumulative_tokens,
     extract_token_fields,
     response_to_output_items,
     stamp_lineage,
@@ -49,6 +54,24 @@ from nemo_gym.token_id_capture.store import TokenCaptureStore
 
 
 logger = logging.getLogger(__name__)
+
+
+# Which recorded call each request continues, per rollout. Process-wide because the
+# capture path is per request; bounded, so an abandoned rollout cannot leak. Losing an
+# entry costs a fallback to prefix inference, never a wrong answer.
+#
+# Being process-wide means it does not span uvicorn workers. With num_workers > 1 the
+# calls of one rollout can be handled by different workers, and a call landing on a
+# worker that did not record its parent resolves nothing: parent_call_id stays unset and
+# the builder infers the parent from token prefixes instead. Prefix supply, which needs a
+# resolved parent, does not fire for those calls. Both degrade rather than break, and
+# parent_link_fallbacks reports the rate. The file store is unaffected because it is keyed
+# per rollout and appends under a file lock, which holds across processes.
+_LINEAGE = LineageIndex()
+
+
+def lineage_index() -> LineageIndex:
+    return _LINEAGE
 
 
 @dataclass
@@ -65,24 +88,36 @@ class CaptureContext:
     model_call_id: str
     store: TokenCaptureStore
     model: str = ""
+    # Set by the model server when it supplied this call's prefix; read back at
+    # capture time so the evidence lands on the record rather than only in a log.
+    prefix_supplied: bool = False
 
     @property
     def sink(self) -> TokenSink:
         return self.store
 
 
-_TOKEN_SINK: ContextVar[Optional[CaptureContext]] = ContextVar("nemo_gym_token_sink", default=None)
+_TOKEN_SINK: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_token_sink", default=None)
 
 
 def set_token_sink(sink: CaptureContext) -> Token:
     return _TOKEN_SINK.set(sink)
 
 
+def current_capture_context() -> CaptureContext | None:
+    """The capture context for the in-flight call, or None for untagged traffic."""
+    return _TOKEN_SINK.get()
+
+
 def reset_token_sink(token: Token) -> None:
     _TOKEN_SINK.reset(token)
 
 
-async def capture_tokens(response: Any, parent_call_id: Optional[str] = None) -> None:
+async def capture_tokens(
+    response: Any,
+    parent_call_id: str | None = None,
+    request_messages: list | None = None,
+) -> None:
     """Record a ``TokenEntry`` from a complete model response when a sink is set.
 
     ``response`` is a served response as a pydantic model or dict. No-op when no
@@ -105,6 +140,14 @@ async def capture_tokens(response: Any, parent_call_id: Optional[str] = None) ->
         return
     # Content only: the arrays live on the entry, not on the items as well.
     content_items, token_item_index = strip_token_fields(response_to_output_items(payload))
+    # Which call does this one continue? Resolved from the conversation the request already
+    # carries, so the harness needs to send nothing extra. A miss (new conversation, rewritten
+    # history, or two recorded calls with byte-identical output) leaves the link unset and the
+    # builder infers from token prefixes instead.
+    lineage = _LINEAGE.for_rollout(sink.rollout_id)
+    if parent_call_id is None and request_messages is not None:
+        parent = lineage.resolve(request_messages)
+        parent_call_id = parent.call_id if parent is not None else None
     try:
         entry = TokenEntry(
             rollout_id=sink.rollout_id,
@@ -119,11 +162,21 @@ async def capture_tokens(response: Any, parent_call_id: Optional[str] = None) ->
             output_items=content_items,
             token_item_index=token_item_index,
             created_at=time.time(),
+            prefix_supplied=sink.prefix_supplied,
         )
         # cum_len/digest describe this call and are always computable; the parent
         # link is filled only when the model server resolved one.
         stamp_lineage(entry, parent_call_id)
         await sink.sink.put(entry)
+        # Index this call by the conversation a continuation of it would carry, so the next
+        # request resolves to it.
+        if request_messages is not None:
+            lineage.record(
+                sink.model_call_id,
+                list(request_messages) + [assistant_turn_from_output_items(entry.output_items)],
+                cumulative_tokens(entry),
+                entry.digest or "",
+            )
     except Exception:
         # Capture is best-effort per call: a bad token payload must never fail the
         # model call and break the harness's run. But a rollout that lost a call

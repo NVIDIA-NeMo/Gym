@@ -86,6 +86,26 @@ logger = logging.getLogger(__name__)
 _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
+def _request_messages(body: Any) -> list[dict]:
+    """The conversation a request carries, across the three dialects.
+
+    Used only to identify which recorded call this request continues (see
+    ``token_id_capture.lineage``): the assistant turns in it are the ones we
+    produced. Chat and Anthropic both use ``messages``; Responses carries
+    ``input``, which is a string for a first turn and a list of items after that.
+    """
+    if body is None:
+        return []
+    getter = body.get if isinstance(body, dict) else lambda key, default=None: getattr(body, key, default)
+    messages = getter("messages", None)
+    if isinstance(messages, list):
+        return [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
+    items = getter("input", None)
+    if isinstance(items, list):
+        return [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
+    return []
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     pass
 
@@ -210,7 +230,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion = await self.chat_completions(request=request, body=params)
         else:
             completion = await self.chat_completions(body=params)
-        await capture_tokens(completion)
+        await capture_tokens(
+            completion,
+            request_messages=_request_messages(params),
+        )
         return completion
 
     async def messages(self, request: Request, body: dict = Body()):
@@ -246,7 +269,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Capture here rather than at the route: the streaming dispatch returns a StreamingResponse
         # and the Anthropic mapping drops the token fields, so this is the last point where the
         # assembled response still carries them, for every dialect.
-        await capture_tokens(response)
+        await capture_tokens(
+            response,
+            request_messages=_request_messages(params),
+        )
         return response
 
 

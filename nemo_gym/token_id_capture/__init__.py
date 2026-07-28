@@ -46,6 +46,13 @@ from nemo_gym.token_id_capture.consumer import (
     trajectories_for_rollout,
     trajectories_from_source,
 )
+from nemo_gym.token_id_capture.lineage import (
+    LineageIndex,
+    LineageNode,
+    RolloutLineage,
+    assistant_fingerprint,
+    canonicalize_tool_arguments,
+)
 from nemo_gym.token_id_capture.protocols import (
     TokenSink,
     TokenSource,
@@ -56,12 +63,16 @@ from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
     TokenEntry,
     compute_digest,
+    cumulative_tokens,
     encode_token_ids,
     extract_token_fields,
+    stamp_lineage,
 )
 from nemo_gym.token_id_capture.sink import (
     CaptureContext,
     capture_tokens,
+    current_capture_context,
+    lineage_index,
     reset_token_sink,
     set_token_sink,
 )
@@ -77,6 +88,8 @@ __all__ = [
     "extract_token_fields",
     "compute_digest",
     "encode_token_ids",
+    "cumulative_tokens",
+    "stamp_lineage",
     "TokenCaptureStore",
     "validate_rollout_id",
     "TokenSink",
@@ -87,6 +100,13 @@ __all__ = [
     "set_token_sink",
     "reset_token_sink",
     "capture_tokens",
+    "current_capture_context",
+    "lineage_index",
+    "LineageIndex",
+    "LineageNode",
+    "RolloutLineage",
+    "assistant_fingerprint",
+    "canonicalize_tool_arguments",
     "per_request",
     "prefix_merging",
     "project_chain_to_output_items",

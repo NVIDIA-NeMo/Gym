@@ -18,10 +18,12 @@ import pytest
 
 from nemo_gym.token_id_capture import (
     assert_prefix_contiguity,
+    compute_digest,
     per_request,
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
+    stamp_lineage,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
 )
@@ -406,3 +408,82 @@ def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):
 
     assert calls == ["prefix_merging"]
     assert built["metrics"]["n_calls"] == 2
+
+
+def _with_lineage(entry, parent_call_id=None):
+    stamp_lineage(entry, parent_call_id)
+    return entry
+
+
+def test_recorded_parent_link_resolves_a_final_call_retry_exactly():
+    """Two siblings share a prompt and differ only in their generation.
+
+    Prefix inference cannot tell which one the harness kept, because both are
+    equally valid children. A recorded parent link on the next call names the
+    survivor, so the other is provably unused rather than tie-broken.
+    """
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    kept = _with_lineage(_entry("kept", [1, 2, 3, 4], [5]), parent_call_id="root")
+    dropped = _with_lineage(_entry("dropped", [1, 2, 3, 4], [9]), parent_call_id="root")
+    # The next call continued `kept`, and says so.
+    nxt = _with_lineage(_entry("next", [1, 2, 3, 4, 5, 6], [7]), parent_call_id="kept")
+
+    out = prefix_merging([root, kept, dropped, nxt])
+    main = next(c for c in out.chains if c.chain_id == "main")
+    assert [link.entry.model_call_id for link in main.links] == ["root", "kept", "next"]
+    assert "dropped" in out.quarantined
+    # Resolved, so nothing is flagged for masking.
+    assert out.notes.unresolved_retries == []
+
+
+def test_unresolvable_final_retry_is_flagged_not_silently_tie_broken():
+    """A retry of the LAST call has no successor to name the survivor. Neither
+    inference nor a parent link can resolve it, so it must be reported so the
+    caller can mask the rollout instead of training on a generation the client
+    may never have received."""
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    a = _with_lineage(_entry("a", [1, 2, 3, 4], [5]), parent_call_id="root")
+    b = _with_lineage(_entry("b", [1, 2, 3, 4], [9]), parent_call_id="root")
+
+    out = prefix_merging([root, a, b])
+    assert sorted(out.notes.unresolved_retries) == ["a", "b"]
+
+
+def test_a_stale_parent_link_fails_verification_and_falls_back():
+    """A rerun that appended onto a previous attempt's records must not merge two
+    attempts. The digest check catches the bad edge; the builder falls back to
+    inference and reports that it did."""
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    child = _entry("child", [1, 2, 3, 4], [5])
+    stamp_lineage(child, "root")
+    # Corrupt the recorded parent's digest, as a stale record would.
+    root.digest = compute_digest([42, 42, 42])
+
+    out = prefix_merging([root, child])
+    assert out.notes.parent_link_fallbacks == {"parent_digest_mismatch": 1}
+    # Inference still finds the right parent, so the chain is intact.
+    main = next(c for c in out.chains if c.chain_id == "main")
+    assert [link.entry.model_call_id for link in main.links] == ["root", "child"]
+
+
+def test_parent_link_and_inference_agree_on_a_clean_rollout():
+    """Parity: with and without recorded links, the same rollout must stitch the
+    same way. This is what makes the lineage fields safe to add before anything
+    populates them."""
+    plain = [
+        _entry("c1", [1, 2, 3], [4, 5]),
+        _entry("c2", [1, 2, 3, 4, 5, 6], [7]),
+        _entry("c3", [1, 2, 3, 4, 5, 6, 7, 8], [9, 10]),
+    ]
+    linked = [
+        _with_lineage(_entry("c1", [1, 2, 3], [4, 5])),
+        _with_lineage(_entry("c2", [1, 2, 3, 4, 5, 6], [7]), parent_call_id="c1"),
+        _with_lineage(_entry("c3", [1, 2, 3, 4, 5, 6, 7, 8], [9, 10]), parent_call_id="c2"),
+    ]
+    inferred = prefix_merging(plain)
+    recorded = prefix_merging(linked)
+
+    def shape(out):
+        return [([link.entry.model_call_id for link in c.links], c.root_prompt) for c in out.chains]
+
+    assert shape(inferred) == shape(recorded)
