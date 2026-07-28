@@ -50,6 +50,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+
 # Must match DOCKER_HUB_HOSTS in nemo_gym/sandbox/providers/enroot/provider.py
 _DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
 
@@ -179,9 +180,7 @@ def main() -> int:
         parser.error("No images specified. Provide IMAGE arguments or --images-file.")
 
     if not args.sqsh_dir:
-        parser.error(
-            "No sqsh directory specified. Use --sqsh-dir or set NEMO_GYM_ENROOT_SQSH_CACHE."
-        )
+        parser.error("No sqsh directory specified. Use --sqsh-dir or set NEMO_GYM_ENROOT_SQSH_CACHE.")
 
     sqsh_dir = Path(args.sqsh_dir)
     sqsh_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -193,10 +192,7 @@ def main() -> int:
 
     failed = 0
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {
-            pool.submit(prefetch_image, image, sqsh_dir, args.extra_import_args): image
-            for image in images
-        }
+        futures = {pool.submit(prefetch_image, image, sqsh_dir, args.extra_import_args): image for image in images}
         for future in as_completed(futures):
             image, status = future.result()
             ok = not status.startswith("failed")
