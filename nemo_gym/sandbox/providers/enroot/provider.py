@@ -65,12 +65,13 @@ READY_PROBE_COMMAND = (
 READY_PROBE_EXPECTED = "enroot-sandbox-ready"
 SANDBOX_RUNTIME_RETURN_CODE = 125
 # Best-effort stderr markers indicating enroot itself (not the user's command)
-# failed to run the command. Enroot prefixes its own errors with "[ERROR]"; the
-# remaining entries are narrow nsenter/proc signatures. Broad strings like
-# "failed to" or "does not exist" are omitted — they appear in normal command
-# stderr and would corrupt the exit-code signal returned to the agent.
+# failed to run the command. The narrow nsenter/proc entries are substring-matched;
+# "[error]" is checked via line-start in _is_runtime_failure — enroot prefixes its
+# own errors with "[ERROR]" at the start of a line, so anchoring there prevents false
+# positives from user commands that print "[ERROR]" mid-output (e.g. pytest, build logs).
+# Broad strings like "failed to" or "does not exist" are omitted — they appear in normal
+# command stderr and would corrupt the exit-code signal returned to the agent.
 ENROOT_RUNTIME_ERROR_MARKERS = (
-    "[error]",
     "no such process",
     "no such file or directory: /proc",
     "nsenter",
@@ -262,7 +263,9 @@ def _resource_gpu_env(resources: SandboxResources) -> dict[str, str]:
 def _is_runtime_failure(stderr: str) -> bool:
     """Best-effort: did enroot itself fail to run the command (vs the command failing)?"""
     low = stderr.lower()
-    return any(marker in low for marker in ENROOT_RUNTIME_ERROR_MARKERS)
+    return any(line.startswith("[error]") for line in low.splitlines()) or any(
+        marker in low for marker in ENROOT_RUNTIME_ERROR_MARKERS
+    )
 
 
 def _is_missing_container(stderr: str) -> bool:
@@ -718,7 +721,15 @@ class EnrootProvider:
         if user is not None and not is_root:
             effective_command = f"su -s /bin/sh -c {shlex.quote(effective_command)} {shlex.quote(str(user))}"
 
-        argv = [self._binary, "exec", *flags, str(instance.container_pid), self._exec_config.exec_shell, "-c", effective_command]
+        argv = [
+            self._binary,
+            "exec",
+            *flags,
+            str(instance.container_pid),
+            self._exec_config.exec_shell,
+            "-c",
+            effective_command,
+        ]
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
 
         try:

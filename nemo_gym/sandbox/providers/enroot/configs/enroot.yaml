@@ -30,6 +30,12 @@ sandbox:
       cache_path: ${oc.env:ENROOT_CACHE_PATH,null}
       runtime_path: ${oc.env:ENROOT_RUNTIME_PATH,null}
       sqsh_cache_dir: ${oc.env:NEMO_GYM_ENROOT_SQSH_CACHE,null}
+      # Clear the Docker ENTRYPOINT so images with a non-shell entrypoint
+      # (e.g. ENTRYPOINT ["python"]) don't wrap the init and exit immediately.
+      # Set to false for SWE-bench images: enroot resolves /dev/null inside the
+      # container namespace before /dev is mounted, so passing --rc /dev/null
+      # (bypass_entrypoint: true) fails with "No such file or directory".
+      bypass_entrypoint: true
       rw: true
       remap_root: false
       import_timeout_s: 1800
