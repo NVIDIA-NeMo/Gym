@@ -66,7 +66,7 @@ COPY --from=nemo-gym pyproject.toml uv.lock ./
 COPY --from=nemo-gym nemo_gym/__init__.py nemo_gym/package_info.py ./nemo_gym/
 
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -91,8 +91,8 @@ COPY --from=nemo-gym --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 # Unshallow the clone so setuptools-scm can read the full tag history.
 RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
 
-# Install the nemo-gym project itself into the venv.
-RUN UV_LINK_MODE=symlink uv sync --locked
+# Install the nemo-gym project itself along with the vllm extra.
+RUN UV_LINK_MODE=symlink uv sync --locked --extra vllm
 
 WORKDIR /opt/nemo-gym
 
