@@ -37,9 +37,7 @@ class TestFernDocsLinks(unittest.TestCase):
             for line_number, line in enumerate(page.read_text().splitlines(), start=1):
                 if re.search(r'(?:\]\(|href=")/evaluation-tutorials(?:[/#")])', line):
                     versionless_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
-                versioned_links += line.count(
-                    "/v0.4.0/tutorials/evaluation-tutorials"
-                )
+                versioned_links += line.count("/v0.4.0/tutorials/evaluation-tutorials")
 
         self.assertEqual([], versionless_links)
         self.assertEqual(5, versioned_links)
@@ -59,9 +57,7 @@ class TestFernDocsLinks(unittest.TestCase):
                 for page in pages.rglob("*.mdx"):
                     for line_number, line in enumerate(page.read_text().splitlines(), start=1):
                         if "#eval-profile" in line:
-                            broken_links.append(
-                                f"{page.relative_to(REPO_ROOT)}:{line_number}"
-                            )
+                            broken_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
                         canonical_links += line.count(expected_target)
 
                 self.assertEqual([], broken_links)
