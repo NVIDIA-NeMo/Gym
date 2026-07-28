@@ -526,10 +526,14 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 read_deliverable_files,
             )
 
-            read = read_deliverable_files(body.deliverables_dir)
+            # Office/PDF text extraction and page rasterization are CPU-bound and
+            # can run for seconds on a large deliverable; keep them off the event
+            # loop so co-located requests aren't stalled.
+            read = await asyncio.to_thread(read_deliverable_files, body.deliverables_dir)
             if read:
                 deliverable_text = read
-            blocks = convert_deliverables_to_content_blocks(
+            blocks = await asyncio.to_thread(
+                convert_deliverables_to_content_blocks,
                 body.deliverables_dir,
                 media_mode=self.config.judge_media_mode,
                 render_dpi=self.config.judge_pdf_render_dpi,
@@ -742,7 +746,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
             "video_capable": video_capable,
         }
         try:
-            eval_submission = build_file_section(str(eval_task_dir), clean_up_list, **media_kwargs)
+            # ``build_file_section`` rasterizes pages (PyMuPDF) and extracts text
+            # (pdfminer) in images_and_text mode — CPU-bound work that must not
+            # run on the event loop, same reasoning as the ``run_trials`` dispatch
+            # below.
+            eval_submission = await asyncio.to_thread(
+                build_file_section, str(eval_task_dir), clean_up_list, **media_kwargs
+            )
 
             # Judge the eval submission against every reference model, and within
             # each model against every available reference repeat. Raw vote
@@ -753,12 +763,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 ref_judged_repeats = 0
                 for ref_dir in dirs:
                     refs_subdir = ref_dir / "reference_files"
-                    refs = build_file_section(
+                    refs = await asyncio.to_thread(
+                        build_file_section,
                         str(refs_subdir) if refs_subdir.is_dir() else None,
                         clean_up_list,
                         **media_kwargs,
                     )
-                    ref_submission = build_file_section(str(ref_dir), clean_up_list, **media_kwargs)
+                    ref_submission = await asyncio.to_thread(
+                        build_file_section, str(ref_dir), clean_up_list, **media_kwargs
+                    )
                     attempted_matchups += 1
                     # Seed per (task, ref_id, ref_repeat) so judge sampling is
                     # reproducible and each reference subset draws independently —
