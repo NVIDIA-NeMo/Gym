@@ -14,8 +14,6 @@
 
 """Unit tests for the e2b sandbox provider (SDK faked; no network)."""
 
-import asyncio
-import re
 import types
 from pathlib import Path
 
@@ -113,45 +111,9 @@ class FakeSandbox:
         self.killed = True
 
 
-class FakeTemplateBuilder:
-    def __init__(self, image: str, username=None, password=None) -> None:
-        self.image = image
-        self.username = username
-        self.password = password
-
-
-class FakeTemplate:
-    """Records build calls; ``existing_aliases`` fakes server-side state."""
-
-    builds: list[dict] = []
-    existing_aliases: set[str] = set()
-    build_error: Exception | None = None
-    build_delay_s: float = 0.0
-
-    def from_image(self, image, username=None, password=None):
-        return FakeTemplateBuilder(image, username, password)
-
-    @staticmethod
-    async def alias_exists(alias, **kwargs):
-        return alias in FakeTemplate.existing_aliases
-
-    @staticmethod
-    async def build(builder, *, alias=None, cpu_count=None, memory_mb=None, **kwargs):
-        if FakeTemplate.build_delay_s:
-            await asyncio.sleep(FakeTemplate.build_delay_s)
-        if FakeTemplate.build_error is not None:
-            raise FakeTemplate.build_error
-        FakeTemplate.builds.append(
-            {"image": builder.image, "alias": alias, "cpu_count": cpu_count, "memory_mb": memory_mb, **kwargs}
-        )
-        FakeTemplate.existing_aliases.add(alias)
-        return types.SimpleNamespace(alias=alias)
-
-
 def _fake_sdk() -> types.SimpleNamespace:
     return types.SimpleNamespace(
         AsyncSandbox=FakeSandbox,
-        AsyncTemplate=FakeTemplate,
         SandboxNotFoundException=FakeSandboxNotFound,
         NotFoundException=FakeSandboxNotFound,
         TimeoutException=FakeTimeout,
@@ -164,10 +126,6 @@ def _fake_sdk() -> types.SimpleNamespace:
 @pytest.fixture(autouse=True)
 def fake_e2b_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeSandbox.instances.clear()
-    FakeTemplate.builds.clear()
-    FakeTemplate.existing_aliases.clear()
-    FakeTemplate.build_error = None
-    FakeTemplate.build_delay_s = 0.0
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _fake_sdk)
 
 
@@ -216,117 +174,13 @@ class TestTemplateResolution:
         # Silently starting the wrong template would corrupt a benchmark run,
         # so an unmappable image must fail loudly.
         provider = E2BProvider()
-        with pytest.raises(E2BCreateError, match="auto_build_from_image"):
+        with pytest.raises(E2BCreateError, match="template_map"):
             await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
 
     async def test_no_template_at_all_raises(self) -> None:
         provider = E2BProvider()
         with pytest.raises(E2BCreateError, match="No E2B template"):
             await provider.create(_spec())
-
-
-# --------------------------------------------------------------------------
-# On-demand template building from an OCI image
-# --------------------------------------------------------------------------
-
-
-class TestAutoBuildFromImage:
-    async def test_builds_template_then_starts_sandbox_from_it(self) -> None:
-        provider = E2BProvider(create={"auto_build_from_image": True})
-        handle = await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
-
-        assert len(FakeTemplate.builds) == 1
-        build = FakeTemplate.builds[0]
-        assert build["image"] == "ghcr.io/acme/task:1.0"
-        # Alias must be charset-safe for E2B and traceable back to the image.
-        alias = build["alias"]
-        assert re.fullmatch(r"[A-Za-z0-9_-]+", alias)
-        assert alias.startswith("task-1-0__")
-        assert handle.raw.create_kwargs["template"] == alias
-
-    async def test_spec_resources_become_build_arguments(self) -> None:
-        # The whole point of building ourselves: E2B fixes cpu/memory at build
-        # time, so a spec's resources CAN be honoured on this path.
-        provider = E2BProvider(create={"auto_build_from_image": True})
-        await provider.create(_spec(image="ghcr.io/acme/task:1.0", resources={"cpu": 8, "memory_mib": 16384}))
-        build = FakeTemplate.builds[0]
-        assert build["cpu_count"] == 8
-        assert build["memory_mb"] == 16384
-
-    async def test_no_resource_warning_when_applied_at_build(self, caplog) -> None:
-        provider = E2BProvider(create={"auto_build_from_image": True})
-        with caplog.at_level("WARNING"):
-            await provider.create(_spec(image="ghcr.io/acme/task:1.0", resources={"cpu": 8}))
-        assert not [r for r in caplog.records if "fixes sandbox resources" in r.message]
-
-    async def test_different_resources_get_different_templates(self) -> None:
-        # Sharing one template across differing resource requests would
-        # silently give the second sandbox the first one's sizing.
-        provider = E2BProvider(create={"auto_build_from_image": True})
-        a = await provider.create(_spec(image="ghcr.io/acme/task:1.0", resources={"cpu": 2}))
-        b = await provider.create(_spec(image="ghcr.io/acme/task:1.0", resources={"cpu": 8}))
-        assert a.raw.create_kwargs["template"] != b.raw.create_kwargs["template"]
-        assert len(FakeTemplate.builds) == 2
-
-    async def test_template_is_built_once_and_reused(self) -> None:
-        provider = E2BProvider(create={"auto_build_from_image": True})
-        await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
-        await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
-        assert len(FakeTemplate.builds) == 1
-
-    async def test_concurrent_creates_build_only_once(self) -> None:
-        # N sandboxes on one image must not trigger N builds.
-        FakeTemplate.build_delay_s = 0.02
-        provider = E2BProvider(create={"auto_build_from_image": True})
-        handles = await asyncio.gather(*(provider.create(_spec(image="ghcr.io/acme/task:1.0")) for _ in range(6)))
-        assert len(FakeTemplate.builds) == 1
-        assert len({h.raw.create_kwargs["template"] for h in handles}) == 1
-
-    async def test_preexisting_alias_is_not_rebuilt(self) -> None:
-        provider = E2BProvider(create={"auto_build_from_image": True})
-        alias = provider._derive_alias("ghcr.io/acme/task:1.0", 2, 1024)
-        FakeTemplate.existing_aliases.add(alias)
-        handle = await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
-        assert FakeTemplate.builds == []
-        assert handle.raw.create_kwargs["template"] == alias
-
-    async def test_registry_credentials_are_forwarded(self) -> None:
-        provider = E2BProvider(
-            create={"auto_build_from_image": True, "registry_username": "u", "registry_password": "p"}
-        )
-        captured: dict = {}
-        original = FakeTemplate.from_image
-
-        def spy(self, image, username=None, password=None):
-            captured.update({"username": username, "password": password})
-            return original(self, image, username, password)
-
-        FakeTemplate.from_image = spy
-        try:
-            await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
-        finally:
-            FakeTemplate.from_image = original
-        assert captured == {"username": "u", "password": "p"}
-
-    async def test_build_failure_is_wrapped(self) -> None:
-        FakeTemplate.build_error = RuntimeError("builder offline")
-        provider = E2BProvider(create={"auto_build_from_image": True})
-        with pytest.raises(E2BCreateError, match="builder offline"):
-            await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
-
-    async def test_build_timeout_is_reported(self) -> None:
-        FakeTemplate.build_delay_s = 0.2
-        provider = E2BProvider(create={"auto_build_from_image": True, "build_timeout_s": 0.01})
-        with pytest.raises(E2BCreateError, match="Timed out"):
-            await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
-
-    async def test_explicit_mapping_still_wins_over_building(self) -> None:
-        provider = E2BProvider(
-            create={"auto_build_from_image": True, "template_map": {"ghcr.io/acme/task:1.0": "preset"}}
-        )
-        handle = await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
-        assert handle.raw.create_kwargs["template"] == "preset"
-        assert FakeTemplate.builds == []
 
 
 # --------------------------------------------------------------------------

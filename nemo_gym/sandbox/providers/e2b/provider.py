@@ -34,7 +34,6 @@ instead of being dropped quietly.
 """
 
 import asyncio
-import hashlib
 import logging
 import re
 from collections.abc import Mapping
@@ -145,21 +144,6 @@ class E2BCreateConfig:
     # per sandbox (they are fixed when the template is built).
     strict_resources: bool = False
 
-    # --- on-demand template building -------------------------------------
-    # E2B cannot start a sandbox from an OCI reference; it only starts from a
-    # pre-built template alias. With this enabled the provider builds a
-    # template from ``SandboxSpec.image`` on first use and reuses it after,
-    # so callers can supply ordinary image references.
-    auto_build_from_image: bool = False
-    # Resources for auto-built templates. E2B fixes cpu/memory at build time,
-    # so a spec's own resources are applied here (and take precedence).
-    build_cpu_count: int = 2
-    build_memory_mb: int = 1024
-    build_timeout_s: float = 3600.0
-    # Private registry credentials for ``from_image``.
-    registry_username: str | None = None
-    registry_password: str | None = None
-
 
 @dataclass(frozen=True)
 class E2BExecConfig:
@@ -199,10 +183,6 @@ class E2BProvider:
         self._exec = _config_from_mapping(E2BExecConfig, exec)
         self._operations = _config_from_mapping(E2BOperationConfig, operations)
         self._warned_resource_specs: set[str] = set()
-        # Aliases this process has already built or confirmed, plus a per-alias
-        # lock so N concurrent sandboxes on the same image build it once.
-        self._built_aliases: set[str] = set()
-        self._build_locks: dict[str, asyncio.Lock] = {}
 
     # ---------------------------------------------------------------- helpers
 
@@ -214,86 +194,15 @@ class E2BProvider:
             params["request_timeout"] = self._connection.request_timeout_s
         return params
 
-    def _build_resources(self, spec: SandboxSpec) -> tuple[int, int]:
-        """cpu/memory for an auto-built template; the spec wins over config."""
-        resources = spec.resources
-        cpu = resources.cpu if getattr(resources, "cpu", None) else None
-        memory_mib = resources.memory_mib if getattr(resources, "memory_mib", None) else None
-        cpu_count = max(1, int(cpu)) if cpu else self._create.build_cpu_count
-        memory_mb = int(memory_mib) if memory_mib else self._create.build_memory_mb
-        return cpu_count, memory_mb
-
-    def _derive_alias(self, image: str, cpu_count: int, memory_mb: int) -> str:
-        """Deterministic, charset-safe alias for an image + its build resources.
-
-        The digest covers the resources because E2B bakes them into the
-        template: two sandboxes asking for different cpu/memory must not share
-        one template, or the second silently gets the first one's sizing.
-        """
-        digest = hashlib.sha256(f"{image}|cpu={cpu_count}|mem={memory_mb}".encode()).hexdigest()[:12]
-        stem = image.rsplit("/", 1)[-1].split("@", 1)[0].replace(":", "-")
-        stem = re.sub(r"[^A-Za-z0-9_-]", "-", stem).strip("-") or "image"
-        return f"{stem[:48]}__{digest}"
-
-    async def _ensure_template_for_image(self, image: str, spec: SandboxSpec) -> str:
-        """Build (once) and return a template alias for an OCI image."""
-        e2b = _require_e2b_sdk()
-        cpu_count, memory_mb = self._build_resources(spec)
-        alias = self._derive_alias(image, cpu_count, memory_mb)
-        if alias in self._built_aliases:
-            return alias
-
-        lock = self._build_locks.setdefault(alias, asyncio.Lock())
-        async with lock:
-            if alias in self._built_aliases:
-                return alias
-            api_params = self._api_params()
-            try:
-                if await e2b.AsyncTemplate.alias_exists(alias, **api_params):
-                    self._built_aliases.add(alias)
-                    return alias
-            except Exception as exc:  # noqa: BLE001 - existence check is best-effort
-                LOGGER.debug("e2b alias_exists(%s) failed, attempting build: %s", alias, exc)
-
-            LOGGER.info(
-                "Building e2b template %s from image %s (cpu_count=%d, memory_mb=%d)",
-                alias,
-                image,
-                cpu_count,
-                memory_mb,
-            )
-            builder = e2b.AsyncTemplate().from_image(
-                image,
-                username=self._create.registry_username,
-                password=self._create.registry_password,
-            )
-            try:
-                await asyncio.wait_for(
-                    e2b.AsyncTemplate.build(
-                        builder,
-                        alias=alias,
-                        cpu_count=cpu_count,
-                        memory_mb=memory_mb,
-                        **api_params,
-                    ),
-                    timeout=self._create.build_timeout_s,
-                )
-            except asyncio.TimeoutError as exc:
-                raise E2BCreateError(
-                    f"Timed out after {self._create.build_timeout_s}s building e2b template {alias!r} "
-                    f"from image {image!r}."
-                ) from exc
-            except Exception as exc:
-                raise E2BCreateError(f"Failed to build e2b template {alias!r} from image {image!r}: {exc}") from exc
-            self._built_aliases.add(alias)
-            return alias
-
-    async def _resolve_template(self, spec: SandboxSpec) -> str:
+    def _resolve_template(self, spec: SandboxSpec) -> str:
         """Map a spec onto an E2B template alias.
 
         Precedence: ``provider_options.template`` -> ``create.template_map`` ->
-        ``spec.image`` when it is already a valid alias -> build from the image
-        (``create.auto_build_from_image``) -> ``create.template``.
+        ``spec.image`` when it is already a valid alias -> ``create.template``.
+
+        Building a template from an image is provisioning, not part of starting
+        a sandbox, so it lives in :mod:`nemo_gym.sandbox.providers.e2b.build`
+        and never runs on this path.
         """
         option = (spec.provider_options or {}).get("template")
         if option:
@@ -305,12 +214,11 @@ class E2BProvider:
                 return str(mapped)
             if _TEMPLATE_ALIAS_RE.match(spec.image):
                 return spec.image
-            if self._create.auto_build_from_image:
-                return await self._ensure_template_for_image(spec.image, spec)
             raise E2BCreateError(
                 f"E2B starts sandboxes from a template alias, but SandboxSpec.image={spec.image!r} is not a valid "
                 "alias (allowed: letters, digits, '-', '_'). Map it with create.template_map, set "
-                "provider_options.template, or enable create.auto_build_from_image to build one from the image."
+                "provider_options.template, or build a template first with "
+                "nemo_gym.sandbox.providers.e2b.build (its output is a ready-made template_map)."
             )
 
         if self._create.template:
@@ -320,14 +228,8 @@ class E2BProvider:
             "No E2B template to start from: set SandboxSpec.image, provider_options.template, or create.template."
         )
 
-    def _check_resources(self, spec: SandboxSpec, template: str, *, applied_at_build: bool = False) -> None:
-        """Surface resource requests E2B cannot honour per sandbox.
-
-        ``applied_at_build`` suppresses the report: when the provider built the
-        template itself, the request *was* satisfied (as build arguments).
-        """
-        if applied_at_build:
-            return
+    def _check_resources(self, spec: SandboxSpec, template: str) -> None:
+        """Surface resource requests E2B cannot honour per sandbox."""
         resources = spec.resources
         requested = {
             name: getattr(resources, name)
@@ -392,10 +294,8 @@ class E2BProvider:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         e2b = _require_e2b_sdk()
-        template = await self._resolve_template(spec)
-        # When we built the template ourselves the spec's resources became the
-        # build's cpu_count/memory_mb, so there is nothing to report.
-        self._check_resources(spec, template, applied_at_build=template in self._built_aliases)
+        template = self._resolve_template(spec)
+        self._check_resources(spec, template)
 
         timeout_s = spec.ttl_s if spec.ttl_s is not None else self._create.timeout_s
         kwargs: dict[str, Any] = {
