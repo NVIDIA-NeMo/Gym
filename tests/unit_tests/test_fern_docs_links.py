@@ -50,6 +50,17 @@ class TestFernDocsLinks(unittest.TestCase):
             with self.subTest(workflow=workflow):
                 self.assertIn("node-version: '22'", read(workflow))
 
+    def test_prerequisites_disclose_default_quickstart_credentials(self):
+        prerequisites = read(
+            "fern/versions/latest/pages/get-started/prerequisites.mdx"
+        )
+
+        self.assertIn("## Quickstart Requirements", prerequisites)
+        self.assertIn("OpenAI API key", prerequisites)
+        self.assertIn("sufficient usage quota", prerequisites)
+        self.assertIn("[Configure Models](/model-server)", prerequisites)
+        self.assertIn("hosted provider or a local model", prerequisites)
+
     def test_main_evaluation_tutorial_links_include_the_tutorials_section(self):
         pages = REPO_ROOT / "fern/versions/latest/pages"
         broken_links = []
