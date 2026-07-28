@@ -35,7 +35,6 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -252,15 +251,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
 
-    def _resolve_model_base_url(self) -> str:
-        # aiagent builds its own openai client; resolve policy_model url
-        model_server_cfg = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.model_server.name,
-        )
-        base = self.server_client._build_server_base_url(model_server_cfg)
-        return f"{base}/v1"
-
     async def responses(
         self,
         request: Request,
@@ -275,7 +265,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
         system_message = self.config.system_prompt or input_system
 
-        base_url = self._resolve_model_base_url()
+        # A prefixed self-call carries the rollout id into the model-server base URL.
+        rollout_id = request.path_params.get("rollout_id") if request is not None else None
+        base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         model_name = str(self.config.model_server.name)
 
         agent = AIAgent(
@@ -395,7 +387,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path="/v1/responses",
+                url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,
             )

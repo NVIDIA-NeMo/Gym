@@ -51,7 +51,6 @@ jobs:
           # 'files' input enables global other_changed_files_count for uncategorized files
           files: |
             **.md
-            docs/**
             fern/**
             LICENSE
             resources_servers/**
@@ -61,7 +60,6 @@ jobs:
           files_yaml: |
             doc:
               - '**.md'
-              - docs/**
               - fern/**
               - LICENSE
               - benchmarks/**
@@ -90,7 +88,7 @@ jobs:
           echo "============================================"
           echo ""
           echo "Categories:"
-          echo "  doc (skip tests):          **.md, docs/**, fern/**, LICENSE, benchmarks/**"
+          echo "  doc (skip tests):          **.md, fern/**, LICENSE, benchmarks/**"
           echo "  server (test changed):     resources_servers/**, responses_api_agents/**, responses_api_models/**"
           echo "  other (full suite):        everything else (core library, CI, scripts, etc.)"
           echo "  Priority:                  other > server > doc"
@@ -186,7 +184,7 @@ jobs:
               echo "================================================"
               echo "Testing: $server"
               echo "================================================"
-              if ng_test +entrypoint=$server +delete_venvs_after_each_test=true; then
+              if ng_test +entrypoint=$server +delete_venvs_after_each_test=true +should_validate_data=true; then
                 echo "PASS: $server"
               else
                 echo "FAIL: $server"

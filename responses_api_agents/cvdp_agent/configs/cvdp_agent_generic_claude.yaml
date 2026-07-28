@@ -1,0 +1,35 @@
+cvdp_agent_generic_claude:
+  responses_api_agents:
+    cvdp_agent:
+      entrypoint: app.py
+      simple_agent: false
+      resources_server: {type: resources_servers, name: cvdp}
+      model_server: {type: responses_api_models, name: policy_model}
+      concurrency: 4
+      timeout: 900
+
+      datasets:
+      - name: example_agentic
+        type: example
+        jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
+
+      # the harness: swap these three + setup_scripts/<key>_deps.sh to change agent
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
+      agent_kwargs:
+        model: ${anthropic_model_name}
+        max_turns: 30
+
+      # sandbox: eda sim image, apptainer backend, deps bind-mounted
+      image: ${cvdp_sim_image}
+      # mount_point MUST match container_workdir: the provider bind-mounts a writable host
+      # dir at mount_point, and everything the agent writes lives under container_workdir.
+      # --writable-tmpfs makes the rest of the container (e.g. the harness's HOME) writable.
+      sandbox_provider:
+        apptainer:
+          create:
+            mount_point: /code
+            extra_start_args: [--writable-tmpfs]
+      container_workdir: /code
+      deps_provision: bind

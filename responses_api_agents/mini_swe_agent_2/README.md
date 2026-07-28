@@ -24,6 +24,7 @@ over the older Docker/Singularity mini-SWE integration.
     - [Run One-Example Smoke](#run-one-example-smoke)
     - [Expected Outputs](#expected-outputs)
     - [Repeated Rollouts](#repeated-rollouts)
+  - [Running SWE-bench on ECS Fargate](#running-swe-bench-on-ecs-fargate)
   - [Sandbox Environment Adapter](#sandbox-environment-adapter)
     - [Environment Lifecycle](#environment-lifecycle)
   - [Contributing](#contributing)
@@ -483,6 +484,56 @@ The agent writes per-instance mini-swe-agent configs and result artifacts under
 Use the agent's `step_timeout` and `eval_timeout` config values or CLI overrides
 to bound tool and verification execution. If you launch from a custom
 Kubernetes wrapper, add any outer per-sample guard there.
+
+## Running SWE-bench on ECS Fargate
+
+Swap OpenSandbox for ECS Fargate by adding the ECS provider config to your
+`+config_paths` — the agent config (`configs/mini_swe_agent_2.yaml`), agent loop,
+and SWE-bench verifier are unchanged. For provider setup (AWS infra/SSM,
+credentials, the `:52222` network requirement, and automatic image mirroring via
+`auto_mirror`) see the ECS Fargate provider page under `infrastructure/sandbox`.
+SWE-bench task images are pulled into the ECR mirror on first use, so no manual
+image staging is needed.
+
+Each input row needs the SWE-bench instance fields shown under
+[Dataset Information](#dataset-information) plus `subset` (`verified`), `split`
+(`test`), and `responses_create_params`.
+
+**Golden smoke (no model)** — `run_golden=true` applies the gold patch and runs
+the verifier in-sandbox, so the model is never called:
+
+```bash
+CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml,nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+AWS_REGION=us-east-1 ng_run "+config_paths=[$CONFIG_PATHS]" \
+    ++mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.run_golden=true
+
+ng_collect_rollouts +agent_name=mini_swe_agent_2 \
+    +input_jsonl_fpath=data/swe_verified_smoke.jsonl \
+    +output_jsonl_fpath=results/ecs_golden.jsonl \
+    +limit=1 +num_repeats=1 +num_samples_in_parallel=1
+```
+
+A resolved instance returns reward `1.0` with `tests_status` populated.
+
+**Real rollout** — drop `run_golden` and point the model server at a live
+OpenAI-compatible endpoint (`policy_model_name` is the model id sent upstream):
+
+```bash
+AWS_REGION=us-east-1 ng_run "+config_paths=[$CONFIG_PATHS]" \
+    ++policy_base_url=https://<endpoint>/v1 ++policy_api_key=<key> ++policy_model_name=<model-id>
+
+ng_collect_rollouts +agent_name=mini_swe_agent_2 \
+    +input_jsonl_fpath=data/swe_verified_smoke.jsonl \
+    +output_jsonl_fpath=results/ecs_rollout.jsonl \
+    +limit=8 +num_repeats=1 +num_samples_in_parallel=8 \
+    '+responses_create_params={max_output_tokens: 16384, temperature: 0.6, top_p: 0.95}'
+```
+
+Reasoning models often only accept the default `temperature` (`1`) and reject a
+custom `top_p`; in that case use
+`'+responses_create_params={temperature: 1, max_output_tokens: 16384}'` and keep
+`max_output_tokens` large enough for reasoning tokens.
 
 ## Sandbox Environment Adapter
 

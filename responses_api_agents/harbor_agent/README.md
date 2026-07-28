@@ -9,6 +9,7 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
   - [Custom agents](#custom-agents)
   - [Custom environments](#custom-environments)
 - [Quick Start](#quick-start)
+- [Other datasets through this bridge](#other-datasets-through-this-bridge)
 - [Daytona execution path](#daytona-execution-path)
 - [NeMo RL Training](#nemo-rl-training)
   - [Required patches to Gym](#required-patches-to-gym)
@@ -211,11 +212,33 @@ gym env start \
 python responses_api_agents/harbor_agent/client.py
 ```
 
-After a test run, inspect NeMo Gym rollout outputs under `results/`. For Harbor-
-specific trial artifacts, use `harbor_jobs_dir` (configured in
-`configs/harbor_agent.yaml`, default `jobs/`), where each Harbor run writes a
-timestamped job directory containing per-trial outputs and a top-level
-`result.json` summary.
+### Where rollouts are stored
+
+Each `/run` call writes to **two** places, for two different audiences:
+
+- **`results/runs/<YYYYMMDD>/<dataset_alias>/<model_name>/<run_id>/<instance_id>.json`**
+  — the NeMo Gym-facing `HarborVerifyResponse` (`app.py:run`), i.e. what
+  `ng_collect_rollouts`/`gym eval run` actually consume: `reward`,
+  `response.output` (converted from the ATIF trajectory), `usage`, and
+  `responses_create_params`. This is derived/recomputed from the Harbor job
+  below — it is not the source of truth. If this file has an empty `output`,
+  `reward: 0.0`, and `metadata: {}` even though the trial clearly succeeded, that
+  means the `try` block in `HarborAgent.run()` hit an exception and fell through
+  to the `except` fallback — check the server logs for `Error running Harbor
+  job: ...` to find the real cause.
+- **`harbor_jobs_dir`** (set via `configs/harbor_agent*.yaml`, default `jobs/`,
+  grouped the same way: `<YYYYMMDD>/<dataset_alias>/<model_name>/<job_id>/`) —
+  Harbor's own raw trial artifacts and the actual source of truth: per-trial
+  `result.json` (reward, token counts, timing), `agent/trajectory.json` (full
+  ATIF conversation), and `verifier/{reward.txt,reward.json,test-stdout.txt}`.
+
+When debugging a suspicious `results/runs/...` file, always cross-check the
+corresponding `harbor_jobs_dir/.../<trial_name>/result.json` and
+`verifier/reward.txt` first — if those show the real reward/trajectory, the bug
+is in the `run()` bridge (`app.py`/`utils.py`), not in Harbor or the task itself.
+`run_harbor_job()` has a known-fixed race here: `job.run()` can return before the
+trial's `result.json` is visible on disk, so it retries for up to 5s before
+giving up.
 
 ### 7) Collect rollouts
 
@@ -231,6 +254,18 @@ gym eval run --no-serve \
 ```bash
 jq -C . responses_api_agents/harbor_agent/example/example_output.jsonl | less -R
 ```
+
+## Other datasets through this bridge
+
+Datasets that need their own materialization/download pipeline (rather than a
+checked-in `example/*.jsonl`) live under `environments/<name>/` and reuse this same
+Harbor agent bridge — only the dataset alias in `harbor_datasets` and the
+`--environment-type`/config differ. See
+[`environments/biomnibench_da`](../../environments/biomnibench_da) for a worked
+example (BiomniBench-DA data-analysis tasks): dataset download + materialization
+script, docker/singularity configs, and an LLM-judge verifier, all wired to this
+agent via `harbor_agent_import_path`/`harbor_datasets` the same way as the Quick
+Start above.
 
 ## Daytona execution path
 

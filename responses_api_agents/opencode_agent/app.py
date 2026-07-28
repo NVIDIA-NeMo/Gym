@@ -169,6 +169,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # extra env vars for the subprocess e.g. API keys
     env: dict[str, str] = Field(default_factory=dict)
     workspace_root: str = "outputs/opencode_agent/workspaces"
+    repo_dir: Optional[str] = None
     thinking: bool = True
     system_prompt: Optional[str] = None
     setup_timeout: int = 900
@@ -222,6 +223,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         root.mkdir(parents=True, exist_ok=True)
         return root
 
+    def _repo_dir(self, fallback: Path) -> Path:
+        """Return the configured persistent repository or the temporary fallback."""
+        if not self.config.repo_dir:
+            return fallback
+        root = Path(self.config.repo_dir).expanduser()
+        if not root.is_absolute():
+            root = Path.cwd() / root
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
     def _write_opencode_config(self, work_dir: Path) -> None:
         if not self.config.opencode_config:
             return
@@ -243,12 +254,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         """Run one headless opencode run. Returns (output_items, usage, model_name)."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
+        project_dir = self._repo_dir(work_dir)
         data_home = work_dir / ".opencode-data"
         data_home.mkdir(parents=True, exist_ok=True)
-        self._write_opencode_config(work_dir)
+        self._write_opencode_config(project_dir)
         env = self._env(str(data_home))
 
-        cmd = [*self.config.command_parts, "run", "-m", self.config.model, "--dir", str(work_dir)]
+        cmd = [*self.config.command_parts, "run", "-m", self.config.model, "--dir", str(project_dir)]
         if self.config.thinking:
             cmd.append("--thinking")
         cmd.extend(self.config.extra_args)
@@ -257,7 +269,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=str(work_dir),
+                cwd=str(project_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,

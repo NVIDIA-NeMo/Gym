@@ -45,7 +45,7 @@ def _make_server(**overrides):
     )
     defaults.update(overrides)
     config = InferenceProviderConfig(**defaults)
-    return InferenceProvider(config=config, server_client=MagicMock(spec=ServerClient))
+    return InferenceProvider(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
 
 def _mock_chat_response(content="Hello!", finish_reason="stop", tool_calls=None, usage=None):
@@ -323,7 +323,22 @@ class TestResponses:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
-        response = client.post("/v1/responses", json={"input": "hello", "tool_choice": "required"})
+        response = client.post(
+            "/v1/responses",
+            json={
+                "input": "hello",
+                "tool_choice": "required",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": True,
+                    }
+                ],
+            },
+        )
         assert response.status_code == 200
         assert response.json()["tool_choice"] == "required"
 

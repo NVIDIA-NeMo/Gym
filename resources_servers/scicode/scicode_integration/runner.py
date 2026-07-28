@@ -29,8 +29,6 @@ import re
 import subprocess
 import sys
 
-import ray
-
 
 # Helper functions ported verbatim from nemo-skills scicode_utils.eval_prefix. H5PY_FILE and the
 # h5py/scipy imports are emitted by build_test_program so the test-data path can be parameterized.
@@ -216,8 +214,6 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
     return program
 
 
-# Kept as a plain function (then wrapped with ray.remote below) so the executor logic can be
-# unit-tested directly without launching Ray.
 def run_substep(program: str, timeout_secs: float) -> dict:
     """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed."""
     try:
@@ -226,6 +222,3 @@ def run_substep(program: str, timeout_secs: float) -> dict:
         return {"passed": False, "error": "timeout"}
     passed = proc.returncode == 0
     return {"passed": passed, "error": "" if passed else proc.stderr.decode("utf-8", errors="replace")[-_STDERR_TAIL:]}
-
-
-run_substep_remote = ray.remote(run_substep)
