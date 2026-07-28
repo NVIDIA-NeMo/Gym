@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -19,12 +20,26 @@ class TestFernDocsLinks(unittest.TestCase):
 
         self.assertNotIn("`fern docs dev` from the repository root", guide)
         self.assertIn("`make docs`", guide)
-        self.assertIn("Node.js 20+", guide)
+        self.assertIn("Node.js 22+", guide)
         self.assertIn("`make docs-login`", guide)
         self.assertIn(
             "https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md",
             guide,
         )
+
+    def test_fern_tooling_uses_current_supported_node_version(self):
+        package = json.loads(read("fern/package.json"))
+        self.assertEqual(">=22", package["engines"]["node"])
+        self.assertIn("Node.js 22+", read("fern/README.md"))
+
+        workflows = (
+            ".github/workflows/fern-docs-ci.yml",
+            ".github/workflows/fern-docs-preview-comment.yml",
+            ".github/workflows/publish-fern-docs.yml",
+        )
+        for workflow in workflows:
+            with self.subTest(workflow=workflow):
+                self.assertIn("node-version: '22'", read(workflow))
 
     def test_main_evaluation_tutorial_links_include_the_tutorials_section(self):
         pages = REPO_ROOT / "fern/versions/latest/pages"
