@@ -34,6 +34,7 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.capture_records import create_call_path
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -48,7 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, get_server_url, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
 
@@ -346,7 +347,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         prefix-stripping middleware, so a prefix would 404 every call.
         """
         if self.config.model_server:
-            return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+            return create_call_path(get_server_url(self.config.model_server.name) + "/v1", rollout_id)
         # Mirrors claude_code_agent's null anthropic_base_url: null means the provider's real API.
         return self.config.openai_base_url or "https://api.openai.com/v1"
 
@@ -649,7 +650,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             # (extra="allow"). Pass its path straight into _create_response so the CLI invocation
             # can stage the skills into its per-request CODEX_HOME.
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
-            rollout_id = self.rollout_id_from_run(body)
+            rollout_id = self._get_rollout_id(request)
 
             agent_resp = await self._create_response(
                 body.responses_create_params,
