@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 from fastapi import Body, FastAPI
 from fastapi.responses import PlainTextResponse
 from fastapi.testclient import TestClient
-from omegaconf import OmegaConf
+from pytest import MonkeyPatch
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModel,
@@ -26,7 +26,7 @@ from nemo_gym.base_responses_api_model import (
     ModelCallRecord,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.capture_records import CaptureStore
+from nemo_gym.capture_records import CallCaptureConfig, CaptureStore
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -116,13 +116,15 @@ class TestBaseResponsesAPIModel:
     def _create_test_app_with_model_call_capture(
         self,
         tmp_path: Path,
+        monkeypatch: MonkeyPatch,
         TestSimpleResponsesAPIModel_cls: type[SimpleResponsesAPIModel] = _TestSimpleResponsesAPIModel,
         should_capture_calls: bool = True,
     ) -> FastAPI:
-        mock_server_client = MagicMock(spec=ServerClient)
-        mock_server_client.global_config_dict = OmegaConf.create(
-            {"should_capture_calls": should_capture_calls, "call_capture_dir": str(tmp_path)}
+        monkeypatch.setattr(
+            "nemo_gym.capture_records.get_capture_config",
+            lambda: CallCaptureConfig(should_capture_calls=should_capture_calls, call_capture_dir=tmp_path),
         )
+        monkeypatch.setattr("nemo_gym.capture_records.get_capture_store", lambda: CaptureStore(root=tmp_path))
 
         model_server = TestSimpleResponsesAPIModel_cls(
             config=BaseResponsesAPIModelConfig(
@@ -131,12 +133,16 @@ class TestBaseResponsesAPIModel:
                 entrypoint="",
                 name="my-test-server-name",
             ),
-            server_client=mock_server_client,
+            server_client=MagicMock(spec=ServerClient),
         )
 
-        return model_server.setup_webserver()
+        app = model_server.setup_webserver()
+        model_server.setup_exception_middleware(app)
+        model_server.setup_call_capture_middleware(app)
 
-    def test_raised_call_is_captured_then_reraised(self, tmp_path: Path):
+        return app
+
+    def test_raised_call_is_captured_then_reraised(self, tmp_path: Path, monkeypatch: MonkeyPatch):
         """A model call that raises (not just a non-2xx) is captured with an exception category and the
         error is re-raised (response unchanged for the caller)."""
 
@@ -144,7 +150,7 @@ class TestBaseResponsesAPIModel:
             async def responses(self, body: dict = Body()) -> dict:
                 raise RuntimeError("kaboom")
 
-        app = self._create_test_app_with_model_call_capture(tmp_path, MyTestSimpleResponsesAPIModel)
+        app = self._create_test_app_with_model_call_capture(tmp_path, monkeypatch, MyTestSimpleResponsesAPIModel)
 
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -156,10 +162,12 @@ class TestBaseResponsesAPIModel:
         assert calls[0].response is None
         assert calls[0].error_response is not None and "kaboom" in calls[0].error_response
 
-    def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(self, tmp_path: Path):
+    def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ):
         """A caller attributes calls through the model base URL. The prefix is stripped before routing,
         while an ordinary unprefixed request remains unobserved."""
-        app = self._create_test_app_with_model_call_capture(tmp_path)
+        app = self._create_test_app_with_model_call_capture(tmp_path, monkeypatch)
 
         client = TestClient(app)
 
@@ -181,10 +189,12 @@ class TestBaseResponsesAPIModel:
         calls = CaptureStore(tmp_path).read("task7-roll2")
         assert len(calls) == 2
 
-    def test_per_rollout_prefix_not_stripped_for_non_observed_paths_too(self, tmp_path: Path):
+    def test_per_rollout_prefix_not_stripped_for_non_observed_paths_too(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ):
         """A prefixed but non-observed path (e.g. /v1/models) is not stripped and not found,
         and is not captured (composes with arbitrary endpoints, not just the observed dialects)."""
-        app = self._create_test_app_with_model_call_capture(tmp_path)
+        app = self._create_test_app_with_model_call_capture(tmp_path, monkeypatch)
 
         @app.get("/v1/models")
         async def _models() -> dict:
@@ -196,12 +206,12 @@ class TestBaseResponsesAPIModel:
         assert r.status_code == 404
         assert CaptureStore(tmp_path).read("abc") == []
 
-    def test_capture_records_non_json_response_as_error_doesnt_record(self, tmp_path: Path):
+    def test_capture_records_non_json_response_as_error_doesnt_record(self, tmp_path: Path, monkeypatch: MonkeyPatch):
         class My_TestSimpleResponsesAPIModel(_TestSimpleResponsesAPIModel):
             async def responses(self, body: dict = Body()) -> PlainTextResponse:
                 return PlainTextResponse("not json")
 
-        app = self._create_test_app_with_model_call_capture(tmp_path, My_TestSimpleResponsesAPIModel)
+        app = self._create_test_app_with_model_call_capture(tmp_path, monkeypatch, My_TestSimpleResponsesAPIModel)
 
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -210,8 +220,8 @@ class TestBaseResponsesAPIModel:
         records = CaptureStore(tmp_path).read("rnj")
         assert len(records) == 0
 
-    def test_rollout_prefix_not_stripped_when_capture_disabled(self, tmp_path: Path):
-        app = self._create_test_app_with_model_call_capture(tmp_path, should_capture_calls=False)
+    def test_rollout_prefix_not_stripped_when_capture_disabled(self, tmp_path: Path, monkeypatch: MonkeyPatch):
+        app = self._create_test_app_with_model_call_capture(tmp_path, monkeypatch, should_capture_calls=False)
 
         client = TestClient(app)
         # Dummy input to just test it doesn't 404

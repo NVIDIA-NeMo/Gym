@@ -525,8 +525,6 @@ def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no co
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
-    _is_exception_middleware_setup: bool = False
-
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
@@ -559,9 +557,6 @@ class SimpleServer(BaseServer):
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
-        if self._is_exception_middleware_setup:
-            return
-
         @app.middleware("http")
         async def exception_handling_middleware(request: Request, call_next):
             try:
@@ -594,19 +589,13 @@ repr(e): {repr(e)}"""
         # TODO @bxyu-nvidia: We nested import here to avoid circular dependencies.
         # server_utils -> openai_utils, openai_utils -> capture_records, capture_records -> openai_utils
         # We can fix this by taking out NeMoGymAsyncOpenAI from the openai_utils
-        from nemo_gym.capture_records import CallCaptureConfig, CaptureStore
+        from nemo_gym.capture_records import get_capture_config
 
-        self._capture_config = CallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        if not self._capture_config.should_capture_calls:
+        capture_config = get_capture_config()
+        if not capture_config.should_capture_calls:
             return
 
-        # Model call capture middleware must be the final middleware added so
-        # 1. It is run first on request, the closest to the original request sent to the endpoint
-        # 2. It is run last on response, so it can capture the response closest to what is sent back.
-        # Here, we setup the exception middleware first so that we guarantee the ordering
-        self.setup_exception_middleware(app)
-
-        self._store = CaptureStore(self._capture_config.call_capture_dir)
+        self.setup_call_capture_routes(app)
         app.add_middleware(BaseHTTPMiddleware, dispatch=self.call_capture_middleware)
 
         print(f"Set up model call capture middleware for {self.config.name}")
@@ -621,7 +610,9 @@ repr(e): {repr(e)}"""
         return request.session[ROLLOUT_ID_KEY_NAME]
 
     def resolve_call_path(self, base_url_or_path: str, request: Request) -> str:
-        if not hasattr(self, "_capture_config") or not self._capture_config.should_capture_calls:
+        from nemo_gym.capture_records import get_capture_config
+
+        if not get_capture_config().should_capture_calls:
             return base_url_or_path
 
         maybe_rollout_id = self._get_rollout_id(request)
@@ -648,6 +639,10 @@ repr(e): {repr(e)}"""
     async def call_capture_middleware(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        # This method is to be overridden by inner classes that need it.
+        raise NotImplementedError
+
+    def setup_call_capture_routes(self, app: FastAPI) -> None:
         # This method is to be overridden by inner classes that need it.
         raise NotImplementedError
 
@@ -765,6 +760,12 @@ Full body: {json.dumps(exc.body, indent=4)}
 """
             )
             return await request_validation_exception_handler(request, exc)
+
+        # Model call capture middleware must be the final middleware added so
+        # 1. It is run first on request, the closest to the original request sent to the endpoint
+        # 2. It is run last on response, so it can capture the response closest to what is sent back.
+        # Here, we setup the exception middleware first so that we guarantee the ordering
+        server.setup_call_capture_middleware(app)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:

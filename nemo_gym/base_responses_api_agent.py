@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.capture_records import EventTypes
+from nemo_gym.capture_records import EventTypes, get_capture_store
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -54,12 +54,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         self.setup_session_middleware(app)
 
-        # Setup the capture middleware for model calls.
-        self.setup_call_capture_middleware(app)
-        if self._capture_config.should_capture_calls:
-            app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses)
-            app.post(f"/run/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.run)
-
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -82,13 +76,17 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         # Record in the background to not block the response
         # The background task only runs after streaming has finished
-        task = BackgroundTask(self._store.record, rollout_id, request.state.events)
+        task = BackgroundTask(get_capture_store().record, rollout_id, request.state.events)
 
         # Later on we can handle cases where there are existing background tasks
         assert not response.background
         response.background = task
 
         return response
+
+    def setup_call_capture_routes(self, app: FastAPI) -> None:
+        app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses)
+        app.post(f"/run/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.run)
 
     @abstractmethod
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:

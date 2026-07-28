@@ -27,7 +27,7 @@ from pydantic import BaseModel, ValidationError
 from starlette.background import BackgroundTask
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.capture_records import ModelCallRecord
+from nemo_gym.capture_records import ModelCallRecord, get_capture_store
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -72,24 +72,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
 
-        # Setup the capture middleware for model calls.
-        self.setup_call_capture_middleware(app)
-        if self._capture_config.should_capture_calls:
-            # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
-            # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
-            app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(
-                self.chat_completions_with_call_capture
-            )
-            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(
-                self.chat_completions_with_call_capture
-            )
-
-            app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
-            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(self.responses_with_call_capture)
-
-            app.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.messages_with_call_capture)
-            app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(self.messages_with_call_capture)
-
         # Setup the canonical routes.
         app.post("/v1/chat/completions")(self.chat_completions)
 
@@ -123,7 +105,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Record in the background to not block the response
         # The background task only runs after streaming has finished
         task = BackgroundTask(
-            self._store.record, rollout_id, [ModelCallRecord.model_validate(request.state.model_call_record_dict)]
+            get_capture_store().record,
+            rollout_id,
+            [ModelCallRecord.model_validate(request.state.model_call_record_dict)],
         )
 
         # Later on we can handle cases where there are existing background tasks
@@ -131,6 +115,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         response.background = task
 
         return response
+
+    def setup_call_capture_routes(self, app: FastAPI) -> None:
+        # We allow both /v1/chat/completions/... and /v1/.../chat/completions since blackbox agents will be passed a base_url e.g. http://.../v1/ and then add their final route
+        # whereas most internal calls will specify the route rather than the base_url e.g. /v1/responses
+        app.post(f"/v1/chat/completions/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.chat_completions_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/chat/completions")(self.chat_completions_with_call_capture)
+
+        app.post(f"/v1/responses/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.responses_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/responses")(self.responses_with_call_capture)
+
+        app.post(f"/v1/messages/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}")(self.messages_with_call_capture)
+        app.post(f"/v1/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/messages")(self.messages_with_call_capture)
 
     @abstractmethod
     async def chat_completions(

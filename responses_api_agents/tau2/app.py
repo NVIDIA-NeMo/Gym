@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Request
 
-from nemo_gym.capture_records import ToolCallEvent
+from nemo_gym.capture_records import ToolCallEvent, get_capture_config
 from responses_api_agents.tau2.source import ensure_tau2_data_dir
 
 
@@ -198,7 +198,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             max_prompt_tokens = max(prompt_usages)
             max_completion_tokens = max(completion_usages)
 
-        if hasattr(self, "_capture_config") and self._capture_config.should_capture_calls:
+        if get_capture_config().should_capture_calls:
             prev_timestamp = None
             for message in result.messages:
                 if message.role == "assistant" and message.tool_calls:

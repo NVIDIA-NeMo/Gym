@@ -46,9 +46,9 @@ from nemo_gym.rollout_collection import (
 
 @pytest.fixture
 def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    get_global_config_dict = MagicMock(return_value={})
-    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
-    return get_global_config_dict
+    monkeypatch.setattr(
+        nemo_gym.rollout_collection, "get_capture_config", lambda: MagicMock(should_capture_calls=False)
+    )
 
 
 class TestLoadsJsonlLine:
@@ -126,7 +126,9 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: dict())
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_capture_config", lambda: MagicMock(should_capture_calls=False)
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "is_global_aiohttp_client_request_debug_enabled",
@@ -552,8 +554,8 @@ class TestRolloutCollection:
     ) -> None:
         clear_captures = MagicMock()
         merge_capture = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "clear", clear_captures)
-        monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "aggregate", merge_capture)
+        monkeypatch.setattr("nemo_gym.capture_records.CaptureStore.clear", clear_captures)
+        monkeypatch.setattr("nemo_gym.capture_records.CaptureStore.aggregate", merge_capture)
 
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
@@ -599,7 +601,6 @@ class TestRolloutCollection:
                 return metrics_fpath
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
-        empty_global_config.assert_called_once_with()
 
         # Test that no model calls are captured
         clear_captures.assert_not_called()
@@ -676,16 +677,13 @@ class TestRolloutCollection:
     async def test_run_from_config_uses_global_capture_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
-        capture_dir = tmp_path / "captures"
-        get_global_config_dict = MagicMock(
-            return_value={
-                "should_capture_calls": True,
-                "call_capture_dir": str(capture_dir),
-            }
+        capture_store_mock = MagicMock()
+        capture_store_mock.aggregate.return_value = MagicMock()
+        capture_store_mock.aggregate.return_value.model_dump.return_value = dict()
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_capture_config", lambda: MagicMock(should_capture_calls=True)
         )
-        clear_captures = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
-        monkeypatch.setattr(nemo_gym.rollout_collection.CaptureStore, "clear", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_capture_store", lambda: capture_store_mock)
 
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
@@ -705,7 +703,7 @@ class TestRolloutCollection:
 
         results = await Helper().run_from_config(config)
 
-        clear_captures.assert_called_once()
+        capture_store_mock.clear.assert_called_once()
         assert "Clearing previously captured model calls" in capsys.readouterr().out
 
         assert len(results) == 1

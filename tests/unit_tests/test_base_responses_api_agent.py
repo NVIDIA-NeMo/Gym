@@ -37,19 +37,18 @@ class TestBaseResponsesAPIAgent:
             async def run(self, body=...):
                 raise NotImplementedError
 
-        agent = TestSimpleResponsesAPIAgent(
-            config=config, server_client=MagicMock(spec=ServerClient, global_config_dict=dict())
-        )
+        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
         agent.setup_webserver()
 
-    def test_resolve_call_path(self):
+    def test_resolve_call_path(self, monkeypatch):
         mock_agent = MagicMock()
-        mock_agent._capture_config.should_capture_calls = True
         mock_agent._get_rollout_id = SimpleResponsesAPIAgent._get_rollout_id
 
         mock_request = MagicMock()
         mock_request.session = {}
         mock_request.path_params = {}
+
+        monkeypatch.setattr("nemo_gym.capture_records.get_capture_config", MagicMock(should_capture_calls=True))
 
         with_id = SimpleResponsesAPIAgent.resolve_call_path(
             mock_agent, base_url_or_path="http://my-test-url/v1", request=mock_request

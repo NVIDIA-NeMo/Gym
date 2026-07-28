@@ -33,7 +33,7 @@ from wandb import Table
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.capture_records import CallCaptureConfig, CaptureStore, create_call_path
+from nemo_gym.capture_records import create_call_path, get_capture_config, get_capture_store
 from nemo_gym.config_types import (
     NG_CALL_CAPTURE_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -49,7 +49,6 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    get_global_config_dict,
     get_wandb_run,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -528,7 +527,7 @@ class RolloutCollectionHelper(BaseModel):
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_config = CallCaptureConfig.model_validate(get_global_config_dict())
+        capture_config = get_capture_config()
 
         # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
         # same rollout ids, so clear the capture files this run is about to (re)write.
@@ -536,7 +535,7 @@ class RolloutCollectionHelper(BaseModel):
             print(
                 f"Clearing previously captured model calls dir {capture_config.call_capture_dir} because resume_from_cache=false"
             )
-            store = CaptureStore(capture_config.call_capture_dir)
+            store = get_capture_store()
             store.clear()
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
@@ -735,7 +734,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         server_client = self.setup_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
 
-        capture_config = CallCaptureConfig.model_validate(get_global_config_dict())
+        capture_config = get_capture_config()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:

@@ -31,7 +31,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.capture_records import ToolCallEvent
+from nemo_gym.capture_records import ToolCallEvent, get_capture_config
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -148,7 +148,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     )
                     new_outputs.append(tool_response)
 
-                    if self._capture_config.should_capture_calls:
+                    if get_capture_config().should_capture_calls:
                         request.state.events.append(
                             ToolCallEvent(
                                 call_id=output_function_call.call_id,
@@ -175,7 +175,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
 
-                if self._capture_config.should_capture_calls:
+                if get_capture_config().should_capture_calls:
                     request.state.events.append(
                         ToolCallEvent(
                             call_id=output_function_call.call_id,

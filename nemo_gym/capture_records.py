@@ -24,6 +24,7 @@ from pydantic import BaseModel, TypeAdapter, model_validator
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
@@ -170,3 +171,25 @@ class CaptureStore:
 
 def create_call_path(base_url_or_path: str, rollout_id: str) -> str:
     return f"{base_url_or_path}/{ROLLOUT_PATH_PREFIX}/{rollout_id}"
+
+
+_CAPTURE_CONFIG: Optional[CallCaptureConfig] = None
+_CAPTURE_STORE: Optional[CaptureStore] = None
+
+
+def get_capture_config() -> CallCaptureConfig:
+    global _CAPTURE_CONFIG
+    _CAPTURE_CONFIG = CallCaptureConfig.model_validate(get_global_config_dict())
+
+    return _CAPTURE_CONFIG
+
+
+def get_capture_store() -> CaptureStore:
+    global _CAPTURE_STORE
+
+    capture_config = get_capture_config()
+    assert capture_config.should_capture_calls
+
+    _CAPTURE_STORE = CaptureStore(capture_config.call_capture_dir)
+
+    return _CAPTURE_STORE
