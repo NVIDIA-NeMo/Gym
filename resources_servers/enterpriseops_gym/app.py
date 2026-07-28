@@ -479,14 +479,19 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             await self._delete_session_dbs(state)
 
         # EOG-parity scoring over the name-collapsed results (executor.py semantics).
+        # NOTE: like upstream, an empty result set (all verifiers skipped for unknown gyms)
+        # yields all([]) == True here — preserved for leaderboard comparability (PARITY.md §1);
+        # `num_verifiers_scored` exposes the condition to callers.
         total_verifiers = len(verification_results)
         passed_verifiers = sum(1 for v in verification_results.values() if v.get("passed", False))
         overall_success = all(v["passed"] for v in verification_results.values())
         verifier_pass_rate = passed_verifiers / total_verifiers if total_verifiers > 0 else 0.0
 
         # Strict scoring over every defined verifier (skipped verifiers count as failed).
+        # Unlike the parity path above, strict mode feeds RL rewards, so an empty verifier
+        # set must NOT score as success.
         strict_passed = [entry["result"].get("passed", False) for entry in all_verifier_results]
-        strict_success = all(strict_passed)
+        strict_success = bool(strict_passed) and all(strict_passed)
         strict_pass_rate = sum(strict_passed) / len(strict_passed) if strict_passed else 0.0
 
         reward = float(strict_success) if self.config.strict_verifiers else float(overall_success)

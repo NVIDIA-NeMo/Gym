@@ -197,6 +197,24 @@ class TestSeedToolVerify:
         assert result["overall_success"] is True  # parity metric unchanged
         assert result["reward"] == 0.0  # but strict reward catches the masked failure
 
+    def test_empty_verifier_set_never_passes_strict(self, gym_env, make_server) -> None:
+        # A task defining zero verifiers (or only skipped ones) must not score as a strict/RL
+        # success via all([]) == True. The collapsed parity metric intentionally keeps the
+        # upstream all([]) behavior (PARITY.md §1).
+        stub_url, state = gym_env
+        server = make_server(strict_verifiers=True)
+        row = make_row(stub_url, [])
+
+        with TestClient(server.setup_webserver()) as client:
+            result = run_agent_flow(client, row, do_tool_call=False)
+
+        assert result["reward"] == 0.0  # strict mode: empty verifier set is not a success
+        assert result["strict_success"] is False
+        assert result["strict_pass_rate"] == 0.0
+        assert result["overall_success"] is True  # parity-pinned upstream quirk
+        assert result["num_verifiers_defined"] == 0
+        assert result["num_verifiers_scored"] == 0
+
     def test_distinct_name_failure_fails_task(self, gym_env, make_server) -> None:
         stub_url, state = gym_env
         server = make_server()
