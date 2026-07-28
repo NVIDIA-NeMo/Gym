@@ -32,6 +32,7 @@ from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.capture_records import create_call_path
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -46,7 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
@@ -276,7 +277,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         """
         base_url = self._resolve_base_url()
         if base_url and self.config.model_server:
-            base_url = apply_rollout_prefix(base_url, rollout_id)
+            base_url = create_call_path(base_url, rollout_id)
         return base_url
 
     def _build_settings(self) -> dict[str, Any]:
@@ -589,7 +590,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             # can stage the skills into its per-request CLAUDE_CONFIG_DIR. run() calls _create_response
             # in-process, so no metadata side-channel is needed (unlike the schema-forbidden HTTP path).
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
-            rollout_id = self.rollout_id_from_run(body)
+            rollout_id = self._get_rollout_id(request)
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
