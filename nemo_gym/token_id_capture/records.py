@@ -120,6 +120,12 @@ class TokenEntry(BaseModel):
     # O(N^2) prefix scan into an O(1) lookup, and let a claimed parent be
     # verified rather than trusted.
     parent_call_id: Optional[str] = None
+    # Whether the model server handed the engine this call's prefix verbatim
+    # (prefix supply) rather than letting the chat template re-render it. Recorded
+    # per call so a run can be audited after the fact: supply only fires on a
+    # unique, verified parent, so the supplied/total ratio is the honest measure
+    # of how often it applied versus fell back.
+    prefix_supplied: bool = False
     # len(prompt_token_ids) + len(generation_token_ids) for THIS call: the
     # length of the prefix a child of this call must start with.
     cum_len: Optional[int] = None
