@@ -507,7 +507,7 @@ class ResponsesConverter(BaseModel):
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=chat_completion.created,
-            model=responses_create_params.model,
+            model=responses_create_params.model or "",
             object="response",
             output=response_output_dicts,
             tool_choice=responses_create_params.tool_choice

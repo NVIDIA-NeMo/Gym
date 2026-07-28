@@ -297,7 +297,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         return response
 
-    async def messages_with_call_capture(self, rollout_id: str, request: Request, body: dict = Body()):
+    async def messages_with_call_capture(
+        self, rollout_id: str, request: Request, response: Response, body: dict = Body()
+    ):
         # TODO @bxyu-nvidia: This function may be round tripping with the self.messages(...) implementation
         request.state.model_call_record_dict["route"] = "/v1/messages"
 
@@ -306,7 +308,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
-            response = await self.messages(request, body)
+            params = {"body": body}
+            self._maybe_inject_request(self.messages, request, response, params)
+            response = await self.messages(**params)
 
             if request.state.model_call_record_dict["request"].stream:
                 assert isinstance(response, StreamingResponse)

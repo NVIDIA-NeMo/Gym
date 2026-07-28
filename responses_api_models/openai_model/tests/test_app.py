@@ -19,14 +19,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
-from starlette.middleware.base import BaseHTTPMiddleware
 
-from nemo_gym.base_responses_api_model import (
-    CaptureStore,
-    _CaptureMiddleware,
-    aggregate_model_call_metrics,
-    read_model_call_records,
-)
+from nemo_gym.capture_records import CaptureStore
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -83,7 +77,7 @@ class TestApp:
     async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
-            "observability_enabled": True,
+            "should_capture_calls": True,
             "call_capture_dir": str(tmp_path),
         }
         app = server.setup_webserver()
@@ -117,7 +111,7 @@ class TestApp:
         server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
         chat_no_model = client.post(
-            "/ng-rollout/chat-test/v1/chat/completions",
+            "/v1/chat/completions/ng-rollout/chat-test",
             json={"messages": [{"role": "user", "content": "hi"}]},
         )
         assert chat_no_model.status_code == 200
@@ -137,13 +131,13 @@ class TestApp:
             messages=[{"role": "user", "content": "hi"}],
             model="dummy_model",
         )
-        calls = read_model_call_records(CaptureStore(tmp_path), "chat-test")
-        assert len(calls) == 1 and calls[0].dialect == "chat"
+        calls = CaptureStore(tmp_path).read("chat-test")
+        assert len(calls) == 1
 
     async def test_responses(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
-            "observability_enabled": True,
+            "should_capture_calls": True,
             "call_capture_dir": str(tmp_path),
         }
         app = server.setup_webserver()
@@ -160,7 +154,7 @@ class TestApp:
         server._client.create_response = AsyncMock(side_effect=mock_create_response)
 
         # No model provided should use the one from the config
-        res_no_model = client.post("/ng-rollout/openai-test/v1/responses", json={"input": "hello"})
+        res_no_model = client.post("/v1/responses/ng-rollout/openai-test", json={"input": "hello"})
         assert res_no_model.status_code == 200
         assert called_args_response.get("model") == "dummy_model"
 
@@ -170,29 +164,24 @@ class TestApp:
         assert called_args_response.get("model") == "dummy_model"
 
         server._client.create_response.assert_any_await(input="hello", model="dummy_model")
-        calls = read_model_call_records(CaptureStore(tmp_path), "openai-test")
+        calls = CaptureStore(tmp_path).read("openai-test")
         assert len(calls) == 1
-        assert calls[0].dialect == "responses"
         assert calls[0].model_ref is not None
         assert calls[0].model_ref.name == "test_model_server"
-        assert calls[0].request == {"input": "hello"}
-        assert aggregate_model_call_metrics(CaptureStore(tmp_path), "openai-test")["num_calls"] == 1
 
     def test_streaming_messages_capture(self, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
-            "observability_enabled": True,
+            "should_capture_calls": True,
             "call_capture_dir": str(tmp_path),
         }
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=_response_data())
         app = server.setup_webserver()
-        assert app.user_middleware[0].cls is _CaptureMiddleware
-        assert not issubclass(_CaptureMiddleware, BaseHTTPMiddleware)
         client = TestClient(app)
 
         response = client.post(
-            "/ng-rollout/messages-test/v1/messages",
+            "/v1/messages/ng-rollout/messages-test",
             json={
                 "model": "claude-test",
                 "max_tokens": 32,
@@ -203,9 +192,8 @@ class TestApp:
 
         assert response.status_code == 200
         assert "event: message_stop" in response.text
-        calls = read_model_call_records(CaptureStore(tmp_path), "messages-test")
-        assert len(calls) == 1 and calls[0].dialect == "messages"
-        assert calls[0].error_category is None
+        calls = CaptureStore(tmp_path).read("messages-test")
+        assert len(calls) == 1
 
     async def test_responses_parses_hosted_mcp_call(self, monkeypatch: MonkeyPatch) -> None:
         """A server-side ``mcp_call`` output item must validate (200), not 500.
