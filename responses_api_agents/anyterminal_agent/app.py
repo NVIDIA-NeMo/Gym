@@ -27,18 +27,19 @@ from traceback import format_exc
 from typing import Any, Dict, Optional
 
 import ray
+from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.capture_records import create_call_path
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
-from nemo_gym.server_utils import apply_rollout_prefix
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
@@ -698,7 +699,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
         server_config = self._server.model_dump()
         if rollout_id and server_config["model_server_url"]:
-            server_config["model_server_url"] = apply_rollout_prefix(server_config["model_server_url"], rollout_id)
+            server_config["model_server_url"] = create_call_path(server_config["model_server_url"], rollout_id)
 
         params = AnyTerminalInstanceConfig(
             **{**self.config.model_dump(), **config_overrides},
@@ -736,8 +737,11 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             print(f"[{params.task_name}] exception: see {tb_path}", file=sys.stderr)
             raise
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        return await self._responses(body)
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        rollout_id = self._get_rollout_id(request)
+        return await self._responses(body, rollout_id)
 
     async def _inner_responses(self, params: AnyTerminalInstanceConfig) -> NeMoGymResponse:
         await _run_remote.options(**self._ray_resource_opts(params)).remote(params.model_dump())
@@ -779,11 +783,11 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             },
         )
 
-    async def run(self, body: AnyTerminalRunRequest) -> AnyTerminalVerifyResponse:
+    async def run(self, request: Request, body: AnyTerminalRunRequest) -> AnyTerminalVerifyResponse:
         async with self._sem:
             body.responses_create_params.parallel_tool_calls = True
             body.responses_create_params.tool_choice = "auto"
-            response = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
+            response = await self._responses(body.responses_create_params, self._get_rollout_id(request))
 
             meta, response.metadata = response.metadata, None
             metrics = TerminalBenchMetrics.model_validate_json(meta["metrics"])
