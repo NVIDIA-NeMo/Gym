@@ -17,10 +17,14 @@ class SlurmExecutor(BaseExecutor):
     bash inside the sbatch script (no container needed — they just poll HTTP).
     """
 
-    def run(self, config: SubmitConfig) -> None:
+    def run(self, config: SubmitConfig, *, dry_run: bool = False) -> None:
         compute = next(iter(config.compute.values()))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         remote_run_dir = Path(config.job.output_path) / timestamp
+
+        if dry_run:
+            self._dry_run(config, compute, remote_run_dir)
+            return
 
         staging = self._stage(config, compute, remote_run_dir)
         with get_connection(compute.hostname) as conn:
@@ -29,6 +33,15 @@ class SlurmExecutor(BaseExecutor):
                 f"sbatch {shlex.quote(str(remote_run_dir / b.name / 'job.sh'))}"
                 for b in config.driver.benchmarks
             ])
+
+    def _dry_run(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> None:
+        print(f"[dry-run] remote run dir: {remote_run_dir}")
+        for benchmark in config.driver.benchmarks:
+            script = build_sbatch_script(config, benchmark, compute, remote_run_dir / benchmark.name)
+            print(f"\n{'='*60}")
+            print(f"[dry-run] sbatch script for benchmark: {benchmark.name}")
+            print(f"{'='*60}")
+            print(script)
 
     def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> Path:
         staging = Path(tempfile.mkdtemp(prefix="gym-submit-"))

@@ -12,15 +12,18 @@ _EXECUTORS = {
 }
 
 
-def _load_submit_config() -> SubmitConfig:
+def _load_submit_config() -> tuple[SubmitConfig, bool]:
     """Load the submit config YAML and apply +key=value overrides from the command line."""
     config_path: str | None = None
+    dry_run: bool = False
     override_tokens: list[str] = []
 
     for token in sys.argv[1:]:
         stripped = token.lstrip("+")
         if stripped.startswith("_submit_config="):
             config_path = stripped[len("_submit_config="):]
+        elif stripped == "_dry_run=true":
+            dry_run = True
         else:
             override_tokens.append(stripped)
 
@@ -31,11 +34,11 @@ def _load_submit_config() -> SubmitConfig:
     base = OmegaConf.load(config_path)
     overrides = OmegaConf.from_dotlist(override_tokens) if override_tokens else OmegaConf.create()
     merged = OmegaConf.merge(base, overrides)
-    return SubmitConfig.model_validate(OmegaConf.to_container(merged, resolve=True))
+    return SubmitConfig.model_validate(OmegaConf.to_container(merged, resolve=True)), dry_run
 
 
 @experimental
 def submit() -> None:  # pragma: no cover
-    config = _load_submit_config()
+    config, dry_run = _load_submit_config()
     compute = next(iter(config.compute.values()))
-    _EXECUTORS[type(compute)]().run(config)
+    _EXECUTORS[type(compute)]().run(config, dry_run=dry_run)

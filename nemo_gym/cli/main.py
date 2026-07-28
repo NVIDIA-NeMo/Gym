@@ -545,6 +545,10 @@ COMMANDS = {
                 register=lambda p: p.add_argument("--config", metavar="PATH", help="Config YAML file to load."),
                 translate_to_hydra=lambda args: [f"+_submit_config={args.config}"] if args.config else [],
             ),
+            Flag(
+                register=lambda p: p.add_argument("--dry-run", action="store_true", help="Print generated job scripts without submitting."),
+                translate_to_hydra=lambda args: ["+_dry_run=true"] if args.dry_run else [],
+            ),
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
