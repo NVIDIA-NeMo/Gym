@@ -15,10 +15,11 @@
 import signal
 import subprocess
 import urllib.error
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -435,6 +436,31 @@ class TestProxyOutlivesNothing:
         # Entering and leaving the TestClient context runs the app's startup/shutdown events.
         with TestClient(app):
             process.terminate.assert_not_called()
+
+        process.terminate.assert_called_once()
+
+    def test_failed_startup_still_stops_the_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        """The proxy is up before the app finishes starting, so a failed startup must still reap it."""
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
+        server = self._launch_server(monkeypatch)
+
+        process = MagicMock(spec=_REAL_POPEN)
+        process.poll.return_value = None
+        server._proxy_process = process
+
+        app = FastAPI()
+
+        @asynccontextmanager
+        async def failing_lifespan(_app):
+            raise RuntimeError("startup failed")
+            yield  # pragma: no cover - unreachable; present so this is a generator
+
+        app.router.lifespan_context = failing_lifespan
+        server.setup_proxy_shutdown(app)
+
+        with pytest.raises(RuntimeError, match="startup failed"):
+            with TestClient(app):
+                pass  # pragma: no cover - startup raises before the body runs
 
         process.terminate.assert_called_once()
 
