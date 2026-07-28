@@ -107,6 +107,10 @@ redirects:
     destination: "/nemo/gym/tutorials/training-tutorials"
   - source: "/nemo/gym/training-tutorials/:path*"
     destination: "/nemo/gym/tutorials/training-tutorials/:path*"
+  # Python autodoc lists this private compatibility helper as a submodule but
+  # does not publish a standalone page for private modules.
+  - source: "/nemo/gym/nemo-gym/nemo_gym/cli/_compat"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/cli"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).
