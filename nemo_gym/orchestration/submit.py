@@ -3,6 +3,7 @@ import sys
 import rich
 from omegaconf import OmegaConf
 
+from nemo_gym.decorators import experimental
 from nemo_gym.orchestration.api import SubmitConfig
 
 
@@ -28,6 +29,7 @@ def _load_submit_config() -> SubmitConfig:
     return SubmitConfig.model_validate(OmegaConf.to_container(merged, resolve=True))
 
 
+@experimental
 def submit() -> None:  # pragma: no cover
     _load_submit_config()
     rich.print("[bold]gym eval submit[/bold]: not yet implemented.")
