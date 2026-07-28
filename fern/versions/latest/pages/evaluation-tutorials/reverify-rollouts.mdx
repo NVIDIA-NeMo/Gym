@@ -95,7 +95,7 @@ A benchmark/agent config's agent references a model server, so a model config mu
 | `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
 | `--rollouts PATH` | `rollouts.jsonl` from `gym eval run`. |
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
-| `--force` | Override the `UNSUPPORTED` reverify mode guard (see below). Output is prefixed with `unsafe_`. |
+| `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard (see below). Output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
 | `--disable-aggregation` | Skip aggregate-metrics computation. Use when sharding (see [Sharding](#sharding)). |
 
@@ -112,14 +112,17 @@ gym eval reverify \
 
 ## ReverifyMode
 
-Before starting, `gym eval reverify` calls `GET /reverify_mode` on each resources server it will use. Servers report one of two modes:
+Before starting, `gym eval reverify` calls `GET /reverify_mode` on each resources server it will use. Servers report one of three modes:
 
 | Mode | Meaning |
 | --- | --- |
-| `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. This is the default for most resources servers. |
+| `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. Set `REVERIFY_MODE = ReverifyMode.STATELESS` on your resources server config once you have verified this. |
 | `unsupported` | Reverification is not safe. The verifier reads per-rollout session state that was seeded during the original run and is no longer present. Results would be silently wrong. |
+| `unknown` | The resources server has not declared its reverification behaviour. This is the **default** for all resources servers until explicitly set. Treat it as potentially unsafe. |
 
-Session-stateful resources servers (for example, those that use cookie-keyed state seeded by `/seed_session`) report `unsupported`. By default, `gym eval reverify` refuses to proceed and prints a clear error.
+Session-stateful resources servers (for example, those that use cookie-keyed state seeded by `/seed_session`) should report `unsupported`. Resources servers that have not yet been audited for reverification safety report `unknown` (the default).
+
+By default, `gym eval reverify` refuses to proceed against any server reporting `unsupported` or `unknown`, and prints a clear error.
 
 If you understand the risk and want to run anyway — for example, to get an approximate lower-bound estimate — pass `--force`. The output file will be prefixed with `unsafe_` to mark it as potentially incorrect:
 

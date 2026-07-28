@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 from asyncio import Semaphore
+from collections import defaultdict
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -40,6 +41,7 @@ from nemo_gym.rollout_reverification import (
     _call_aggregate_metrics,
     _check_reverify_mode,
     _drop_cache_from_payloads,
+    _get_rs_names,
     _guard_reverify_mode,
     _load_cache_keys_by_status,
     _load_reverified_results,
@@ -184,6 +186,39 @@ class TestBuildAgentToResourcesServerMapping:
         }
         result = _build_agent_to_resources_server_mapping(config)
         assert result["any_agent_name"] == "verifier_block"
+
+
+class TestGetRsNames:
+    """Tests for _get_rs_names: extracts unique RS names, handling the keyless-defaultdict edge case."""
+
+    def test_regular_dict_returns_unique_rs_names(self) -> None:
+        result = _get_rs_names({"agent_a": "rs_a", "agent_b": "rs_b"})
+        assert sorted(result) == ["rs_a", "rs_b"]
+
+    def test_regular_dict_deduplicates_shared_rs(self) -> None:
+        result = _get_rs_names({"agent_a": "rs_shared", "agent_b": "rs_shared"})
+        assert result == ["rs_shared"]
+
+    def test_empty_regular_dict_returns_empty_list(self) -> None:
+        assert _get_rs_names({}) == []
+
+    def test_keyless_defaultdict_materialises_factory_value(self) -> None:
+        """Resources-only configs produce a keyless defaultdict; .values() is empty, so _get_rs_names
+        must call default_factory() to surface the single RS name."""
+        mapping = defaultdict(lambda: "mcqa_resources_server")
+        result = _get_rs_names(mapping)
+        assert result == ["mcqa_resources_server"]
+
+    def test_defaultdict_with_keys_uses_values_not_factory(self) -> None:
+        mapping = defaultdict(lambda: "should_not_appear")
+        mapping["agent_a"] = "rs_a"
+        mapping["agent_b"] = "rs_a"
+        result = _get_rs_names(mapping)
+        assert result == ["rs_a"]
+
+    def test_defaultdict_with_no_factory_returns_empty_list(self) -> None:
+        mapping: defaultdict = defaultdict(None)
+        assert _get_rs_names(mapping) == []
 
 
 class TestRolloutVerifyDebugSummary:
@@ -1112,6 +1147,24 @@ class TestCheckReverifyMode:
         await _check_reverify_mode(mock_client, {"agent_a": "rs_shared", "agent_b": "rs_shared"})
 
         assert queried == ["rs_shared"]
+
+    async def test_resources_only_config_still_checks_its_single_rs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression: a resources-server-only config produces a keyless ``defaultdict`` mapping, whose
+        ``.values()`` is empty until a key is accessed. The guard runs before any row is routed, so it
+        must not rely on materialized keys — it has to query the single RS's ``/reverify_mode`` anyway.
+        Otherwise an UNKNOWN/UNSUPPORTED resources-only server silently passes the safety check.
+
+        Drives the *real* ``_build_agent_to_resources_server_mapping`` (not an injected plain dict) so the
+        actual defaultmapping the guard uses in production is exercised end to end.
+        """
+        config = {"mcqa_resources_server": {"resources_servers": {"mcqa": {}}}}
+        agent_to_rs = _build_agent_to_resources_server_mapping(config)
+
+        mock_client = self._mock_client(monkeypatch, {"mcqa_resources_server": ReverifyMode.UNKNOWN})
+
+        result = await _check_reverify_mode(mock_client, agent_to_rs)
+
+        assert result == ["mcqa_resources_server"]
 
 
 class TestGuardReverifyMode:

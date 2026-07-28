@@ -133,10 +133,10 @@ class CacheKeysByStatus:
 
 
 def _agent_to_rs_mapping_from_agent_blocks(
-    global_conflict_dict: Union[Dict[str, Any], "DictConfig"],
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
 ) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
-    for raw_name, block in global_conflict_dict.items():
+    for raw_name, block in global_config_dict.items():
         name = str(raw_name)
         if isinstance(block, (dict, DictConfig)) and "responses_api_agents" in block:
             impl = next(iter(block["responses_api_agents"].values()))
@@ -147,13 +147,13 @@ def _agent_to_rs_mapping_from_agent_blocks(
 
 
 def _agent_to_rs_mapping_from_resources_only_config(
-    global_conflict_dict: Union[Dict[str, Any], "DictConfig"],
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
 ) -> Dict[str, str]:
     # The rollout rows still carry agent names that were never started, so fall back to the
     # single resources server for EVERY requested key.
     resources_server_names = [
         str(name)
-        for name, block in global_conflict_dict.items()
+        for name, block in global_config_dict.items()
         if isinstance(block, (dict, DictConfig)) and "resources_servers" in block
     ]
     if len(resources_server_names) == 1:
@@ -168,12 +168,12 @@ def _agent_to_rs_mapping_from_resources_only_config(
 
 
 def _build_agent_to_resources_server_mapping(
-    global_conflict_dict: Union[Dict[str, Any], "DictConfig"],
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
 ) -> Dict[str, str]:
-    mapping = _agent_to_rs_mapping_from_agent_blocks(global_conflict_dict)
+    mapping = _agent_to_rs_mapping_from_agent_blocks(global_config_dict)
     if mapping:
         return mapping
-    return _agent_to_rs_mapping_from_resources_only_config(global_conflict_dict)
+    return _agent_to_rs_mapping_from_resources_only_config(global_config_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -372,13 +372,22 @@ def _run_verification_payloads(
 # ---------------------------------------------------------------------------
 
 
+def _get_rs_names(agent_to_rs: Dict[str, str]) -> List[str]:
+    # Resources-only configs return a keyless defaultdict whose .values() is empty until a key is
+    # accessed; materialise the single RS explicitly so it isn't silently skipped by the safety check.
+    rs_names = set(agent_to_rs.values())
+    if not rs_names and isinstance(agent_to_rs, defaultdict) and agent_to_rs.default_factory is not None:
+        rs_names = {agent_to_rs.default_factory()}
+    return list(rs_names)
+
+
 async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[str, str]) -> List[str]:
     """Query GET /reverify_mode on each unique resource server referenced by agent_to_rs.
 
     Returns a sorted list of RS names that reported ReverifyMode.UNSUPPORTED or ReverifyMode.UNKNOWN.
     """
     unsupported: List[str] = []
-    for rs_name in set(agent_to_rs.values()):
+    for rs_name in _get_rs_names(agent_to_rs):
         res = await server_client.get(server_name=rs_name, url_path="/reverify_mode")
         await raise_for_status(res)
         mode = ReverifyMode(await get_response_json(res))
