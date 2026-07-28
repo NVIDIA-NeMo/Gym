@@ -110,8 +110,8 @@ def _log_timeout_once(timeout_s: float) -> None:
 #                     written anywhere; resume's set-difference on the main
 #                     jsonl naturally re-dispatches, capped per-attempt by
 #                     the per-task timeout above.
-#   timeout_exceeded  TaskPerAttemptTimeoutError. Sidecar entry with
-#                     _ng_failure_terminal=True so chain-hop 2 does NOT retry.
+#   timeout_exceeded  TaskPerAttemptTimeoutError. Retryable sidecar entry,
+#                     capped by NEMO_GYM_MAX_ROLLOUT_ATTEMPTS.
 #   skipped           TaskSampleSkipError. Sidecar entry with terminal=True.
 #   transient         verify-side ClientResponseError 5xx / connection /
 #                     asyncio.TimeoutError. Sidecar entry per attempt; retry
@@ -1215,17 +1215,37 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             rollout_index = existing_metadata.get("_ng_rollout_index")
             if self.config.persist_deliverables_dir and task_id:
                 repeat_name = f"repeat_{rollout_index}" if rollout_index is not None else "repeat_0"
-                deliverables_dir = str(
-                    (Path(self.config.persist_deliverables_dir) / f"task_{task_id}" / repeat_name).absolute()
-                )
+                task_root = (Path(self.config.persist_deliverables_dir) / f"task_{task_id}").absolute()
+                repeat_dir = task_root / repeat_name
+                deliverables_dir = str(repeat_dir)
 
-                # Fall back to the flat (no repeat_index) layout for backwards compat with older
-                # runs. Only use the flat path when it actually exists on disk — if neither the
-                # repeat dir nor the flat dir exists it's a fresh run and we keep the repeat path.
-                if (self.config.judge_only or self.config.rerun_incomplete) and not Path(deliverables_dir).is_dir():
-                    flat_dir = Path(self.config.persist_deliverables_dir) / f"task_{task_id}"
-                    if flat_dir.is_dir():
-                        deliverables_dir = str(flat_dir.absolute())
+                # Fall back to the pre-repeat flat layout only when the task root
+                # actually contains legacy artifacts. A missing repeat directory
+                # is normal before a fresh rollout: ``responses()`` creates it
+                # while persisting that rollout. Falling back merely because it
+                # does not exist yet makes the post-rollout finish check look in
+                # ``task_<id>/`` even though the marker was written beneath
+                # ``task_<id>/repeat_<n>/``. It also breaks a new repeat whenever
+                # a sibling repeat directory already exists.
+                if (
+                    (self.config.judge_only or self.config.rerun_incomplete)
+                    and not repeat_dir.is_dir()
+                    and task_root.is_dir()
+                ):
+                    has_flat_legacy_artifacts = any(
+                        not (
+                            (entry.is_dir() and entry.name.startswith("repeat_"))
+                            or (
+                                entry.is_file()
+                                and entry.name.startswith("repeat_")
+                                and "_verify_response" in entry.name
+                                and entry.suffix == ".json"
+                            )
+                        )
+                        for entry in task_root.iterdir()
+                    )
+                    if has_flat_legacy_artifacts:
+                        deliverables_dir = str(task_root)
 
             # Per-request opt-in to judge an already-cached deliverable instead of
             # re-running the policy. Unlike server-wide judge_only, it falls back
@@ -1544,11 +1564,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
         - ``_ng_no_persist=True`` for ``kill_shaped``: not written anywhere;
           resume's set-difference on the main jsonl re-dispatches the task.
-        - ``_ng_failure_terminal=True`` for ``timeout_exceeded`` / ``skipped``:
-          one sidecar entry, never retried.
-        - Otherwise (``legitimate``, ``transient``, ``incomplete``): sidecar
-          entry per attempt; retried up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on
-          chain resume.
+        - ``_ng_failure_terminal=True`` for ``skipped``: one sidecar entry,
+          never retried.
+        - Otherwise (``timeout_exceeded``, ``legitimate``, ``transient``,
+          ``incomplete``): sidecar entry per attempt; retried up to
+          ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on chain resume.
         """
         if error_class == "timeout_exceeded":
             suffix = "timeout"
@@ -1603,11 +1623,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 # Don't persist: resume's set-difference on the main jsonl
                 # naturally re-dispatches. Bounded across hops by per-task timeout.
                 payload[NG_NO_PERSIST_KEY] = True
-            elif error_class in ("timeout_exceeded", "skipped"):
+            elif error_class == "skipped":
                 # Sidecar entry written once; chain-hop 2 will not retry.
                 payload[NG_TERMINAL_KEY] = True
-            # 'legitimate' / 'transient' / 'incomplete': sidecar entry per
-            # attempt; retried by chain-hop / resume up to
+            # 'timeout_exceeded' / 'legitimate' / 'transient' / 'incomplete':
+            # sidecar entry per attempt; retried by chain-hop / resume up to
             # NEMO_GYM_MAX_ROLLOUT_ATTEMPTS (default 3).
         return payload
 

@@ -785,8 +785,9 @@ class TestFailureRouting:
                 ).encode()
                 + b"\n"
             )
-        # Sidecar: task 1 terminal (never retried), task 2 hit 3 attempts (gated),
-        # task 3 has 1 attempt (still re-dispatchable).
+        # Sidecar: task 1 terminal (never retried), task 2 hit 3 attempts
+        # (gated), task 3 has 1 attempt (still re-dispatchable), and task 4 is
+        # a legacy timeout row whose old terminal flag must be ignored.
         sidecar = _failures_path_for(out)
         entries = [
             {
@@ -800,6 +801,13 @@ class TestFailureRouting:
             {"stage_index": 0, TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "x"},
             {"stage_index": 0, TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "x"},
             {"stage_index": 0, TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "x"},
+            {
+                "stage_index": 0,
+                TASK_INDEX_KEY_NAME: 4,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                NG_TERMINAL_KEY: True,
+            },
         ]
         with sidecar.open("wb") as handle:
             for e in entries:
@@ -812,6 +820,7 @@ class TestFailureRouting:
         assert (1, 0) in gated[0]
         assert (2, 0) in gated[0]
         assert (3, 0) not in gated[0]
+        assert (4, 0) not in gated[0]
 
     async def test_failure_row_redispatched_but_terminal_not(self) -> None:
         # A failed (non-terminal, below max) row is re-dispatched; a terminal one is not.

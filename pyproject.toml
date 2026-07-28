@@ -305,7 +305,8 @@ exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",
-    "cryptography",
+    # Do not exclude cryptography: GDPVal's pdfminer-based PDF text extraction
+    # imports it at runtime in resources-server venvs.
     "flask",
     "flask-cors",
     "graphene",

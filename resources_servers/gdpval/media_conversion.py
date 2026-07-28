@@ -35,6 +35,7 @@ extraction reuses ``pdfminer.six``.
 from __future__ import annotations
 
 import base64
+import importlib
 import io
 import logging
 from typing import Any, Dict, List, Literal
@@ -63,6 +64,28 @@ DEFAULT_MAX_TEXT_CHARS = 20_000
 # PDF page rasters are always PNG (lossless — keeps small text crisp for the
 # judge). One shared MIME constant so callers don't re-specify it.
 _PNG_MIME = "image/png"
+
+
+def validate_images_and_text_dependencies() -> None:
+    """Fail fast unless the full ``images_and_text`` stack is importable.
+
+    Importing the top-level ``pdfminer`` package is not sufficient:
+    ``pdfminer.high_level`` imports ``cryptography`` transitively.  Validate the
+    exact modules used during scoring so a partially resolved server venv cannot
+    silently degrade to page images without the supplemental text.
+    """
+    required_modules = {
+        "fitz": "PyMuPDF",
+        "pdfminer.high_level": "pdfminer.six and cryptography",
+    }
+    for module_name, packages in required_modules.items():
+        try:
+            importlib.import_module(module_name)
+        except ImportError as exc:
+            raise RuntimeError(
+                "judge_media_mode=images_and_text requires "
+                f"{packages}; failed to import {module_name}: {exc}"
+            ) from exc
 
 
 def _data_url(mime_type: str, data: bytes) -> str:
@@ -180,8 +203,11 @@ def pdf_bytes_to_text(pdf_bytes: bytes, *, max_chars: int = DEFAULT_MAX_TEXT_CHA
     """
     try:
         from pdfminer.high_level import extract_text
-    except ImportError:
-        LOGGER.warning("pdfminer.six not installed; skipping PDF text extraction")
+    except ImportError as exc:
+        LOGGER.warning(
+            "PDF text extraction unavailable; failed to import pdfminer.high_level: %s",
+            exc,
+        )
         return ""
 
     try:
