@@ -198,7 +198,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             max_prompt_tokens = max(prompt_usages)
             max_completion_tokens = max(completion_usages)
 
-        if self._capture_config.should_capture_calls:
+        if hasattr(self, "_capture_config") and self._capture_config.should_capture_calls:
             prev_timestamp = None
             for message in result.messages:
                 if message.role == "assistant" and message.tool_calls:

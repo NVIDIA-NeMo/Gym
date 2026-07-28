@@ -62,6 +62,7 @@ class TestApp:
             turns_remaining_interval=turns_remaining_interval,
         )
         server = Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+        server.server_client.global_config_dict = dict()
 
         return config, server
 
@@ -196,7 +197,7 @@ class TestApp:
             patch("responses_api_agents.tau2.app.get_server_url", return_value="dummy base url"),
             patch("responses_api_agents.tau2.app.run_single_task", side_effect=fake_run_single_task),
         ):
-            response = await server.run(body)
+            response = await server.run(MagicMock(), body)
 
         assert captured_kwargs["config"].max_agent_steps == 3
         assert captured_kwargs["config"].turns_remaining_interval == 2
@@ -233,7 +234,7 @@ class TestApp:
                 ),
             ),
         ):
-            response = await server.run(body)
+            response = await server.run(MagicMock(), body)
 
         response_dict = response.model_dump(mode="json")
         assert reminder not in json.dumps(response_dict["result"]["messages"])
