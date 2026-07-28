@@ -23,20 +23,11 @@ on:
       dockerfile:
         required: true
         type: string
-      build-contexts:
-        required: false
-        type: string
-        description: "Additional build contexts to pass to docker buildx"
-        default: ""
       runner:
         required: false
         default: linux-amd64-cpu16
         type: string
         description: "The runner to use for the build"
-    outputs:
-      container-uri:
-        description: "URI of the built container image"
-        value: ${{ jobs.build.outputs.container-uri }}
     secrets:
       AZURE_CLIENT_ID:
         required: true
@@ -82,7 +73,6 @@ jobs:
     with:
       image-name: ${{ inputs.image-name }}
       dockerfile: ${{ inputs.dockerfile }}
-      build-contexts: ${{ inputs.build-contexts }}
       image-label: nemo-core
       prune-filter-timerange: 24h
       use-inline-cache: false

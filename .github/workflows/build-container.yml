@@ -24,10 +24,13 @@ on:
 
 jobs:
   build:
-    uses: ./.github/workflows/_build_container.yml
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_container.yml@v0.78.0
     with:
       image-name: nemo-gym
       dockerfile: docker/Dockerfile
+      target: release
+      image-label: nemo-gym
+      has-azure-credentials: true
       build-contexts: "nemo-gym=${{ github.run_id }}/"
     secrets:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
