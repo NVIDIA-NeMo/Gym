@@ -19,9 +19,9 @@ dependencies = [
     "nemo-gym[dev]",
 
     # We specifically pin the vllm dependency because we have tested on this version.
-    # Updated Tue Jun 23, 2026 with vllm==0.20.0
-    # License: Apache 2.0 https://github.com/vllm-project/vllm/blob/88d34c6409e9fb3c7b8ca0c04756f061d2099eb1/LICENSE
-    # "vllm==0.20.0",
+    # Updated Mon Jul 28, 2026 with vllm==0.26.0
+    # License: Apache 2.0 https://github.com/vllm-project/vllm/blob/main/LICENSE
+    # "vllm==0.26.0",
     # VLLM is resolved below since installation on Macs requires special workarounds.
 
     # hf_transfer for faster model download from HuggingFace
@@ -44,7 +44,7 @@ dependencies = [
 if platform == "darwin":
     dependencies.append("vllm==0.11.0")
 else:
-    dependencies.append("vllm==0.20.0")
+    dependencies.append("vllm==0.26.0")
 
 
 setuptools.setup(install_requires=dependencies)

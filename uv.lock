@@ -2784,6 +2784,7 @@ sandbox = [
     { name = "tenacity" },
 ]
 vllm = [
+    { name = "flashinfer-python" },
     { name = "vllm" },
 ]
 
@@ -2797,6 +2798,7 @@ requires-dist = [
     { name = "daytona", marker = "extra == 'sandbox'", specifier = ">=0.179.0" },
     { name = "devtools" },
     { name = "fastapi" },
+    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.14" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", specifier = ">=3.1.50" },
     { name = "gprof2dot" },
@@ -2830,7 +2832,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=2.7.0" },
     { name = "uvicorn" },
     { name = "uvloop" },
-    { name = "vllm", marker = "extra == 'vllm'" },
+    { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.26.0" },
     { name = "wandb" },
     { name = "yappi" },
 ]
