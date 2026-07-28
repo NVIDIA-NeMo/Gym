@@ -1,12 +1,17 @@
+import re
 import shlex
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import rich
+
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import get_connection
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+
+_SBATCH_JOB_ID_RE = re.compile(r"Submitted batch job (\d+)")
 
 
 class SlurmExecutor(BaseExecutor):
@@ -29,10 +34,18 @@ class SlurmExecutor(BaseExecutor):
         staging = self._stage(config, compute, remote_run_dir)
         with get_connection(compute.hostname) as conn:
             conn.copy(staging, remote_run_dir)
-            conn.run([
+            output = conn.run([
                 f"sbatch {shlex.quote(str(remote_run_dir / b.name / 'job.sh'))}"
                 for b in config.driver.benchmarks
             ])
+
+        benchmarks = [b.name for b in config.driver.benchmarks]
+        job_ids = _SBATCH_JOB_ID_RE.findall(output)
+        for benchmark, job_id in zip(benchmarks, job_ids):
+            rich.print(f"[green]submitted[/green] {benchmark} → Slurm job [bold]{job_id}[/bold]")
+        unmatched = benchmarks[len(job_ids):]
+        for benchmark in unmatched:
+            rich.print(f"[green]submitted[/green] {benchmark} (job ID unavailable)")
 
     def _dry_run(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> None:
         print(f"[dry-run] remote run dir: {remote_run_dir}")

@@ -19,7 +19,7 @@ class Connection(ABC):
     def copy(self, local: Path, remote: Path) -> None: ...
 
     @abstractmethod
-    def run(self, commands: list[str]) -> None: ...
+    def run(self, commands: list[str]) -> str: ...
 
     def close(self) -> None:
         pass
@@ -31,9 +31,8 @@ class LocalConnection(Connection):
             shutil.rmtree(remote)
         shutil.copytree(local, remote)
 
-    def run(self, commands: list[str]) -> None:
-        for cmd in commands:
-            _checked(shlex.split(cmd))
+    def run(self, commands: list[str]) -> str:
+        return "\n".join(_checked(shlex.split(cmd)) for cmd in commands)
 
 
 class SSHConnection(Connection):
@@ -83,6 +82,10 @@ class SSHConnection(Connection):
 
     def copy(self, local: Path, remote: Path) -> None:
         _checked(
+            ["ssh", *self._ssh_opts(), self._hostname, "mkdir", "-p", str(remote)],
+            context=f"mkdir -p {self._hostname}:{remote}",
+        )
+        _checked(
             [
                 "rsync", "-az", "--delete",
                 "-e", f"ssh {' '.join(self._ssh_opts())}",
@@ -92,9 +95,9 @@ class SSHConnection(Connection):
             context=f"rsync to {self._hostname}:{remote}",
         )
 
-    def run(self, commands: list[str]) -> None:
+    def run(self, commands: list[str]) -> str:
         script = "\n".join(commands)
-        _checked(
+        return _checked(
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input=script,
             context=f"ssh commands on {self._hostname}",
@@ -110,7 +113,7 @@ class SSHConnection(Connection):
             self._master.wait()
 
 
-def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> None:
+def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> str:
     result = subprocess.run(cmd, input=input, text=True, capture_output=True)
     if result.returncode != 0:
         label = f" ({context})" if context else ""
@@ -119,6 +122,7 @@ def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> 
             f"  {' '.join(cmd)}\n"
             f"{result.stderr.strip()}"
         )
+    return result.stdout
 
 
 def get_connection(hostname: str | None) -> Connection:
