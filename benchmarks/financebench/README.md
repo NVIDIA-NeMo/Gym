@@ -69,7 +69,23 @@ gym eval prepare --benchmark financebench
 This downloads the public 150-question Hugging Face dataset and writes
 `benchmarks/financebench/data/financebench_benchmark.jsonl`.
 
-## Start servers
+## Run
+
+Either form below works.
+
+A single command starts the servers, collects rollouts, and shuts the servers
+down. It resolves the agent, the data file, and the prompt config from
+`config.yaml`:
+
+```bash
+gym eval run \
+  --benchmark financebench \
+  --split benchmark \
+  --model-type openai_model \
+  --output results/financebench/rollouts.jsonl
+```
+
+To reuse one server across several runs, start it in one terminal:
 
 ```bash
 gym env start \
@@ -77,15 +93,14 @@ gym env start \
   --model-type openai_model
 ```
 
-## Collect rollouts
-
-In another terminal:
+and collect against it from another. This form takes no benchmark config, so
+the agent, input, and prompt config are named explicitly:
 
 ```bash
 gym eval run --no-serve \
   --agent financebench_simple_agent \
   --input benchmarks/financebench/data/financebench_benchmark.jsonl \
-  --output results/financebench_rollouts.jsonl \
+  --output results/financebench/rollouts.jsonl \
   --prompt-config benchmarks/financebench/prompts/default.yaml \
   --num-repeats 1
 ```

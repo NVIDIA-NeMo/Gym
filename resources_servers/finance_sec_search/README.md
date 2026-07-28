@@ -235,5 +235,5 @@ gym env test --resources-server finance_sec_search
 
 ## Verification
 
-Uses LLM-as-judge with a financial grading rubric (0/1/2 scale). Only fully correct answers ([[2]]) receive reward 1.0. The judge prompt and rubric are defined in /prompt_templates.
+Uses LLM-as-judge with a financial grading rubric (0/1/2 scale). `reward_mode: binary` gives reward 1.0 only to fully correct answers (`[[2]]`); `reward_mode: scaled` also gives partially correct answers (`[[1]]`) 0.5. The judge additionally requires grounding: an answer that restates general financial knowledge without filing-specific figures, dates, or disclosures scores `[[0]]` even when it is conceptually correct. The judge prompt and rubric are defined in /prompt_templates.
 

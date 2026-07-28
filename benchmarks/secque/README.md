@@ -9,8 +9,9 @@ resource server with a finance-specific judge prompt.
 The relevant excerpt for each question is supplied in the prompt, so this
 measures reasoning over the correct context rather than retrieval.
 
-The dataset is licensed under
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+The dataset is licensed under [MIT](https://opensource.org/license/mit). Its authors
+publish it as an evaluation benchmark, so it ships here as a benchmark dataset only and
+is not used for training.
 
 ## Verification
 
@@ -66,7 +67,23 @@ gym eval prepare --benchmark secque
 This downloads the single 565-row Hugging Face split and writes
 `benchmarks/secque/data/secque_benchmark.jsonl`.
 
-## Start servers
+## Run
+
+Either form below works.
+
+A single command starts the servers, collects rollouts, and shuts the servers
+down. It resolves the agent, the data file, and the prompt config from
+`config.yaml`:
+
+```bash
+gym eval run \
+  --benchmark secque \
+  --split benchmark \
+  --model-type openai_model \
+  --output results/secque/rollouts.jsonl
+```
+
+To reuse one server across several runs, start it in one terminal:
 
 ```bash
 gym env start \
@@ -74,15 +91,14 @@ gym env start \
   --model-type openai_model
 ```
 
-## Collect rollouts
-
-In another terminal:
+and collect against it from another. This form takes no benchmark config, so
+the agent, input, and prompt config are named explicitly:
 
 ```bash
 gym eval run --no-serve \
   --agent secque_simple_agent \
   --input benchmarks/secque/data/secque_benchmark.jsonl \
-  --output results/secque_rollouts.jsonl \
+  --output results/secque/rollouts.jsonl \
   --prompt-config benchmarks/secque/prompts/default.yaml \
   --num-repeats 1
 ```

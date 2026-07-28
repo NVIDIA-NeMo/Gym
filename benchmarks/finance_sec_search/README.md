@@ -71,7 +71,22 @@ when running the web-search variant.
 | `config_no_web_search.yaml` | `data/finance_sec_search_benchmark.jsonl` |
 | `config_web_search.yaml` | `data/finance_sec_search_benchmark_web_search.jsonl` |
 
-## Running servers
+## Run
+
+Either form below works.
+
+A single command starts the servers, collects rollouts, and shuts the servers
+down. It resolves the agent and the data file from the benchmark config:
+
+```bash
+gym eval run \
+  --benchmark finance_sec_search/config_no_web_search \
+  --split benchmark \
+  --model-type openai_model \
+  --output results/finance_sec_search/rollouts.jsonl
+```
+
+To reuse one server across several runs, start it in one terminal:
 
 ```bash
 gym env start \
@@ -79,16 +94,17 @@ gym env start \
   --benchmark finance_sec_search/config_no_web_search
 ```
 
-## Collecting rollouts
+and collect against it from another, naming the agent and input explicitly:
 
 ```bash
 gym eval run --no-serve \
   --agent finance_sec_search_benchmark_agent \
   --input benchmarks/finance_sec_search/data/finance_sec_search_benchmark.jsonl \
-  --output results/finance_sec_search_rollouts.jsonl \
+  --output results/finance_sec_search/rollouts.jsonl \
   --num-repeats 1
 ```
 
 Use `--limit 1` for a quick end-to-end check. For the web-search variant, use
-`finance_sec_search_web_search_benchmark_agent` and
+`finance_sec_search/config_web_search`, agent
+`finance_sec_search_web_search_benchmark_agent`, and
 `data/finance_sec_search_benchmark_web_search.jsonl`.

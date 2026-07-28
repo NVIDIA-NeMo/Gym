@@ -45,4 +45,4 @@ secque_simple_agent:
           prompt_config: benchmarks/secque/prompts/default.yaml
           prepare_script: benchmarks/secque/prepare.py
           num_repeats: 1
-          license: Creative Commons Attribution 4.0 International
+          license: MIT
