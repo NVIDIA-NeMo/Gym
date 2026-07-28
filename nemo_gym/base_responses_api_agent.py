@@ -84,7 +84,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # The background task only runs after streaming has finished
         task = BackgroundTask(self._store.record, rollout_id, request.state.events)
 
-        # # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
+        # Later on we can handle cases where there are existing background tasks
         assert not response.background
         response.background = task
 

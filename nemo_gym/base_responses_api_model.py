@@ -126,7 +126,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             self._store.record, rollout_id, [ModelCallRecord.model_validate(request.state.model_call_record_dict)]
         )
 
-        # TODO @bxyu-nvidia: Later on we can handle cases where there are existing background tasks
+        # Later on we can handle cases where there are existing background tasks
         assert not response.background
         response.background = task
 
@@ -300,7 +300,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def messages_with_call_capture(
         self, rollout_id: str, request: Request, response: Response, body: dict = Body()
     ):
-        # TODO @bxyu-nvidia: This function may be round tripping with the self.messages(...) implementation
+        # This function may be round tripping with the self.messages(...) implementation
         request.state.model_call_record_dict["route"] = "/v1/messages"
 
         request.state.model_call_record_dict["request"] = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
