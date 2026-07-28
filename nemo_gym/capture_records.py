@@ -82,9 +82,9 @@ class AggregateCallRecords(BaseModel):
     events: List[EventTypes]
 
     @classmethod
-    def from_records(cls, records: List[RecordEventType]) -> "AggregateCallRecords":
-        records = [r for r in records if isinstance(r, ModelCallRecord)]
-        events = [e for e in records if isinstance(e, EventTypes)]
+    def from_records(cls, all_records: List[RecordEventType]) -> "AggregateCallRecords":
+        records = [r for r in all_records if isinstance(r, ModelCallRecord)]
+        events = [e for e in all_records if isinstance(e, EventTypes)]
         return cls(records=records, events=events)
 
 
