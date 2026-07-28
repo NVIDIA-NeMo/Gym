@@ -4,18 +4,29 @@
 import json
 from pathlib import Path
 from typing import TypeVar
+from unittest.mock import patch
 
 import pytest
 
+from nemo_gym.base_responses_api_model import (
+    CaptureStore,
+    ModelCallRecord,
+    merge_model_call_capture_into_record,
+)
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymFunctionCallOutput
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
+    ModelCallRef,
+    ObservationGap,
     ToolCallObservation,
 )
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.observability import (
+    associate_claude_code_compaction_calls,
+    extract_claude_code_observations,
+)
 
 
 MODEL_REF = ModelServerRef(type="responses_api_models", name="policy")
@@ -201,21 +212,18 @@ def test_extracts_explicit_compaction_markers(tmp_path: Path) -> None:
         _assistant("root", "2026-07-22T09:59:59Z", "msg-before", {"type": "text", "text": "before"}),
         _event(
             "root",
-            "user",
-            "bad-timestamp",
-            "summary",
-            message_extra={
-                "isCompactSummary": True,
-                "compactMetadata": {"tokensBefore": 1000, "tokensAfter": 200, "trigger": "auto"},
-            },
-        ),
-        _event(
-            "root",
             "system",
             "2026-07-22T10:00:01Z",
             "",
             subtype="compact_boundary",
-            compact_metadata={"preTokens": 900, "postTokens": 180},
+        ),
+        _event(
+            "root",
+            "user",
+            "bad-timestamp",
+            "summary",
+            isCompactSummary=True,
+            compactMetadata={"tokensBefore": 1000, "tokensAfter": 200, "trigger": "auto"},
         ),
         _assistant("root", "2026-07-22T10:00:02Z", "msg-after", {"type": "text", "text": "after"}),
     )
@@ -237,19 +245,7 @@ def test_extracts_explicit_compaction_markers(tmp_path: Path) -> None:
     assert "compaction_timestamp_missing" not in codes
 
 
-@pytest.mark.parametrize(
-    ("metadata", "expected_outcome", "expected_gap"),
-    [
-        ({"outcome": None, "status": "failed", "tokensBefore": 100, "tokensAfter": 100}, "failed", None),
-        ({"tokensBefore": 100, "tokensAfter": 80}, "unknown", "compaction_outcome_unavailable"),
-    ],
-)
-def test_compaction_metadata_does_not_assume_success(
-    tmp_path: Path,
-    metadata: dict,
-    expected_outcome: str,
-    expected_gap: str | None,
-) -> None:
+def test_compaction_metadata_does_not_assume_success(tmp_path: Path) -> None:
     _write(
         tmp_path / "projects" / "work" / "session.jsonl",
         _event(
@@ -257,37 +253,15 @@ def test_compaction_metadata_does_not_assume_success(
             "system",
             "2026-07-22T10:00:00Z",
             "",
-            compact_metadata=metadata,
+            compact_metadata={"tokensBefore": 100, "tokensAfter": 80},
         ),
     )
 
     bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
 
     [compaction] = _records(bundle, ContextCompactionObservation)
-    assert compaction.outcome == expected_outcome
-    codes = {gap.code for gap in bundle.gaps}
-    if expected_gap is None:
-        assert "compaction_outcome_unavailable" not in codes
-    else:
-        assert expected_gap in codes
-
-
-def test_compaction_summary_preserves_explicit_failure(tmp_path: Path) -> None:
-    _write(
-        tmp_path / "projects" / "work" / "session.jsonl",
-        _event(
-            "root",
-            "user",
-            "2026-07-22T10:00:00Z",
-            "summary",
-            message_extra={"isCompactSummary": True, "is_error": True},
-        ),
-    )
-
-    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
-
-    [compaction] = _records(bundle, ContextCompactionObservation)
-    assert compaction.outcome == "failed"
+    assert compaction.outcome == "unknown"
+    assert "compaction_outcome_unavailable" in {gap.code for gap in bundle.gaps}
 
 
 def test_malformed_and_incomplete_artifacts_produce_sanitized_gaps(tmp_path: Path) -> None:
@@ -404,3 +378,147 @@ def test_reports_missing_response_id_and_unsupported_content_blocks(tmp_path: Pa
     assert "unsupported_assistant_content_block" in codes
     assert "unsupported_user_content_block" in codes
     assert _records(bundle, AgentInvocation)[0].model_calls == []
+
+
+def _compaction_bundle() -> AgentObservationBundle:
+    before = ModelCallRef(model_ref=MODEL_REF, response_id="msg-before")
+    after = ModelCallRef(model_ref=MODEL_REF, response_id="msg-after")
+    return AgentObservationBundle(
+        source="claude_code",
+        records=[
+            AgentInvocation(invocation_id="root", model_calls=[before, after]),
+            ContextCompactionObservation(
+                invocation_id="root",
+                outcome="completed",
+                summary=(
+                    "This session is being continued from a previous conversation that ran out of context. "
+                    "The summary below covers the earlier portion of the conversation.\n\n"
+                    "Summary:\nKeep this.\n\nRecent messages are preserved verbatim."
+                ),
+                before_model_call=before,
+                after_model_call=after,
+            ),
+        ],
+        gaps=[ObservationGap(code="compaction_model_call_reference_unavailable", invocation_id="root")],
+    )
+
+
+def _captured_call(call_id: str, response_id: str, *, compact: bool = False) -> dict:
+    return {
+        "model_call_id": call_id,
+        "response_id": response_id,
+        "dialect": "messages",
+        "status_code": 200,
+        "model_ref": MODEL_REF.model_dump(mode="json"),
+        "request": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Your task is to create a detailed summary of this conversation." if compact else "continue"
+                    ),
+                }
+            ]
+        },
+        "response": {
+            "id": response_id,
+            "content": [
+                {
+                    "type": "text",
+                    "text": ("<analysis>private</analysis><summary>Keep this.</summary>" if compact else "ok"),
+                }
+            ],
+        },
+    }
+
+
+def _rollout_record(tmp_path: Path, *calls: dict) -> dict:
+    store = CaptureStore(tmp_path)
+    for call in calls:
+        store.record("0-0", call)
+    return {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": _compaction_bundle().model_dump(mode="json"),
+    }
+
+
+def test_merge_correlates_unique_compaction_call_into_rollout(tmp_path: Path) -> None:
+    record = _rollout_record(
+        tmp_path,
+        _captured_call("call-before", "msg-before"),
+        _captured_call("call-compact", "msg-compact", compact=True),
+        _captured_call("call-after", "msg-after"),
+    )
+
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    observations = AgentObservationBundle.model_validate(record["ng_agent_observations"])
+    [invocation] = _records(observations, AgentInvocation)
+    [compaction] = _records(observations, ContextCompactionObservation)
+    assert [reference.model_call_id for reference in invocation.model_calls] == [
+        "call-before",
+        "call-compact",
+        "call-after",
+    ]
+    assert [reference.model_call_id for reference in compaction.model_calls] == ["call-compact"]
+    assert "compaction_model_call_reference_unavailable" not in {gap.code for gap in observations.gaps}
+
+
+def test_compaction_resolver_failure_preserves_generic_model_call_join(tmp_path: Path) -> None:
+    record = _rollout_record(
+        tmp_path,
+        _captured_call("call-before", "msg-before"),
+        _captured_call("call-after", "msg-after"),
+    )
+
+    with patch(
+        "responses_api_agents.claude_code_agent.observability.associate_claude_code_compaction_calls",
+        side_effect=RuntimeError,
+    ):
+        merge_model_call_capture_into_record(record, [tmp_path])
+
+    observations = AgentObservationBundle.model_validate(record["ng_agent_observations"])
+    [invocation] = _records(observations, AgentInvocation)
+    assert [reference.model_call_id for reference in invocation.model_calls] == ["call-before", "call-after"]
+    assert "compaction_model_call_join_failed" in {gap.code for gap in observations.gaps}
+
+
+def test_compaction_call_correlation_rejects_ambiguous_matches() -> None:
+    calls = [
+        ModelCallRecord.model_validate(_captured_call("call-before", "msg-before") | {"call_index": 0}),
+        ModelCallRecord.model_validate(_captured_call("call-1", "msg-1", compact=True) | {"call_index": 1}),
+        ModelCallRecord.model_validate(_captured_call("call-2", "msg-2", compact=True) | {"call_index": 2}),
+        ModelCallRecord.model_validate(_captured_call("call-after", "msg-after") | {"call_index": 3}),
+    ]
+
+    associated = associate_claude_code_compaction_calls(_compaction_bundle(), calls)
+
+    [compaction] = _records(associated, ContextCompactionObservation)
+    assert compaction.model_calls == []
+    assert "compaction_model_call_reference_unavailable" in {gap.code for gap in associated.gaps}
+    assert "compaction_model_call_match_ambiguous" in {gap.code for gap in associated.gaps}
+
+
+@pytest.mark.parametrize("case", ["marker_in_history", "failed_call", "outside_boundaries"])
+def test_compaction_call_correlation_rejects_inexact_matches(case: str) -> None:
+    calls = [
+        ModelCallRecord.model_validate(_captured_call("call-before", "msg-before") | {"call_index": 0}),
+        ModelCallRecord.model_validate(
+            _captured_call("call-compact", "msg-compact", compact=True) | {"call_index": 1}
+        ),
+        ModelCallRecord.model_validate(_captured_call("call-after", "msg-after") | {"call_index": 2}),
+    ]
+    compact_call = calls[1]
+    if case == "marker_in_history":
+        compact_call.request["messages"].append({"role": "user", "content": "continue"})
+    elif case == "failed_call":
+        compact_call.status_code = 500
+    else:
+        compact_call.call_index = 3
+
+    associated = associate_claude_code_compaction_calls(_compaction_bundle(), calls)
+
+    [compaction] = _records(associated, ContextCompactionObservation)
+    assert compaction.model_calls == []
+    assert "compaction_model_call_reference_unavailable" in {gap.code for gap in associated.gaps}

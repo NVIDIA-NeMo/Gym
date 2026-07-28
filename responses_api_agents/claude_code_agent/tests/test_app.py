@@ -32,7 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation
+from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
@@ -352,6 +352,7 @@ class TestObservability:
                 "num_turns": 7,
                 "subtype": "success",
                 "is_error": False,
+                "compaction_attempts": [{"invocation_id": "session-1", "outcome": "failed"}],
             }
             observation_collector(tmp_path, run_metadata)
             return (
@@ -379,9 +380,19 @@ class TestObservability:
         assert invocation.status == "completed"
         assert invocation.duration_ms == 123
         assert invocation.model_calls[0].response_id == "msg-1"
+        compaction = next(
+            record for record in observations.records if isinstance(record, ContextCompactionObservation)
+        )
+        assert compaction.invocation_id == "session-1"
+        assert compaction.outcome == "failed"
         assert result.turns_used == 1
         assert result.finished_naturally is True
-        assert "no_sandbox_runtime" in {gap.code for gap in observations.gaps}
+        assert {
+            "compaction_before_model_call_unavailable",
+            "compaction_after_model_call_unavailable",
+            "compaction_model_call_reference_unavailable",
+            "no_sandbox_runtime",
+        } <= {gap.code for gap in observations.gaps}
 
 
 class TestRunClaudeCode:
@@ -471,22 +482,25 @@ class TestRunClaudeCode:
 
     def test_timeout_returns_empty(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
-        killed = {"called": False}
+        state = {"killed": False, "communicate_calls": 0}
 
         class SlowProc:
             returncode = None
 
             def kill(self):
-                killed["called"] = True
+                state["killed"] = True
 
             async def communicate(self):
-                return b"", b""
+                state["communicate_calls"] += 1
+                return (
+                    _event("system", subtype="status", status="compacting", session_id="session-1").encode(),
+                    b"",
+                )
 
         async def fake_exec(*cmd, **kwargs):
             return SlowProc()
 
         async def fake_wait_for(coro, timeout):
-            coro.close()  # avoid un-awaited coroutine warning
             raise asyncio.TimeoutError
 
         with (
@@ -497,11 +511,56 @@ class TestRunClaudeCode:
             output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
 
         assert output_items == []
-        assert killed["called"] is True
+        assert state == {"killed": True, "communicate_calls": 1}
         assert model == "claude-sonnet-4-6"
         assert metadata["status"] == "incomplete"
         assert metadata["error_type"] == "timeout"
         assert metadata["duration_ms"] >= 0
+        assert metadata["compaction_attempts"] == [{"invocation_id": "session-1", "outcome": "unknown"}]
+
+    def test_cancellation_stops_process_before_observation_cleanup(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        state: list[str] = []
+
+        async def run() -> None:
+            communicating = asyncio.Event()
+            stopped = asyncio.Event()
+
+            class SlowProc:
+                returncode = None
+
+                def kill(self):
+                    state.append("kill")
+                    self.returncode = -9
+                    stopped.set()
+
+                async def communicate(self):
+                    state.append("communicate")
+                    communicating.set()
+                    await stopped.wait()
+                    state.append("stopped")
+                    return b"", b""
+
+            async def fake_exec(*cmd, **kwargs):
+                return SlowProc()
+
+            def collect(config_dir: Path, metadata: dict) -> None:
+                assert config_dir.exists()
+                state.append("collect")
+
+            with (
+                patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+                patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            ):
+                task = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
+                await communicating.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(run())
+
+        assert state == ["communicate", "kill", "stopped", "collect"]
 
     def test_collects_observations_before_cleanup(self, tmp_path: Path) -> None:
         agent = _make_agent()
@@ -938,6 +997,26 @@ class TestParseStreamJson:
         assistant = self._assistant([{"type": "text", "text": "hi"}])
         _, usage = parse_stream_json(assistant)
         assert "num_turns" not in usage
+
+    def test_compaction_status_events_report_failed_and_unknown_attempts(self) -> None:
+        events = [
+            _event("system", subtype="status", status="compacting", session_id="failed"),
+            _event("system", subtype="status", status="requesting", session_id="failed"),
+            _event("system", subtype="status", compact_result="failed", session_id="failed"),
+            _event("system", subtype="status", compact_result="failed", session_id="failed-without-opener"),
+            _event("system", subtype="status", status="compacting", session_id="success"),
+            _event("system", subtype="status", status="requesting", session_id="success"),
+            _event("system", subtype="status", compact_result="success", session_id="success"),
+            _event("system", subtype="status", status="compacting", session_id="open"),
+        ]
+
+        _, metadata = parse_stream_json("\n".join(events))
+
+        assert metadata["compaction_attempts"] == [
+            {"invocation_id": "failed", "outcome": "failed"},
+            {"invocation_id": "failed-without-opener", "outcome": "failed"},
+            {"invocation_id": "open", "outcome": "unknown"},
+        ]
 
 
 class TestConfigYaml:

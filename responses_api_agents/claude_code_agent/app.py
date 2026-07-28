@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import tempfile
 from asyncio import Semaphore
+from contextlib import suppress
 from pathlib import Path
 from time import monotonic, time
 from typing import Any, Callable, Optional
@@ -89,6 +90,8 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
     total_output = 0
     num_turns: Optional[int] = None
     result_metadata: dict[str, Any] = {}
+    compacting_sessions: set[str] = set()
+    compaction_attempts: list[dict[str, str]] = []
 
     for event in raw_events:
         etype = event.get("type")
@@ -181,9 +184,27 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
                     )
                 )
 
+        elif etype == "system" and event.get("subtype") == "status":
+            session_id = event.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            if event.get("status") == "compacting":
+                compacting_sessions.add(session_id)
+                continue
+            compact_result = event.get("compact_result")
+            if compact_result in {"failed", "success"}:
+                if compact_result == "failed":
+                    compaction_attempts.append({"invocation_id": session_id, "outcome": "failed"})
+                compacting_sessions.discard(session_id)
+
+    compaction_attempts.extend(
+        {"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting_sessions
+    )
     metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
     if num_turns is not None:
         metadata["num_turns"] = num_turns
+    if compaction_attempts:
+        metadata["compaction_attempts"] = compaction_attempts
     metadata.update(result_metadata)
     return output_items, metadata
 
@@ -456,18 +477,31 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
+            communication = asyncio.create_task(proc.communicate())
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                stdout, stderr = await asyncio.wait_for(
+                    asyncio.shield(communication),
+                    timeout=self.config.timeout,
+                )
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
+                if proc.returncode is None:
+                    with suppress(ProcessLookupError):
+                        proc.kill()
+                stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                run_metadata = {
-                    "status": "incomplete",
-                    "error_type": "timeout",
-                    "duration_ms": (monotonic() - process_started_at) * 1000,
-                }
+                _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
+                run_metadata.update(
+                    status="incomplete",
+                    error_type="timeout",
+                    duration_ms=(monotonic() - process_started_at) * 1000,
+                )
                 return [], model, run_metadata
+            except asyncio.CancelledError:
+                if proc.returncode is None:
+                    with suppress(ProcessLookupError):
+                        proc.kill()
+                await asyncio.gather(communication, return_exceptions=True)
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("claude-code exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -638,6 +672,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     root_status=run_metadata["status"],
                     root_duration_ms=run_metadata.get("duration_ms"),
                     root_error_type=run_metadata.get("error_type"),
+                    compaction_attempts=run_metadata.get("compaction_attempts"),
                 )
                 if self.config.model_server is None:
                     observations.gaps.append(ObservationGap(code="model_call_ownership_unavailable"))
