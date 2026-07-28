@@ -36,6 +36,13 @@ upstream base and the gate-authoritative layer is structural; the
 same-named exports and must be imported from this subpackage.
 """
 
+from nemo_gym.token_id_capture.staging.capture import (
+    ActiveCall,
+    CaptureError,
+    CaptureHost,
+    RolloutTokenCapture,
+    StreamingUnsupportedError,
+)
 from nemo_gym.token_id_capture.staging.protocols import (
     CaptureAdapter,
     TokenSink,
@@ -59,8 +66,13 @@ from nemo_gym.token_id_capture.staging.records import (
 
 __all__ = [
     "SCHEMA_VERSION",
+    "ActiveCall",
     "CallRecord",
     "CaptureAdapter",
+    "CaptureError",
+    "CaptureHost",
+    "RolloutTokenCapture",
+    "StreamingUnsupportedError",
     "CaptureDisposition",
     "CaptureMode",
     "CommitCoords",

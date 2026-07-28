@@ -108,12 +108,16 @@ def install_capture(
     sink: TokenSink,
     weight_version_fn: WeightVersionProvider,
     adapter: Optional[CaptureAdapter] = None,
-) -> None:
+) -> Any:
     """Wire gate-authoritative capture into a worker's serving layer.
 
-    The single call a framework makes at worker startup. The working
-    implementation lands with the engine-blind capture core in S2
-    (``capture.py``); the signature is frozen at the S1 gate so framework
-    wiring can be written against it.
+    The single call a framework makes at worker startup (signature frozen at
+    the S1 gate). Delegates to the engine-blind capture core, which builds a
+    ``RolloutTokenCapture`` and hands it to the serving layer's
+    ``install_token_capture`` seam; the instance is also returned for hosts
+    that hold it directly.
     """
-    raise NotImplementedError("install_capture is wired by the S2 capture core (nemo_gym.token_id_capture.capture)")
+    # Deferred: capture.py imports this module's protocols (circular at top).
+    from nemo_gym.token_id_capture.staging.capture import install_capture as _install
+
+    return _install(serving_layer, sink=sink, weight_version_fn=weight_version_fn, adapter=adapter)
