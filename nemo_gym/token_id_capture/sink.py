@@ -86,7 +86,11 @@ def reset_token_sink(token: Token) -> None:
     _TOKEN_SINK.reset(token)
 
 
-async def capture_tokens(response: Any, parent_call_id: Optional[str] = None) -> None:
+async def capture_tokens(
+    response: Any,
+    parent_call_id: Optional[str] = None,
+    request_facts: Optional[dict] = None,
+) -> None:
     """Record a ``TokenEntry`` from a complete model response when a sink is set.
 
     ``response`` is a served response as a pydantic model or dict. No-op when no
@@ -120,6 +124,7 @@ async def capture_tokens(response: Any, parent_call_id: Optional[str] = None) ->
             # reads is not token-only -- text-based penalties need it.
             output_items=response_to_output_items(payload),
             created_at=time.time(),
+            **(request_facts or {}),
         )
         # cum_len/digest describe this call and are always computable; the parent
         # link is filled only when the model server resolved one.

@@ -100,6 +100,15 @@ class TokenEntry(BaseModel):
     # Non-semantic; a cheap diagnostic for retry/sibling-branch cases.
     created_at: float = 0.0
 
+    # --- What the harness asked for, used to tell trajectory calls from side calls.
+    # A harness may make model calls that are not part of the rollout -- a
+    # conversation title or a quota probe, for example. They carry real token ids
+    # and log probs, so nothing downstream distinguishes them. ``requested_model``
+    # is what the harness asked for (not what the server served), since a harness
+    # commonly requests a smaller model for such calls.
+    requested_model: str = ""
+    has_tools: Optional[bool] = None
+
     # --- Lineage. Optional: null when the model server could not identify the
     # parent, in which case the builder infers it from token prefixes instead.
     #

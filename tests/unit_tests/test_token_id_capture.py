@@ -470,3 +470,23 @@ def test_delete_removes_records_and_marker(tmp_path):
     assert not store.is_incomplete("gone-0")
     # Idempotent: consuming a rollout twice must not raise.
     store.delete("gone-0")
+
+
+def test_capture_records_the_model_the_harness_asked_for(tmp_path):
+    """Claude Code asks for a small model when it generates a conversation title.
+    The record must keep what the *harness* requested, not what the server
+    served, or side calls are indistinguishable from trajectory calls."""
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    resp = client.post(
+        "/ng-rollout/facts0-roll0/v1/messages",
+        json={
+            "model": "claude-3-5-haiku-20241022",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "title this"}],
+        },
+    )
+    assert resp.status_code == 200
+    (entry,) = TokenCaptureStore(tmp_path).read_entries("facts0-roll0")
+    assert entry.requested_model == "claude-3-5-haiku-20241022"
+    # The served model is a different field and is unaffected.
+    assert entry.model != entry.requested_model

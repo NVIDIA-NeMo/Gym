@@ -20,6 +20,7 @@ from nemo_gym.token_id_capture import (
     Trajectory,
     assert_nemo_rl_contiguity,
     build_trajectories,
+    classify_side_calls,
     compute_digest,
     prefix_merging,
     project_main_chain_response,
@@ -404,3 +405,63 @@ def test_clean_rollout_is_not_masked_and_reports_full_delivery(tmp_path):
     assert built["mask_sample"] is False
     assert built["metrics"]["delivered_fraction"] == 1.0
     assert built["metrics"]["quarantined_calls"] == 0
+
+
+# --- side calls ---------------------------------------------------------------
+
+
+def _sc(mcid, prompt, gen, requested_model=""):
+    entry = _entry(mcid, prompt, gen)
+    entry.requested_model = requested_model
+    return entry
+
+
+def test_side_calls_are_excluded_by_self_calibration():
+    """No configuration: whichever model generated the most tokens is the policy
+    model, and calls asking for a different one are side calls."""
+    real_1 = _sc("r1", [100, 101], [1, 2, 3, 4, 5], "big-policy-model")
+    real_2 = _sc("r2", [100, 101, 1, 2, 3, 4, 5, 6], [7, 8, 9], "big-policy-model")
+    title = _sc("title", [9000], [42], "tiny-title-model")
+
+    kept, excluded = classify_side_calls([real_1, real_2, title])
+
+    assert [e.model_call_id for e in kept] == ["r1", "r2"]
+    assert [e.model_call_id for e in excluded] == ["title"]
+
+
+def test_side_calls_are_excluded_by_explicit_pattern():
+    real = _sc("r1", [100], [1, 2, 3], "claude-sonnet-4")
+    title = _sc("title", [9000], [42], "claude-3-5-haiku-20241022")
+
+    kept, excluded = classify_side_calls([real, title], side_call_model_patterns=("haiku",))
+
+    assert [e.model_call_id for e in kept] == ["r1"]
+    assert [e.model_call_id for e in excluded] == ["title"]
+
+
+def test_records_without_a_requested_model_are_all_kept():
+    """Backward compatibility: records written before the field existed must not
+    be reclassified as side calls."""
+    entries = [_entry("c1", [1, 2, 3], [4, 5]), _entry("c2", [1, 2, 3, 4, 5, 6], [7])]
+    kept, excluded = classify_side_calls(entries)
+    assert len(kept) == 2 and excluded == []
+
+
+def test_single_model_rollout_is_left_alone():
+    entries = [_sc("c1", [1, 2, 3], [4, 5], "m"), _sc("c2", [1, 2, 3, 4, 5, 6], [7], "m")]
+    kept, excluded = classify_side_calls(entries)
+    assert len(kept) == 2 and excluded == []
+
+
+def test_consumer_excludes_side_calls_and_reports_the_count(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    store.append(_sc("r1", [100, 101], [1, 2, 3, 4, 5], "policy"))
+    store.append(_sc("r2", [100, 101, 1, 2, 3, 4, 5, 6], [7, 8, 9], "policy"))
+    store.append(_sc("title", [9000], [42], "titler"))
+
+    built = trajectories_for_rollout("t0-r0", [tmp_path])
+
+    assert built["metrics"]["side_calls_excluded"] == 1
+    assert built["metrics"]["n_calls"] == 2
+    call_ids = [span[2] for span in built["trajectories"][0]["spans"]]
+    assert "title" not in call_ids

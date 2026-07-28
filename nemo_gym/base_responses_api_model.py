@@ -86,6 +86,27 @@ logger = logging.getLogger(__name__)
 _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
+def _request_facts(body: Any) -> dict[str, Any]:
+    """What the harness asked for, read off the parsed request body.
+
+    Two things, both used to tell trajectory calls from side calls: the model the
+    harness requested (not the one the server served), and whether the request
+    declared tools. Reading it from the parsed request avoids touching the body a
+    second time in middleware.
+    """
+    if body is None:
+        return {}
+    getter = body.get if isinstance(body, dict) else lambda key, default=None: getattr(body, key, default)
+    model = getter("model", None)
+    tools = getter("tools", None)
+    facts: dict[str, Any] = {}
+    if isinstance(model, str) and model:
+        facts["requested_model"] = model
+    if tools is not None:
+        facts["has_tools"] = bool(tools)
+    return facts
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     pass
 
@@ -210,7 +231,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion = await self.chat_completions(request=request, body=params)
         else:
             completion = await self.chat_completions(body=params)
-        await capture_tokens(completion)
+        await capture_tokens(completion, request_facts=_request_facts(params))
         return completion
 
     async def messages(self, request: Request, body: dict = Body()):
@@ -247,7 +268,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Capture here rather than at the route: the streaming dispatch returns a StreamingResponse
         # and the Anthropic mapping drops the token fields, so this is the last point where the
         # assembled response still carries them, for every dialect.
-        await capture_tokens(response)
+        await capture_tokens(response, request_facts=_request_facts(params))
         return response
 
 

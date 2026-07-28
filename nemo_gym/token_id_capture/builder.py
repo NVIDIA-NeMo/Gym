@@ -118,6 +118,65 @@ class Trajectory(BaseModel):
     provenance: dict = Field(default_factory=dict)
 
 
+def classify_side_calls(
+    entries: list[TokenEntry],
+    side_call_model_patterns: tuple[str, ...] = (),
+) -> tuple[list[TokenEntry], list[TokenEntry]]:
+    """Split a rollout's records into trajectory calls and side calls.
+
+    A harness may make model calls that are not part of the trajectory being
+    trained -- a conversation title or a quota probe, for example. They are
+    genuine policy output (real token ids, real log probs), so nothing downstream
+    distinguishes them from trajectory calls.
+
+    Not observed on the Claude Code path so far: runs report
+    side_calls_excluded = 0. This is a guard, not a fix for a measured problem.
+
+    Two signals, neither requiring harness-specific code in the core:
+
+    1. An explicit pattern list (substring, case-insensitive) for deployments
+       that know their harness, e.g. ``("haiku",)``.
+    2. Self-calibration on the requested model. A harness asks for a *different*
+       (usually smaller) model for these calls. Whichever model generated the
+       most tokens in this rollout is the policy model; calls asking for another
+       one are side calls. This needs no configuration and adapts to whatever the
+       harness happens to name its models.
+
+    Records written before this field existed carry an empty ``requested_model``,
+    so they are all treated as trajectory calls and nothing changes for them.
+    """
+    if not entries:
+        return [], []
+
+    patterns = tuple(p.lower() for p in side_call_model_patterns if p)
+
+    def matches_pattern(entry: TokenEntry) -> bool:
+        name = (entry.requested_model or "").lower()
+        return bool(name) and any(p in name for p in patterns)
+
+    kept = [e for e in entries if not matches_pattern(e)]
+    excluded = [e for e in entries if matches_pattern(e)]
+
+    # Self-calibration: only meaningful when the records actually recorded what was requested and
+    # more than one model appears. A single-model rollout is left alone.
+    named = [e for e in kept if e.requested_model]
+    distinct = {e.requested_model for e in named}
+    if len(distinct) > 1:
+        by_model: dict[str, int] = {}
+        for entry in named:
+            by_model[entry.requested_model] = by_model.get(entry.requested_model, 0) + len(entry.generation_token_ids)
+        # Ties break on the name so the choice is deterministic.
+        policy_model = max(sorted(by_model), key=lambda m: (by_model[m], m))
+        still_kept, extra = [], []
+        for entry in kept:
+            (still_kept if (not entry.requested_model or entry.requested_model == policy_model) else extra).append(
+                entry
+            )
+        kept, excluded = still_kept, excluded + extra
+
+    return kept, excluded
+
+
 def per_request(entries: list[TokenEntry]) -> BuildOutput:
     ordered = sorted(entries, key=lambda e: (len(e.prompt_token_ids), e.model_call_id))
     chains = [
