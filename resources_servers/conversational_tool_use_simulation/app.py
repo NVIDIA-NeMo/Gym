@@ -233,6 +233,8 @@ class ConversationMessage(BaseModel):
     type: Literal[MessageType.TEXT, MessageType.TOOL_CALL, MessageType.TOOL_EXECUTION] = MessageType.TEXT
     source: Literal[Source.USER, Source.AGENT, Source.ENVIRONMENT]
     responses: Optional[List[Dict[str, Any]]] = None
+    response_id: Optional[str] = None
+    response_output_index: Optional[int] = Field(default=None, ge=0)
     content: Any = None
     tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
@@ -339,6 +341,7 @@ class RecordAgentMessageResponse(BaseModel):
 class RecordedAgentMessage(BaseModel):
     type: Literal["message"]
     content: str
+    response_output_index: Optional[int] = Field(default=None, ge=0)
 
 
 class RecordedAgentToolCall(BaseModel):
@@ -346,6 +349,7 @@ class RecordedAgentToolCall(BaseModel):
     tool_name: str
     tool_call_id: str
     arguments: str
+    response_output_index: Optional[int] = Field(default=None, ge=0)
 
 
 RecordedAgentOutput = Annotated[
@@ -378,6 +382,7 @@ class AgentToolCallAtStepLimit(BaseModel):
     tool_name: str
     tool_call_id: str
     arguments: str
+    response_output_index: Optional[int] = Field(default=None, ge=0)
 
 
 class RecordAgentStepLimitRequest(BaseModel):
@@ -951,22 +956,28 @@ Return type in JSON Schema format: {return_type}
             for message in state.messages
             if message.type == MessageType.TOOL_CALL and message.tool_call_id is not None
         }
-        for output in body.outputs:
+        for output_index, output in enumerate(body.outputs):
+            provenance = self._response_provenance(
+                state,
+                body.response,
+                response_output_index=output.response_output_index,
+                store_response=output_index == 0,
+            )
             if isinstance(output, RecordedAgentMessage):
                 message = ConversationMessage(
                     type=MessageType.TEXT,
                     source=Source.AGENT,
                     content=output.content,
-                    responses=[body.response] if body.response is not None else None,
+                    **provenance,
                 )
             else:
                 message = ConversationMessage(
                     type=MessageType.TOOL_CALL,
                     source=Source.AGENT,
-                    responses=[body.response] if body.response is not None else None,
                     tool_call_id=output.tool_call_id,
                     tool_name=output.tool_name,
                     arguments=output.arguments,
+                    **provenance,
                 )
                 if output.tool_call_id in known_call_ids:
                     state.messages.append(message)
@@ -1019,14 +1030,19 @@ Return type in JSON Schema format: {return_type}
         if state.terminal_state:
             return RecordAgentStepLimitResponse(terminal_state=state.terminal_state)
 
-        for tool_call in body.tool_calls:
+        for tool_call_index, tool_call in enumerate(body.tool_calls):
             message = ConversationMessage(
                 type=MessageType.TOOL_CALL,
                 source=Source.AGENT,
-                responses=[body.response] if body.response is not None else None,
                 tool_call_id=tool_call.tool_call_id,
                 tool_name=tool_call.tool_name,
                 arguments=tool_call.arguments,
+                **self._response_provenance(
+                    state,
+                    body.response,
+                    response_output_index=tool_call.response_output_index,
+                    store_response=tool_call_index == 0,
+                ),
             )
             state.messages.append(message)
             invalid = self._validate_message(state, message)
@@ -1063,7 +1079,7 @@ Return type in JSON Schema format: {return_type}
                     type=MessageType.TEXT,
                     source=Source.USER,
                     content=user_message,
-                    responses=[response_object] if response_object is not None else None,
+                    **self._response_provenance(state, response_object),
                 )
                 invalid = self._validate_message(state, message)
                 if invalid is None:
@@ -1181,10 +1197,10 @@ Return type in JSON Schema format: {return_type}
             tool_call_message = ConversationMessage(
                 type=MessageType.TOOL_CALL,
                 source=Source.AGENT,
-                responses=[response_object] if response_object is not None else None,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 arguments=arguments_string,
+                **self._response_provenance(state, response_object),
             )
             state.messages.append(tool_call_message)
 
@@ -1223,11 +1239,11 @@ Return type in JSON Schema format: {return_type}
                 execution_message = ConversationMessage(
                     type=MessageType.TOOL_EXECUTION,
                     source=Source.ENVIRONMENT,
-                    responses=[response_object] if response_object is not None else None,
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     arguments=arguments_string,
                     content=output,
+                    **self._response_provenance(state, response_object),
                 )
                 invalid = self._validate_message(state, execution_message)
                 if invalid is None:
@@ -1370,6 +1386,28 @@ Return type in JSON Schema format: {return_type}
         if session_id not in self.session_id_to_state:
             raise HTTPException(status_code=400, detail="Session not initialized. Call /seed_session first.")
         return self.session_id_to_state[session_id]
+
+    def _response_provenance(
+        self,
+        state: ConversationSessionState,
+        response: Optional[Dict[str, Any]],
+        *,
+        response_output_index: Optional[int] = None,
+        store_response: bool = True,
+    ) -> Dict[str, Any]:
+        if response is None:
+            return {}
+
+        raw_response_id = response.get("id")
+        response_id = raw_response_id if isinstance(raw_response_id, str) else None
+        response_already_stored = response_id is not None and any(
+            message.response_id == response_id and message.responses for message in state.messages
+        )
+        return {
+            "response_id": response_id,
+            "response_output_index": response_output_index,
+            "responses": [response] if store_response and not response_already_stored else None,
+        }
 
     def _find_tool(self, state: ConversationSessionState, tool_name: str) -> Optional[ToolSignature]:
         for tool in state.tool_signatures:
@@ -2256,6 +2294,10 @@ Return type in JSON Schema format: {return_type}
         }
         if message.responses is not None:
             payload["responses"] = message.responses
+        if message.response_id is not None:
+            payload["response_id"] = message.response_id
+        if message.response_output_index is not None:
+            payload["response_output_index"] = message.response_output_index
         if message.type == MessageType.TEXT:
             payload["text"] = message.content
         elif message.type == MessageType.TOOL_CALL:

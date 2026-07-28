@@ -31,6 +31,10 @@ the policy model and verifier see different contracts. If a provider emits assis
 response, the agent records the selected items in provider order before executing any call so both transcript views
 remain aligned. Parallel tool results are appended only after all selected response items.
 
+For the simulator trajectory, each selected output item carries its source `response_id` and
+`response_output_index`. The resource server stores the complete raw policy response only once, on the first selected
+item, rather than repeating it on every decomposed message.
+
 Tool results are returned to the policy as the raw tool-simulator text. Resource-server diagnostics such as
 `schema_valid`, `error`, `should_continue`, and `terminal_state` control the rollout and remain available in the
 internal trajectory, but are not embedded in the policy-visible tool message.

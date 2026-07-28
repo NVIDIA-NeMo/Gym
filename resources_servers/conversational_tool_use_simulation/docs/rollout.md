@@ -44,6 +44,10 @@ If one model response contains both assistant text and function calls, every sel
 order before any call is executed. Parallel function-call outputs are appended after all response items, matching the
 policy-visible Responses transcript even for a nonconforming mixed response.
 
+Each selected item becomes a logical simulator message with a shared `response_id` and its own
+`response_output_index`. The complete raw provider response is attached only to the first logical message, avoiding
+repeated payloads while preserving an exact reference to every source output item.
+
 ## Validation
 
 Validation occurs as messages enter session state:
@@ -94,7 +98,7 @@ The returned Gym row has two complementary views:
 - `responses_create_params` and `response` contain the policy-visible Responses API transcript
 - `result.profile` and `result.source_artifacts` preserve generation identity
 - `result.trajectory` contains simulator messages, terminal state, validation details, verification results, prefill
-  counts, and continuation indexes
+  counts, continuation indexes, and per-item response references
 
 Top-level reward, invalid reasons, failure labels, and judge diagnostics are synchronized with the nested result
 before the rollout is returned.

@@ -366,13 +366,19 @@ async def test_agent_outputs_preserve_provider_order_before_parallel_tool_result
                         "tool_name": "lookup_subscription",
                         "tool_call_id": "call_1",
                         "arguments": "{}",
+                        "response_output_index": 0,
                     },
-                    {"type": "message", "content": "I will check both."},
+                    {
+                        "type": "message",
+                        "content": "I will check both.",
+                        "response_output_index": 1,
+                    },
                     {
                         "type": "function_call",
                         "tool_name": "lookup_subscription",
                         "tool_call_id": "call_2",
                         "arguments": "{}",
+                        "response_output_index": 2,
                     },
                 ],
                 "response": {"id": "resp_policy"},
@@ -405,6 +411,20 @@ async def test_agent_outputs_preserve_provider_order_before_parallel_tool_result
         (MessageType.TOOL_EXECUTION, "call_1", '{"call_id": "call_1"}'),
         (MessageType.TOOL_EXECUTION, "call_2", '{"call_id": "call_2"}'),
     ]
+    assert [message.response_id for message in continuation[:3]] == ["resp_policy"] * 3
+    assert [message.response_output_index for message in continuation[:3]] == [0, 1, 2]
+    assert continuation[0].responses == [{"id": "resp_policy"}]
+    assert continuation[1].responses is None
+    assert continuation[2].responses is None
+    serialized_messages = [
+        message.model_dump(mode="json", exclude_none=True)
+        for message in server._trajectory_result(state).trajectory.messages[state.prefill_message_count :]
+    ]
+    assert serialized_messages[0]["responses"] == [{"id": "resp_policy"}]
+    assert "responses" not in serialized_messages[1]
+    assert "responses" not in serialized_messages[2]
+    assert [message["response_id"] for message in serialized_messages[:3]] == ["resp_policy"] * 3
+    assert [message["response_output_index"] for message in serialized_messages[:3]] == [0, 1, 2]
     assert recorded.should_continue is True
 
 
@@ -620,7 +640,14 @@ async def test_agent_step_limit_records_tool_calls_without_tool_simulation(monke
                     "tool_name": "lookup_subscription",
                     "tool_call_id": "call_1",
                     "arguments": '{"email":"alex@example.com"}',
-                }
+                    "response_output_index": 0,
+                },
+                {
+                    "tool_name": "lookup_subscription",
+                    "tool_call_id": "call_2",
+                    "arguments": '{"email":"alex@example.com"}',
+                    "response_output_index": 1,
+                },
             ],
             response={"id": "resp_limit"},
         ),
@@ -629,8 +656,12 @@ async def test_agent_step_limit_records_tool_calls_without_tool_simulation(monke
     state = server.session_id_to_state["session_1"]
     assert result.should_continue is False
     assert result.terminal_state == "incomplete"
-    assert [message.type for message in state.messages] == [MessageType.TOOL_CALL]
-    assert state.messages[0].deserialized_arguments == {"email": "alex@example.com"}
+    assert [message.type for message in state.messages] == [MessageType.TOOL_CALL, MessageType.TOOL_CALL]
+    assert all(message.deserialized_arguments == {"email": "alex@example.com"} for message in state.messages)
+    assert [message.response_id for message in state.messages] == ["resp_limit", "resp_limit"]
+    assert [message.response_output_index for message in state.messages] == [0, 1]
+    assert state.messages[0].responses == [{"id": "resp_limit"}]
+    assert state.messages[1].responses is None
     assert state.generation_invalid_reason == "excessive_length"
     assert state.failure_labels == [VerificationFailureLabel.TRAJECTORY_FAILURE]
     assert state.terminal_error == "The maximum number of agent steps of 50 has been reached"

@@ -481,6 +481,7 @@ async def test_responses_executes_all_parallel_function_calls_in_one_model_turn(
                 "call_1",
                 "call_2",
             ]
+            assert [output["response_output_index"] for output in kwargs["json"]["outputs"]] == [0, 1]
             return JsonResponseStub({"should_continue": True})
         tool_requests.append(kwargs["json"])
         return JsonResponseStub(
@@ -661,6 +662,7 @@ async def test_responses_records_mixed_parallel_output_in_provider_order_before_
         "message",
         "function_call",
     ]
+    assert [output["response_output_index"] for output in resource_requests[0]["json"]["outputs"]] == [0, 1, 2]
     raw_response_calls = [
         output["call_id"]
         for output in resource_requests[0]["json"]["response"]["output"]
@@ -779,6 +781,7 @@ async def test_responses_records_mixed_single_output_and_executes_first_tool_cal
     assert [output.call_id for output in function_outputs] == ["call_1"]
     assert function_outputs[0].output == '  {"status":"ok"}\n'
     assert [output.type for output in model_response.output] == ["message", "function_call", "function_call_output"]
+    assert [output["response_output_index"] for output in resource_requests[0]["json"]["outputs"]] == [0, 1]
     raw_response_calls = [
         output["call_id"]
         for output in resource_requests[0]["json"]["response"]["output"]

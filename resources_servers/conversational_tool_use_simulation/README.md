@@ -57,6 +57,10 @@ the standard Gym-facing policy transcript, while `result` stores generation prof
 `result.trajectory` stores simulator-native user, agent, tool, terminal, and verification state that the Responses API
 representation cannot carry.
 
+One policy response can become several logical trajectory messages when it contains multiple output items. The complete
+raw response is stored only on the first such message. Every decomposed message records the same `response_id` and its
+own `response_output_index`, so consumers can recover the source item without duplicating the response payload.
+
 Verification is message-level:
 
 - user and environment/tool-result messages are judged first when termination is enabled
@@ -93,7 +97,8 @@ Before seeding, the policy agent verifies that the materialized system prompt is
 top-level policy and that the model-visible function tools are the exact rendering of the top-level simulator tools.
 This prevents the policy model and verifier from operating on different task contracts. If a provider emits assistant
 text and function calls in one response, both are recorded in order in the simulator trajectory before tool execution,
-matching the policy-visible transcript.
+matching the policy-visible transcript. The items retain their shared `response_id` and distinct
+`response_output_index` values.
 
 When Gym observability is enabled, the policy, user-simulator, tool-simulator, and judge calls all inherit the rollout
 correlation prefix. Standard model-call captures therefore remain attached to the rollout that caused them.

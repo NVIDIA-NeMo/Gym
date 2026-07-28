@@ -423,7 +423,7 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
         cookies: Dict[str, str],
     ) -> Dict[str, Any]:
         outputs = []
-        for output in model_response.output:
+        for response_output_index, output in enumerate(model_response.output):
             if output.type == "message" and any(
                 getattr(content_item, "type", None) == "output_text" for content_item in output.content
             ):
@@ -431,6 +431,7 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                     {
                         "type": "message",
                         "content": self._message_text(output),
+                        "response_output_index": response_output_index,
                     }
                 )
             elif output.type == "function_call":
@@ -440,6 +441,7 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                         "tool_name": output.name,
                         "tool_call_id": output.call_id,
                         "arguments": output.arguments,
+                        "response_output_index": response_output_index,
                     }
                 )
 
@@ -496,6 +498,11 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
         cookies: Dict[str, str],
         model_response: NeMoGymResponse,
     ) -> Dict[str, Any]:
+        function_call_indices = {
+            output.call_id: response_output_index
+            for response_output_index, output in enumerate(model_response.output)
+            if output.type == "function_call"
+        }
         resource_response = await self._post_resource(
             "/record_agent_step_limit",
             {
@@ -505,6 +512,7 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                         "tool_name": function_call.name,
                         "tool_call_id": function_call.call_id,
                         "arguments": function_call.arguments,
+                        "response_output_index": function_call_indices.get(function_call.call_id),
                     }
                     for function_call in function_calls
                 ],
