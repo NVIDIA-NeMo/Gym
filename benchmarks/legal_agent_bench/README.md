@@ -11,7 +11,7 @@ gitignored benchmark index.
 
 ## Requirements
 
-- Python 3.12 and the repository environment installed with `uv`
+- Python 3.14 and the repository environment installed with `uv`
 - Docker with a running daemon
 - Authorized OpenAI-compatible policy and judge endpoints in the root
   `env.yaml`

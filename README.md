@@ -73,7 +73,7 @@ NeMo Gym is designed to run on standard development machines:
 | Hardware Requirements | Software Requirements |
 | --------------------- | --------------------- |
 | **GPU**: Not required for NeMo Gym library operation<br>• GPU may be needed for specific resources servers or model inference (see individual server documentation) | **Operating System**:<br>• Linux (Ubuntu 20.04+, or equivalent)<br>• macOS (11.0+ for x86_64, 12.0+ for Apple Silicon)<br>• Windows (via WSL2) |
-| **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon) | **Python**: 3.12 or higher |
+| **CPU**: Any modern x86_64 or ARM64 processor (e.g., Intel, AMD, Apple Silicon) | **Python**: 3.14 or higher |
 | **RAM**: Minimum 8 GB (16 GB+ recommended for larger environments) | **Git**: For cloning the repository |
 | **Storage**: Minimum 5 GB free disk space for installation and basic usage | **Internet Connection**: Required for downloading dependencies and API access |
 
@@ -85,16 +85,16 @@ NeMo Gym is designed to run on standard development machines:
 
 ## 🚀 Quick Start
 
-Requires Python 3.12+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/main/get-started) docs for a more comprehensive walkthrough.
+Requires Python 3.14+ on x86_64 or ARM64 (Linux, macOS, Windows via WSL2). No GPU required. See the [Getting Started](https://docs.nvidia.com/nemo/gym/main/get-started) docs for a more comprehensive walkthrough.
 
 **Install NeMo Gym:**
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.12+.
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.14+.
 
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --python 3.14.6 && source .venv/bin/activate
 uv sync
 ```
 

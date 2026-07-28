@@ -69,7 +69,7 @@ policy_model_name: Qwen/Qwen3-VL-8B-Thinking
 Run the following from the NeMo Gym repo root in a separate virtual environment configured with `vllm`:
 
 ```bash
-uv venv --python 3.12 --seed
+uv venv --python 3.14.6 --seed
 source .venv/bin/activate
 uv pip install hf_transfer datasets vllm --torch-backend=auto
 
