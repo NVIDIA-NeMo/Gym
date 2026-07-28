@@ -89,9 +89,35 @@ def _metadata(event: dict[str, Any]) -> dict[str, Any]:
 def _integer(metadata: dict[str, Any], *keys: str) -> int | None:
     for key in keys:
         value = metadata.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
     return None
+
+
+def _compaction_outcome(
+    event: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    has_completion_marker: bool,
+) -> Literal["completed", "failed", "aborted", "unknown"]:
+    value = metadata.get("outcome")
+    if not isinstance(value, str):
+        value = metadata.get("status")
+    normalized = value.lower() if isinstance(value, str) else None
+    if normalized in {"failed", "failure", "error"}:
+        return "failed"
+    if normalized in {"aborted", "cancelled", "canceled", "interrupted"}:
+        return "aborted"
+    message = event.get("message")
+    if (
+        metadata.get("is_error") is True
+        or event.get("is_error") is True
+        or (isinstance(message, dict) and message.get("is_error") is True)
+    ):
+        return "failed"
+    if normalized in {"completed", "complete", "success", "succeeded"}:
+        return "completed"
+    return "completed" if has_completion_marker else "unknown"
 
 
 def _compaction(event: dict[str, Any], invocation_id: str) -> ContextCompactionObservation | None:
@@ -110,7 +136,11 @@ def _compaction(event: dict[str, Any], invocation_id: str) -> ContextCompactionO
         trigger=trigger if isinstance(trigger, str) else None,
         tokens_before=_integer(metadata, "tokensBefore", "preTokens"),
         tokens_after=_integer(metadata, "tokensAfter", "postTokens"),
-        outcome="completed",
+        outcome=_compaction_outcome(
+            event,
+            metadata,
+            has_completion_marker=is_summary or is_boundary,
+        ),
         summary=summary or None,
     )
 
@@ -149,11 +179,11 @@ def _tool_call(tool_call_id: str, block: dict[str, Any]) -> NeMoGymResponseFunct
     )
 
 
-def _tool_result(block: dict[str, Any]) -> NeMoGymFunctionCallOutput:
+def _tool_result(block: dict[str, Any], status: str) -> NeMoGymFunctionCallOutput:
     return NeMoGymFunctionCallOutput(
         call_id=block["tool_use_id"],
         output=_text(block.get("content")),
-        status="completed",
+        status="completed" if status == "completed" else "incomplete",
     )
 
 
@@ -278,9 +308,11 @@ def extract_claude_code_observations(
                     and previous_compaction[1] != is_summary
                 ):
                     prior = previous_compaction[2]
-                    for field in ("trigger", "tokens_before", "tokens_after", "summary"):
+                    for field in ("observed_at", "trigger", "tokens_before", "tokens_after", "summary"):
                         if getattr(prior, field) is None:
                             setattr(prior, field, getattr(compaction, field))
+                    if prior.outcome == "unknown" or compaction.outcome in {"failed", "aborted"}:
+                        prior.outcome = compaction.outcome
                     compaction = prior
                 else:
                     compaction.before_model_call = last_model_call
@@ -289,8 +321,6 @@ def extract_claude_code_observations(
                     if last_model_call is None:
                         add_gap("compaction_before_model_call_unavailable")
                 previous_compaction = (entry_index, is_summary, compaction)
-                if compaction.observed_at is None:
-                    add_gap("compaction_timestamp_missing")
             else:
                 previous_compaction = None
 
@@ -384,7 +414,7 @@ def extract_claude_code_observations(
                             add_gap("tool_result_id_missing")
                             continue
                         tool_status = _status(block, result_metadata)
-                        items.append(_tool_result(block))
+                        items.append(_tool_result(block, tool_status))
                         finishes[(invocation_id, tool_call_id)].append(
                             (_timestamp(event.get("timestamp")), tool_status)
                         )
@@ -429,6 +459,18 @@ def extract_claude_code_observations(
 
         for _ in pending_compactions:
             add_gap("compaction_after_model_call_unavailable")
+
+    for compaction in compactions:
+        gaps.append(
+            _gap(
+                "compaction_model_call_reference_unavailable",
+                invocation_id=compaction.invocation_id,
+            )
+        )
+        if compaction.outcome == "unknown":
+            gaps.append(_gap("compaction_outcome_unavailable", invocation_id=compaction.invocation_id))
+        if compaction.observed_at is None:
+            gaps.append(_gap("compaction_timestamp_missing", invocation_id=compaction.invocation_id))
 
     tool_calls: list[ToolCallObservation] = []
     for invocation_id, tool_call_id in sorted(

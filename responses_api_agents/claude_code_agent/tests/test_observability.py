@@ -181,6 +181,10 @@ def test_extracts_nested_tree_model_refs_and_parallel_tool_timing(tmp_path: Path
         "function_call_output",
     ]
     assert all(item.id is None for item in root_invocation.conversation if isinstance(item, NeMoGymFunctionCallOutput))
+    [grandchild_result] = [
+        item for item in child_invocation.conversation if isinstance(item, NeMoGymFunctionCallOutput)
+    ]
+    assert grandchild_result.status == "incomplete"
 
     timings = {tool.tool_call_id: tool for tool in _records(bundle, ToolCallObservation)}
     assert timings["tool-fast"].duration_ms == pytest.approx(1000)
@@ -198,7 +202,7 @@ def test_extracts_explicit_compaction_markers(tmp_path: Path) -> None:
         _event(
             "root",
             "user",
-            "2026-07-22T10:00:00Z",
+            "bad-timestamp",
             "summary",
             message_extra={
                 "isCompactSummary": True,
@@ -224,8 +228,66 @@ def test_extracts_explicit_compaction_markers(tmp_path: Path) -> None:
     assert compaction.tokens_after == 200
     assert compaction.summary == "summary"
     assert compaction.outcome == "completed"
+    assert compaction.observed_at == pytest.approx(1784714401)
     assert compaction.before_model_call.response_id == "msg-before"
     assert compaction.after_model_call.response_id == "msg-after"
+    assert compaction.model_calls == []
+    codes = {gap.code for gap in bundle.gaps}
+    assert "compaction_model_call_reference_unavailable" in codes
+    assert "compaction_timestamp_missing" not in codes
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_outcome", "expected_gap"),
+    [
+        ({"outcome": None, "status": "failed", "tokensBefore": 100, "tokensAfter": 100}, "failed", None),
+        ({"tokensBefore": 100, "tokensAfter": 80}, "unknown", "compaction_outcome_unavailable"),
+    ],
+)
+def test_compaction_metadata_does_not_assume_success(
+    tmp_path: Path,
+    metadata: dict,
+    expected_outcome: str,
+    expected_gap: str | None,
+) -> None:
+    _write(
+        tmp_path / "projects" / "work" / "session.jsonl",
+        _event(
+            "root",
+            "system",
+            "2026-07-22T10:00:00Z",
+            "",
+            compact_metadata=metadata,
+        ),
+    )
+
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+
+    [compaction] = _records(bundle, ContextCompactionObservation)
+    assert compaction.outcome == expected_outcome
+    codes = {gap.code for gap in bundle.gaps}
+    if expected_gap is None:
+        assert "compaction_outcome_unavailable" not in codes
+    else:
+        assert expected_gap in codes
+
+
+def test_compaction_summary_preserves_explicit_failure(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "projects" / "work" / "session.jsonl",
+        _event(
+            "root",
+            "user",
+            "2026-07-22T10:00:00Z",
+            "summary",
+            message_extra={"isCompactSummary": True, "is_error": True},
+        ),
+    )
+
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+
+    [compaction] = _records(bundle, ContextCompactionObservation)
+    assert compaction.outcome == "failed"
 
 
 def test_malformed_and_incomplete_artifacts_produce_sanitized_gaps(tmp_path: Path) -> None:

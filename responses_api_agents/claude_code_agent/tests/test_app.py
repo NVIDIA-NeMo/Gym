@@ -77,6 +77,10 @@ def _event(type_: str, **kwargs) -> str:
     return json.dumps({"type": type_, **kwargs})
 
 
+def _output(*events: str) -> list:
+    return parse_stream_json("\n".join(events))[0]
+
+
 class FakeAioHTTPResponse:
     ok = True
 
@@ -290,7 +294,7 @@ class TestRunForwardsSkillsPath:
     def test_skills_ref_path_forwarded(self) -> None:
         agent = _make_agent()
         run_claude_code = AsyncMock(
-            return_value=("", "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
+            return_value=([], "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
         )
         body = ClaudeCodeAgentRunRequest.model_validate(
             {
@@ -306,7 +310,7 @@ class TestRunForwardsSkillsPath:
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
         run_claude_code = AsyncMock(
-            return_value=("", "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
+            return_value=([], "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
         )
         body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
 
@@ -314,8 +318,8 @@ class TestRunForwardsSkillsPath:
 
         assert run_claude_code.call_args.kwargs["skills_path"] is None
         assert "ng_agent_observations" not in result.model_dump(mode="json")
-        assert result.turns_used == 0
-        assert result.finished_naturally is False
+        assert result.turns_used == 1
+        assert result.finished_naturally is True
 
 
 class TestObservability:
@@ -351,7 +355,7 @@ class TestObservability:
             }
             observation_collector(tmp_path, run_metadata)
             return (
-                _event("assistant", message={"content": [{"type": "text", "text": "done"}]}),
+                _output(_event("assistant", message={"content": [{"type": "text", "text": "done"}]})),
                 "model",
                 run_metadata,
             )
@@ -375,7 +379,7 @@ class TestObservability:
         assert invocation.status == "completed"
         assert invocation.duration_ms == 123
         assert invocation.model_calls[0].response_id == "msg-1"
-        assert result.turns_used == 7
+        assert result.turns_used == 1
         assert result.finished_naturally is True
         assert "no_sandbox_runtime" in {gap.code for gap in observations.gaps}
 
@@ -409,7 +413,7 @@ class TestRunClaudeCode:
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
         ):
-            stdout, model, metadata = asyncio.run(agent._run_claude_code("hello", system_prompt="be terse"))
+            output_items, model, metadata = asyncio.run(agent._run_claude_code("hello", system_prompt="be terse"))
 
         assert "claude" in captured["cmd"][0]
         assert "--mcp-config" in captured["cmd"]
@@ -418,7 +422,7 @@ class TestRunClaudeCode:
         assert captured["dir_exists_during_run"] is True
         # config dir is removed after the run (no leakage between rollouts)
         assert not Path(captured["config_dir"]).exists()
-        assert "result" in stdout
+        assert output_items == []
         assert model == "claude-sonnet-4-6"
         assert metadata["status"] == "completed"
 
@@ -490,9 +494,9 @@ class TestRunClaudeCode:
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.claude_code_agent.app.asyncio.wait_for", fake_wait_for),
         ):
-            stdout, model, metadata = asyncio.run(agent._run_claude_code("hello"))
+            output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
 
-        assert stdout == ""
+        assert output_items == []
         assert killed["called"] is True
         assert model == "claude-sonnet-4-6"
         assert metadata["status"] == "incomplete"
@@ -576,7 +580,7 @@ class TestRolloutMCPConfig:
                 "mcp": {
                     "server_name": "example_mcp_weather",
                     "url_path": "/mcp",
-                    "headers": {"X-NeMo-Gym-Session-Token": "mcp-session-value"},
+                    "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
                 }
             },
             tmp_path,
@@ -587,7 +591,7 @@ class TestRolloutMCPConfig:
         server = config["mcpServers"]["example_mcp_weather"]
         assert server["type"] == "http"
         assert server["url"] == "http://127.0.0.1:8123/mcp"
-        assert server["headers"]["X-NeMo-Gym-Session-Token"] == "mcp-session-value"
+        assert server["headers"]["X-NeMo-Gym-Session-Token"] == "secret-token"
 
     def test_merges_static_mcp_config_when_metadata_present(self, tmp_path: Path) -> None:
         static_config = tmp_path / "static_mcp.json"
@@ -661,9 +665,11 @@ class TestRolloutMCPConfig:
             captured["config_exists_during_run"] = Path(mcp_config).is_file()
             captured["config"] = json.loads(Path(mcp_config).read_text())
             return (
-                _event(
-                    "assistant",
-                    message={"content": [{"type": "text", "text": "The weather in Paris is sunny and 72 F."}]},
+                _output(
+                    _event(
+                        "assistant",
+                        message={"content": [{"type": "text", "text": "The weather in Paris is sunny and 72 F."}]},
+                    )
                 ),
                 "claude-sonnet-4-6",
                 {"status": "completed"},
@@ -720,7 +726,7 @@ class TestRolloutMCPConfig:
                 "headers"
             ]["X-NeMo-Gym-Session-Token"]
             return (
-                _event("assistant", message={"content": [{"type": "text", "text": "ok"}]}),
+                _output(_event("assistant", message={"content": [{"type": "text", "text": "ok"}]})),
                 "claude-sonnet-4-6",
                 {"status": "completed"},
             )
@@ -811,6 +817,7 @@ class TestParseStreamJson:
         ("metadata", "returncode", "expected"),
         [
             ({"subtype": "success"}, 0, ("completed", None)),
+            ({"subtype": "success"}, 7, ("failed", "process_exit_7")),
             ({"subtype": "error_max_turns", "is_error": True}, 0, ("incomplete", "error_max_turns")),
             ({"subtype": "error_during_execution", "is_error": True}, 0, ("failed", "error_during_execution")),
             ({"subtype": "error_max_turns", "is_error": True}, 7, ("incomplete", "error_max_turns")),

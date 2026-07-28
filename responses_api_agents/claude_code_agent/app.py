@@ -194,10 +194,10 @@ def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tup
         return "incomplete", subtype
     if metadata.get("is_error") is True or (isinstance(subtype, str) and subtype.startswith("error_")):
         return "failed", subtype if isinstance(subtype, str) else "agent_error"
-    if subtype == "success":
-        return "completed", None
     if returncode not in (0, None):
         return "failed", f"process_exit_{returncode}"
+    if subtype == "success":
+        return "completed", None
     return "incomplete", "result_missing"
 
 
@@ -409,8 +409,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
-    ) -> tuple[str, str, dict[str, Any]]:
-        """Run claude -p --output-format=stream-json and return stdout, model name, and run metadata.
+    ) -> tuple[list[Any], str, dict[str, Any]]:
+        """Run Claude Code and return parsed output, model name, and run metadata.
 
         When ``rollout_id`` is set and a model server is configured, the per-rollout capture prefix is
         applied to ANTHROPIC_BASE_URL so the CLI's streaming /v1/messages calls correlate to this rollout.
@@ -467,20 +467,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     "error_type": "timeout",
                     "duration_ms": (monotonic() - process_started_at) * 1000,
                 }
-                return "", model, run_metadata
+                return [], model, run_metadata
 
             if proc.returncode not in (0, None):
                 LOG.warning("claude-code exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
-            _, run_metadata = parse_stream_json(stdout_text)
+            output_items, run_metadata = parse_stream_json(stdout_text)
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
             run_metadata["status"] = status
             if error_type is not None:
                 run_metadata["error_type"] = error_type
-            return stdout_text, model, run_metadata
+            return output_items, model, run_metadata
         finally:
             if claude_config_dir is not None:
                 try:
@@ -558,7 +558,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
-    ) -> tuple[NeMoGymResponse, dict[str, Any]]:
+    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -567,23 +567,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        stdout, model_name, run_metadata = await self._run_claude_code(
+        output_items, model_name, run_metadata = await self._run_claude_code(
             user_message,
             system_prompt=system_prompt,
             mcp_config=mcp_config,
             skills_path=skills_path,
             rollout_id=rollout_id,
             observation_collector=observation_collector,
-        )
-        output_items, usage = parse_stream_json(stdout)
-        run_metadata = usage | run_metadata
-        run_metadata.setdefault(
-            "num_turns",
-            sum(
-                1
-                for item in output_items
-                if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            ),
         )
 
         if not any(
@@ -601,28 +591,25 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 )
             )
 
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
+        input_tokens = run_metadata.get("input_tokens", 0)
+        output_tokens = run_metadata.get("output_tokens", 0)
 
-        return (
-            NeMoGymResponse(
-                id=f"resp_{uuid4().hex}",
-                created_at=int(time()),
-                model=model_name,
-                object="response",
-                output=output_items,
-                tool_choice=body.tool_choice,
-                tools=body.tools,
-                parallel_tool_calls=body.parallel_tool_calls,
-                usage=NeMoGymResponseUsage(
-                    input_tokens=input_tokens,
-                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-                    output_tokens=output_tokens,
-                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                    total_tokens=input_tokens + output_tokens,
-                ),
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=model_name,
+            object="response",
+            output=output_items,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            usage=NeMoGymResponseUsage(
+                input_tokens=input_tokens,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                output_tokens=output_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=input_tokens + output_tokens,
             ),
-            run_metadata,
         )
 
     async def responses(
@@ -630,8 +617,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        response, _ = await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
-        return response
+        return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
     async def _create_episode(
         self,
@@ -640,7 +626,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-    ) -> tuple[AgentEpisode, dict[str, Any]]:
+    ) -> AgentEpisode:
         observations: Optional[AgentObservationBundle] = None
 
         def collect(config_dir: Path, run_metadata: dict[str, Any]) -> None:
@@ -662,7 +648,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     gaps=[ObservationGap(code="observation_parse_failed")],
                 )
 
-        response, run_metadata = await self._create_response(
+        response = await self._create_response(
             body,
             mcp_config=mcp_config,
             skills_path=skills_path,
@@ -675,7 +661,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
-        return AgentEpisode(response=response, observations=observations), run_metadata
+        return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         async with self.sem:
@@ -701,7 +687,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
                 if rollout_id is not None:
-                    episode, run_metadata = await self._create_episode(
+                    episode = await self._create_episode(
                         body.responses_create_params,
                         mcp_config=mcp_config,
                         skills_path=skills_path,
@@ -709,7 +695,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     )
                     agent_resp, observations = episode.response, episode.observations
                 else:
-                    agent_resp, run_metadata = await self._create_response(
+                    agent_resp = await self._create_response(
                         body.responses_create_params,
                         mcp_config=mcp_config,
                         skills_path=skills_path,
@@ -727,21 +713,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             verify_json = await get_response_json(verify_resp)
 
             gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
-            turns = run_metadata.get("num_turns")
-            if not isinstance(turns, int):
-                turns = sum(
-                    1
-                    for item in gym_resp.output
-                    if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-                )
+            turns = sum(
+                1
+                for item in gym_resp.output
+                if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
+            )
             last = gym_resp.output[-1] if gym_resp.output else None
-            subtype = run_metadata.get("subtype")
-            if run_metadata.get("status") != "completed":
-                naturally = False
-            elif isinstance(subtype, str):
-                naturally = subtype == "success" and run_metadata.get("is_error") is not True
-            else:
-                naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
+            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
             result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
             if observations is not None:
