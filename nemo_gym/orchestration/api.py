@@ -34,6 +34,14 @@ ServiceConfig = Annotated[
 ]
 
 
+class NodePool(BaseModel):
+    partition: str
+    nodes: int = 1
+    ntasks_per_node: int = 1
+    gpus_per_node: int | None = None
+    extra_args: dict[str, str] = {}
+
+
 class BaseComputeConfig(BaseModel):
     pass
 
@@ -42,7 +50,8 @@ class SlurmComputeConfig(BaseComputeConfig):
     type: Literal["slurm"]
     hostname: str | None = None
     walltime: str | None = None
-    node_pools: dict[str, dict] | None = None
+    node_pools: dict[str, NodePool] = {}
+    extra_args: dict[str, str] = {}
 
 
 ComputeConfig = Annotated[

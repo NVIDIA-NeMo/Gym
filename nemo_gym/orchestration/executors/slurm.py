@@ -3,32 +3,10 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from nemo_gym.orchestration.api import (
-    BenchmarkRunConfig,
-    RayServiceConfig,
-    SlurmComputeConfig,
-    SubmitConfig,
-    VllmServiceConfig,
-)
+from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import get_connection
-
-
-def _build_vllm_command(service: VllmServiceConfig) -> str:
-    cmd = f"vllm serve {shlex.quote(service.model)} --port {service.port} --tensor-parallel-size {service.tensor_parallel_size}"
-    if service.trust_remote_code:
-        cmd += " --trust-remote-code"
-    return cmd
-
-
-def _build_ray_command(_service: RayServiceConfig) -> str:
-    return "ray start --head"
-
-
-_BUILDERS = {
-    VllmServiceConfig: _build_vllm_command,
-    RayServiceConfig: _build_ray_command,
-}
+from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 
 
 class SlurmExecutor(BaseExecutor):
@@ -58,45 +36,6 @@ class SlurmExecutor(BaseExecutor):
             bench_dir = staging / benchmark.name
             bench_dir.mkdir()
             (bench_dir / "logs").mkdir()
-            remote_bench_dir = remote_run_dir / benchmark.name
-            script = self._build_job_script(config, benchmark, compute, remote_bench_dir)
+            script = build_sbatch_script(config, benchmark, compute, remote_run_dir / benchmark.name)
             (bench_dir / "job.sh").write_text(script)
         return staging
-
-    def _build_job_script(
-        self,
-        config: SubmitConfig,
-        benchmark: BenchmarkRunConfig,
-        compute: SlurmComputeConfig,
-        remote_bench_dir: Path,
-    ) -> str:
-        lines = ["#!/bin/bash"]
-
-        if compute.walltime:
-            lines.append(f"#SBATCH --time={compute.walltime}")
-        lines.append(f"#SBATCH --chdir={remote_bench_dir}")
-
-        for name, service in config.services.items():
-            builder = _BUILDERS[type(service)]
-            lines.append(f"# service: {name}")
-            lines.append(
-                f"srun --container-image={shlex.quote(service.container)} "
-                f"{builder(service)} "
-                f"> logs/{name}.log 2>&1 &"
-            )
-
-        for name, service in config.services.items():
-            if service.health_check:
-                hc = service.health_check
-                lines.append(
-                    f"# health check: {name} (timeout {hc.timeout_seconds}s)\n"
-                    f"timeout {hc.timeout_seconds} bash -c "
-                    f"'until curl -sf http://localhost:{hc.port}{shlex.quote(hc.path)}; do sleep 2; done'"
-                )
-
-        lines.append(
-            f"srun --container-image={shlex.quote(config.driver.container)} "
-            f"gym eval run --benchmark {shlex.quote(benchmark.name)} "
-            f"> logs/driver.log 2>&1"
-        )
-        return "\n".join(lines)
