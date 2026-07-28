@@ -17,7 +17,9 @@ import asyncio
 import difflib
 import importlib
 import json
+import sys
 from copy import deepcopy
+from dataclasses import dataclass
 from glob import glob
 from multiprocessing import Pool
 from pathlib import Path
@@ -468,8 +470,3 @@ Input rows: {completion_summary["total_input_rows"]} total; {completion_summary[
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")
 
-
-@exit_cleanly_on_config_error
-def submit() -> None:  # pragma: no cover
-    get_global_config_dict()
-    rich.print("[bold]gym eval submit[/bold]: not yet implemented.")
