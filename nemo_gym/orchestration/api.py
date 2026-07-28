@@ -60,10 +60,15 @@ class DriverConfig(BaseModel):
     benchmarks: list[BenchmarkRunConfig]
 
 
+class JobConfig(BaseModel):
+    output_path: str
+
+
 class SubmitConfig(BaseModel):
     services: dict[str, ServiceConfig]
     compute: dict[str, ComputeConfig]
     driver: DriverConfig
+    job: JobConfig
 
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":

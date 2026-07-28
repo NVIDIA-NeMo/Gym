@@ -26,10 +26,11 @@ COMPUTE_TWO = {
 
 SERVICE = {"container": "gym:latest", "type": "vllm", "model": "org/model"}
 DRIVER = {"container": "gym:latest", "benchmarks": [{"name": "gsm8k"}]}
+JOB = {"output_path": "/tmp/gym-jobs"}
 
 
 def _config(**overrides):
-    return {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, **overrides}
+    return {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB, **overrides}
 
 
 def test_implicit_placement_single_compute():
