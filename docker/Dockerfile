@@ -12,11 +12,7 @@
 #       --tag <registry>/nemo-gym:latest --push .
 #
 # Optional build args:
-#   --build-arg VLLM_VERSION=0.9.1
-#       Install a specific vLLM version into the container (default: skip).
-#   --build-arg NEMO_GYM_PREFETCH_CONFIGS=path/to/config.yaml
-#       Pre-warm resource-server venvs at build time (placeholder; requires
-#       a gym CLI prefetch command to be implemented).
+#   --build-arg VLLM_VERSION=0.9.1   Install vLLM for local inference (default: skip)
 
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.03-cuda13.2-devel-ubuntu24.04
 
@@ -66,13 +62,15 @@ ARG UV_VERSION
 
 ENV UV_PROJECT_ENVIRONMENT=/opt/nemo_gym_venv
 ENV UV_LINK_MODE=copy
+# Set VIRTUAL_ENV so uv pip install targets the project venv (used for optional deps like vLLM).
+ENV VIRTUAL_ENV=/opt/nemo_gym_venv
 
 # Copy only dependency metadata first for layer caching.
 COPY --from=nemo-gym pyproject.toml uv.lock ./
 COPY --from=nemo-gym nemo_gym/__init__.py nemo_gym/package_info.py ./nemo_gym/
 
 RUN uv venv --seed && \
-    uv sync --locked --no-install-project
+    uv sync --link-mode symlink --locked --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -80,7 +78,6 @@ ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 FROM hermetic AS release
 
 ARG VLLM_VERSION
-ARG NEMO_GYM_PREFETCH_CONFIGS
 ARG NEMO_GYM_COMMIT
 ARG NVIDIA_BUILD_ID
 ARG NVIDIA_BUILD_REF
@@ -102,20 +99,11 @@ RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallo
 # Install the nemo-gym project itself into the venv.
 RUN UV_LINK_MODE=symlink uv sync --locked
 
-# Optional: install vLLM for local inference. Pass --build-arg VLLM_VERSION=<ver>
-# to enable (e.g. VLLM_VERSION=0.9.1).
+# Optional: install vLLM for local inference. Pass --build-arg VLLM_VERSION=<ver> to enable.
+# VIRTUAL_ENV is set in the hermetic stage, so uv pip targets /opt/nemo_gym_venv correctly.
 RUN <<"EOF" bash -exu
 if [[ -n "${VLLM_VERSION:-}" ]]; then
     uv pip install "vllm==${VLLM_VERSION}"
-fi
-EOF
-
-# Optional: pre-warm resource-server venvs at build time.
-# Requires a gym CLI prefetch subcommand — not yet implemented.
-# Pass --build-arg NEMO_GYM_PREFETCH_CONFIGS=path/to/config.yaml to enable.
-RUN <<"EOF" bash -exu
-if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
-    gym env prefetch --config "${NEMO_GYM_PREFETCH_CONFIGS}"
 fi
 EOF
 
