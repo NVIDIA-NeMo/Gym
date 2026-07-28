@@ -28,7 +28,7 @@ sidecar and retries on resume.
 """
 
 import asyncio
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 import orjson
@@ -53,8 +53,11 @@ from nemo_gym.server_utils import get_global_aiohttp_client, get_response_json, 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"
 
-# Header names of the optional session-forwarding contract (forward_session=true): the
-# remote service echoes the cookie on every resources-server tool call it makes.
+# Header names of the session-forwarding contract (tools_mode="forward"): the remote
+# service echoes the cookie on every resources-server tool call it makes. The URL is
+# re-sent per request (rather than configured remote-side) because Gym assigns servers
+# random ports on every `gym env start` — a statically configured address goes stale on
+# every restart; the cookie is minted per rollout and has no static equivalent at all.
 RESOURCES_URL_HEADER = "X-NeMo-Gym-Resources-Server-Url"
 SESSION_COOKIE_HEADER = "X-NeMo-Gym-Session-Cookie"
 
@@ -111,16 +114,20 @@ class RemoteAgentConfig(BaseResponsesAPIAgentConfig):
     # semaphore is acquired so queue wait does not count against it. The collector's
     # named-agent hop carries no timeout of its own; this is the only wallclock bound.
     run_timeout_secs: float = 2100.0
-    # Forward the resources-server URL and session cookie to the remote service so its
-    # loop can call Gym-hosted tools (it must echo the cookie on every tool call).
-    forward_session: bool = False
-    # The dataset declares tools but the remote service implements them itself; skip the
-    # declared-tools guard without forwarding the session.
-    assume_remote_tools: bool = False
-    # The resources-server URL advertised to the remote service with forward_session. The
-    # default (resolved from the global config) is the BIND address — typically 127.0.0.1,
-    # unreachable from another machine. Set this to the externally reachable URL when the
-    # remote service runs off-host.
+    # Who serves the tools a dataset declares:
+    #   "refuse"  — nobody can: reject tool-declaring tasks up front (terminal failure row)
+    #               instead of letting verify() score silent zeros against untouched state.
+    #   "forward" — Gym does: send the resources-server URL and session cookie as headers on
+    #               every remote request; the service echoes the cookie on each tool call.
+    #   "remote"  — the service does: it implements the declared tools itself; nothing is
+    #               forwarded and the guard stands down.
+    tools_mode: Literal["refuse", "forward", "remote"] = "refuse"
+    # The resources-server URL advertised to the remote service with tools_mode="forward".
+    # The default (resolved from the global config) is the BIND address — typically
+    # 127.0.0.1, unreachable from another machine. Set this to the externally reachable URL
+    # when the remote service runs off-host (bind vs. advertise can genuinely differ: NAT,
+    # tunnels, load balancers). This only changes the header string; making the address
+    # actually route to the resources server is the operator's job.
     advertised_resources_url: Optional[str] = None
 
     @field_validator("agent_base_url")
@@ -183,6 +190,11 @@ class RemoteAgent(SimpleResponsesAPIAgent):
     async def _run_once(
         self, request: Request, body: RemoteAgentRunRequest, record: Dict[str, Any]
     ) -> RemoteAgentVerifyResponse:
+        # body and record are two views of the same row: `record` (sanitized dict, computed
+        # before run()'s try so failure rows can be built in ANY error state) feeds the Gym
+        # hops; `body` (typed model) is kept solely because exclude_unset information — which
+        # fields the dataset actually set — exists only on the model, and the remote wire
+        # payload must not carry materialized None defaults.
         guard_error = self._tools_guard_error(record)
         if guard_error:
             return self._failure_response(record, guard_error, terminal=True)
@@ -251,11 +263,11 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         those tools mutate stays untouched and verify() scores 0 on every row.
         """
         declared_tools = (record.get("responses_create_params") or {}).get("tools")
-        if declared_tools and not (self.config.forward_session or self.config.assume_remote_tools):
+        if declared_tools and self.config.tools_mode == "refuse":
             return (
-                "the task declares tools but forward_session=false and assume_remote_tools=false. "
-                "Set forward_session=true so the remote service can call Gym-hosted tools with the "
-                "session cookie, or assume_remote_tools=true if the service implements the declared "
+                'the task declares tools but tools_mode="refuse" (the default). Set '
+                'tools_mode="forward" so the remote service can call Gym-hosted tools with the '
+                'session cookie, or tools_mode="remote" if the service implements the declared '
                 "tools itself."
             )
         return None
@@ -268,7 +280,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         client = get_global_aiohttp_client()
         data = orjson.dumps(remote_params)
         headers = {"Content-Type": "application/json"}
-        if self.config.forward_session:
+        if self.config.tools_mode == "forward":
             resources_url = self.config.advertised_resources_url or get_server_url(self.config.resources_server.name)
             advertised_host = urlparse(resources_url).hostname or ""
             remote_host = urlparse(self.config.agent_base_url).hostname or ""
@@ -351,14 +363,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             print(f"{message} (occurrence #{n})", flush=True)
 
     def _warn_on_response_quality(self, response: NeMoGymResponse) -> None:
-        last = response.output[-1] if response.output else None
-        finished_naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
-        if not finished_naturally:
-            self._throttled_warn(
-                "non_terminal_trajectory",
-                "WARNING: the remote trajectory does not end with an assistant message; the contract "
-                "is one FINISHED trajectory per call (no dangling tool calls).",
-            )
         if response.usage is None:
             self._throttled_warn(
                 "missing_usage",

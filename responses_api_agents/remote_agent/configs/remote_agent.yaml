@@ -9,5 +9,5 @@ remote_agent:
       concurrency: 32
       remote_responses_timeout_secs: 1800.0
       run_timeout_secs: 2100.0
-      forward_session: false
-      assume_remote_tools: false
+      tools_mode: refuse
+      advertised_resources_url: null

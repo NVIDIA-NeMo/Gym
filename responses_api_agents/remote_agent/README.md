@@ -21,15 +21,29 @@ through a Gym model server) token-id capture for training.
 
 ## Gym-hosted tools (optional)
 
-With `forward_session: true`, each request to your service carries two headers:
-`X-NeMo-Gym-Resources-Server-Url` and `X-NeMo-Gym-Session-Cookie`. Echo the cookie on every
-tool call you make against that URL and stateful environments work end to end. If your service
-runs on a different machine, set `advertised_resources_url` to an externally reachable URL —
-the default resolves to the resources server's bind address, which is typically a loopback
-address only valid on the Gym host. Without
-forwarding, tasks that declare tools are refused up front (instead of silently scoring 0)
-unless you set `assume_remote_tools: true` because your service implements the declared tools
-itself.
+`tools_mode` decides who serves the tools a dataset declares:
+
+- `refuse` (default): tool-declaring tasks are rejected up front with a clear error instead of
+  silently scoring zero against untouched session state.
+- `forward`: each request to your service carries two headers, `X-NeMo-Gym-Resources-Server-Url`
+  and `X-NeMo-Gym-Session-Cookie`. Echo the cookie on every tool call you make against that URL
+  and stateful environments work end to end. The URL is re-sent per request because Gym assigns
+  servers random ports on every start; the cookie is minted per rollout.
+- `remote`: your service implements the declared tools itself; nothing is forwarded.
+
+### Running the service off-host (`tools_mode: forward`)
+
+The advertised URL must be reachable *from your service's machine* — Gym serves the tools and
+tells your service where they are; making that address route to Gym is on you:
+
+1. Bind the resources server on all interfaces and pin its port (`host: 0.0.0.0`, `port: <fixed>`).
+2. Make the path route (internal DNS / firewall rule / SSH tunnel / load balancer — your infra).
+3. Verify once from the remote machine: `curl http://<address>:<port>/` should connect.
+4. Set `advertised_resources_url: http://<address>:<port>` on this agent. It changes only the
+   header string; the default advertises the bind address, which is typically a loopback address
+   other machines cannot reach (you'll see a warning for that combination).
+5. Recommended: have your service probe the advertised URL on its first request and fail loudly —
+   reachability is only testable from your side (see the self-check in the docs example).
 
 ## Run
 

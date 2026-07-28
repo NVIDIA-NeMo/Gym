@@ -382,15 +382,15 @@ class TestToolsGuardAndSessionForwarding:
 
         assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
         assert result[NG_TERMINAL_KEY] is True
-        assert "forward_session" in result["error"] and "assume_remote_tools" in result["error"]
+        assert "tools_mode" in result["error"]
         # Refused before any network traffic
         assert client.request.call_count == 0
         assert server_client.calls == []
 
-    async def test_assume_remote_tools_skips_guard_without_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_tools_mode_remote_skips_guard_without_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         request_mock = AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY)))
         client = mock_remote(monkeypatch, request_mock)
-        agent = make_agent(server_client=seed_verify_server_client(), assume_remote_tools=True)
+        agent = make_agent(server_client=seed_verify_server_client(), tools_mode="remote")
 
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=self._TOOLS)))
 
@@ -398,12 +398,12 @@ class TestToolsGuardAndSessionForwarding:
         headers = client.request.call_args.kwargs["headers"]
         assert RESOURCES_URL_HEADER not in headers
 
-    async def test_forward_session_sends_url_and_cookie_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_tools_mode_forward_sends_url_and_cookie_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         request_mock = AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY)))
         client = mock_remote(monkeypatch, request_mock)
         monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: f"http://resolved-{name}:1234")
         server_client = seed_verify_server_client(seed_cookies={"session": "cookie-value"})
-        agent = make_agent(server_client=server_client, forward_session=True)
+        agent = make_agent(server_client=server_client, tools_mode="forward")
 
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=self._TOOLS)))
 
@@ -430,24 +430,6 @@ class TestResponseQualityWarnings:
         mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(trajectory))))
         agent = make_agent(server_client=seed_verify_server_client())
         return await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
-
-    async def test_non_terminal_trajectory_warns(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        trajectory = dict(_MINIMAL_TRAJECTORY)
-        trajectory["output"] = [
-            {
-                "type": "function_call",
-                "status": "completed",
-                "id": "fc_1",
-                "call_id": "call_1",
-                "name": "increment_counter",
-                "arguments": "{}",
-            }
-        ]
-        result = await self._run_with_trajectory(monkeypatch, trajectory)
-        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
-        assert "does not end with an assistant message" in capsys.readouterr().out
 
     async def test_missing_usage_warns(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -598,7 +580,7 @@ class TestStatefulToolsEndToEnd:
         mock_remote(monkeypatch, AsyncMock(side_effect=remote_service))
         monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: "http://counter-in-process")
 
-        agent = make_agent(server_client=server_client, forward_session=True)
+        agent = make_agent(server_client=server_client, tools_mode="forward")
         row = {
             "responses_create_params": {
                 "input": [{"role": "user", "content": "add 1 then add 2 then get the count"}],
@@ -817,14 +799,14 @@ class TestReviewFindingPins:
         # If queue wait counted against run_timeout_secs, the second task would time out
         assert all(NG_FAILURE_CLASS_KEY not in r for r in results)
 
-    async def test_forward_session_loopback_warning_for_offhost_remote(
+    async def test_tools_mode_forward_loopback_warning_for_offhost_remote(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))))
         monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: "http://127.0.0.1:15022")
         agent = make_agent(
             server_client=seed_verify_server_client(),
-            forward_session=True,
+            tools_mode="forward",
             agent_base_url="http://gpu-node-7:9000",
         )
 
@@ -840,7 +822,7 @@ class TestReviewFindingPins:
         monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: "http://127.0.0.1:15022")
         agent = make_agent(
             server_client=seed_verify_server_client(),
-            forward_session=True,
+            tools_mode="forward",
             agent_base_url="http://gpu-node-7:9000",
             advertised_resources_url="http://head-node.cluster:15022",
         )
