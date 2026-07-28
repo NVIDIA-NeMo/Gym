@@ -3,16 +3,17 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Discriminator, Tag
 
 
-class VllmServiceConfig(BaseModel):
+class BaseServiceConfig(BaseModel):
+    container: str
+    placement: str
+
+
+class VllmServiceConfig(BaseServiceConfig):
     type: Literal["vllm"]
-    container: str
-    placement: str | None = None
 
 
-class RayServiceConfig(BaseModel):
+class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
-    container: str
-    placement: str | None = None
 
 
 ServiceConfig = Annotated[
