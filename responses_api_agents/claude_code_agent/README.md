@@ -196,5 +196,7 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 ## Limitations
 
 - Eval only for now. Token IDs and logprobs are not wired up yet.
-- Does not go through Gym's model server. Token counts come from Claude Code's own usage reporting.
-- `turns_used` counts assistant messages right now, not tool calls.
+- With `model_server`, model calls go through Gym and can be captured. Direct Anthropic or
+  `anthropic_base_url` runs bypass Gym capture.
+- `turns_used` uses Claude Code's terminal `num_turns` when present and otherwise counts assistant
+  messages.
