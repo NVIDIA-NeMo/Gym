@@ -675,7 +675,15 @@ gym eval profile \
 
 Recompute rewards from existing rollouts by replaying them through a resources server's `/verify` endpoint — without re-running model inference. Starts the resources server automatically from the provided config. Requires the `*_materialized_inputs.jsonl` and `rollouts.jsonl` artifacts produced by `gym eval run`.
 
-Before starting, the command checks each resources server's `GET /reverify_mode` response. Servers that report `unsupported` (session-stateful verifiers whose state is no longer present) cause the command to abort unless `--force` is passed.
+Before starting, the command checks each resources server's `GET /reverify_mode` response. Resources servers report one of three modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. |
+| `unsupported` | Reverification is not safe. The verifier reads per-rollout session state that is no longer present. |
+| `unknown` | The server has not declared its reverification behaviour. **This is the default.** Treated as potentially unsafe. |
+
+Servers that report `unsupported` or `unknown` cause the command to abort unless `--force` is passed.
 
 | Option | Description |
 | --- | --- |
@@ -686,7 +694,7 @@ Before starting, the command checks each resources server's `GET /reverify_mode`
 | `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
 | `--rollouts PATH` | `rollouts.jsonl` from `gym eval run`. |
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
-| `--force` | Override the `UNSUPPORTED` reverify mode guard; output is prefixed with `unsafe_`. |
+| `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard; output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
 | `--resume` | Resume a partial run: skip rows already in the output and re-verify only the rest. |
 | `--judge-failed-only` | Recover only the rollouts whose judge call failed in the original run (from `<rollouts>_failures.jsonl`), reusing the stored responses. Skips the reverify-mode guard. |
@@ -718,7 +726,7 @@ gym eval reverify --judge-failed-only \
     --rollouts results/rollouts.jsonl \
     --output results/rollouts_recovered.jsonl
 
-# Force through an UNSUPPORTED server (output prefixed with unsafe_)
+# Force through an UNSUPPORTED or UNKNOWN server (output prefixed with unsafe_)
 gym eval reverify \
     --config my_stateful_server.yaml \
     --inputs results/rollouts_materialized_inputs.jsonl \
