@@ -41,6 +41,8 @@ Use `/ng-rollout/<rollout_id>` as the model-server URL prefix. SDKs append their
 the rollout prefix before routing.
 
 Correlation is caller-supplied. An unprefixed call is forwarded normally but is not captured.
+SDK-based harnesses must configure their `model_server` field for capture; calls sent directly to an
+external provider do not cross a Gym model server.
 
 Agents built on `SimpleResponsesAPIAgent` can use these helpers: `url_path_for_run(url_path, body)`
 prefixes a downstream call from the run request's task/rollout indices (only when
@@ -77,9 +79,10 @@ totals = aggregate_model_call_metrics(store, rollout_id)
 ```
 
 `ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It
-contains a unique server-generated `model_call_id`, typed `model_ref`, wall-clock `started_at` and
-`completed_at`, a `call_index`, API dialect, token and cache usage, latency, error details, tool
-calls, reasoning content, and the captured request and response. `started_at` is recorded immediately
+contains a unique server-generated `model_call_id`, the protocol `response_id` when present, typed
+`model_ref`, wall-clock `started_at` and `completed_at`, a `call_index`, API dialect, token and cache
+usage, latency, error details, tool calls, reasoning content, and the captured request and response.
+`started_at` is recorded immediately
 before invoking the downstream ASGI application; `completed_at` is recorded when that invocation
 returns or raises, before capture parsing and persistence. Both are UTC Unix seconds for external
 trace correlation; durations use the monotonic latency fields. `call_index` reflects durable append
@@ -111,7 +114,32 @@ data does not mix with an earlier attempt. Before dispatch, the collector clears
 for that exact rollout-attempt id, including a kill-shaped attempt being redispatched.
 
 The attachment is additive: it does not replace or rewrite the existing response, reward,
-`NeMoGymResponse`, token-id, or log-prob fields. Downstream consumers can choose whether to read it.
+`NeMoGymResponse`, token-id, or log-prob fields. Downstream consumers can choose whether to read it,
+and aggregate-metrics requests exclude it.
+
+## Agent observations
+
+Supported Agent Servers may also attach `ng_agent_observations` when observability is enabled. It
+contains an unordered `records` list of typed agent invocations, tool-call intervals, explicit
+context-compaction events, and sandbox observations. `gaps` reports unavailable evidence. An
+invocation's `conversation` contains the ordered, normalized items exposed by that integration.
+
+Agent observations and model-call capture are separate evidence. Join an invocation's model-call
+references by `model_call_id`, or by the exact `(model_ref, response_id)` pair when the harness sees
+the protocol response ID. Do not infer ownership from timestamps, text, or list position. The full
+model request and response remain in `CaptureStore`; rollout attachments intentionally omit them.
+
+Tool timestamps are UTC Unix seconds when the source provides wall-clock time. `duration_ms` is the
+measured interval, and `timing_source` identifies executor, harness, or artifact-derived timing.
+
+Model-visible tool calls and results remain in `AgentInvocation.conversation` as `function_call` and
+`function_call_output` items. Execution timing and outcome, when observable, live in
+`ToolCallObservation` and join through `(invocation_id, tool_call_id)`. A tool observation may also
+reference its enclosing `sandbox_id`; concurrent calls retain independent timing and outcome.
+
+Each `SandboxObservation` covers one sandbox execution. Usage fields contain measured values only;
+configured limits are never reported as usage. Integrations emit only facts available at their
+execution boundary or in retained artifacts and report unavailable evidence in `gaps`.
 
 ## Limitations
 
@@ -119,3 +147,7 @@ The model-server boundary observes model HTTP requests and responses. It can rec
 reasoning, and tool results present in those payloads, but it does not observe the actual tool
 execution boundary, environment events, context compaction, semantic turns, or subagent structure.
 Those require instrumentation at the agent, tool, environment, or rollout layer.
+
+Sandbox CPU and memory observations describe the sandbox as a whole. They cannot be attributed to
+individual overlapping tool calls unless each call runs in a separately measured execution scope.
+Gym therefore records the shared sandbox relationship without estimating per-tool resource usage.

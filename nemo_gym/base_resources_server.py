@@ -30,6 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
+from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 
 
@@ -110,6 +111,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
         app.post("/verify")(self.verify)
