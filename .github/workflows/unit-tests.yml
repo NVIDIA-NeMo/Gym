@@ -153,7 +153,7 @@ jobs:
           # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
           # This is how we test and this is how you should use/consume.
           curl -LsSf "$UV_INSTALL_URL" | sh
-          uv venv --python 3.12
+          uv venv --python 3.14.6
           source .venv/bin/activate
           uv sync --extra dev --extra sandbox
 
@@ -227,7 +227,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
           curl -LsSf "$UV_INSTALL_URL" | sh
-          uv venv --python 3.12
+          uv venv --python 3.14.6
           source .venv/bin/activate
           uv sync --extra dev
 

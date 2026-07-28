@@ -17,7 +17,7 @@
 name = "genrm-model"
 dynamic = ["dependencies"]
 version = "0.2.0rc0"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 
 [build-system]
 build-backend = "setuptools.build_meta"

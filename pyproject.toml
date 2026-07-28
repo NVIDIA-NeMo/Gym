@@ -25,7 +25,7 @@ dynamic = [
 ]
 description = "NeMo Gym is a library for building reinforcement learning environments"
 license = {file = "LICENSE"}
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 authors = [{ name = "NVIDIA" }]
 maintainers = [{ name = "NVIDIA" }]
 
@@ -57,7 +57,7 @@ classifiers = [
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Mathematics",
@@ -540,7 +540,7 @@ exclude_also = [
 [tool.ruff]
 # Line length configuration
 line-length = 119
-target-version = "py312"
+target-version = "py314"
 
 cache-dir = "cache/.ruff_cache"
 # Exclude common directories that shouldn't be linted
