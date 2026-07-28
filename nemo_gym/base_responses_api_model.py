@@ -225,7 +225,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         streaming_response.body_iterator = wrapper()
 
     async def chat_completions_with_call_capture(
-        self, rollout_id: str, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+        self,
+        rollout_id: str,
+        request: Request,
+        response: Response,
+        body: NeMoGymChatCompletionCreateParamsNonStreaming = Body(),
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump()
 
@@ -242,7 +246,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         # Application-level exception catching before it's caught by FastAPI exception middleware
         try:
-            response = await self.chat_completions(body)
+            params = {"body": body}
+            self._maybe_inject_request(self.chat_completions, request, response, params)
+            response = await self.chat_completions(**params)
             request.state.model_call_record_dict["response"] = _CHAT_COMPLETIONS_CONVERTER.chat_completion_to_response(
                 request.state.model_call_record_dict["request"], response
             )
