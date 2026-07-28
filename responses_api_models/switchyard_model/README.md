@@ -30,8 +30,9 @@ part — maturin bootstraps a Rust toolchain if the machine has none — but it 
 `static.rust-lang.org` and `crates.io` on top of PyPI and GitHub. Behind a restrictive egress
 policy those two hosts are the ones to allow.
 
-Neither applies once the pin moves to a released wheel, and neither applies to the self-managed
-mode below, which installs nothing.
+Both apply in either mode. The dependency is unconditional, so this server's environment is built
+the same way whether or not you end up launching a proxy — attaching to your own proxy means the
+CLI goes unused, not uninstalled. Both go away once the pin moves to a released wheel.
 
 **Attaching instead.** Set `switchyard_base_url` to use a proxy you already run — worth doing when
 an eval needs to pin a specific Switchyard build, or when several servers should share one
@@ -64,9 +65,11 @@ Gym knows Switchyard; Switchyard does not know Gym.
 through Switchyard pay for it. No Gym code imports Switchyard; this server speaks
 OpenAI-compatible HTTP to the proxy and drives the CLI to launch one.
 
-The dependency is pinned to `==0.1.0` with a `[tool.uv] override-dependencies` entry relaxing that
-release's stale `openai>=2.34.0` floor. See the comments in `pyproject.toml` — both should be
-removed once a Switchyard release carrying the widened floor ships.
+The dependency is pinned to a git commit rather than a release, because published 0.1.0 cannot
+serve this server's `/v1/responses` endpoint at all — its chat→responses translation omits the
+usage detail objects the Responses schema requires, so every response fails validation. The fix is
+merged upstream but unreleased. See the comment in `pyproject.toml`; the pin should move to a
+released version as soon as one carries the fix.
 
 # Licensing information
 Code: Apache 2.0
