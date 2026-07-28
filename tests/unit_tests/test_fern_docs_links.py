@@ -51,9 +51,7 @@ class TestFernDocsLinks(unittest.TestCase):
                 self.assertIn("node-version: '22'", read(workflow))
 
     def test_prerequisites_disclose_default_quickstart_credentials(self):
-        prerequisites = read(
-            "fern/versions/latest/pages/get-started/prerequisites.mdx"
-        )
+        prerequisites = read("fern/versions/latest/pages/get-started/prerequisites.mdx")
 
         self.assertIn("## Quickstart Requirements", prerequisites)
         self.assertIn("OpenAI API key", prerequisites)
