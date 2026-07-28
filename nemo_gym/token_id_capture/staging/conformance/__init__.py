@@ -21,7 +21,7 @@ fixtures are replayed through the gate in S3 and must produce byte-identical
 manifests. Conformance is tested, not trusted.
 """
 
-from nemo_gym.token_id_capture.conformance.kit import (
+from nemo_gym.token_id_capture.staging.conformance.kit import (
     ConformanceFailure,
     build_fixture_artifacts,
     fixture_names,

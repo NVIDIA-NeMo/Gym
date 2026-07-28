@@ -31,9 +31,10 @@ from nemo_gym.token_id_capture.store import TokenCaptureStore, validate_rollout_
 
 # The reader/route/source exports pull in the server stack (fastapi, the
 # shared aiohttp client) through nemo_gym.server_utils. They are resolved
-# lazily (PEP 562) so the capture core -- records, digest, lineage, rebuild,
-# protocols, conformance -- stays importable inside any framework's worker
-# process with no serving dependencies (the § 3.0 purity rule, enforced by
+# lazily (PEP 562) so the gate-authoritative capture core (the ``staging``
+# subpackage: records, digest, lineage, rebuild, protocols, conformance)
+# stays importable inside any framework's worker process with no serving
+# dependencies (the § 3.0 purity rule, enforced by
 # tests/unit_tests/test_token_capture_gate_primitives.py).
 _LAZY_EXPORTS = {
     "TokenReader": ("nemo_gym.token_id_capture.reader", "TokenReader"),

@@ -30,11 +30,11 @@ valid. Conformance is tested, not trusted -- every framework implementation
 runs the golden fixtures in ``conformance/``.
 
 Namespacing note: this module's ``TokenSink``/``TokenSource`` are the staging
-protocols of the gate-authoritative design. They are deliberately not exported
-from the package ``__init__`` because the #2124 capture core already exports a
+protocols of the gate-authoritative design. The #2124 capture core exports a
 file-store ``TokenSink`` dataclass and an async ``TokenSource`` protocol under
-those names; import these explicitly as
-``from nemo_gym.token_id_capture.protocols import TokenSink``.
+the same names from ``nemo_gym.token_id_capture``; these live only under the
+``staging`` subpackage, so the collision is resolved by namespace: import them
+as ``from nemo_gym.token_id_capture.staging import TokenSink``.
 
 This module is part of the dependency-free capture core: stdlib + pydantic
 (via ``records``) only.
@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Protocol, runtime_checkable
 
-from nemo_gym.token_id_capture.records import StagedCallRecord, StagedCallSnapshot, StageResult
+from nemo_gym.token_id_capture.staging.records import StagedCallRecord, StagedCallSnapshot, StageResult
 
 
 @runtime_checkable

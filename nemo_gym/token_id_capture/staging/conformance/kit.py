@@ -44,10 +44,10 @@ import struct
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym.token_id_capture.digest import build_staging_delta, compute_staging_digest
-from nemo_gym.token_id_capture.lineage import RolloutLineage
-from nemo_gym.token_id_capture.rebuild import LinearizedRow, linearize, snapshots_to_entries
-from nemo_gym.token_id_capture.records import (
+from nemo_gym.token_id_capture.staging.digest import build_staging_delta, compute_staging_digest
+from nemo_gym.token_id_capture.staging.lineage import RolloutLineage
+from nemo_gym.token_id_capture.staging.rebuild import LinearizedRow, linearize, snapshots_to_entries
+from nemo_gym.token_id_capture.staging.records import (
     CommitCoords,
     RolloutReceipt,
     StagedCallRecord,

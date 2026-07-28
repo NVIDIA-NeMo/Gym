@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
-from nemo_gym.token_id_capture.records import CallRecord, StagedCallSnapshot
+from nemo_gym.token_id_capture.staging.records import CallRecord, StagedCallSnapshot
 
 
 class RebuildError(ValueError):

@@ -22,24 +22,25 @@ framework sink/source and (in S3) the gate itself must reproduce byte-exactly.
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from nemo_gym.token_id_capture.conformance import (
+from nemo_gym.token_id_capture.staging.conformance import (
     build_fixture_artifacts,
     fixture_names,
     load_fixture,
     run_lineage_conformance,
     run_sink_source_conformance,
 )
-from nemo_gym.token_id_capture.digest import (
+from nemo_gym.token_id_capture.staging.digest import (
     EMPTY_PREFIX_HASH,
     build_staging_delta,
     compute_staging_digest,
     encode_token_ids,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.lineage import (
+from nemo_gym.token_id_capture.staging.lineage import (
     DuplicateRolloutError,
     LineageRegistry,
     LineageStateError,
@@ -47,13 +48,13 @@ from nemo_gym.token_id_capture.lineage import (
     UnknownCallError,
     UnknownRolloutError,
 )
-from nemo_gym.token_id_capture.rebuild import (
+from nemo_gym.token_id_capture.staging.rebuild import (
     RebuildError,
     linearize,
     main_chain_call_ids,
     snapshots_to_entries,
 )
-from nemo_gym.token_id_capture.records import (
+from nemo_gym.token_id_capture.staging.records import (
     CommitCoords,
     StagedCallRecord,
     StagedCallSnapshot,
@@ -541,14 +542,22 @@ def test_conformance_catches_a_corrupted_store() -> None:
 # purity: the capture core must import with no heavy dependencies
 # ---------------------------------------------------------------------------
 
-CORE_MODULES = [
-    "nemo_gym.token_id_capture.records",
-    "nemo_gym.token_id_capture.protocols",
-    "nemo_gym.token_id_capture.digest",
-    "nemo_gym.token_id_capture.lineage",
-    "nemo_gym.token_id_capture.rebuild",
-    "nemo_gym.token_id_capture.conformance.kit",
-]
+def _staging_modules() -> list[str]:
+    """Every module in the ``staging`` subpackage, discovered from disk so a
+    new core module is covered automatically (no hand-maintained list)."""
+    import nemo_gym.token_id_capture.staging as staging
+
+    root = Path(staging.__file__).parent
+    modules = ["nemo_gym.token_id_capture.staging"]
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).with_suffix("")
+        parts = [p for p in rel.parts if p != "__init__"]
+        if parts:
+            modules.append(".".join(["nemo_gym.token_id_capture.staging", *parts]))
+    return modules
+
+
+CORE_MODULES = _staging_modules()
 
 FORBIDDEN_IMPORTS = ("fastapi", "ray", "torch", "transfer_queue", "aiohttp")
 

@@ -46,7 +46,7 @@ import time
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from nemo_gym.token_id_capture.records import CallRecord, CaptureMode, CommitCoords, RolloutReceipt
+from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureMode, CommitCoords, RolloutReceipt
 
 
 class LineageError(Exception):
