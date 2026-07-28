@@ -117,6 +117,22 @@ class TestConfig:
 
 
 class TestRolloutSessionMiddleware:
+    async def _rollout_id_for(self, path: str) -> object:
+        seen: dict = {}
+
+        async def inner(scope, receive, send):
+            seen["rollout_id"] = app_module._ROLLOUT_ID.get()
+
+        await _RolloutSessionMiddleware(inner)({"type": "http", "path": path}, None, None)
+        return seen["rollout_id"]
+
+    async def test_well_formed_rollout_id_is_published(self) -> None:
+        assert await self._rollout_id_for("/ng-rollout/task0-r1-a0/v1/responses") == "task0-r1-a0"
+
+    async def test_rollout_id_outside_the_contract_charset_is_ignored(self) -> None:
+        """The id becomes an upstream header value, so anything off-contract is dropped, not sent."""
+        assert await self._rollout_id_for("/ng-rollout/bad\r\nx-injected: 1/v1/responses") is None
+
     async def test_non_http_scope_is_forwarded_untouched(self) -> None:
         seen: dict = {}
 
