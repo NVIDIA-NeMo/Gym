@@ -49,7 +49,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path=self.url_path_for_request("/v1/responses", request),
+            url_path=self.resolve_call_path("/v1/responses", request),
             json=body,
         )
 
@@ -64,11 +64,13 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                 f"Received an invalid response from the model server: {json.dumps(model_response_json)}"
             ) from e
 
-    async def run(self, body: ToolSimulationAgentRunRequest = Body()) -> ToolSimulationAgentVerifyResponse:
+    async def run(
+        self, request: Request, body: ToolSimulationAgentRunRequest = Body()
+    ) -> ToolSimulationAgentVerifyResponse:
         config = self.config
         response = await self.server_client.post(
             server_name=config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
+            url_path=self.resolve_call_path("/v1/responses", request),
             json=body.responses_create_params,
         )
         await raise_for_status(response)
