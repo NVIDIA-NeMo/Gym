@@ -622,7 +622,7 @@ repr(e): {repr(e)}"""
         return request.session[ROLLOUT_ID_KEY_NAME]
 
     def resolve_call_path(self, base_url_or_path: str, request: Request) -> str:
-        if not self._capture_config.should_capture_calls:
+        if not hasattr(self, "_capture_config") or not self._capture_config.should_capture_calls:
             return base_url_or_path
 
         maybe_rollout_id = self._get_rollout_id(request)

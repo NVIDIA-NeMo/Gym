@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from typing import List, cast
 
 import aiohttp
+from fastapi import Request
 from pydantic import ConfigDict, Field, ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
@@ -136,7 +137,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
             raise ValueError("No observations in seed session response")
         return seed_session_response
 
-    async def responses(self, req: AviaryAgentRunRequest) -> AviaryNeMoGymResponse:
+    async def responses(self, fastapi_request: Request, req: AviaryAgentRunRequest) -> AviaryNeMoGymResponse:
         req = req.model_copy(deep=True)
         body = req.responses_create_params
 
@@ -169,7 +170,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                     # correlation id comes straight from the request body rather than a path prefix.
                     raw_model_response = await self.server_client.post(
                         server_name=self.config.model_server.name,
-                        url_path=self.url_path_for_run("/v1/responses", req),
+                        url_path=self.resolve_call_path("/v1/responses", fastapi_request),
                         json=agent_state,
                         cookies=model_server_cookies,
                     )
@@ -254,9 +255,9 @@ class AviaryAgent(SimpleResponsesAPIAgent):
         output = AviaryNeMoGymResponse.model_validate(model_response.model_dump() | output_overrides)
         return output
 
-    async def run(self, body: AviaryAgentRunRequest) -> AviaryAgentVerifyResponse:
+    async def run(self, fastapi_request: Request, body: AviaryAgentRunRequest) -> AviaryAgentVerifyResponse:
         try:
-            response = await self.responses(body)
+            response = await self.responses(fastapi_request, body)
 
             verify_request = AviaryAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
             verify_response = await self.server_client.post(
