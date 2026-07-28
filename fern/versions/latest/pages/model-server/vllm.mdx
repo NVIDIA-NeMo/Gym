@@ -210,7 +210,7 @@ If the loaded tokenizer has no `chat_template`, the server fails at startup — 
 
 ### Token-ID extraction (RL training)
 
-When `return_token_id_information: true`, the completions backend automatically adds `logprobs: 0`, `prompt_logprobs: 0`, and `return_tokens_as_token_ids: true` to outbound requests so generation token IDs come from `logprobs.tokens` (the `"token_id:<int>"` entries) and prompt token IDs come from `prompt_logprobs` — no second `/tokenize` call needed.
+When `return_token_id_information: true`, the completions backend automatically adds `logprobs: 0`, `return_token_ids: true`, and `return_tokens_as_token_ids: true` to outbound requests. It reads prompt and generation token IDs directly from each choice. For older vLLM versions that omit inline IDs, it falls back to `/tokenize` for the prompt and the `"token_id:<int>"` entries in `logprobs.tokens` for the generation.
 
 ### Use it
 
@@ -230,7 +230,7 @@ ng_collect_rollouts +agent_name=<your_agent> \
     +output_jsonl_fpath=results/rollouts_completions.jsonl
 ```
 
-Make sure your input JSONL respects the [Constraints](#constraints) above — single-turn user messages (optionally with a leading system prompt) and no `tools`.
+Make sure your input JSONL respects the selected mode in the [Constraint matrix](#constraint-matrix) above.
 
 ## VLLMModel configuration reference
 
@@ -242,7 +242,7 @@ Make sure your input JSONL respects the [Constraints](#constraints) above — si
 | `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
 | `uses_reasoning_parser` | `bool` | — | **Required.** Set `true` for reasoning models (extracts `<think>` tags), `false` otherwise. |
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
-| `chat_template_kwargs` | `dict` | `null` | Override chat template parameters (e.g., `add_generation_prompt`). Only consulted when `use_completions_api: false`. |
+| `chat_template_kwargs` | `dict` | `null` | Override chat template parameters. Forwarded to upstream chat completions when `use_completions_api: false`, or to `apply_chat_template` when `use_completions_api: true` and `render_chat_template: true`. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
 | `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
 | `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
