@@ -110,8 +110,8 @@ def _log_timeout_once(timeout_s: float) -> None:
 #                     written anywhere; resume's set-difference on the main
 #                     jsonl naturally re-dispatches, capped per-attempt by
 #                     the per-task timeout above.
-#   timeout_exceeded  TaskPerAttemptTimeoutError. Sidecar entry with
-#                     _ng_failure_terminal=True so chain-hop 2 does NOT retry.
+#   timeout_exceeded  TaskPerAttemptTimeoutError. Retryable sidecar entry,
+#                     capped by NEMO_GYM_MAX_ROLLOUT_ATTEMPTS.
 #   skipped           TaskSampleSkipError. Sidecar entry with terminal=True.
 #   transient         verify-side ClientResponseError 5xx / connection /
 #                     asyncio.TimeoutError. Sidecar entry per attempt; retry
@@ -1229,7 +1229,15 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     and task_root.is_dir()
                 ):
                     has_flat_legacy_artifacts = any(
-                        not (entry.is_dir() and entry.name.startswith("repeat_"))
+                        not (
+                            (entry.is_dir() and entry.name.startswith("repeat_"))
+                            or (
+                                entry.is_file()
+                                and entry.name.startswith("repeat_")
+                                and "_verify_response" in entry.name
+                                and entry.suffix == ".json"
+                            )
+                        )
                         for entry in task_root.iterdir()
                     )
                     if has_flat_legacy_artifacts:
@@ -1552,11 +1560,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
         - ``_ng_no_persist=True`` for ``kill_shaped``: not written anywhere;
           resume's set-difference on the main jsonl re-dispatches the task.
-        - ``_ng_failure_terminal=True`` for ``timeout_exceeded`` / ``skipped``:
-          one sidecar entry, never retried.
-        - Otherwise (``legitimate``, ``transient``, ``incomplete``): sidecar
-          entry per attempt; retried up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on
-          chain resume.
+        - ``_ng_failure_terminal=True`` for ``skipped``: one sidecar entry,
+          never retried.
+        - Otherwise (``timeout_exceeded``, ``legitimate``, ``transient``,
+          ``incomplete``): sidecar entry per attempt; retried up to
+          ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on chain resume.
         """
         if error_class == "timeout_exceeded":
             suffix = "timeout"
@@ -1611,11 +1619,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 # Don't persist: resume's set-difference on the main jsonl
                 # naturally re-dispatches. Bounded across hops by per-task timeout.
                 payload[NG_NO_PERSIST_KEY] = True
-            elif error_class in ("timeout_exceeded", "skipped"):
+            elif error_class == "skipped":
                 # Sidecar entry written once; chain-hop 2 will not retry.
                 payload[NG_TERMINAL_KEY] = True
-            # 'legitimate' / 'transient' / 'incomplete': sidecar entry per
-            # attempt; retried by chain-hop / resume up to
+            # 'timeout_exceeded' / 'legitimate' / 'transient' / 'incomplete':
+            # sidecar entry per attempt; retried by chain-hop / resume up to
             # NEMO_GYM_MAX_ROLLOUT_ATTEMPTS (default 3).
         return payload
 

@@ -14,7 +14,7 @@
 # limitations under the License.
 import asyncio
 from contextlib import nullcontext
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import Field
 
@@ -33,7 +33,7 @@ from nemo_gym.openai_utils import (
 
 
 class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
-    openai_base_url: str
+    openai_base_url: Union[str, List[str]]
     openai_api_key: str
     openai_model: str
 
@@ -54,11 +54,25 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
 
     def model_post_init(self, context):
-        self._client = NeMoGymAsyncOpenAI(
-            base_url=self.config.openai_base_url,
-            api_key=self.config.openai_api_key,
-            default_headers=self.config.openai_default_headers,
+        base_urls = (
+            [self.config.openai_base_url]
+            if isinstance(self.config.openai_base_url, str)
+            else self.config.openai_base_url
         )
+        if not base_urls:
+            raise ValueError("openai_base_url must contain at least one endpoint")
+        self._clients = [
+            NeMoGymAsyncOpenAI(
+                base_url=base_url,
+                api_key=self.config.openai_api_key,
+                default_headers=self.config.openai_default_headers,
+            )
+            for base_url in base_urls
+        ]
+        # Keep the original attribute for backwards compatibility with tests
+        # and callers that replace a single upstream client.
+        self._client = self._clients[0]
+        self._next_client_idx = 0
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)
             if self.config.max_concurrent_requests is not None
@@ -67,11 +81,19 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
         return super().model_post_init(context)
 
+    def _resolve_client(self) -> NeMoGymAsyncOpenAI:
+        if len(self._clients) == 1:
+            return self._client
+        client = self._clients[self._next_client_idx]
+        self._next_client_idx = (self._next_client_idx + 1) % len(self._clients)
+        return client
+
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
+        client = self._resolve_client()
         async with self._semaphore:
-            openai_response_dict = await self._client.create_response(**body_dict)
+            openai_response_dict = await client.create_response(**body_dict)
         return NeMoGymResponse.model_validate(openai_response_dict)
 
     async def chat_completions(
@@ -79,8 +101,9 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
+        client = self._resolve_client()
         async with self._semaphore:
-            openai_response_dict = await self._client.create_chat_completion(**body_dict)
+            openai_response_dict = await client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)
 
 

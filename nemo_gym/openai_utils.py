@@ -533,16 +533,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES:
-                    max_num_tries += 1
-
                 content = (await response.content.read()).decode()
                 kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
                 print(
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
                     flush=True,
                 )
+                # Keep retryable HTTP failures bounded. The previous behavior
+                # incremented both ``tries`` and ``max_num_tries`` for 429/502/
+                # 503/504/520, so a persistently overloaded service or a
+                # request that always exceeded an ingress timeout retried
+                # forever and left the rollout permanently RUNNING.
                 await sleep(0.5)
                 continue
             else:

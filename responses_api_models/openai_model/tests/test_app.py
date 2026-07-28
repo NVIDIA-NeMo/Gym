@@ -29,11 +29,11 @@ from responses_api_models.openai_model.app import (
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None):
+    def _setup_server(self, max_concurrent_requests=None, openai_base_url="https://api.openai.com/v1"):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
-            openai_base_url="https://api.openai.com/v1",
+            openai_base_url=openai_base_url,
             openai_api_key="dummy_key",  # pragma: allowlist secret
             openai_model="dummy_model",
             entrypoint="",
@@ -44,6 +44,19 @@ class TestApp:
 
     async def test_sanity(self) -> None:
         self._setup_server()
+
+    def test_multiple_endpoints_round_robin(self) -> None:
+        server = self._setup_server(openai_base_url=["https://judge-1/v1", "https://judge-2/v1"])
+        clients = [MagicMock(spec=NeMoGymAsyncOpenAI), MagicMock(spec=NeMoGymAsyncOpenAI)]
+        server._clients = clients
+
+        assert [server._resolve_client() for _ in range(5)] == [
+            clients[0],
+            clients[1],
+            clients[0],
+            clients[1],
+            clients[0],
+        ]
 
     async def test_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server()

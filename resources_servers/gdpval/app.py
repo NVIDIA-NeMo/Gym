@@ -320,6 +320,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
+        if self.config.judge_media_mode == "images_and_text":
+            from resources_servers.gdpval.media_conversion import validate_images_and_text_dependencies
+
+            # This mode promises both page images and supplemental PDF text.
+            # Refuse to start instead of silently grading with a weaker input.
+            validate_images_and_text_dependencies()
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
@@ -590,12 +596,23 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
+        # A scorer can exhaust every formatting retry and return an error
+        # metadata object such as ``{"error": "no_valid_scores"}``.  Treating
+        # that object as a successful reward-zero judgement contaminates the
+        # main rollout JSONL and, with rerun-incomplete enabled, permanently
+        # caches the malformed judgement.  Raise so the Stirrup agent routes
+        # the attempt to the retryable failure sidecar and leaves the cached
+        # deliverable available for a later judging attempt.
+        if judge_result is None or judge_result.get("error"):
+            error = judge_result.get("error") if judge_result else "missing_judge_result"
+            raise RuntimeError(f"rubric judge produced no valid score: {error}")
+
         return GDPValVerifyResponse(
             **body.model_dump(),
             reward=float(reward),
             verify_mode="rubric",
             judge_response=judge_result,
-            invalid_judge_response=(judge_result is None),
+            invalid_judge_response=False,
         )
 
     async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:

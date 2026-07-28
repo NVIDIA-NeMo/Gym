@@ -78,7 +78,9 @@ from nemo_gym.skills import SkillsConfig, load_skill_directory
 #     it what's permanently done, sidecar tells it how many attempts each
 #     non-success has consumed (capped at NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,
 #     default 3). Rows flagged ``_ng_failure_terminal=True`` are never
-#     retried regardless of attempt count.
+#     retried regardless of attempt count, except legacy ``timeout_exceeded``
+#     rows: timeouts are retryable because a fresh rollout can take a
+#     different trajectory and finish within the next allocation.
 # ---------------------------------------------------------------------------
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
@@ -86,6 +88,16 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _failure_is_terminal(row: Dict[str, Any]) -> bool:
+    """Return whether a sidecar failure permanently gates its rollout key.
+
+    Older sidecars marked ``timeout_exceeded`` terminal. Treat those rows as
+    retryable so changing this policy also repairs already-persisted failures.
+    The normal max-attempt gate still bounds repeated timeouts.
+    """
+    return bool(row.get(NG_TERMINAL_KEY)) and row.get(NG_FAILURE_CLASS_KEY) != "timeout_exceeded"
 
 
 def _get_max_rollout_attempts() -> int:
@@ -437,7 +449,7 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                     attempts_by_key[k] += 1
-                    if fr.get(NG_TERMINAL_KEY):
+                    if _failure_is_terminal(fr):
                         terminal_keys.add(k)
 
         max_attempts = _get_max_rollout_attempts()
@@ -454,7 +466,7 @@ class RolloutCollectionHelper(BaseModel):
 - {len(original_input_rows)} original input rows
 - {len(rows)} rows already done (in main jsonl)
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
-- {len(terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
+- {len(terminal_keys)} sidecar-terminal (skipped; legacy timeout flags ignored) → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
