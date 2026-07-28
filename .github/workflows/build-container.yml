@@ -20,12 +20,6 @@ on:
       - docker/Dockerfile
       - pyproject.toml
       - uv.lock
-  pull_request:
-    branches: [main]
-    paths:
-      - docker/Dockerfile
-      - pyproject.toml
-      - uv.lock
   workflow_dispatch:
 
 jobs:
