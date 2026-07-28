@@ -1,5 +1,6 @@
 import shlex
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from nemo_gym.orchestration.api import (
@@ -40,40 +41,48 @@ class SlurmExecutor(BaseExecutor):
 
     def run(self, config: SubmitConfig) -> None:
         compute = next(iter(config.compute.values()))
-        output_path = Path(config.job.output_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        remote_run_dir = Path(config.job.output_path) / timestamp
 
-        staging = self._stage(config, compute)
+        staging = self._stage(config, compute, remote_run_dir)
         with get_connection(compute.hostname) as conn:
-            conn.copy(staging, output_path)
+            conn.copy(staging, remote_run_dir)
             conn.run([
-                f"sbatch {shlex.quote(str(output_path / b.name / 'job.sh'))}"
+                f"sbatch {shlex.quote(str(remote_run_dir / b.name / 'job.sh'))}"
                 for b in config.driver.benchmarks
             ])
 
-    def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig) -> Path:
+    def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> Path:
         staging = Path(tempfile.mkdtemp(prefix="gym-submit-"))
         for benchmark in config.driver.benchmarks:
             bench_dir = staging / benchmark.name
             bench_dir.mkdir()
             (bench_dir / "logs").mkdir()
-            script = self._build_job_script(config, benchmark, compute)
+            remote_bench_dir = remote_run_dir / benchmark.name
+            script = self._build_job_script(config, benchmark, compute, remote_bench_dir)
             (bench_dir / "job.sh").write_text(script)
         return staging
 
     def _build_job_script(
-        self, config: SubmitConfig, benchmark: BenchmarkRunConfig, compute: SlurmComputeConfig
+        self,
+        config: SubmitConfig,
+        benchmark: BenchmarkRunConfig,
+        compute: SlurmComputeConfig,
+        remote_bench_dir: Path,
     ) -> str:
         lines = ["#!/bin/bash"]
 
         if compute.walltime:
             lines.append(f"#SBATCH --time={compute.walltime}")
+        lines.append(f"#SBATCH --chdir={remote_bench_dir}")
 
         for name, service in config.services.items():
             builder = _BUILDERS[type(service)]
             lines.append(f"# service: {name}")
             lines.append(
                 f"srun --container-image={shlex.quote(service.container)} "
-                f"{builder(service)} &"
+                f"{builder(service)} "
+                f"> logs/{name}.log 2>&1 &"
             )
 
         for name, service in config.services.items():
@@ -87,6 +96,7 @@ class SlurmExecutor(BaseExecutor):
 
         lines.append(
             f"srun --container-image={shlex.quote(config.driver.container)} "
-            f"gym eval run --benchmark {shlex.quote(benchmark.name)}"
+            f"gym eval run --benchmark {shlex.quote(benchmark.name)} "
+            f"> logs/driver.log 2>&1"
         )
         return "\n".join(lines)
