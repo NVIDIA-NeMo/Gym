@@ -41,6 +41,13 @@ from nemo_gym.token_id_capture.builder import (
     project_main_chain_response,
 )
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.lineage import (
+    LineageIndex,
+    LineageNode,
+    RolloutLineage,
+    assistant_fingerprint,
+    canonicalize_tool_arguments,
+)
 from nemo_gym.token_id_capture.consumer import (
     clear_token_captures_for_rollouts,
     token_id_capture_dirs_from_config,
@@ -94,6 +101,11 @@ __all__ = [
     "reset_token_sink",
     "capture_tokens",
     "CaptureTokenSource",
+    "LineageIndex",
+    "LineageNode",
+    "RolloutLineage",
+    "assistant_fingerprint",
+    "canonicalize_tool_arguments",
     "build_trajectories",
     "classify_side_calls",
     "per_request",
