@@ -37,20 +37,26 @@ set +a
 ```
 
 Serving a different model is a new file in `models/`, not an edit to any
-script. Start from `models/example.env`. The three GLM-5.2 profiles are worked
-examples of the same weights deployed three ways:
+script. Start from `models/example.env`. The two GLM-5.2 profiles are worked
+examples of the same weights deployed two ways:
 
 | Profile | Shape | For |
 |---|---|---|
 | `glm-5.2-fp8.env` | 2 nodes, TP=8, 1 replica | Lowest per-request latency |
-| `glm-5.2-fp8-dp7.env` | 7 nodes, TP=4, 7 replicas | Aggregate throughput |
-| `glm-5.2-bf16.env` | 16 nodes, TP=4, 16 replicas | Throughput, unquantized |
+| `glm-5.2-bf16.env` | 16 nodes, TP=4, 16 replicas | Aggregate throughput |
+
+Sizing tensor parallelism is not a free choice: the weights have to leave room
+for KV cache. GLM-5.2 fp8 is ~756 GB, so TP=4 puts ~189 GB on each GPU and vLLM
+starts and then dies with `No available memory for the cache blocks`. TP=8 puts
+~95 GB per GPU and leaves most of the card for KV. Check that arithmetic before
+inventing a topology — the failure comes minutes into startup, after the weights
+have loaded.
 
 For rollout collection the binding constraint is replicas, not the agent loop:
 aggregate throughput on a single replica was still scaling at ~0.84 efficiency
-per doubling of agent concurrency with no sign of flattening. Reach for a
-data-parallel profile before tuning concurrency, and set concurrency to roughly
-16 per replica so the replicas stay fed.
+per doubling of agent concurrency with no sign of flattening. Reach for data
+parallelism before tuning concurrency, and set concurrency to roughly 16 per
+replica so the replicas stay fed.
 
 Four settings are required and deliberately have no default —
 `GDPVAL_SLURM_ACCOUNT`, `GDPVAL_MODEL_PATH`, `GDPVAL_VLLM_IMAGE` and
