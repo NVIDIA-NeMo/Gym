@@ -42,6 +42,49 @@ from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS
 
 MAX_TOTAL_CHARS = 20_000
 
+# Caps on *text* content blocks in the multimodal judging path. ``read_deliverable_files``
+# has always bounded its output at ``MAX_TOTAL_CHARS``; ``convert_deliverables_to_content_blocks``
+# bounded nothing, so a single large text file went into the judge prompt whole. Observed:
+# a 2.8 MB file produced a 720,898-token request against a 786,432-token judge, came back
+# 400, and surfaced to the caller as a transient 500 -- so the task was not judged badly,
+# it was not judged at all, and the run still exited 0.
+#
+# The largest genuine text deliverable in the GDPVal/Mercor corpus is 101 KB (per-task
+# total also 101 KB), so these caps leave real submissions byte-for-byte intact and only
+# bite pathological files. Truncating loses a tail; not truncating loses the task.
+MAX_TEXT_BLOCK_CHARS = 200_000
+MAX_TOTAL_TEXT_BLOCK_CHARS = 400_000
+# Reserved per text block for its header and any truncation notice, so a directory
+# of many small files cannot blow the request on framing alone.
+TEXT_BLOCK_OVERHEAD_CHARS = 120
+
+# Stirrup persists its own run state into the very directory it writes
+# deliverables to: the finish payload, the full message history, and run
+# metadata. ``.json`` is in ``TEXT_EXTS``, so without this filter the judge is
+# handed the agent's own reasoning trace as part of the "submission" and can
+# grade what the agent *said it did* rather than the artefact it produced -- a
+# false positive for any "states/reports <value>" rubric criterion.
+#
+# This is the single definition: the agent that writes these files owns the
+# list, and every judging path imports it from here (pairwise comparison in
+# ``resources_servers/gdpval/comparison.py`` previously kept its own copy).
+IGNORE_FILES = frozenset(
+    {
+        "finish_params.json",
+        "history.json",
+        "history.pkl",
+        "metadata.json",
+        "inprogress_history.json",
+        "log.txt",
+        "reference_files",
+    }
+)
+
+
+def is_deliverable(path: Path) -> bool:
+    """True if *path* is an agent-produced deliverable rather than run state."""
+    return path.is_file() and path.name not in IGNORE_FILES
+
 
 def read_deliverable_files(output_dir: str) -> str:
     """Read text from all deliverable files in *output_dir*.
@@ -60,7 +103,7 @@ def read_deliverable_files(output_dir: str) -> str:
     if not output_path.is_dir():
         return ""
 
-    files = sorted(output_path.iterdir())
+    files = sorted(p for p in output_path.iterdir() if p.name not in IGNORE_FILES)
     if not files:
         return ""
 
@@ -207,20 +250,24 @@ MIME_TYPES = {
 }
 
 
-def _convert_office_to_pdf(fpath: Path) -> Path | None:
+def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | None:
     """Convert a .docx/.xlsx/.pptx file to PDF using LibreOffice headless.
 
     Returns the path to the generated PDF, or None on failure.
     Uses a unique user profile to avoid lock conflicts in concurrent workers.
 
+    With *out_dir*, the PDF is written there instead of next to *fpath*. Judging
+    passes use that so reading a deliverables directory never also writes to it.
+
     Whitespace in the input filename makes LibreOffice's batch-convert mode
     silently drop the file (the URI it builds isn't percent-encoded), so we
     stage the input to a tempdir with a sanitized basename and move the PDF
-    back to the original location.
+    back to the intended location.
     """
     profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
     user_install = f"file://{profile_dir.as_posix()}"
-    out_pdf = fpath.with_suffix(".pdf")
+    dest_dir = out_dir if out_dir is not None else fpath.parent
+    out_pdf = dest_dir / (fpath.stem + ".pdf")
     stage_dir: Path | None = None
     input_path = fpath
     has_whitespace = any(c.isspace() for c in fpath.name)
@@ -233,7 +280,7 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
             shutil.copy2(fpath, input_path)
             lo_outdir = str(stage_dir)
         else:
-            lo_outdir = str(fpath.parent)
+            lo_outdir = str(dest_dir)
 
         cmd = [
             "libreoffice",
@@ -265,6 +312,26 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
         shutil.rmtree(profile_dir, ignore_errors=True)
         if stage_dir is not None:
             shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def _fair_text_allowances(sizes: list[int], total_budget: int, per_file_cap: int) -> list[int]:
+    """Max-min fair split of *total_budget* across text deliverables of *sizes*.
+
+    Smallest first: each file may take an equal share of what is left divided by how
+    many files still need one. Files under their share take only what they need and
+    hand the surplus back, so a small real deliverable is never starved by a large
+    one that happens to sort earlier. Returned in the order *sizes* was given.
+    """
+    allowances = [0] * len(sizes)
+    remaining = total_budget
+    order = sorted(range(len(sizes)), key=lambda i: sizes[i])
+    for position, idx in enumerate(order):
+        still_to_serve = len(order) - position
+        share = remaining // still_to_serve
+        take = max(0, min(sizes[idx], per_file_cap, share))
+        allowances[idx] = take
+        remaining -= take
+    return allowances
 
 
 def _pdf_bytes_to_image_text_blocks(
@@ -356,10 +423,59 @@ def convert_deliverables_to_content_blocks(
     images_and_text = media_mode == "images_and_text"
 
     blocks: list[dict[str, Any]] = []
-    converted_pdfs: list[Path] = []  # track for cleanup
+    scratch_dirs: list[Path] = []  # tempdirs holding PDFs this pass converted
 
-    for fpath in sorted(output_path.iterdir()):
-        if not fpath.is_file():
+    entries = sorted(output_path.iterdir())
+
+    # ``Report.docx`` and ``Report.pptx`` both map to ``Report.pdf``. A sibling PDF
+    # is then ambiguous -- it can only be the render of one of them -- so reusing it
+    # for the other would show the judge the first file's content twice and the
+    # second file's content never. Count the stems and only take the fast path when
+    # the mapping is unambiguous.
+    office_stem_counts: dict[str, int] = {}
+    for entry in entries:
+        if is_deliverable(entry) and entry.suffix.lower() in OFFICE_EXTS:
+            office_stem_counts[entry.stem] = office_stem_counts.get(entry.stem, 0) + 1
+
+    # Allot the aggregate budget up front rather than first-come-first-served. Files
+    # are visited in sorted order, so a spend-as-you-go budget would let two big
+    # ``000_*.txt`` files starve a real ``Report.md`` -- renaming a file would change
+    # the score. Max-min fair shares make a deliverable's allowance independent of
+    # what it is called. Per-block overhead (header, truncation notice) is reserved
+    # before allotting, because it is tokens too.
+    text_files = [p for p in entries if is_deliverable(p) and p.suffix.lower() in TEXT_EXTS]
+    body_budget = max(0, MAX_TOTAL_TEXT_BLOCK_CHARS - len(text_files) * TEXT_BLOCK_OVERHEAD_CHARS)
+    allowance_by_name = dict(
+        zip(
+            (p.name for p in text_files),
+            _fair_text_allowances([p.stat().st_size for p in text_files], body_budget, MAX_TEXT_BLOCK_CHARS),
+        )
+    )
+
+    emitted_chars = 0
+    omitted_names: list[str] = []
+
+    def _text_block(header: str, body: str, allowance: int) -> dict[str, Any] | None:
+        """A text block for *body*, trimmed to *allowance*.
+
+        Returns ``None`` once the aggregate budget is spent: with enough files even
+        the headers alone would blow the request, so past that point they are counted
+        into a single summary block rather than named one by one.
+        """
+        nonlocal emitted_chars
+        if emitted_chars >= MAX_TOTAL_TEXT_BLOCK_CHARS:
+            return None
+        cap = max(0, min(MAX_TEXT_BLOCK_CHARS, allowance))
+        if len(body) > cap:
+            shown = body[:cap] + f"\n[...truncated: {len(body) - cap:,} of {len(body):,} chars omitted]"
+        else:
+            shown = body
+        block = {"type": "text", "text": f"\n{header}\n{shown}"}
+        emitted_chars += len(block["text"])
+        return block
+
+    for fpath in entries:
+        if not is_deliverable(fpath):
             continue
 
         ext = fpath.suffix.lower()
@@ -368,12 +484,27 @@ def convert_deliverables_to_content_blocks(
             if ext in TEXT_EXTS:
                 text = fpath.read_text(encoding="utf-8", errors="replace").strip()
                 if text:
-                    blocks.append({"type": "text", "text": f"\n{fpath.name}:\n{text}"})
+                    block = _text_block(f"{fpath.name}:", text, allowance_by_name.get(fpath.name, 0))
+                    blocks.append(block) if block else omitted_names.append(fpath.name)
 
             elif ext in OFFICE_EXTS:
-                pdf_path = _convert_office_to_pdf(fpath)
+                # A preconversion pass may already have written a sibling PDF
+                # (see resources_servers/gdpval/preconvert.py, which guards on
+                # exactly this). Reuse it when it unambiguously belongs to this
+                # file, rather than regenerating over the top of a corpus we did
+                # not create -- a judging pass that rewrites its own inputs makes
+                # the next run over the same tree a different experiment.
+                existing_pdf = fpath.with_suffix(".pdf")
+                if existing_pdf.is_file() and office_stem_counts.get(fpath.stem, 0) == 1:
+                    pdf_path = existing_pdf
+                else:
+                    # Convert into a tempdir, never next to the original: that keeps
+                    # the deliverables directory read-only for judging and stops two
+                    # same-stem Office files fighting over one output name.
+                    scratch = Path(tempfile.mkdtemp(prefix="deliverable-pdf-"))
+                    scratch_dirs.append(scratch)
+                    pdf_path = _convert_office_to_pdf(fpath, out_dir=scratch)
                 if pdf_path and pdf_path.exists():
-                    converted_pdfs.append(pdf_path)
                     data = pdf_path.read_bytes()
                     if images_and_text:
                         rendered = _pdf_bytes_to_image_text_blocks(
@@ -393,9 +524,12 @@ def convert_deliverables_to_content_blocks(
                     )
                 else:
                     # Fallback to text extraction
+                    # No pre-allotted share: an Office file only lands here when its
+                    # conversion failed, so it competes for whatever budget is left.
                     text = _extract_text(fpath, ext)
                     if text:
-                        blocks.append({"type": "text", "text": f"\n{fpath.name} (text fallback):\n{text}"})
+                        block = _text_block(f"{fpath.name} (text fallback):", text, MAX_TEXT_BLOCK_CHARS)
+                        blocks.append(block) if block else omitted_names.append(fpath.name)
 
             elif ext == ".pdf":
                 data = fpath.read_bytes()
@@ -446,8 +580,19 @@ def convert_deliverables_to_content_blocks(
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 
-    # Clean up converted PDFs (they live next to the originals)
-    for pdf_path in converted_pdfs:
-        pdf_path.unlink(missing_ok=True)
+    if omitted_names:
+        shown = ", ".join(omitted_names[:20])
+        if len(omitted_names) > 20:
+            shown += f", and {len(omitted_names) - 20} more"
+        blocks.append(
+            {
+                "type": "text",
+                "text": f"\n[{len(omitted_names)} text deliverable(s) omitted, budget exhausted: {shown}]",
+            }
+        )
+
+    # Clean up only what this pass created, which lives entirely in tempdirs.
+    for scratch in scratch_dirs:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     return blocks
