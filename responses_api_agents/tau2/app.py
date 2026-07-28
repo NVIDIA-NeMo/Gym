@@ -200,18 +200,18 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         if self._capture_config.should_capture_calls:
             prev_timestamp = None
-            for message in result["messages"]:
-                if message["role"] == "assistant" and message["tool_calls"]:
-                    prev_timestamp = message["timestamp"]
-                elif message["role"] == "tool" and message["requestor"] == "assistant":
+            for message in result.messages:
+                if message.role == "assistant" and message.tool_calls:
+                    prev_timestamp = message.timestamp
+                elif message.role == "tool" and message.requestor == "assistant":
                     request.state.events.append(
                         ToolCallEvent(
-                            call_id=message["id"],
+                            call_id=message.id,
                             timestamp_start=datetime.fromisoformat(prev_timestamp).timestamp(),
-                            timestamp_end=datetime.fromisoformat(message["timestamp"]).timestamp(),
+                            timestamp_end=datetime.fromisoformat(message.timestamp).timestamp(),
                         ),
                     )
-                    prev_timestamp = message["timestamp"]
+                    prev_timestamp = message.timestamp
 
         return Tau2VerifyResponse(
             **body_dict,
