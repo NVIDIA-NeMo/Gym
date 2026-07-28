@@ -4,13 +4,17 @@ wmt_translation:
       entrypoint: app.py
       domain: other
       verified: false
-      description: Machine-translation verifier computing corpus-level BLEU per language pair plus optional xCOMET-XXL neural QE via a Ray GPU actor.
-      value: Improves multilingual translation quality across BLEU and COMET-family metrics.
+      description: Machine-translation verifier computing corpus-level spBLEU and ChrF per language pair plus optional xCOMET-XXL neural QE via a Ray GPU actor.
+      value: Improves multilingual translation quality across spBLEU, ChrF, and COMET-family metrics.
       compute_comet: true
       comet_model: Unbabel/XCOMET-XXL
       comet_batch_size: 16
       # Listed explicitly so OmegaConf struct mode accepts `++…comet_num_shards=N` CLI overrides.
       comet_num_shards: 8
+      # Optional per-rollout language-consistency backend.
+      language_consistency_backend: null
+      # Warn once per aggregation for source-target pairs below this 0-100 score.
+      language_consistency_warning_threshold: 50.0
 
 wmt_translation_simple_agent:
   responses_api_agents:
