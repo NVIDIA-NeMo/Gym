@@ -3784,6 +3784,55 @@ class TestTopLogprobsHandling:
         assert message["generation_log_probs"] == [-0.1, -0.2]
         assert message["prompt_token_ids"] == [10, 20, 30]
 
+    def test_capture_path_preserves_upstream_token_metadata_without_tokenizing(
+        self,
+    ) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {
+                            "token": "token_id:123",
+                            "logprob": -0.1,
+                            "bytes": None,
+                            "top_logprobs": [],
+                        },
+                        {
+                            "token": "token_id:456",
+                            "logprob": -0.2,
+                            "bytes": None,
+                            "top_logprobs": [],
+                        },
+                    ]
+                },
+                message_extra={
+                    "prompt_token_ids": [10, 20, 30],
+                    "generation_token_ids": [123, 456],
+                    "generation_log_probs": [-0.1, -0.2],
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        client = TestClient(app)
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["prompt_token_ids"] == [10, 20, 30]
+        assert message["generation_token_ids"] == [123, 456]
+        assert message["generation_log_probs"] == [-0.1, -0.2]
+        mock_client.create_tokenize.assert_not_awaited()
+
     def test_capture_path_preserves_routed_experts(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
         app = model.setup_webserver()
