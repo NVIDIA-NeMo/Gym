@@ -27,7 +27,7 @@ from uuid import uuid4
 
 import ray
 import yaml
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Request
 from minisweagent.config import builtin_config_dir, get_config_path
 from pydantic import ConfigDict
 
@@ -697,7 +697,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
 
-    async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
+    async def run(self, request: Request, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
         async with self.sem:
             model_server_name = self.config.model_server.name
             global_config_dict = ServerClient.load_from_global_config().global_config_dict
@@ -715,7 +715,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             workers = 1
             run_golden = self.config.run_golden
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
-            base_url = f"{self.base_url_for_run(base_url, body)}/v1"
+            base_url = self.resolve_call_path(f"{base_url}/v1", request)
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
