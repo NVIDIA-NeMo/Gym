@@ -66,7 +66,7 @@ class BenchmarkRunConfig(BaseModel):
 
 
 class DriverConfig(BaseModel):
-    container: str
+    container: str = "python:3.12"
     benchmarks: list[BenchmarkRunConfig]
 
 

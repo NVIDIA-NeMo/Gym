@@ -22,8 +22,9 @@ _SCRIPT_TEMPLATE = """\
 """
 
 
-def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path) -> str:
+def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benchmark_name: str) -> str:
     lines = []
+    lines.append(f"#SBATCH --job-name=gym-{benchmark_name}")
     lines.append(f"#SBATCH --account={compute.account}")
     if compute.walltime:
         lines.append(f"#SBATCH --time={compute.walltime}")
@@ -51,7 +52,7 @@ def _render_pool_directives(pool_name: str, pool: NodePool) -> list[str]:
 def _render_service_command(name: str, container: str, command: str) -> str:
     return (
         f"# service: {name}\n"
-        f"srun --container-image={shlex.quote(container)} {command} > logs/{name}.log 2>&1 &"
+        f"srun --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &"
     )
 
 
@@ -85,7 +86,7 @@ def build_sbatch_script(
     compute: SlurmComputeConfig,
     remote_bench_dir: Path,
 ) -> str:
-    directives = _render_directives(compute, remote_bench_dir)
+    directives = _render_directives(compute, remote_bench_dir, benchmark.name)
 
     service_commands = "\n\n".join(
         _render_service_command(name, service.container, _BUILDERS[type(service)](service))
@@ -100,8 +101,8 @@ def build_sbatch_script(
 
     driver_command = (
         f"srun --container-image={shlex.quote(config.driver.container)} "
-        f"gym eval run --benchmark {shlex.quote(benchmark.name)} "
-        f"> logs/driver.log 2>&1"
+        f"--output=logs/driver.log "
+        f"gym eval run --benchmark {shlex.quote(benchmark.name)}"
     )
 
     return _SCRIPT_TEMPLATE.format(
