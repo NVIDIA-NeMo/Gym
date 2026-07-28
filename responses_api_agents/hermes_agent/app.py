@@ -47,7 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, get_server_url, raise_for_status
 
 
 def _trajectory_to_output_items(messages, n_input):
@@ -265,9 +265,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
         system_message = self.config.system_prompt or input_system
 
-        # A prefixed self-call carries the rollout id into the model-server base URL.
-        rollout_id = request.path_params.get("rollout_id") if request is not None else None
-        base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        base_url = self.resolve_call_path(get_server_url(self.config.model_server.name) + "/v1", request)
         model_name = str(self.config.model_server.name)
 
         agent = AIAgent(
@@ -387,7 +385,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
+                url_path=self.resolve_call_path("/v1/responses", request),
                 json=body.responses_create_params,
                 cookies=cookies,
             )

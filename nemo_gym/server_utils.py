@@ -59,7 +59,6 @@ from starlette.middleware.sessions import SessionMiddleware
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
     ROLLOUT_ID_KEY_NAME,
-    ROLLOUT_PATH_PREFIX,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
 )
@@ -888,15 +887,3 @@ def get_server_url(server_name: str) -> str:
     )
 
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
-
-
-def rollout_path_prefix(rollout_id: Optional[str]) -> str:
-    """Return the leading model-server path prefix for a rollout, if available."""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
-
-
-def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
-    """Append a rollout prefix to a model-server root URL."""
-    if not rollout_id:
-        return base_url
-    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
