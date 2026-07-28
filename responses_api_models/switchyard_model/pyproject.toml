@@ -39,9 +39,11 @@ dependencies = [
     # 0.1.0. Move to `>=0.1.1,<0.2.0` as soon as a release carrying that fix ships.
     #
     # Installing from git bypasses Switchyard's published cp312-abi3 wheels and builds its Rust
-    # extension through maturin, so this needs a cargo toolchain on the installing machine and
-    # adds roughly a minute to a cold environment build. CI runners carry one, so this server's
-    # suite builds and runs there normally.
+    # extension through maturin. That needs no toolchain on the installing machine -- maturin
+    # pulls in puccinialin and bootstraps rustup when it finds none, verified on a host with no
+    # cargo, no rustup and a cold cache -- but it does add a minute or two to a cold environment
+    # build, and the build fetches from static.rust-lang.org and crates.io on top of PyPI and
+    # GitHub. Restricted egress is the failure mode to warn users about, not a missing compiler.
     #
     # Updated Sun Jul 26, 2026 with nemo-switchyard[server] @ 0a03235
     # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Switchyard/blob/main/LICENSE

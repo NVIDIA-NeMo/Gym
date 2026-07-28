@@ -21,6 +21,18 @@ gym eval run --benchmark <name> --model-type switchyard_model \
   ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
 ```
 
+### The first startup builds Switchyard from source
+
+While `nemo-switchyard` is pinned to a git commit rather than a release, installing it compiles
+Switchyard's Rust extension instead of using its published wheels. This needs no setup on your
+part — maturin bootstraps a Rust toolchain if the machine has none — but it does mean the first
+`gym env start` for this server spends an extra minute or two building, and that the build reaches
+`static.rust-lang.org` and `crates.io` on top of PyPI and GitHub. Behind a restrictive egress
+policy those two hosts are the ones to allow.
+
+Neither applies once the pin moves to a released wheel, and neither applies to the self-managed
+mode below, which installs nothing.
+
 **Attaching instead.** Set `switchyard_base_url` to use a proxy you already run — worth doing when
 an eval needs to pin a specific Switchyard build, or when several servers should share one
 instance (routing strategies that use session or agent affinity are stateful, so replicas each
