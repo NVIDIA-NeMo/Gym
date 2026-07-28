@@ -79,6 +79,9 @@ class CaptureContext:
     model_call_id: str
     store: TokenCaptureStore
     model: str = ""
+    # Set by the model server when it supplied this call's prefix; read back at
+    # capture time so the evidence lands on the record rather than only in a log.
+    prefix_supplied: bool = False
 
     @property
     def sink(self) -> TokenSink:
@@ -95,6 +98,11 @@ _TOKEN_SINK: ContextVar[Optional[CaptureContext]] = ContextVar("nemo_gym_token_s
 
 def set_token_sink(sink: CaptureContext) -> Token:
     return _TOKEN_SINK.set(sink)
+
+
+def current_capture_context() -> Optional[CaptureContext]:
+    """The capture context for the in-flight call, or None for untagged traffic."""
+    return _TOKEN_SINK.get()
 
 
 def reset_token_sink(token: Token) -> None:
@@ -148,6 +156,7 @@ async def capture_tokens(
             # reads is not token-only -- text-based penalties need it.
             output_items=response_to_output_items(payload),
             created_at=time.time(),
+            prefix_supplied=sink.prefix_supplied,
             **(request_facts or {}),
         )
         # cum_len/digest describe this call and are always computable; the parent

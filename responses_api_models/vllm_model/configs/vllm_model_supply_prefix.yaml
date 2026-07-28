@@ -1,0 +1,11 @@
+# A/B overlay: turn prefix supply ON (it is off by default in the shipped config).
+#
+# The model server hands the engine the exact tokens of the call this request continues
+# (required_prefix_token_ids), so the new prompt EXTENDS the previous prompt+generation by
+# construction instead of being re-rendered from text. Requires a unique, verified parent
+# from the lineage index; otherwise it forwards the request untouched and starts a new
+# chain -- wasteful, never wrong.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      supply_prefix_token_ids: true

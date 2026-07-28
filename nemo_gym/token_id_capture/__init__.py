@@ -41,18 +41,18 @@ from nemo_gym.token_id_capture.builder import (
     project_main_chain_response,
 )
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.consumer import (
+    clear_token_captures_for_rollouts,
+    token_id_capture_dirs_from_config,
+    trajectories_for_rollout,
+    trajectories_from_source,
+)
 from nemo_gym.token_id_capture.lineage import (
     LineageIndex,
     LineageNode,
     RolloutLineage,
     assistant_fingerprint,
     canonicalize_tool_arguments,
-)
-from nemo_gym.token_id_capture.consumer import (
-    clear_token_captures_for_rollouts,
-    token_id_capture_dirs_from_config,
-    trajectories_for_rollout,
-    trajectories_from_source,
 )
 from nemo_gym.token_id_capture.protocols import (
     TokenSink,
@@ -73,6 +73,8 @@ from nemo_gym.token_id_capture.sink import (
     CaptureContext,
     TokenCaptureContext,
     capture_tokens,
+    current_capture_context,
+    lineage_index,
     reset_token_sink,
     set_token_sink,
 )
@@ -100,6 +102,8 @@ __all__ = [
     "set_token_sink",
     "reset_token_sink",
     "capture_tokens",
+    "current_capture_context",
+    "lineage_index",
     "CaptureTokenSource",
     "LineageIndex",
     "LineageNode",

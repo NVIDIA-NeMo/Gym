@@ -53,6 +53,13 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.token_id_capture import (
+    CaptureContext,
+    TokenCaptureStore,
+    lineage_index,
+    reset_token_sink,
+    set_token_sink,
+)
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -4684,3 +4691,192 @@ class TestTopLogprobsHandling:
             )
         # The tokenize endpoint must not be reached once the contract check fails.
         mock_client.create_tokenize.assert_not_called()
+
+
+class TestPrefixSupply:
+    """Supplying the engine the previous call's exact tokens.
+
+    Without this the engine re-renders every prompt from text: a re-tokenized
+    assistant turn can split differently than the model sampled, and a reasoning
+    model's template drops earlier thinking entirely. Either way the new prompt
+    does not extend the old one and the trajectory cannot be chained.
+    """
+
+    @staticmethod
+    def _server(monkeypatch: MonkeyPatch, *, enabled: bool) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            supply_prefix_token_ids=enabled,
+        )
+        get_global_config_dict_mock = MagicMock(return_value={})
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    @staticmethod
+    def _armed(rollout_id: str, tmp_path) -> CaptureContext:
+        return CaptureContext(rollout_id=rollout_id, model_call_id="call-x", store=TokenCaptureStore(tmp_path))
+
+    def test_supplies_the_parents_cumulative_tokens(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        first_turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-0").record("parent", first_turn, [1, 2, 3, 4], "d")
+
+        token = set_token_sink(self._armed("sup-0", tmp_path))
+        try:
+            out = server._apply_prefix_supply({"messages": first_turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3, 4]
+
+    def test_off_by_default(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=False)
+        turn = [{"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-1").record("parent", turn, [1, 2], "d")
+
+        token = set_token_sink(self._armed("sup-1", tmp_path))
+        try:
+            out = server._apply_prefix_supply({"messages": turn})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_uncorrelated_call_is_left_alone(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "hello"}]})
+        assert "required_prefix_token_ids" not in out
+
+    def test_fingerprint_miss_falls_back_rather_than_supplying_something_wrong(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        """A rewritten history must send the request untouched. The splice applies
+        whatever it is given without checking it belongs to this conversation, so
+        a wrong prefix would silently generate from a conversation the harness
+        never asked for."""
+        server = self._server(monkeypatch, enabled=True)
+        lineage_index().for_rollout("sup-2").record("parent", [{"role": "assistant", "content": "hello"}], [1, 2], "d")
+
+        token = set_token_sink(self._armed("sup-2", tmp_path))
+        try:
+            out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "a summary"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_ambiguous_parent_is_not_supplied(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        turn = [{"role": "assistant", "content": "same"}]
+        lineage = lineage_index().for_rollout("sup-3")
+        lineage.record("a", turn, [1, 2], "da")
+        lineage.record("b", turn, [3, 4], "db")
+
+        token = set_token_sink(self._armed("sup-3", tmp_path))
+        try:
+            out = server._apply_prefix_supply({"messages": turn})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_a_fork_gets_the_parents_prefix_not_the_previous_calls(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """Two sub-agents branching from one parent must both get cum(parent).
+
+        A running cursor would hand the second branch a prefix containing the
+        first branch's generation -- which the splice would apply without
+        complaint, generating from a conversation that never happened.
+        """
+        server = self._server(monkeypatch, enabled=True)
+        shared = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "plan"}]
+        lineage = lineage_index().for_rollout("sup-4")
+        lineage.record("parent", shared, [1, 2, 3], "dp")
+        lineage.record(
+            "branch-a",
+            shared + [{"role": "user", "content": "a"}, {"role": "assistant", "content": "A"}],
+            [1, 2, 3, 9, 9],
+            "da",
+        )
+
+        token = set_token_sink(self._armed("sup-4", tmp_path))
+        try:
+            out = server._apply_prefix_supply({"messages": shared + [{"role": "user", "content": "b"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3]
+
+    def test_reasoning_stripped_history_still_supplies_the_real_tokens(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        """The case supplying exists for.
+
+        A reasoning model's chat template drops earlier thinking when it renders
+        a later prompt, so the re-rendered prompt cannot extend the previous
+        prompt-plus-generation -- the tokens are gone, not merely re-split. The
+        supplied prefix comes from the recording, so those tokens are restored
+        and the chain survives.
+        """
+        server = self._server(monkeypatch, enabled=True)
+        # The recorded turn included reasoning; what the harness echoes back does not.
+        recorded_turn = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}]
+        real_tokens_including_reasoning = [1, 2, 3, 4, 5, 6, 7]
+        lineage_index().for_rollout("sup-5").record("parent", recorded_turn, real_tokens_including_reasoning, "d")
+
+        token = set_token_sink(self._armed("sup-5", tmp_path))
+        try:
+            out = server._apply_prefix_supply({"messages": recorded_turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == real_tokens_including_reasoning
+
+
+class TestPrefixSupplyAccounting:
+    """Supply must be auditable after the fact.
+
+    Without this the only evidence supply fired is that chains happen to be
+    contiguous -- which they often are anyway, so a supply run and a non-supply
+    run look identical. That ambiguity made the first live supply experiment
+    inconclusive.
+    """
+
+    def test_supplied_call_is_marked_on_the_capture_context(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        turn = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+        lineage_index().for_rollout("acct-0").record("parent", turn, [1, 2, 3], "d")
+
+        ctx = CaptureContext(rollout_id="acct-0", model_call_id="c", store=TokenCaptureStore(tmp_path))
+        token = set_token_sink(ctx)
+        try:
+            out = server._apply_prefix_supply({"messages": turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3]
+        assert ctx.prefix_supplied is True
+        assert server._prefix_supply_counts == [1, 1]  # 1 supplied of 1 eligible
+
+    def test_fallback_counts_as_eligible_but_not_supplied(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        lineage_index().for_rollout("acct-1").record("parent", [{"role": "assistant", "content": "a"}], [1, 2], "d")
+
+        ctx = CaptureContext(rollout_id="acct-1", model_call_id="c", store=TokenCaptureStore(tmp_path))
+        token = set_token_sink(ctx)
+        try:
+            # A rewritten history: no unique parent, so supply must decline.
+            out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "rewritten"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+        assert ctx.prefix_supplied is False
+        assert server._prefix_supply_counts == [0, 1]  # eligible, not supplied
