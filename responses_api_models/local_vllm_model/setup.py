@@ -45,6 +45,11 @@ if platform == "darwin":
     dependencies.append("vllm==0.11.0")
 else:
     dependencies.append("vllm==0.26.0")
+    # Pin flashinfer to the exact version vllm 0.26.0 requires — pre-compiled CUDA kernels,
+    # avoids JIT compilation on first generation. Must stay in sync with pyproject.toml [vllm].
+    # Updated Mon Jul 28, 2026 with flashinfer-python==0.6.14
+    # License: Apache 2.0 https://github.com/flashinfer-ai/flashinfer/blob/main/LICENSE
+    dependencies.append("flashinfer-python==0.6.14")
 
 
 setuptools.setup(install_requires=dependencies)
