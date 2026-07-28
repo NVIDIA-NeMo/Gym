@@ -48,6 +48,7 @@ class BaseComputeConfig(BaseModel):
 
 class SlurmComputeConfig(BaseComputeConfig):
     type: Literal["slurm"]
+    account: str
     hostname: str | None = None
     walltime: str | None = None
     node_pools: dict[str, NodePool] = {}

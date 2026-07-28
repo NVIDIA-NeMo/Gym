@@ -20,7 +20,7 @@ class SlurmExecutor(BaseExecutor):
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> None:
         compute = next(iter(config.compute.values()))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        remote_run_dir = Path(config.job.output_path) / timestamp
+        remote_run_dir = Path(config.job.output_path) / f"gym-job-{timestamp}"
 
         if dry_run:
             self._dry_run(config, compute, remote_run_dir)

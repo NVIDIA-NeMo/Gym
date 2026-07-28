@@ -24,6 +24,7 @@ _SCRIPT_TEMPLATE = """\
 
 def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path) -> str:
     lines = []
+    lines.append(f"#SBATCH --account={compute.account}")
     if compute.walltime:
         lines.append(f"#SBATCH --time={compute.walltime}")
     lines.append(f"#SBATCH --chdir={remote_bench_dir}")

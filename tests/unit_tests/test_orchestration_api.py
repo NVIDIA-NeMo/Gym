@@ -18,10 +18,10 @@ from pydantic import ValidationError
 
 from nemo_gym.orchestration.api import SubmitConfig
 
-COMPUTE = {"cluster": {"type": "slurm", "hostname": "foo"}}
+COMPUTE = {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}}
 COMPUTE_TWO = {
-    "cluster_a": {"type": "slurm", "hostname": "foo"},
-    "cluster_b": {"type": "slurm", "hostname": "bar"},
+    "cluster_a": {"type": "slurm", "account": "my-account", "hostname": "foo"},
+    "cluster_b": {"type": "slurm", "account": "my-account", "hostname": "bar"},
 }
 
 SERVICE = {"container": "gym:latest", "type": "vllm", "model": "org/model"}
