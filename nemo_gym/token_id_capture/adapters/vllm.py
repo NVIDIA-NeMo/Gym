@@ -124,9 +124,7 @@ Template repr (detokenized): {repr(tokenizer.decode(template_token_ids))}
             break
 
     # This should never be the case, but
-    assert (
-        template_cut_start >= 0
-    ), f"""No EOS token ID found in the chat-templated messages!
+    assert template_cut_start >= 0, f"""No EOS token ID found in the chat-templated messages!
 Template prefix token IDs (everything before the final assistant message): {template_prefix_token_ids}
 
 Template token IDs (everything that was sent to the model endpoint): {template_token_ids}
@@ -162,9 +160,7 @@ def extract_generation_token_info(choice: dict[str, Any]) -> tuple[list[int], li
     token_ids = [int(str(token_id).removeprefix("token_id:")) for token_id in raw_ids]
     logprobs = [float(value) for value in raw_logprobs]
     if len(token_ids) != len(logprobs):
-        raise ValueError(
-            f"generated token and log-probability lengths differ: {len(token_ids)} != {len(logprobs)}"
-        )
+        raise ValueError(f"generated token and log-probability lengths differ: {len(token_ids)} != {len(logprobs)}")
     return token_ids, logprobs
 
 

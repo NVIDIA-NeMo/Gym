@@ -26,6 +26,12 @@ from typing import Any, Optional
 
 import pytest
 
+from nemo_gym.token_id_capture.adapters.vllm import (
+    PREFIX_IDS_FIELD,
+    VLLMCaptureAdapter,
+    extract_generation_token_info,
+    replace_prefix_tokens,
+)
 from nemo_gym.token_id_capture.staging import install_capture as staging_install_capture
 from nemo_gym.token_id_capture.staging.capture import (
     ActiveCall,
@@ -38,12 +44,6 @@ from nemo_gym.token_id_capture.staging.capture import (
 from nemo_gym.token_id_capture.staging.digest import compute_staging_digest
 from nemo_gym.token_id_capture.staging.protocols import install_capture as protocols_install_capture
 from nemo_gym.token_id_capture.staging.records import StagedCallRecord, StageResult
-from nemo_gym.token_id_capture.adapters.vllm import (
-    PREFIX_IDS_FIELD,
-    VLLMCaptureAdapter,
-    extract_generation_token_info,
-    replace_prefix_tokens,
-)
 
 
 class _MemorySink:
@@ -160,13 +160,17 @@ def test_complete_call_stages_before_returning_coords() -> None:
     record = sink.records[0]
     assert record.token_mask_delta == [0.0, 0.0, 0.0, 1.0, 1.0]
     assert record.generation_logprobs_delta == [0.0, 0.0, 0.0, -0.1, -0.2]
-    assert record.digest == coords.digest == compute_staging_digest(
-        rollout_id="g7_r0",
-        call_id="c1",
-        prev_len=0,
-        token_ids_delta=record.token_ids_delta,
-        token_mask_delta=record.token_mask_delta,
-        logprobs_delta=record.generation_logprobs_delta,
+    assert (
+        record.digest
+        == coords.digest
+        == compute_staging_digest(
+            rollout_id="g7_r0",
+            call_id="c1",
+            prev_len=0,
+            token_ids_delta=record.token_ids_delta,
+            token_mask_delta=record.token_mask_delta,
+            logprobs_delta=record.generation_logprobs_delta,
+        )
     )
 
 
@@ -190,9 +194,7 @@ def test_complete_call_token_in_child_carries_only_the_delta() -> None:
 def test_sink_rejection_degrades_to_capture_failed_coords() -> None:
     capture, sink = _capture(_MemorySink(fail=True))
     call = _root_call(capture)
-    coords = capture.complete_call(
-        call, prompt_token_ids=[1, 2], generated_token_ids=[3], generated_logprobs=[-0.5]
-    )
+    coords = capture.complete_call(call, prompt_token_ids=[1, 2], generated_token_ids=[3], generated_logprobs=[-0.5])
     assert coords.disposition == "capture_failed"
     assert coords.token_ids_delta == []
     assert (coords.delta_len, coords.cum_len) == (0, 0)
@@ -202,9 +204,7 @@ def test_sink_rejection_degrades_to_capture_failed_coords() -> None:
 def test_sink_exception_degrades_not_raises() -> None:
     capture, _ = _capture(_MemorySink(raise_error=True))
     call = _root_call(capture)
-    coords = capture.complete_call(
-        call, prompt_token_ids=[1, 2], generated_token_ids=[3], generated_logprobs=[-0.5]
-    )
+    coords = capture.complete_call(call, prompt_token_ids=[1, 2], generated_token_ids=[3], generated_logprobs=[-0.5])
     assert coords.disposition == "capture_failed"
 
 

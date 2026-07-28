@@ -251,7 +251,7 @@ def run_sink_source_conformance(fixture: dict[str, Any], sink: Any, source: Any)
         )
         _require(
             recomputed == record.digest,
-            f"call {snapshot.call_id}: storage round-trip changed the digest " "(dtype drift or corruption)",
+            f"call {snapshot.call_id}: storage round-trip changed the digest (dtype drift or corruption)",
         )
     # Parent pointers are lineage state, not storage state: rejoin them from
     # the manifest before rebuilding, as the finalizer does.

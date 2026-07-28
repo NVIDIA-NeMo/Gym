@@ -91,7 +91,7 @@ def _carry_boundary(snapshot: StagedCallSnapshot) -> int:
             break
     if any(mask_value == 0.0 for mask_value in snapshot.token_mask_delta[boundary:]):
         raise RebuildError(
-            f"call {snapshot.call_id}: token_mask_delta is not a prompt-carry " "prefix followed by generated tokens"
+            f"call {snapshot.call_id}: token_mask_delta is not a prompt-carry prefix followed by generated tokens"
         )
     return boundary
 
@@ -112,19 +112,17 @@ def snapshots_to_entries(rollout_id: str, snapshots: list[StagedCallSnapshot]) -
             base = cumulative_by_call.get(snapshot.parent_call_id)
             if base is None:
                 raise RebuildError(
-                    f"call {snapshot.call_id}: parent {snapshot.parent_call_id} " "precedes it in no snapshot"
+                    f"call {snapshot.call_id}: parent {snapshot.parent_call_id} precedes it in no snapshot"
                 )
             if len(base) != snapshot.prev_len:
                 raise RebuildError(
-                    f"call {snapshot.call_id}: prev_len={snapshot.prev_len} does not "
-                    f"equal parent length {len(base)}"
+                    f"call {snapshot.call_id}: prev_len={snapshot.prev_len} does not equal parent length {len(base)}"
                 )
         else:
             base = []
             if snapshot.prev_len != 0:
                 raise RebuildError(
-                    f"call {snapshot.call_id}: parentless row must be self-contained, "
-                    f"got prev_len={snapshot.prev_len}"
+                    f"call {snapshot.call_id}: parentless row must be self-contained, got prev_len={snapshot.prev_len}"
                 )
         if not (len(snapshot.token_ids_delta) == len(snapshot.token_mask_delta) == len(snapshot.logprobs_delta)):
             raise RebuildError(f"call {snapshot.call_id}: misaligned delta arrays")

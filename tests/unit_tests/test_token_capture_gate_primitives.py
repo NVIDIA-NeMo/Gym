@@ -542,6 +542,7 @@ def test_conformance_catches_a_corrupted_store() -> None:
 # purity: the capture core must import with no heavy dependencies
 # ---------------------------------------------------------------------------
 
+
 def _staging_modules() -> list[str]:
     """Every module in the ``staging`` subpackage, discovered from disk so a
     new core module is covered automatically (no hand-maintained list)."""

@@ -209,9 +209,7 @@ class RolloutTokenCapture:
             if not result.ok:
                 return self._failed_coords(call, f"sink_rejected:{result.error}")
         except Exception as error:  # fail-closed, never break the completion
-            LOGGER.exception(
-                "token capture failed for rollout %s call %s", call.rollout_id, call.call_id
-            )
+            LOGGER.exception("token capture failed for rollout %s call %s", call.rollout_id, call.call_id)
             return self._failed_coords(call, f"{type(error).__name__}: {error}")
         return CommitCoords(
             rollout_id=call.rollout_id,
@@ -241,9 +239,7 @@ class RolloutTokenCapture:
             prompt_token_ids = self._adapter.extract_prompt_ids(response_payload)
             generated_token_ids, generated_logprobs = self._adapter.extract_generation(response_payload)
         except Exception as error:  # fail-closed: extraction is part of capture
-            LOGGER.exception(
-                "token extraction failed for rollout %s call %s", call.rollout_id, call.call_id
-            )
+            LOGGER.exception("token extraction failed for rollout %s call %s", call.rollout_id, call.call_id)
             call.completed = True
             return self._failed_coords(call, f"{type(error).__name__}: {error}")
         return self.complete_call(
