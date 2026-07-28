@@ -1,0 +1,39 @@
+config_paths:
+  - resources_servers/legal_agent_bench/configs/resources_only.yaml
+
+legal_agent_bench_claude_code_agent:
+  responses_api_agents:
+    legal_agent_bench_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Legal Agent Bench with a config-selected Claude Code agent harness.
+      value: Evaluate legal-document agents independently of Harbor orchestration.
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      runtime_tasks_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harbor_tasks_dir}
+      skills_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harness_skills_dir}
+      concurrency: 1
+      agent_timeout_seconds: 10800
+      verifier_timeout_seconds: 3600
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
+      agent_kwargs:
+        model: ${policy_model_name}
+        max_turns: null
+        timeout: 10800
+        bare: true
+        claude_code_version: 2.1.211
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/legal_agent_bench/data/example.jsonl
+          license: MIT
+        - name: legal_agent_bench
+          type: validation
+          jsonl_fpath: resources_servers/legal_agent_bench/data/generated/all.jsonl
+          license: MIT

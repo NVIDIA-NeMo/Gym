@@ -1,14 +1,18 @@
 # Legal Agent Bench
 
-This resource server runs the public
+This resource server runs the public Harvey
 [Legal Agent Benchmark (LAB)](https://github.com/harveyai/harvey-labs/tree/f46ef86e4788545622db25dcffa3aebb7a139929)
-through NeMo Gym and Harbor. The integration is pinned to upstream commit
+through NeMo Gym. The compatibility configuration uses Harbor, and optional
+configurations run Gym's Hermes, Claude Code, or Codex harness through a
+LAB-owned Docker runner. The integration is pinned to upstream commit
 `f46ef86e4788545622db25dcffa3aebb7a139929`: 1,749 tasks and the public
 `docx`, `pptx`, and `xlsx` skills.
 
-NeMo Gym schedules rollouts, the custom Harbor agent works with each task's
+NeMo Gym schedules rollouts, the selected agent works with each task's
 documents inside Docker, and the task-local verifier scores every rubric
-criterion with an OpenAI-compatible judge model.
+criterion with an OpenAI-compatible judge model. The default configuration uses
+the Harbor agent harness, but it can easily be overriden through configuration
+settings.
 
 ## Requirements
 
@@ -16,6 +20,16 @@ criterion with an OpenAI-compatible judge model.
 - Docker with a running daemon (the only supported container backend)
 - An OpenAI-compatible policy endpoint and judge endpoint
 - At least 10 GB of free working space for preparation and the first Docker build
+
+Not required:
+
+- Separate Harbor, Hermes, Claude Code, or Codex installations
+- Anthropic or OpenAI vendor subscriptions or CLI logins for the Claude Code
+  and Codex harnesses
+
+Gym provisions the pinned harness dependencies automatically. Every harness
+uses the configured policy model endpoint. Access to the configured policy and
+judge endpoints is still required and may itself be metered or paid.
 
 The pinned source download is about 579 MiB; allow a few GiB of free working
 space during preparation. The first task also builds a
@@ -31,7 +45,12 @@ uv sync --extra dev
 docker info >/dev/null
 ```
 
-Add endpoint settings to the gitignored root `env.yaml`:
+Keep this environment activated when running LAB commands. Invoke `gym`
+directly rather than `uv run gym` for workflows that start servers: Ray starts
+components from their own working directories, which can conflict with uv's
+project discovery.
+
+Create a `env.yaml` file in the root `Gym/` directory and add your endpoint settings (note: `env.yaml` is .gitignored):
 
 ```yaml
 policy_base_url: https://your-policy-endpoint.example/v1
@@ -44,7 +63,9 @@ judge_model_name: your-judge-model
 ```
 
 The judge credentials are injected only into the regenerated, gitignored
-runtime task tree. They are never written into the cache.
+runtime task tree. They are never written into the cache. The configurable
+runner does not mount rubric files or pass judge credentials during the agent
+phase; both are staged only after the agent exits.
 
 ## Prepare explicitly (recommended)
 
@@ -57,7 +78,7 @@ python resources_servers/legal_agent_bench/prepare.py
 The command downloads the pinned LAB source archive from GitHub with retries and visible
 progress, verifies SHA-256
 `e45cbdf3236b22866e034bcc62fb23bf00ef2f2e49db7a0cd8a4b07dbae9212c`,
-rejects unsafe archive entries, generates deterministic Harbor tasks, and
+rejects unsafe archive entries, generates deterministic runtime tasks, and
 builds each cache in staging before replacing the previous valid cache. A
 handled preparation failure leaves the previous cache in place.
 
@@ -84,7 +105,7 @@ gym dataset collate \
   --mode example_validation
 ```
 
-Preparation generates the full 1,749-row task index inside the task cache. Prepare the assets before collating the full validation dataset:
+Preparation using `prepare.py` generates the full 1,749-row task index inside the task cache. Prepare the assets before collating the full validation dataset:
 
 ```bash
 python resources_servers/legal_agent_bench/prepare.py
@@ -108,7 +129,13 @@ gym env test --resources-server legal_agent_bench
 
 ## Run and smoke test
 
-Start the servers:
+For the shortest copy-paste path that prepares and tests Harbor, Hermes, Claude
+Code, and Codex as benchmark variants, use the
+[benchmark README](../../benchmarks/legal_agent_bench/README.md#smoke-test-every-harness).
+The commands below describe the lower-level resource-server and standalone
+agent workflow.
+
+The default configuration starts the Harbor agent:
 
 ```bash
 gym env start \
@@ -131,6 +158,42 @@ gym eval run --no-serve \
   --limit 1
 ```
 
+The generated and example JSONL files do not contain `agent_ref`. Direct runs
+must therefore specify the desired agent. The available standalone
+configurations and agent names are:
+
+| Config path | Direct-run agent |
+| --- | --- |
+| `resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml` | `legal_agent_bench_harbor_agent` |
+| `responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_hermes.yaml` | `legal_agent_bench_hermes_agent` |
+| `responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_claude_code.yaml` | `legal_agent_bench_claude_code_agent` |
+| `responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_codex.yaml` | `legal_agent_bench_codex_agent` |
+
+The configurable files include
+`resources_servers/legal_agent_bench/configs/resources_only.yaml`, which starts
+the LAB resource server without also launching the compatibility Harbor agent.
+
+For example, start and run Hermes with:
+
+```bash
+gym env start \
+  --config responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_hermes.yaml \
+  --model-type vllm_model
+
+gym eval run --no-serve \
+  --config responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_hermes.yaml \
+  --agent legal_agent_bench_hermes_agent \
+  --input resources_servers/legal_agent_bench/data/example.jsonl \
+  --output results/legal_agent_bench_hermes_smoke.jsonl \
+  --concurrency 1 \
+  --limit 1
+```
+
+Use the corresponding config and agent name for Claude Code or Codex. All
+three harnesses use the configured Gym policy endpoint. That endpoint must
+support the selected harness's protocol. Their CLI/runtime dependencies are
+pinned and provisioned into a portable cache on the first rollout.
+
 The default `full_task` reward is LAB's official all-criteria score: a task
 earns `1.0` only when every criterion passes. For diagnostic partial credit,
 start with:
@@ -142,8 +205,8 @@ gym env start \
   +legal_agent_bench.resources_servers.legal_agent_bench.reward_mode=criteria_pass_rate
 ```
 
-The verifier evaluates up to six criteria concurrently, matching the upstream LAB
-default. Adjust the resource setting when the judge endpoint has a lower
+The verifier evaluates up to six criteria concurrently by default.
+Adjust the resource setting when the judge endpoint has a lower
 concurrency limit:
 
 ```bash
@@ -156,10 +219,8 @@ gym env start \
 This setting is forwarded to each task verifier as
 `LAB_JUDGE_PARALLELISM`.
 
-The task container requires network access because its verifier calls the
-configured judge endpoint. The agent and verifier share that container, so the
-agent also has network access during a rollout. This differs from the upstream LAB
-closed-network reference sandbox and should be recorded when comparing runs.
+The task container requires network access because the policy agent and
+verifier call configured endpoints.
 
 ## Caches and outputs
 
@@ -169,6 +230,10 @@ The default paths are:
 - Public skills: `data/cache/harness/skills`
 - Credential-bearing runtime tasks: `data/runtime/harbor_tasks/legal_agent_bench`
 - Harbor jobs: `results/legal_agent_bench/harbor_jobs`
+- Configurable agent runtimes: `responses_api_agents/legal_agent_bench_agent/.deps`
+- Hermes rollout artifacts: `results/legal_agent_bench/hermes_jobs`
+- Claude Code rollout artifacts: `results/legal_agent_bench/claude_code_jobs`
+- Codex rollout artifacts: `results/legal_agent_bench/codex_jobs`
 - Rollout output: the path passed to `gym eval run`
 
 The runtime tree hardlinks immutable documents from the cache when the
@@ -181,15 +246,63 @@ Each successful Harbor trial contains `result.json`, `verifier/reward.json`,
 and `agent/artifacts/lab-run/transcript.jsonl`. The agent config artifact
 should list exactly `docx`, `pptx`, and `xlsx`.
 
+Each configurable trial contains the inner Gym trajectory, agent stdout and
+stderr, LAB `config.json` and `metrics.json`, completed deliverables under
+`agent/artifacts/lab-run/output`, downloaded verifier artifacts, and a compact
+top-level `run_summary.json`. The rollout JSONL row exposes direct paths to the
+summary, trajectory, stdout, stderr, output directory, and verifier report.
+Trials are grouped as
+`<harness>_jobs/<model>/<YYYYMMDD-HHMMSS_hash>/<task_name>_<run_id>` so runs
+are browsable and safe under concurrent execution. `<model>` is the configured
+`policy_model_name`, normalized into one safe path segment. The task name is
+normalized, and the run ID is an eight-character unique suffix. Starting or
+validating an agent server does not create an empty session directory; the
+directory is created by its first rollout.
+The Docker image is content-addressed from the task environment and reused
+across harnesses. Agent and verifier phases use separate containers: the agent
+sees only its selected Gym package and public task inputs, while the verifier
+starts after that container is destroyed and receives the completed LAB run
+read-only.
+
+To inspect a configurable smoke run:
+
+```bash
+ARTIFACT_DIR=$(jq -r '.artifact_dir' results/legal_agent_bench_hermes_smoke.jsonl)
+jq . "$ARTIFACT_DIR/run_summary.json"
+jq . "$ARTIFACT_DIR/agent/trajectory.json"
+open "$ARTIFACT_DIR/verifier/report.html"  # macOS; use xdg-open on Linux
+```
+
+In `run_summary.json`, a reliable completed rollout has `mask_sample: false`,
+all failure flags false, `judge_error_count: 0`, and `verifier_error: 0`.
+`output_files` lists the deliverables and `agent/trajectory.json` is the inner
+harness trace. A zero `full_task` reward can still be a valid rollout when one
+or more criteria fail; use `criteria_pass_rate` to see partial success.
+
 ## Troubleshooting
 
-- A checksum, corrupt archive, unsafe path, wrong task count, or missing skill
-  fails before replacing an existing valid cache.
 - A missing judge setting produces a verifier error in the trial artifacts.
   Confirm the endpoint permits the exact `judge_model_name`.
 - Treat a nonzero `judge_error_count` or `verifier_error` as a judge or
   infrastructure failure, not an ordinary model failure, even though Harbor
   receives a numeric zero reward so it can preserve a complete trial result.
+- Configurable rollouts additionally expose `agent_failed`,
+  `model_connection_failed`, `agent_timed_out`, `verifier_failed`,
+  `verifier_timed_out`, `sandbox_failed`, `task_failed`,
+  `configuration_failed`, and `mask_sample`. Before the harness starts, the
+  runner checks the policy endpoint from inside Docker. On Docker Desktop,
+  derived loopback model URLs are automatically routed through
+  `host.docker.internal`; `sandbox_model_base_url` is an explicit override.
+  Connectivity and harness failures are masked and skip judging.
+  Task-loading and harness-configuration failures are kept separate from Docker
+  sandbox failures. A zero reward without an infrastructure/judge flag is an
+  ordinary model/task result; a flagged result should be excluded from
+  model-quality comparisons.
+- Hermes normally probes `/v1/models` and `/models` for optional pricing and
+  context metadata. The LAB runner disables those lookups because Gym supplies
+  the model explicitly and its internal policy proxy does not implement model
+  discovery. This does not suppress access logs for actual chat-completion
+  requests.
 - If Docker appears idle on the first rollout, inspect `docker ps` and the
   `gym env start` terminal; Harbor is normally building the task image.
 - Do not copy or publish `data/runtime/`: it can contain local judge credentials.

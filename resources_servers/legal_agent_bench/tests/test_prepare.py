@@ -90,7 +90,7 @@ def test_generated_task_cache_is_deterministic_and_credential_free(monkeypatch, 
         "legal_agent_bench::area__task-group__scenario-01",
         "legal_agent_bench::area__task-one",
     ]
-    assert all(row["agent_ref"]["name"] == "legal_agent_bench_harbor_agent" for row in rows)
+    assert all("agent_ref" not in row for row in rows)
     for toml in first.glob("*/task.toml"):
         text = toml.read_text(encoding="utf-8")
         assert "[verifier.env]" not in text
@@ -110,6 +110,31 @@ def test_existing_valid_caches_skip_network(monkeypatch, tmp_path) -> None:
 
     assert result == {"tasks": tasks, "skills": skills}
     assert (tmp_path / "all.jsonl").read_bytes() == (tasks / prepare.INDEX_FILENAME).read_bytes()
+
+
+def test_legacy_harbor_index_migrates_without_network(monkeypatch, tmp_path) -> None:
+    _source, tasks, _skills = _build_caches(monkeypatch, tmp_path)
+    index_path = tasks / prepare.INDEX_FILENAME
+    legacy_rows = []
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        row["agent_ref"] = {
+            "name": "legal_agent_bench_harbor_agent",
+            "type": "responses_api_agents",
+        }
+        legacy_rows.append(json.dumps(row, sort_keys=True) + "\n")
+    index_path.write_text("".join(legacy_rows), encoding="utf-8")
+    monkeypatch.setattr(
+        prepare,
+        "_download_source_archive",
+        lambda _path: pytest.fail("the exact legacy index must migrate without a source download"),
+    )
+
+    result = prepare.prepare_assets("tasks", tasks_dir=tasks)
+
+    assert result == {"tasks": tasks}
+    assert all("agent_ref" not in json.loads(line) for line in index_path.read_text().splitlines())
+    prepare.validate_harbor_tasks(tasks)
 
 
 def test_missing_assets_download_extract_and_install(monkeypatch, tmp_path) -> None:

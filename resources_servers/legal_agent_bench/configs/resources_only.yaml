@@ -1,0 +1,28 @@
+legal_agent_bench:
+  resources_servers:
+    legal_agent_bench:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Resource-only Legal Agent Benchmark (LAB) configuration for configurable Gym agents
+      value: Improve legal-agent document review, drafting, and analysis capability
+      harbor_tasks_cache_dir: ${oc.env:LEGAL_AGENT_BENCH_TASK_CACHE_DIR,resources_servers/legal_agent_bench/data/cache/harbor_tasks/legal_agent_bench}
+      harbor_tasks_dir: ${oc.env:LEGAL_AGENT_BENCH_RUNTIME_TASKS_DIR,resources_servers/legal_agent_bench/data/runtime/harbor_tasks/legal_agent_bench}
+      harness_skills_dir: ${oc.env:LEGAL_AGENT_BENCH_SKILLS_DIR,resources_servers/legal_agent_bench/data/cache/harness/skills}
+      auto_prepare_assets: true
+      reward_mode: full_task
+      judge_base_url: ${oc.select:judge_base_url,null}
+      judge_api_key: ${oc.select:judge_api_key,null}
+      judge_model_name: ${oc.select:judge_model_name,null}
+      judge_temperature: null
+      judge_request_timeout_seconds: 90
+      judge_max_retries: 1
+      judge_structured_output: true
+      judge_parse_repair_attempts: 1
+      judge_repair_max_tokens: 4096
+      judge_max_tokens: 4096
+      judge_parallelism: 6
+
+responses_create_params:
+  temperature: 1.0
+  top_p: 0.95

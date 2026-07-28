@@ -1,8 +1,6 @@
 #!/bin/bash
-# Install claude_code_agent deps into $DEPS_DIR (mounted read-only at /agent_deps_mount):
-# portable CPython + NeMo-Gym runtime deps + portable Node + the claude CLI on PATH.
+# Install Codex agent dependencies into a portable prefix mounted in a task sandbox.
 set -euo pipefail
-set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${PORTABLE_PYTHON_SH:-$SCRIPT_DIR/_portable_python.sh}"
@@ -10,7 +8,7 @@ source "${PORTABLE_PYTHON_SH:-$SCRIPT_DIR/_portable_python.sh}"
 : "${DEPS_DIR:?DEPS_DIR must be set}"
 : "${NEMO_GYM_ROOT:?NEMO_GYM_ROOT must be set}"
 NODE_VERSION="${NODE_VERSION:-22.15.0}"
-: "${CLAUDE_SPEC:?CLAUDE_SPEC must select a pinned @anthropic-ai/claude-code version}"
+: "${CODEX_SPEC:?CODEX_SPEC must select a pinned @openai/codex version}"
 if [ -z "${NODE_ARCH:-}" ]; then
     case "$(uname -m)" in
         x86_64) NODE_ARCH="x64" ;;
@@ -27,14 +25,9 @@ install_nemo_gym_deps
 
 if [ ! -x "$DEPS_DIR/bin/node" ]; then
     node_url="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz"
-    echo "Downloading portable node: $node_url"
     curl -fsSL "$node_url" | tar xz -C "$DEPS_DIR" --strip-components=1
 fi
 
 export PATH="$DEPS_DIR/bin:$PATH"
-echo "Installing claude-code ($CLAUDE_SPEC)"
-npm install -g --prefix "$DEPS_DIR" "$CLAUDE_SPEC"
-
-"$DEPS_DIR/bin/claude" --version || echo "warning: claude --version failed (may need runtime env)"
-
-echo "claude_code_agent deps ready at $DEPS_DIR"
+npm install -g --prefix "$DEPS_DIR" "$CODEX_SPEC"
+"$DEPS_DIR/bin/codex" --version

@@ -242,7 +242,10 @@ def prepare_assets(
                 print(f"Using cached Legal Agent Bench {name} in {prepared[name]}", flush=True)
                 continue
             except (FileNotFoundError, ValueError):
-                pass
+                if name == "tasks" and _migrate_legacy_agent_index(targets[name]):
+                    prepared[name] = validators[name](targets[name])
+                    print(f"Migrated cached Legal Agent Bench {name} index in {prepared[name]}", flush=True)
+                    continue
         missing.append(name)
 
     if not missing:
@@ -479,10 +482,6 @@ def _render_task_index(source_ids: Iterable[str]) -> str:
     rows = []
     for source_id in sorted(source_ids):
         row = {
-            "agent_ref": {
-                "name": "legal_agent_bench_harbor_agent",
-                "type": "responses_api_agents",
-            },
             "instance_id": f"legal_agent_bench::{flatten_task_id(source_id)}",
             "responses_create_params": {
                 "input": [],
@@ -673,6 +672,47 @@ def _replace_directory(source: Path, target: Path) -> None:
     else:
         if backup.exists():
             shutil.rmtree(backup)
+
+
+def _migrate_legacy_agent_index(tasks_dir: Path) -> bool:
+    """Atomically remove the retired Harbor agent_ref from an otherwise exact cached index."""
+    index_path = tasks_dir / INDEX_FILENAME
+    try:
+        rows = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
+    except (OSError, json.JSONDecodeError):
+        return False
+    legacy_ref = {
+        "name": "legal_agent_bench_harbor_agent",
+        "type": "responses_api_agents",
+    }
+    if not rows or any(not isinstance(row, dict) or row.get("agent_ref") != legacy_ref for row in rows):
+        return False
+    candidate_rows = []
+    for row in rows:
+        row = dict(row)
+        row.pop("agent_ref")
+        candidate_rows.append(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    candidate = "".join(candidate_rows)
+
+    source_ids = []
+    try:
+        for task_dir in sorted(child for child in tasks_dir.iterdir() if child.is_dir()):
+            task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+            source_ids.append(str(task["metadata"]["lab_task_id"]))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if candidate != _render_task_index(source_ids):
+        return False
+
+    file_descriptor, temp_name = tempfile.mkstemp(dir=index_path.parent, prefix=f".{index_path.name}.")
+    os.close(file_descriptor)
+    temp_path = Path(temp_name)
+    try:
+        temp_path.write_text(candidate, encoding="utf-8")
+        os.replace(temp_path, index_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return True
 
 
 def _publish_task_index(tasks_dir: Path) -> Path:
