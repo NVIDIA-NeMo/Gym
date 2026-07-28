@@ -83,8 +83,7 @@ def validate_images_and_text_dependencies() -> None:
             importlib.import_module(module_name)
         except ImportError as exc:
             raise RuntimeError(
-                "judge_media_mode=images_and_text requires "
-                f"{packages}; failed to import {module_name}: {exc}"
+                f"judge_media_mode=images_and_text requires {packages}; failed to import {module_name}: {exc}"
             ) from exc
 
 

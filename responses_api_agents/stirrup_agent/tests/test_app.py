@@ -450,9 +450,7 @@ class TestRerunIncompleteMode:
         # Cached judgements are sibling files in the task root. They belong to
         # the repeat layout and must not make a missing repeat look like a
         # legacy flat-layout task.
-        (sibling_repeat.parent / "repeat_0_verify_response.json").write_text(
-            json.dumps({"reward": 0.8})
-        )
+        (sibling_repeat.parent / "repeat_0_verify_response.json").write_text(json.dumps({"reward": 0.8}))
 
         config = _make_config(rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
         server_client = MagicMock(spec=ServerClient)

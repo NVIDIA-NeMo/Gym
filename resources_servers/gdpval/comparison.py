@@ -56,9 +56,6 @@ def _ignore_files() -> frozenset[str]:
     return IGNORE_FILES
 
 
-LOGGER = logging.getLogger(__name__)
-
-
 JUDGE_PROMPT = (
     "Given a task description and reference files, select which of two submission file(s) "
     "better completed the task. "

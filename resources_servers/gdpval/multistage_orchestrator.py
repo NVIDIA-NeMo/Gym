@@ -66,7 +66,6 @@ from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, T
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
-    NG_TERMINAL_KEY,
     _failure_is_terminal,
     _failures_path_for,
     _get_max_rollout_attempts,
