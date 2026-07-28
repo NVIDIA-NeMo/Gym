@@ -33,6 +33,10 @@ on:
         default: linux-amd64-cpu16
         type: string
         description: "The runner to use for the build"
+    outputs:
+      container-uri:
+        description: "URI of the built container image"
+        value: ${{ jobs.build.outputs.container-uri }}
     secrets:
       AZURE_CLIENT_ID:
         required: true

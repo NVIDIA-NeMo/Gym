@@ -33,3 +33,34 @@ jobs:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+  test:
+    needs: [build]
+    runs-on: linux-amd64-cpu16
+    steps:
+      - name: Install Azure CLI
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: Azure Login
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name nemoci
+
+      - name: Smoke test — CLI
+        run: docker run --rm "${{ needs.build.outputs.container-uri }}" gym --help
+
+      - name: Smoke test — vLLM and FlashInfer versions
+        run: |
+          docker run --rm "${{ needs.build.outputs.container-uri }}" python -c "
+          from importlib.metadata import version
+          v = version('vllm')
+          f = version('flashinfer-python')
+          assert v == '0.26.0', f'Expected vllm 0.26.0, got {v}'
+          assert f == '0.6.14', f'Expected flashinfer-python 0.6.14, got {f}'
+          print(f'vllm=={v} flashinfer-python=={f} OK')
+          "
