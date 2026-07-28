@@ -270,8 +270,37 @@ def test_malformed_and_incomplete_artifacts_produce_sanitized_gaps(tmp_path: Pat
         "tool_start_missing",
         "tool_timing_invalid",
     } <= codes
-    assert all(not invocation.model_calls for invocation in _records(bundle, AgentInvocation))
+    invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
+    assert all(not invocation.model_calls for invocation in invocations.values())
+    assert [item.type for item in invocations["root"].conversation] == [
+        "function_call",
+        "function_call",
+        "function_call_output",
+        "function_call_output",
+    ]
     assert sentinel not in bundle.model_dump_json()
+
+
+def test_rejects_cyclic_subagent_parents(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "projects" / "work" / "root.jsonl",
+        _tool_result("root", "2026-07-22T10:00:00Z", "self", child_id="root"),
+        _tool_result("root", "2026-07-22T10:00:01Z", "spawn", child_id="agent-a"),
+        _tool_result(
+            "root",
+            "2026-07-22T10:00:02Z",
+            "back-edge",
+            agent="agent-a",
+            child_id="root",
+        ),
+    )
+
+    bundle = extract_claude_code_observations(tmp_path)
+    invocations = {invocation.invocation_id: invocation for invocation in _records(bundle, AgentInvocation)}
+
+    assert invocations["root"].parent_invocation_id is None
+    assert invocations["agent-a"].parent_invocation_id == "root"
+    assert [gap.code for gap in bundle.gaps].count("cyclic_subagent_parent") == 2
 
 
 def test_ignores_non_transcript_jsonl_and_reports_no_usable_transcript(tmp_path: Path) -> None:
