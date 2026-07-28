@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Wait for the staged GLM endpoint, then submit exactly one rollout client.
+# Wait for the staged model endpoint, then submit exactly one rollout client.
 # This runs on the Slurm login node; the client itself runs on cpu/cpu-normal.
 
 umask 077
@@ -24,7 +24,7 @@ fi
 PRIVATE_ENV="${GDPVAL_PRIVATE_ENV_FILE:-${STAGING_ROOT}/afterquery.private.env}"
 ENDPOINT_ENV="${GDPVAL_ENDPOINT_ENV_FILE:-${STAGING_ROOT}/endpoint.current.env}"
 CLIENT_SCRIPT="${SCRIPT_DIR}/run_gdpval_client.sbatch"
-SERVER_WRAPPER="${SCRIPT_DIR}/submit_gdpval_glm52.sh"
+SERVER_WRAPPER="${SCRIPT_DIR}/submit_model_server.sh"
 CLIENT_STATE="${GDPVAL_CLIENT_STATE_FILE:-${STAGING_ROOT}/client.current}"
 LOCK_DIR="${GDPVAL_PIPELINE_LOCK_DIR:-${STAGING_ROOT}/.monitor_gdpval_pipeline.lock}"
 ACTION="${GDPVAL_ACTION:-run}"

@@ -1,7 +1,5 @@
 #!/bin/bash
 #SBATCH --time=04:00:00
-#SBATCH --nodes=16
-#SBATCH --ntasks=16
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --switches=1
@@ -16,38 +14,35 @@ LUSTRE_DIR=/lustre
 # Keep the upstream flag names for compatibility with the existing launcher stack.
 VLLM_IMAGE="${VLLM_IMAGE:-}"
 MODEL_PATH="${MODEL_PATH:-}"
-MODEL_NAME="${MODEL_NAME:-GLM-52-bf16-parallel}"
+MODEL_NAME="${MODEL_NAME:-}"
 NUM_INSTANCES=""
 INSTANCE_IDX=""
 
-# BF16 GLM 5.2 uses the GLM 5.1 bf16 resource shape: one endpoint spans
-# 16 nodes with TP=4 and Ray data parallelism across all 16 replicas.
-NUM_NODES=16
-# Slurm settings mirror run_parallel_glm52-vllm.sh.
+# Serving shape. Every value below is model-specific, so it comes from a model
+# profile (benchmarks/gdpval/models/*.env) rather than being edited here.
+NUM_NODES="${GDPVAL_NUM_NODES:-2}"
 # Set GDPVAL_SLURM_ACCOUNT (or --account) to your Slurm account.
 # export QOS="${QOS-<your-qos>}"
 # export RESERVATION="${RESERVATION-<your-reservation>}"
 ACCOUNT="${GDPVAL_SLURM_ACCOUNT:-}"
-PARTITION=batch
+PARTITION="${GDPVAL_SLURM_PARTITION:-batch}"
 export QOS="${QOS-normal}"
 export RESERVATION="${RESERVATION-}"
-TIME_LIMIT=04:00:00
+TIME_LIMIT="${GDPVAL_SERVER_TIME_LIMIT:-04:00:00}"
 
 BASE_RAY_PORT=6379
 BASE_VLLM_PORT=10240
 
-TENSOR_PARALLEL_SIZE=4
-PIPELINE_PARALLEL_SIZE=1
-DATA_PARALLEL_SIZE=16
-DATA_PARALLEL_SIZE_LOCAL=1
-GPU_MEMORY_UTILIZATION=0.85
-API_SERVER_COUNT=1
-# Bumped from 202752 -> 262144 so the served context covers the rollout
-# token budget (MAX_TOKENS=262144 in test_parallel_rollout_run.sh); the
-# old 202752 was below that budget and could truncate/reject long requests.
-# Not pushed to GLM-5.2's native 1M window: KV cache here is bf16 (no
-# --kv-cache-dtype fp8), so 1M would collapse per-replica concurrency.
-MAX_MODEL_LEN=262144
+TENSOR_PARALLEL_SIZE="${GDPVAL_TENSOR_PARALLEL_SIZE:-8}"
+PIPELINE_PARALLEL_SIZE="${GDPVAL_PIPELINE_PARALLEL_SIZE:-1}"
+DATA_PARALLEL_SIZE="${GDPVAL_DATA_PARALLEL_SIZE:-1}"
+DATA_PARALLEL_SIZE_LOCAL="${GDPVAL_DATA_PARALLEL_SIZE_LOCAL:-1}"
+GPU_MEMORY_UTILIZATION="${GDPVAL_GPU_MEMORY_UTILIZATION:-0.90}"
+API_SERVER_COUNT="${GDPVAL_API_SERVER_COUNT:-1}"
+# Served context must cover the rollout token budget or long requests are
+# truncated or rejected. Do not simply set this to the model's native maximum:
+# context trades directly against per-replica concurrency via KV cache.
+MAX_MODEL_LEN="${GDPVAL_MAX_MODEL_LEN:-262144}"
 
 CACHE_ROOT="${CACHE_ROOT:-${SCRATCH:-$HOME}/gdpval-cache}"
 HF_HOME="${HF_HOME:-${CACHE_ROOT}/huggingface}"
@@ -64,7 +59,7 @@ usage() {
     echo "  --vllm-image <path>        vLLM Ray container image (default: ${VLLM_IMAGE})"
     echo "  --model-path <path>        Model checkpoint path (default: ${MODEL_PATH})"
     echo "  --model-name <name>        Base served model name (default: ${MODEL_NAME})"
-    echo "  --num-nodes <n>            Nodes per GLM 5.2 bf16 server job (default: ${NUM_NODES})"
+    echo "  --num-nodes <n>            Nodes per server job (default: ${NUM_NODES})"
     echo "  --account <name>           Slurm account for self-submitted jobs (default: ${ACCOUNT})"
     echo "  --partition <name>         Slurm partition for self-submitted jobs (default: ${PARTITION})"
     echo "  --qos <name>               Slurm QoS for self-submitted jobs (default: ${QOS:-<none>})"
@@ -347,36 +342,50 @@ srun \
             fi
             ray status --address "${RAY_ADDRESS}" || true
 
-            echo "=== [rank0] Starting GLM 5.2 bf16 vLLM server (TP=${TENSOR_PARALLEL_SIZE}, PP=${PIPELINE_PARALLEL_SIZE}, DP=${DATA_PARALLEL_SIZE}, DPL=${DATA_PARALLEL_SIZE_LOCAL}) ==="
+            echo "=== [rank0] Starting vLLM server for ${MODEL_NAME} (TP=${TENSOR_PARALLEL_SIZE}, PP=${PIPELINE_PARALLEL_SIZE}, DP=${DATA_PARALLEL_SIZE}, DPL=${DATA_PARALLEL_SIZE_LOCAL}) ==="
             SERVE_PORT="${VLLM_PORT}"
             unset VLLM_PORT
 
-            # Startup compilation has repeatedly failed on a subset of
-            # Blackwell/SM100 ranks with a CUDA-driver error inside Inductor
-            # autotuning. Use eager execution for this rollout service so no
-            # distributed rank can enter that compilation path.
-            vllm serve "${MODEL_PATH}" \
-                --trust-remote-code \
-                --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
-                --pipeline-parallel-size "${PIPELINE_PARALLEL_SIZE}" \
-                --data-parallel-size "${DATA_PARALLEL_SIZE}" \
-                --data-parallel-backend ray \
-                --data-parallel-size-local "${DATA_PARALLEL_SIZE_LOCAL}" \
-                --distributed-executor-backend ray \
-                --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
-                --port "${SERVE_PORT}" \
-                --enable-auto-tool-choice \
-                --tool-call-parser glm47 \
-                --reasoning-parser glm45 \
-                --enable-prefix-caching \
-                --enable-chunked-prefill \
-                --enable-expert-parallel \
-                --api-server-count "${API_SERVER_COUNT}" \
-                --chat-template-content-format string \
-                --served-model-name "${INSTANCE_MODEL_NAME}" \
-                --max-model-len "${MAX_MODEL_LEN}" \
-                --compilation-config "{\"pass_config\": {\"fuse_allreduce_rms\": false}}" \
-                --model-loader-extra-config "{\"enable_multithread_load\": true, \"num_threads\": 96}" > "${LOG_FILE}" 2>&1 &
+            # Model-specific flags come from the model profile. Anything vLLM
+            # accepts can be appended via GDPVAL_VLLM_EXTRA_ARGS without editing
+            # this launcher.
+            VLLM_ARGS=(
+                --trust-remote-code
+                --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}"
+                --pipeline-parallel-size "${PIPELINE_PARALLEL_SIZE}"
+                --distributed-executor-backend ray
+                --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
+                --port "${SERVE_PORT}"
+                --enable-prefix-caching
+                --enable-chunked-prefill
+                --api-server-count "${API_SERVER_COUNT}"
+                --chat-template-content-format string
+                --served-model-name "${INSTANCE_MODEL_NAME}"
+                --max-model-len "${MAX_MODEL_LEN}"
+                --compilation-config "{\"pass_config\": {\"fuse_allreduce_rms\": false}}"
+                --model-loader-extra-config "{\"enable_multithread_load\": true, \"num_threads\": 96}"
+            )
+            # Ray data parallelism only when the profile asks for more than one
+            # replica; passing DP=1 changes the vLLM execution path for no reason.
+            if [ "${DATA_PARALLEL_SIZE}" -gt 1 ]; then
+                VLLM_ARGS+=(--data-parallel-size "${DATA_PARALLEL_SIZE}"
+                            --data-parallel-backend ray
+                            --data-parallel-size-local "${DATA_PARALLEL_SIZE_LOCAL}")
+            fi
+            [ -n "${GDPVAL_TOOL_CALL_PARSER:-}" ] && \
+                VLLM_ARGS+=(--enable-auto-tool-choice --tool-call-parser "${GDPVAL_TOOL_CALL_PARSER}")
+            [ -n "${GDPVAL_REASONING_PARSER:-}" ] && \
+                VLLM_ARGS+=(--reasoning-parser "${GDPVAL_REASONING_PARSER}")
+            [ -n "${GDPVAL_KV_CACHE_DTYPE:-}" ] && \
+                VLLM_ARGS+=(--kv-cache-dtype "${GDPVAL_KV_CACHE_DTYPE}")
+            [ "${GDPVAL_EXPERT_PARALLEL:-1}" = "1" ] && VLLM_ARGS+=(--enable-expert-parallel)
+            # Some Blackwell/SM100 ranks fail Inductor autotuning at startup with a
+            # CUDA driver error; eager execution keeps every rank out of that path.
+            [ "${GDPVAL_ENFORCE_EAGER:-0}" = "1" ] && VLLM_ARGS+=(--enforce-eager)
+            # shellcheck disable=SC2206
+            [ -n "${GDPVAL_VLLM_EXTRA_ARGS:-}" ] && VLLM_ARGS+=(${GDPVAL_VLLM_EXTRA_ARGS})
+
+            vllm serve "${MODEL_PATH}" "${VLLM_ARGS[@]}" > "${LOG_FILE}" 2>&1 &
 
             VLLM_PID=$!
 

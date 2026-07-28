@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=gdpval-glm52-client
+#SBATCH --job-name=gdpval-rollout-client
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64

@@ -14,19 +14,38 @@ it is allowed to proceed.
 Nothing here is required to run GDPVal — `gym eval run` is. Reach for these
 when a batch is too large for one allocation.
 
-## Setup
+## Configuration
+
+Three layers, so swapping any one of them does not touch the others:
+
+| Layer | File | Holds |
+|---|---|---|
+| Site | `slurm/cluster.env` | Slurm account, partition, filesystem paths, weights + image location |
+| Model | `models/<model>.env` | Parallelism, context, tool/reasoning parsers, KV dtype |
+| Batch | `datasets/<batch>.env` | Input JSONL, expected count/hash, task-id pattern, turn budget |
 
 ```bash
 cd benchmarks/gdpval/slurm
 cp cluster.env.example cluster.env
-$EDITOR cluster.env                 # account, model path, container image
-set -a; . ./cluster.env; set +a
+$EDITOR cluster.env                          # account, model path, container image
+
+set -a
+. ./cluster.env
+. ../models/glm-5.2-fp8.env                  # or your own profile
+. ../datasets/my_batch.env
+set +a
 ```
 
-Three settings are required and deliberately have no default —
-`GDPVAL_SLURM_ACCOUNT`, `GDPVAL_MODEL_PATH`, `GDPVAL_VLLM_IMAGE`. A default
-that looks plausible but points at the wrong model or account fails hours
-later as bad numbers instead of immediately as an error.
+Serving a different model is a new file in `models/`, not an edit to any
+script. Start from `models/example.env`; `glm-5.2-fp8.env` and
+`glm-5.2-bf16.env` are worked examples of a latency-shaped and a
+throughput-shaped deployment of the same weights.
+
+Four settings are required and deliberately have no default —
+`GDPVAL_SLURM_ACCOUNT`, `GDPVAL_MODEL_PATH`, `GDPVAL_VLLM_IMAGE` and
+`GDPVAL_MODEL_BASE_NAME` (the last comes from the model profile). A default
+that looks plausible but points at the wrong model or account fails hours later
+as bad numbers instead of immediately as an error.
 
 ## Running a batch
 
@@ -36,7 +55,7 @@ later as bad numbers instead of immediately as an error.
 ./bootstrap_gdpval_runtime.sh
 
 # 2. submit the model server and wait for /v1/models to serve the expected name
-./submit_gdpval_glm52.sh
+./submit_model_server.sh
 
 # 3. submit exactly one rollout client against that endpoint
 ./monitor_gdpval_pipeline.sh
@@ -45,9 +64,9 @@ later as bad numbers instead of immediately as an error.
 ./submit_gdpval_continuation.sh
 ```
 
-`run_parallel_{fp8,bf16}-glm52-vllm.sh` are the underlying multi-instance vLLM
-launchers; `submit_gdpval_glm52.sh` drives the fp8 one by default. Run either
-directly with `--help` for its own flags.
+`run_parallel_vllm.sh` is the underlying multi-instance vLLM launcher;
+`submit_model_server.sh` drives it and validates the endpoint before any rollout
+client is released. Run either with `--help` for its own flags.
 
 ## Dataset profiles
 
@@ -73,15 +92,14 @@ together.
 | Script | Purpose |
 |---|---|
 | `bootstrap_gdpval_runtime.sh` | Build an isolated checkout + venv so a running batch is insulated from edits |
-| `submit_gdpval_glm52.sh` | Submit the vLLM server, wait for readiness, validate the served model name |
+| `submit_model_server.sh` | Submit the vLLM server, wait for readiness, validate the served model name |
 | `monitor_gdpval_pipeline.sh` | Wait for the endpoint, then submit exactly one rollout client |
 | `run_gdpval_client.sbatch` | The rollout client job itself (CPU-only) |
 | `submit_gdpval_continuation.sh` | Chain the next allocation once the current one is nearly spent |
 | `run_gdpval_continuation_gate.sbatch` | Validate resume state, then release the next hop |
 | `run_gdpval_continuation_monitor.sbatch` | Passive watcher for the continuation chain |
 | `validate_gdpval_resume_state.py` | Standalone resume-safety check |
-| `run_parallel_fp8-glm52-vllm.sh` | Multi-instance vLLM launcher (fp8) |
-| `run_parallel_bf16-glm52-vllm.sh` | Multi-instance vLLM launcher (bf16) |
+| `run_parallel_vllm.sh` | Multi-instance vLLM launcher, shaped entirely by the model profile |
 | `wait_for_slurm_account.sh` | Poll until a Slurm account/QOS association exists; never submits or cancels |
 | `smoke_apptainer_worker.sh` | Verify Apptainer works on a compute node before committing an allocation |
 | `rpm2cpio_stdin.sh` | Shim: BusyBox `rpm2cpio` rejects `-` for stdin, which the unprivileged Apptainer installer needs |

@@ -82,7 +82,7 @@ preflight() {
   resolve_parent_jobs "$@"
   require_file "${GATE_BATCH}"
   require_file "${SCRIPT_DIR}/run_gdpval_continuation_monitor.sbatch"
-  require_file "${SCRIPT_DIR}/submit_gdpval_glm52.sh"
+  require_file "${SCRIPT_DIR}/submit_model_server.sh"
   command -v sbatch >/dev/null
   command -v scontrol >/dev/null
   command -v squeue >/dev/null

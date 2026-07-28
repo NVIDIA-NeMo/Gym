@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Submit and validate the dedicated GLM-5.2 service used by GDPVal rollout
+# Submit and validate the model server used by GDPVal rollout
 # batches. Dataset-specific values come from a profile in datasets/.
 
 umask 077
@@ -9,11 +9,11 @@ umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 STAGING_ROOT="${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
-LAUNCHER="${GDPVAL_GLM52_LAUNCHER:-${SCRIPT_DIR}/run_parallel_fp8-glm52-vllm.sh}"
-EXPECTED_LAUNCHER_SHA256="${GDPVAL_EXPECTED_GLM52_LAUNCHER_SHA256:-3f1959d6c65bbf62fae7208639967b3bdcb99c90e05f5fad4884a7a153bba2f4}"
+LAUNCHER="${GDPVAL_SERVER_LAUNCHER:-${SCRIPT_DIR}/run_parallel_vllm.sh}"
+EXPECTED_LAUNCHER_SHA256="${GDPVAL_EXPECTED_LAUNCHER_SHA256:-be1ab8f608b8bbd33123a9bbd4ee93162c9c9dcce94c50cfc408383af281afa7}"
 MODEL_PATH="${GDPVAL_MODEL_PATH:-}"
 VLLM_IMAGE="${GDPVAL_VLLM_IMAGE:-}"
-MODEL_BASE_NAME="${GDPVAL_MODEL_BASE_NAME:-GLM-52-fp8-afterquery-20260721}"
+MODEL_BASE_NAME="${GDPVAL_MODEL_BASE_NAME:-}"
 EXPECTED_MODEL_NAME="${MODEL_BASE_NAME}-0"
 ACCOUNT="${GDPVAL_SLURM_ACCOUNT:-}"
 PARTITION="${GDPVAL_SLURM_PARTITION:-batch}"
@@ -21,7 +21,7 @@ QOS="${GDPVAL_SLURM_QOS:-normal}"
 TIME_LIMIT="${GDPVAL_SERVER_TIME_LIMIT:-04:00:00}"
 STATE_FILE="${GDPVAL_SERVER_STATE_FILE:-${STAGING_ROOT}/model_server.current}"
 CURRENT_ENDPOINT_ENV="${GDPVAL_CURRENT_ENDPOINT_ENV:-${STAGING_ROOT}/endpoint.current.env}"
-SUBMISSION_LOCK_DIR="${GDPVAL_SERVER_SUBMISSION_LOCK_DIR:-${STAGING_ROOT}/.submit_afterquery_glm52.lock}"
+SUBMISSION_LOCK_DIR="${GDPVAL_SERVER_SUBMISSION_LOCK_DIR:-${STAGING_ROOT}/.submit_model_server.lock}"
 
 # Site-specific inputs have no default on purpose: a wrong-but-plausible default
 # silently points the run at somebody else's model, image or Slurm account.
@@ -29,6 +29,7 @@ _missing=()
 [[ -n "${ACCOUNT}" ]]    || _missing+=("GDPVAL_SLURM_ACCOUNT")
 [[ -n "${MODEL_PATH}" ]] || _missing+=("GDPVAL_MODEL_PATH")
 [[ -n "${VLLM_IMAGE}" ]] || _missing+=("GDPVAL_VLLM_IMAGE")
+[[ -n "${MODEL_BASE_NAME}" ]] || _missing+=("GDPVAL_MODEL_BASE_NAME (set by the model profile)")
 if (( ${#_missing[@]} )); then
     echo "ERROR: required setting(s) not set: ${_missing[*]}" >&2
     echo "       Copy benchmarks/gdpval/slurm/cluster.env.example, fill it in, and source it." >&2
@@ -50,11 +51,11 @@ fi
 
 usage() {
   cat <<'EOF'
-Usage: submit_gdpval_glm52.sh ACTION
+Usage: submit_model_server.sh ACTION
 
 Actions:
   preflight  Validate paths, hashes, account settings, and scheduler state.
-  submit     Submit one 16-node / 64-GPU GLM-5.2 service job.
+  submit     Submit one model server job, shaped by the active model profile.
   status     Show the captured job state and server-info availability.
   wait       Wait for readiness, validate /models, and write endpoint.env.
 
@@ -100,7 +101,7 @@ preflight() {
   launcher_sha="$(file_sha256 "${LAUNCHER}")"
   input_sha="$(file_sha256 "${INPUT_JSONL}")"
   if [[ "${launcher_sha}" != "${EXPECTED_LAUNCHER_SHA256}" ]]; then
-    echo "ERROR: launcher hash mismatch (set GDPVAL_EXPECTED_GLM52_LAUNCHER_SHA256 if you edited it): ${launcher_sha}" >&2
+    echo "ERROR: launcher hash mismatch (set GDPVAL_EXPECTED_LAUNCHER_SHA256 if you edited it): ${launcher_sha}" >&2
     return 1
   fi
   if grep -q 'HF_TOKEN' "${LAUNCHER}"; then
@@ -175,7 +176,7 @@ SUBMISSION_LOCK_HELD=0
 acquire_submission_lock() {
   mkdir -p "$(dirname "${SUBMISSION_LOCK_DIR}")"
   if ! mkdir "${SUBMISSION_LOCK_DIR}" 2>/dev/null; then
-    echo "ERROR: another GLM-5.2 submission holds the lock: ${SUBMISSION_LOCK_DIR}" >&2
+    echo "ERROR: another server submission holds the lock: ${SUBMISSION_LOCK_DIR}" >&2
     return 1
   fi
   SUBMISSION_LOCK_HELD=1
@@ -254,7 +255,7 @@ submit_server() {
   write_state "${server_root}" "${job_id}"
   release_submission_lock
   trap - EXIT
-  echo "Submitted GLM-5.2 service job ${job_id}"
+  echo "Submitted ${MODEL_BASE_NAME} server job ${job_id}"
   echo "  server root: ${server_root}"
   echo "  state: ${STATE_FILE}"
 }
@@ -357,7 +358,7 @@ wait_for_server() {
       if [[ "${state}" == "RUNNING" ]]; then
         wait_phase="readiness"
         ready_deadline=$((SECONDS + ready_timeout))
-        echo "GLM server job ${JOB_ID} is RUNNING; starting ${ready_timeout}s readiness timeout"
+        echo "Server job ${JOB_ID} is RUNNING; starting ${ready_timeout}s readiness timeout"
       elif (( SECONDS >= queue_deadline )); then
         echo "ERROR: timed out after ${queue_timeout}s waiting for job ${JOB_ID} to start; job state ${state}" >&2
         return 1
@@ -366,7 +367,7 @@ wait_for_server() {
       echo "ERROR: timed out after ${ready_timeout}s waiting for ${SERVER_INFO}; job state ${state}" >&2
       return 1
     fi
-    echo "Waiting for GLM server (${wait_phase}); job ${JOB_ID} is ${state}"
+    echo "Waiting for model server (${wait_phase}); job ${JOB_ID} is ${state}"
     sleep "${interval}"
   done
 
