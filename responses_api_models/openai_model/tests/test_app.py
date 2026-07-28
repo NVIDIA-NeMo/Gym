@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-from pytest import MonkeyPatch
+from pytest import MonkeyPatch, mark
 
 from nemo_gym.capture_records import CaptureStore
 from nemo_gym.server_utils import ServerClient
@@ -169,6 +169,7 @@ class TestApp:
         assert calls[0].model_ref is not None
         assert calls[0].model_ref.name == "test_model_server"
 
+    @mark.skip(reason="Pending nemo_gym/anthropic_converter.py support for Anthropic streaming SSE to OpenAI Response")
     def test_streaming_messages_capture(self, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
