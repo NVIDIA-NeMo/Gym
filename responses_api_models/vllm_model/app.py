@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import base64
 import json
 import os
@@ -75,7 +76,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     audio_root: Optional[str] = None
 
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
-    # of /v1/chat/completions. The Gym /v1/responses and/v1/chat/completions
+    # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
     # external endpoints continue to work; only the upstream call swaps.
     #
     # In raw mode (render_chat_template=False, the default) the messages list
@@ -596,8 +597,8 @@ class VLLMModel(SimpleResponsesAPIModel):
           /v1/completions doesn't run vLLM's tool-call parser — the caller
           is responsible for parsing tool calls out of the assistant text.
 
-        Audio metadata is rejected in both modes — /v1/completions is
-        text-only.
+        Audio metadata and non-text content blocks are rejected in both
+        modes — /v1/completions is text-only.
         """
         body_dict = body.model_dump(exclude_unset=True)
         messages = body_dict.get("messages", []) or []
@@ -621,7 +622,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
 
         if self.config.render_chat_template:
-            prompt = self._render_messages_via_chat_template(body_dict)
+            prompt = await asyncio.to_thread(self._render_messages_via_chat_template, body_dict)
         else:
             prompt = self._render_messages_to_prompt(messages)
 
@@ -641,6 +642,18 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "length"
                 return res
             raise
+
+        if self.config.return_token_id_information:
+            choice_dict = completion_dict["choices"][0]
+            if choice_dict.get("prompt_token_ids") is None:
+                tokenize_body = dict(
+                    model=self.config.model,
+                    prompt=prompt,
+                )
+                if "add_special_tokens" in completion_body:
+                    tokenize_body["add_special_tokens"] = completion_body["add_special_tokens"]
+                tokenize_response = await client.create_tokenize(**tokenize_body)
+                choice_dict["prompt_token_ids"] = tokenize_response["tokens"]
 
         return self._completion_dict_to_chat_completion(completion_dict)
 
@@ -727,6 +740,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         messages = body_dict.get("messages") or []
         tools = body_dict.get("tools") or None
+        self._validate_text_only_messages(messages)
 
         # Mirror the precedence rules in _preprocess_chat_completion_create_params:
         # global config baseline, per-request metadata overrides on top.
@@ -744,6 +758,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             tools=tools,
             **chat_template_kwargs,
         )
+
+    def _validate_text_only_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Reject non-text content before forwarding to /v1/completions."""
+        for message in messages:
+            if message.get("content") is not None:
+                self._stringify_message_content(message)
 
     def _build_completion_body_from_chat_body(self, chat_body_dict: Dict[str, Any], prompt: str) -> Dict[str, Any]:
         """Translate a chat-completion request body into a /v1/completions body.
@@ -769,6 +789,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             "frequency_penalty",
             "presence_penalty",
             "logit_bias",
+            "response_format",
             "user",
         ):
             if key in chat_body_dict:
@@ -790,22 +811,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         elif self.config.return_token_id_information and "logprobs" not in out:
             out["logprobs"] = 0
 
-        # Operator-level extra_body merges in (e.g. return_tokens_as_token_ids,
-        # prompt_logprobs). Same precedence as the chat path: extra_body fields
-        # do NOT override request-level fields.
+        # Operator-level extra_body merges in (e.g. return_tokens_as_token_ids).
+        # Same precedence as the chat path: extra_body fields do NOT override
+        # request-level fields.
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
             out = extra_body | out
 
         if self.config.return_token_id_information:
-            # vLLM-specific knob: surface generation token IDs as the literal
-            # logprobs.tokens entries (formatted as "token_id:<int>"). This is
-            # the same flag the chat path sets via ``logprobs=True``; here we
-            # need it on the /completions extra_body so vLLM emits them.
-            out.setdefault("return_tokens_as_token_ids", True)
-            # Ask vLLM for prompt-side logprobs so we can recover the prompt
-            # token IDs without a second /tokenize round-trip.
-            out.setdefault("prompt_logprobs", 0)
+            # Prefer vLLM's inline prompt and generation token IDs. Keep the
+            # token-string form available for older engines that omit them.
+            out["return_token_ids"] = True
+            out["return_tokens_as_token_ids"] = True
 
         return out
 
@@ -821,14 +838,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         choice_dict = completion_dict["choices"][0]
         text = choice_dict.get("text") or ""
 
-        # /v1/completions can return matched_stop / stop_reason that the model
-        # actually emitted. Mirror nemo-skills' behavior: append it back.
-        if choice_dict.get("finish_reason") == "stop":
-            for k in ("stop_reason", "matched_stop"):
-                v = choice_dict.get(k)
-                if isinstance(v, str):
-                    text += v
-
         message_dict: Dict[str, Any] = {
             "role": "assistant",
             "content": text,
@@ -836,36 +845,38 @@ class VLLMModel(SimpleResponsesAPIModel):
         }
 
         if self.config.return_token_id_information:
-            logprobs = choice_dict.get("logprobs") or {}
-            tokens = logprobs.get("tokens") or []
-            token_logprobs = logprobs.get("token_logprobs") or []
+            logprobs = choice_dict.get("logprobs")
+            if not logprobs or logprobs.get("token_logprobs") is None:
+                raise RuntimeError(
+                    f"`{self.config.name}` requested per-token logprobs from vLLM "
+                    "(return_token_id_information=True, logprobs=0), but the response "
+                    f"had none (choice.logprobs={logprobs!r}). Cannot extract token IDs or logprobs."
+                )
 
-            generation_token_ids = [t.removeprefix("token_id:") for t in tokens]
+            tokens = logprobs.get("tokens") or []
+            token_logprobs = logprobs["token_logprobs"]
+
+            inline_generation_token_ids = choice_dict.get("token_ids")
+            if inline_generation_token_ids is None and logprobs.get("tokens") is None:
+                raise RuntimeError(
+                    f"`{self.config.name}` requested generation token IDs from vLLM, "
+                    "but the response contained neither choice.token_ids nor choice.logprobs.tokens."
+                )
+            generation_token_ids = (
+                inline_generation_token_ids
+                if inline_generation_token_ids is not None
+                else [t.removeprefix("token_id:") for t in tokens]
+            )
             generation_log_probs = list(token_logprobs)
 
-            prompt_token_ids: List[str] = []
-            prompt_logprobs = completion_dict.get("prompt_logprobs") or []
-            for entry in prompt_logprobs:
-                # vLLM emits None for the very first prompt token (no
-                # predecessor). Subsequent entries are dicts mapping
-                # "token_id:<int>" -> {logprob, ...}.
-                if not entry:
-                    continue
-                # The prompt token at this position is the entry whose rank is
-                # 0 (i.e. the actual token), but vLLM's serialization just
-                # gives us a single-key dict per position when prompt_logprobs=0.
-                for token_key in entry:
-                    prompt_token_ids.append(str(token_key).removeprefix("token_id:"))
-                    break
-
             message_dict.update(
-                prompt_token_ids=prompt_token_ids,
+                prompt_token_ids=choice_dict["prompt_token_ids"],
                 generation_token_ids=generation_token_ids,
                 generation_log_probs=generation_log_probs,
             )
 
         chat_completion_dict = {
-            "id": completion_dict.get("id", "chtcmpl-completions"),
+            "id": completion_dict.get("id", "chatcmpl-completions"),
             "object": "chat.completion",
             "created": completion_dict.get("created", int(time())),
             "model": completion_dict.get("model", self.config.model),
