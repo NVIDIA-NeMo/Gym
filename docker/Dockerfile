@@ -110,8 +110,11 @@ if [[ -n "${NEMO_GYM_PREFETCH_SERVERS:-}" ]]; then
         fi
         echo "Pre-warming venv for: ${server_dir}"
         pushd "${full_path}"
-        uv venv .venv
-        uv sync
+        uv venv --seed .venv
+        # Mirror gym env start: use uv pip install -e . so setup.py install_requires
+        # is evaluated (deps like vllm live there, not in pyproject.toml).
+        # Pass --python explicitly so uv targets .venv, not UV_PROJECT_ENVIRONMENT.
+        uv pip install --python .venv/bin/python -e .
         popd
     done
 fi
