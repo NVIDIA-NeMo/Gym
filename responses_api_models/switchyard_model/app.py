@@ -103,7 +103,7 @@ class _RolloutSessionMiddleware:
 _PR_SET_PDEATHSIG = 1
 
 
-def _set_parent_death_signal() -> None:  # pragma: no cover - runs post-fork, in the child
+def _set_parent_death_signal() -> None:
     """Ask the kernel to SIGTERM this child when its parent dies.
 
     Gym's orchestrator stops a server with SIGINT and escalates to SIGKILL after one second, and a
@@ -236,10 +236,14 @@ class SwitchyardModel(SimpleResponsesAPIModel):
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            async with main_app_lifespan(app) as maybe_state:
-                yield maybe_state
-
-            self.stop_proxy()
+            # finally, not a trailing statement: startup can fail after the proxy is already
+            # serving, and a proxy that outlives a server which never finished starting is the
+            # same leak as one that outlives a server which did.
+            try:
+                async with main_app_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                self.stop_proxy()
 
         app.router.lifespan_context = lifespan_wrapper
 
