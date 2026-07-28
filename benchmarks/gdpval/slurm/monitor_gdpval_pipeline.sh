@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Wait for the staged GLM endpoint, then submit exactly one rollout client.
-# This runs on the HSG login node; the client itself runs on cpu/cpu-normal.
+# This runs on the Slurm login node; the client itself runs on cpu/cpu-normal.
 
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STAGING_ROOT="${GDPVAL_HSG_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
+STAGING_ROOT="${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
 # The monitor drives `<wrapper> wait`, which validates /v1/models against the
 # dataset's expected model name, so it must see the dataset profile itself --
 # forwarding it to the client alone is not enough.

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --time=04:00:00
-#SBATCH --nodes=2
-#SBATCH --ntasks=2
+#SBATCH --nodes=16
+#SBATCH --ntasks=16
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --switches=1
@@ -16,19 +16,17 @@ LUSTRE_DIR=/lustre
 # Keep the upstream flag names for compatibility with the existing launcher stack.
 VLLM_IMAGE="${VLLM_IMAGE:-}"
 MODEL_PATH="${MODEL_PATH:-}"
-MODEL_NAME="${MODEL_NAME:-GLM-52-fp8-parallel}"
+MODEL_NAME="${MODEL_NAME:-GLM-52-bf16-parallel}"
 NUM_INSTANCES=""
 INSTANCE_IDX=""
 
-# FP8 GLM 5.2 uses the serving shape measured fastest on this hardware:
-# a single TP=8 replica spanning 2 nodes. FP8
-# halves weight-memory traffic vs bf16, so decode is materially faster and
-# the freed HBM goes to KV cache.
-NUM_NODES=2
-# Slurm settings match the bf16 launcher.
+# BF16 GLM 5.2 uses the GLM 5.1 bf16 resource shape: one endpoint spans
+# 16 nodes with TP=4 and Ray data parallelism across all 16 replicas.
+NUM_NODES=16
+# Slurm settings mirror run_parallel_glm52-vllm.sh.
 # Set GDPVAL_SLURM_ACCOUNT (or --account) to your Slurm account.
-# export QOS="${QOS-nemotron-priority}"
-# export RESERVATION="${RESERVATION-sla_res_nemotron}"
+# export QOS="${QOS-<your-qos>}"
+# export RESERVATION="${RESERVATION-<your-reservation>}"
 ACCOUNT="${GDPVAL_SLURM_ACCOUNT:-}"
 PARTITION=batch
 export QOS="${QOS-normal}"
@@ -38,11 +36,11 @@ TIME_LIMIT=04:00:00
 BASE_RAY_PORT=6379
 BASE_VLLM_PORT=10240
 
-TENSOR_PARALLEL_SIZE=8
+TENSOR_PARALLEL_SIZE=4
 PIPELINE_PARALLEL_SIZE=1
-DATA_PARALLEL_SIZE=1
+DATA_PARALLEL_SIZE=16
 DATA_PARALLEL_SIZE_LOCAL=1
-GPU_MEMORY_UTILIZATION=0.90
+GPU_MEMORY_UTILIZATION=0.85
 API_SERVER_COUNT=1
 # Bumped from 202752 -> 262144 so the served context covers the rollout
 # token budget (MAX_TOKENS=262144 in test_parallel_rollout_run.sh); the
@@ -349,14 +347,21 @@ srun \
             fi
             ray status --address "${RAY_ADDRESS}" || true
 
-            echo "=== [rank0] Starting GLM 5.2 fp8 vLLM server (TP=${TENSOR_PARALLEL_SIZE}, PP=${PIPELINE_PARALLEL_SIZE}, DP=${DATA_PARALLEL_SIZE}, DPL=${DATA_PARALLEL_SIZE_LOCAL}) ==="
+            echo "=== [rank0] Starting GLM 5.2 bf16 vLLM server (TP=${TENSOR_PARALLEL_SIZE}, PP=${PIPELINE_PARALLEL_SIZE}, DP=${DATA_PARALLEL_SIZE}, DPL=${DATA_PARALLEL_SIZE_LOCAL}) ==="
             SERVE_PORT="${VLLM_PORT}"
             unset VLLM_PORT
 
+            # Startup compilation has repeatedly failed on a subset of
+            # Blackwell/SM100 ranks with a CUDA-driver error inside Inductor
+            # autotuning. Use eager execution for this rollout service so no
+            # distributed rank can enter that compilation path.
             vllm serve "${MODEL_PATH}" \
                 --trust-remote-code \
                 --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
                 --pipeline-parallel-size "${PIPELINE_PARALLEL_SIZE}" \
+                --data-parallel-size "${DATA_PARALLEL_SIZE}" \
+                --data-parallel-backend ray \
+                --data-parallel-size-local "${DATA_PARALLEL_SIZE_LOCAL}" \
                 --distributed-executor-backend ray \
                 --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
                 --port "${SERVE_PORT}" \
@@ -370,7 +375,6 @@ srun \
                 --chat-template-content-format string \
                 --served-model-name "${INSTANCE_MODEL_NAME}" \
                 --max-model-len "${MAX_MODEL_LEN}" \
-                --kv-cache-dtype fp8 \
                 --compilation-config "{\"pass_config\": {\"fuse_allreduce_rms\": false}}" \
                 --model-loader-extra-config "{\"enable_multithread_load\": true, \"num_threads\": 96}" > "${LOG_FILE}" 2>&1 &
 

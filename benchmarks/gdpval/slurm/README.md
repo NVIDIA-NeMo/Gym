@@ -17,7 +17,7 @@ when a batch is too large for one allocation.
 ## Setup
 
 ```bash
-cd benchmarks/gdpval/hsg
+cd benchmarks/gdpval/slurm
 cp cluster.env.example cluster.env
 $EDITOR cluster.env                 # account, model path, container image
 set -a; . ./cluster.env; set +a
@@ -52,7 +52,7 @@ directly with `--help` for its own flags.
 ## Dataset profiles
 
 Per-dataset settings (input JSONL, expected row count, task-id pattern, model
-name, concurrency) live in `benchmarks/gdpval/datasets/*.env` and are selected
+name, concurrency) live in `benchmarks/gdpval/datasets/*.env` (see `example.env`) and are selected
 with `GDPVAL_ENV_FILE`. Adding a new batch means adding a profile, not editing
 these scripts.
 

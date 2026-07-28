@@ -8,9 +8,9 @@ umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-STAGING_ROOT="${GDPVAL_HSG_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
+STAGING_ROOT="${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
 LAUNCHER="${GDPVAL_GLM52_LAUNCHER:-${SCRIPT_DIR}/run_parallel_fp8-glm52-vllm.sh}"
-EXPECTED_LAUNCHER_SHA256="${GDPVAL_EXPECTED_GLM52_LAUNCHER_SHA256:-93c48116c9cef175a5ec6ddb511f9c5f5edbeede4a83e2e7d4c9b1e37fe2cd26}"
+EXPECTED_LAUNCHER_SHA256="${GDPVAL_EXPECTED_GLM52_LAUNCHER_SHA256:-3f1959d6c65bbf62fae7208639967b3bdcb99c90e05f5fad4884a7a153bba2f4}"
 MODEL_PATH="${GDPVAL_MODEL_PATH:-}"
 VLLM_IMAGE="${GDPVAL_VLLM_IMAGE:-}"
 MODEL_BASE_NAME="${GDPVAL_MODEL_BASE_NAME:-GLM-52-fp8-afterquery-20260721}"
@@ -31,7 +31,7 @@ _missing=()
 [[ -n "${VLLM_IMAGE}" ]] || _missing+=("GDPVAL_VLLM_IMAGE")
 if (( ${#_missing[@]} )); then
     echo "ERROR: required setting(s) not set: ${_missing[*]}" >&2
-    echo "       Copy benchmarks/gdpval/hsg/cluster.env.example, fill it in, and source it." >&2
+    echo "       Copy benchmarks/gdpval/slurm/cluster.env.example, fill it in, and source it." >&2
     exit 2
 fi
 VALIDATOR="${REPO_ROOT}/benchmarks/gdpval/validate_gdpval_batch.py"

@@ -9,11 +9,11 @@
 set -euo pipefail
 umask 077
 
-STAGING_ROOT="${GDPVAL_HSG_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
-CHECKOUT="${GDPVAL_HSG_CHECKOUT:-${STAGING_ROOT}/checkout_20260721}"
+STAGING_ROOT="${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
+CHECKOUT="${GDPVAL_SLURM_CHECKOUT:-${STAGING_ROOT}/checkout}"
 PRIVATE_ENV="${GDPVAL_PRIVATE_ENV_FILE:-${STAGING_ROOT}/afterquery.private.env}"
 ENDPOINT_ENV="${GDPVAL_ENDPOINT_ENV_FILE:-${STAGING_ROOT}/endpoint.current.env}"
-BOOTSTRAP="${CHECKOUT}/benchmarks/gdpval/hsg/bootstrap_gdpval_runtime.sh"
+BOOTSTRAP="${CHECKOUT}/benchmarks/gdpval/slurm/bootstrap_gdpval_runtime.sh"
 RUNNER="${CHECKOUT}/benchmarks/gdpval/run_gdpval_rollouts.sh"
 ACTION="${GDPVAL_ACTION:-run}"
 

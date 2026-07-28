@@ -9,9 +9,9 @@
 set -euo pipefail
 umask 077
 
-STAGING_ROOT="${GDPVAL_HSG_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
-CHECKOUT="${GDPVAL_HSG_CHECKOUT:-${STAGING_ROOT}/checkout_20260721}"
-MONITOR="${CHECKOUT}/benchmarks/gdpval/hsg/monitor_gdpval_pipeline.sh"
+STAGING_ROOT="${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
+CHECKOUT="${GDPVAL_SLURM_CHECKOUT:-${STAGING_ROOT}/checkout}"
+MONITOR="${CHECKOUT}/benchmarks/gdpval/slurm/monitor_gdpval_pipeline.sh"
 ACTION="${GDPVAL_ACTION:-resume}"
 
 case "${ACTION}" in
@@ -31,6 +31,6 @@ mkdir -p "${STAGING_ROOT}/continuation_logs"
 chmod 700 "${STAGING_ROOT}/continuation_logs"
 
 export GDPVAL_ACTION="${ACTION}"
-export GDPVAL_HSG_STAGING_ROOT="${STAGING_ROOT}"
+export GDPVAL_SLURM_STAGING_ROOT="${STAGING_ROOT}"
 export GDPVAL_SERVER_READY_TIMEOUT="${GDPVAL_SERVER_READY_TIMEOUT:-3300}"
 exec "${MONITOR}"

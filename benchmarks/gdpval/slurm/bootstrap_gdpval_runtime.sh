@@ -6,8 +6,8 @@ set -euo pipefail
 
 umask 077
 
-CHECKOUT="${GDPVAL_HSG_CHECKOUT:-${GDPVAL_HSG_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}/checkout}"
-BOOT_ROOT="${GDPVAL_BOOT_ROOT:-${GDPVAL_HSG_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}/bootstrap}"
+CHECKOUT="${GDPVAL_SLURM_CHECKOUT:-${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}/checkout}"
+BOOT_ROOT="${GDPVAL_BOOT_ROOT:-${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}/bootstrap}"
 REFERENCE="${GDPVAL_REFERENCE_CHECKOUT:-}"
 UV_BIN="${GDPVAL_UV_BIN:-${CHECKOUT}/.venv/bin/uv}"
 PYTHON_BIN="${GDPVAL_BOOTSTRAP_PYTHON:-/cm/local/apps/python3/bin/python3.12}"

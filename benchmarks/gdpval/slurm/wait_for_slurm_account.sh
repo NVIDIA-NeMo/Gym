@@ -6,10 +6,10 @@ set -euo pipefail
 
 umask 077
 
-STAGING_ROOT="${GDPVAL_HSG_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
+STAGING_ROOT="${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
 TARGET_USER="${GDPVAL_ACCOUNT_TARGET_USER:-${USER:-$(id -un)}}"
 TARGET_ACCOUNT="${GDPVAL_SLURM_ACCOUNT:-}"
-TARGET_CLUSTER="${GDPVAL_ACCOUNT_TARGET_CLUSTER:-oci-hsg-cs-001}"
+TARGET_CLUSTER="${GDPVAL_ACCOUNT_TARGET_CLUSTER:-}"
 REQUIRED_QOS="${GDPVAL_ACCOUNT_REQUIRED_QOS:-normal}"
 POLL_INTERVAL="${GDPVAL_ACCOUNT_POLL_INTERVAL:-600}"
 QUERY_TIMEOUT="${GDPVAL_ACCOUNT_QUERY_TIMEOUT:-30}"
@@ -30,7 +30,7 @@ Actions:
 Environment:
   GDPVAL_ACCOUNT_TARGET_USER      Slurm username (default: $USER)
   GDPVAL_SLURM_ACCOUNT       Slurm account to wait for (required)
-  GDPVAL_ACCOUNT_TARGET_CLUSTER   Slurm cluster (default: oci-hsg-cs-001)
+  GDPVAL_ACCOUNT_TARGET_CLUSTER   Restrict to one Slurm cluster (default: any)
   GDPVAL_ACCOUNT_REQUIRED_QOS     Required QOS token (default: normal)
   GDPVAL_ACCOUNT_POLL_INTERVAL    Poll interval in seconds (default: 600)
   GDPVAL_ACCOUNT_QUERY_TIMEOUT    sacctmgr timeout in seconds (default: 30)

@@ -9,18 +9,18 @@
 set -euo pipefail
 umask 077
 
-STAGING_ROOT="${GDPVAL_HSG_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
-CHECKOUT="${GDPVAL_HSG_CHECKOUT:-${STAGING_ROOT}/checkout_20260721}"
+STAGING_ROOT="${GDPVAL_SLURM_STAGING_ROOT:-${SCRATCH:-$HOME}/gdpval-rollouts}"
+CHECKOUT="${GDPVAL_SLURM_CHECKOUT:-${STAGING_ROOT}/checkout}"
 RUN_ROOT="${GDPVAL_RUN_ROOT:-${STAGING_ROOT}/GLM-52-fp8_afterquery-subset100_20260721}"
 PARENT_SERVER_JOB_ID="${GDPVAL_PARENT_SERVER_JOB_ID:?GDPVAL_PARENT_SERVER_JOB_ID is required}"
 PARENT_CLIENT_JOB_ID="${GDPVAL_PARENT_CLIENT_JOB_ID:?GDPVAL_PARENT_CLIENT_JOB_ID is required}"
 CONTINUATION_STATE="${GDPVAL_CONTINUATION_STATE_FILE:-${STAGING_ROOT}/continuation.current}"
 SERVER_STATE="${GDPVAL_SERVER_STATE_FILE:-${STAGING_ROOT}/model_server.current}"
 CLIENT_STATE="${GDPVAL_CLIENT_STATE_FILE:-${STAGING_ROOT}/client.current}"
-SUBMITTER="${CHECKOUT}/benchmarks/gdpval/hsg/submit_gdpval_glm52.sh"
-MONITOR_BATCH="${CHECKOUT}/benchmarks/gdpval/hsg/run_gdpval_continuation_monitor.sbatch"
+SUBMITTER="${CHECKOUT}/benchmarks/gdpval/slurm/submit_gdpval_glm52.sh"
+MONITOR_BATCH="${CHECKOUT}/benchmarks/gdpval/slurm/run_gdpval_continuation_monitor.sbatch"
 VALIDATOR="${CHECKOUT}/benchmarks/gdpval/validate_gdpval_batch.py"
-RESUME_VALIDATOR="${CHECKOUT}/benchmarks/gdpval/hsg/validate_gdpval_resume_state.py"
+RESUME_VALIDATOR="${CHECKOUT}/benchmarks/gdpval/slurm/validate_gdpval_resume_state.py"
 PYTHON_BIN="${CHECKOUT}/.venv/bin/python"
 LAUNCH_INPUT="${RUN_ROOT}/input/afterquery_gdpval_subset_100_20260721.launch.jsonl"
 REFERENCE_OVERRIDES="${CHECKOUT}/benchmarks/gdpval/data/afterquery_gdpval_subset_100_20260721.reference_overrides.json"
@@ -310,7 +310,7 @@ archive_empty_lock "${RUN_ROOT}/.launch.lock" "${RUN_ROOT}/continuation_archive"
 archive_empty_lock "${STAGING_ROOT}/.monitor_gdpval_pipeline.lock" "${RUN_ROOT}/continuation_archive"
 archive_server_state
 
-GDPVAL_HSG_STAGING_ROOT="${STAGING_ROOT}" "${SUBMITTER}" submit
+GDPVAL_SLURM_STAGING_ROOT="${STAGING_ROOT}" "${SUBMITTER}" submit
 NEW_SERVER_JOB_ID="$(state_value "${SERVER_STATE}" job_id)"
 [[ "${NEW_SERVER_JOB_ID}" =~ ^[0-9]+$ ]] || {
   echo "ERROR: submitter wrote an invalid new server job ID: ${NEW_SERVER_JOB_ID}" >&2
@@ -321,7 +321,7 @@ write_continuation_state server_queued "${ACTION}" "${NEW_SERVER_JOB_ID}"
 MONITOR_SUBMISSION="$(
   sbatch --parsable \
     --dependency="after:${NEW_SERVER_JOB_ID}+1" \
-    --export="USER=${USER},HOME=${HOME},LOGNAME=${LOGNAME:-${USER}},PATH=${PATH},LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-},SLURM_CONF=${SLURM_CONF:-},GDPVAL_ACTION=${ACTION},GDPVAL_HSG_STAGING_ROOT=${STAGING_ROOT}" \
+    --export="USER=${USER},HOME=${HOME},LOGNAME=${LOGNAME:-${USER}},PATH=${PATH},LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-},SLURM_CONF=${SLURM_CONF:-},GDPVAL_ACTION=${ACTION},GDPVAL_SLURM_STAGING_ROOT=${STAGING_ROOT}" \
     "${MONITOR_BATCH}"
 )"
 MONITOR_JOB_ID="${MONITOR_SUBMISSION%%;*}"
