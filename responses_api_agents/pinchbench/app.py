@@ -112,6 +112,11 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
+    # Raise the OpenClaw provider model HTTP request timeout — which includes the LLM
+    # stream-idle watchdog (default 120s) — to this many seconds. Maps to
+    # `models.providers.<id>.timeoutSeconds` in OpenClaw. None keeps the 120s default.
+    # See README § "Increasing the LLM idle timeout".
+    openclaw_provider_timeout_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
     # Where per-task transcripts are archived (kept on disk for inspection, like
     # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
@@ -188,6 +193,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         # it never hits the shared-workspace WorkspaceVanishedError cliff). The client
         # in-container picks up the token from this env var.
         env["OPENCLAW_GATEWAY_TOKEN"] = self.config.gateway_token
+        if self.config.openclaw_provider_timeout_seconds:
+            env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
         if self.config.brave_api_key:
             env["BRAVE_API_KEY"] = self.config.brave_api_key
         if self.config.tavily_api_key:
@@ -222,7 +229,20 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         sb = AsyncSandbox(self.config.sandbox_provider)
         try:
             await sb.start(self._build_spec(task_id))
-            await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
+            run_cmd = "bash /opt/run_task.sh"
+            prov_timeout_s = self.config.openclaw_provider_timeout_seconds
+            if prov_timeout_s:
+                # Raise the OpenClaw provider request timeout (incl. the LLM stream-idle
+                # watchdog, default 120s) WITHOUT rebuilding the image: inject
+                # models.providers.custom.timeoutSeconds into the in-container lib_agent.py
+                # before run_task.sh copies + uses it.
+                inject = (
+                    'sed -i \'s#"api": "openai-completions",#'
+                    '"api": "openai-completions", "timeoutSeconds": %d,#\' '
+                    '/opt/pinchbench-skill/scripts/lib_agent.py'
+                ) % prov_timeout_s
+                run_cmd = inject + " && " + run_cmd
+            await sb.exec(run_cmd, timeout_s=self.config.task_timeout_s)
             await sb.download(archive, out_dir / "out.tgz")
         finally:
             await sb.stop()
@@ -291,6 +311,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                     }
                 ],
             }
+            provider_timeout = int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "0"))
+            if provider_timeout > 0:
+                custom_provider["timeoutSeconds"] = provider_timeout
             models = cfg.setdefault("models", {})
             models["mode"] = "merge"
             models.setdefault("providers", {})["custom"] = custom_provider
