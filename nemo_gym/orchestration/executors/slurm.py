@@ -31,6 +31,13 @@ _BUILDERS = {
 
 
 class SlurmExecutor(BaseExecutor):
+    """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
+
+    Every service and the driver are launched via `srun --container-image` so they
+    run inside the container specified in their config. Health checks run as plain
+    bash inside the sbatch script (no container needed — they just poll HTTP).
+    """
+
     def run(self, config: SubmitConfig) -> None:
         compute = next(iter(config.compute.values()))
         output_path = Path(config.job.output_path)
@@ -64,15 +71,22 @@ class SlurmExecutor(BaseExecutor):
         for name, service in config.services.items():
             builder = _BUILDERS[type(service)]
             lines.append(f"# service: {name}")
-            lines.append(builder(service) + " &")
+            lines.append(
+                f"srun --container-image={shlex.quote(service.container)} "
+                f"{builder(service)} &"
+            )
 
         for name, service in config.services.items():
             if service.health_check:
                 hc = service.health_check
                 lines.append(
-                    f"until curl -sf http://localhost:{hc.port}{hc.path}; do sleep 2; done &"
-                    f"  # health check: {name} (timeout {hc.timeout_seconds}s)"
+                    f"# health check: {name} (timeout {hc.timeout_seconds}s)\n"
+                    f"timeout {hc.timeout_seconds} bash -c "
+                    f"'until curl -sf http://localhost:{hc.port}{shlex.quote(hc.path)}; do sleep 2; done'"
                 )
 
-        lines.append(f"gym eval run --benchmark {shlex.quote(benchmark.name)}")
+        lines.append(
+            f"srun --container-image={shlex.quote(config.driver.container)} "
+            f"gym eval run --benchmark {shlex.quote(benchmark.name)}"
+        )
         return "\n".join(lines)
