@@ -3666,6 +3666,7 @@ class TestTopLogprobsHandling:
         assert result["top_logprobs"] == 0
         assert result["logprobs"] is True
         assert result["return_tokens_as_token_ids"] is True
+        assert result["return_token_ids"] is True
 
         # Inbound non-zero value must also be overridden, not inherited.
         result = model._preprocess_chat_completion_create_params(
@@ -3708,6 +3709,26 @@ class TestTopLogprobsHandling:
             {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
         )
         assert "top_logprobs" not in result
+
+    def test_tokenize_fallback_preserves_multimodal_processor_kwargs(self) -> None:
+        body = {
+            "model": "dummy_model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "mm_processor_kwargs": {
+                "video_as_images": True,
+                "max_num_tiles": 1,
+            },
+            "temperature": 1.0,
+        }
+
+        assert VLLMModel._get_tokenize_body_dict(body) == {
+            "model": "dummy_model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "mm_processor_kwargs": {
+                "video_as_images": True,
+                "max_num_tiles": 1,
+            },
+        }
 
     def _capture_chat_completion_dict(
         self, logprobs: Union[dict, None], message_extra: Union[dict, None] = None
@@ -3771,6 +3792,52 @@ class TestTopLogprobsHandling:
         assert message["generation_token_ids"] == [123, 456]
         assert message["generation_log_probs"] == [-0.1, -0.2]
         assert message["prompt_token_ids"] == [10, 20, 30]
+
+    def test_capture_path_prefers_native_prompt_and_generation_token_ids(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_VLLM_TOKEN_ID_SOURCE", "native")
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        response_dict = self._capture_chat_completion_dict(
+            logprobs={
+                "content": [
+                    {
+                        "token": "token_id:999",
+                        "logprob": -0.1,
+                        "bytes": None,
+                        "top_logprobs": [],
+                    }
+                ]
+            }
+        )
+        response_dict["prompt_token_ids"] = [10, 20, 30]
+        response_dict["choices"][0]["token_ids"] = [123]
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(return_value=response_dict)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("native prompt ids should avoid /tokenize")
+        )
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["prompt_token_ids"] == [10, 20, 30]
+        assert message["generation_token_ids"] == [123]
+        assert message["generation_log_probs"] == [-0.1]
+        assert message["generation_token_id_source"] == "native"
+        assert message["native_generation_token_ids_count"] == 1
+        assert message["logprob_generation_token_ids_count"] == 1
+        assert message["native_logprob_token_id_mismatch_count"] == 1
+        assert message["native_logprob_token_id_first_mismatches"] == [0]
+        assert message["finish_reason"] == "stop"
 
     def test_capture_path_preserves_routed_experts(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
