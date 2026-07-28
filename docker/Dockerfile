@@ -88,13 +88,8 @@ LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 # already present from the hermetic stage.
 COPY --from=nemo-gym --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
-# Unshallow the clone so setuptools-scm can read the full tag history.
-RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
-
 # Install the nemo-gym project itself along with the vllm extra.
 RUN UV_LINK_MODE=symlink uv sync --locked --extra vllm
-
-WORKDIR /opt/nemo-gym
 
 ENTRYPOINT ["gym"]
 CMD ["--help"]
