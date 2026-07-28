@@ -28,6 +28,7 @@ jobs:
     with:
       image-name: nemo-gym
       dockerfile: docker/Dockerfile
+      build-contexts: "nemo-gym=${{ github.run_id }}/"
     secrets:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
