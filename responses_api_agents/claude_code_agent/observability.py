@@ -201,6 +201,21 @@ def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int
     return events
 
 
+def _would_create_parent_cycle(
+    child_id: str,
+    parent_id: str,
+    parents: dict[str, tuple[str, str, str, int]],
+) -> bool:
+    seen = {child_id}
+    current = parent_id
+    while current in parents:
+        if current in seen:
+            return True
+        seen.add(current)
+        current = parents[current][0]
+    return current in seen
+
+
 def extract_claude_code_observations(
     config_dir: Path,
     *,
@@ -242,13 +257,6 @@ def extract_claude_code_observations(
     compactions: list[ContextCompactionObservation] = []
 
     for invocation_id, entries in events_by_invocation.items():
-        entries.sort(
-            key=lambda pair: (
-                _timestamp(pair[1].get("timestamp")) is None,
-                _timestamp(pair[1].get("timestamp")) or 0,
-                pair[0],
-            )
-        )
         items = conversations[invocation_id]
         refs = model_calls[invocation_id]
 
@@ -406,7 +414,16 @@ def extract_claude_code_observations(
                             ambiguous_parents.add(child_id)
                             gaps.append(_gap("conflicting_subagent_parent", invocation_id=child_id))
                         elif child_id not in ambiguous_parents:
-                            parents.setdefault(child_id, parent)
+                            if _would_create_parent_cycle(child_id, invocation_id, parents):
+                                gaps.append(
+                                    _gap(
+                                        "cyclic_subagent_parent",
+                                        invocation_id=child_id,
+                                        detail=invocation_id,
+                                    )
+                                )
+                            else:
+                                parents.setdefault(child_id, parent)
                     else:
                         add_gap("ambiguous_subagent_relation")
 
