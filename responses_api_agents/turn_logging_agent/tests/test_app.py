@@ -87,6 +87,24 @@ def http_mock(payload) -> MagicMock:
 
 
 class TestTurnLogging:
+    def test_rollout_prefix_carried_onto_model_calls(self) -> None:
+        # A /ng-rollout/<id>-prefixed self-call must re-apply the capture-correlation
+        # prefix to downstream model calls, mirroring simple_agent's url_path_for_request.
+        server = TurnLoggingAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+
+        turn = model_response([FINAL_MESSAGE], usage(100, 10))
+        server.server_client.post = AsyncMock(side_effect=[http_mock(turn)])
+
+        result = client.post(
+            "/ng-rollout/rid-7/v1/responses",
+            json={"input": [{"role": "user", "content": "hi"}]},
+        )
+        assert result.status_code == 200, result.text
+
+        model_call = server.server_client.post.call_args_list[0]
+        assert model_call.kwargs["url_path"] == "/ng-rollout/rid-7/v1/responses"
+
     def test_two_turn_loop_captures_per_turn_telemetry(self) -> None:
         server = TurnLoggingAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
         client = TestClient(server.setup_webserver())
