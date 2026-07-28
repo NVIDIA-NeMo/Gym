@@ -40,6 +40,9 @@ jobs:
   test:
     needs: [build]
     runs-on: linux-amd64-cpu16
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Install Azure CLI
         run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
