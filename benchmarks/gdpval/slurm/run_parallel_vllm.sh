@@ -344,7 +344,7 @@ srun \
             fi
             ray status --address "${RAY_ADDRESS}" || true
 
-            echo "=== [rank0] Starting vLLM server for ${MODEL_NAME} (TP=${TENSOR_PARALLEL_SIZE}, PP=${PIPELINE_PARALLEL_SIZE}, DP=${DATA_PARALLEL_SIZE}, DPL=${DATA_PARALLEL_SIZE_LOCAL}) ==="
+            echo "=== [rank0] Starting vLLM server for ${INSTANCE_MODEL_NAME} (TP=${TENSOR_PARALLEL_SIZE}, PP=${PIPELINE_PARALLEL_SIZE}, DP=${DATA_PARALLEL_SIZE}, DPL=${DATA_PARALLEL_SIZE_LOCAL}) ==="
             SERVE_PORT="${VLLM_PORT}"
             unset VLLM_PORT
 
