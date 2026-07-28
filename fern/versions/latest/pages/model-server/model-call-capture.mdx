@@ -41,8 +41,8 @@ Use `/ng-rollout/<rollout_id>` as the model-server URL prefix. SDKs append their
 the rollout prefix before routing.
 
 Correlation is caller-supplied. An unprefixed call is forwarded normally but is not captured.
-SDK-based harnesses must configure their `model_server` field for capture; calls sent directly to an
-external provider do not cross a Gym model server.
+SDK-based harnesses must route calls through a Gym Model Server; calls sent directly to an external
+provider are not captured.
 
 Agents built on `SimpleResponsesAPIAgent` can use these helpers: `url_path_for_run(url_path, body)`
 prefixes a downstream call from the run request's task/rollout indices (only when
@@ -128,6 +128,10 @@ Agent observations and model-call capture are separate evidence. Join an invocat
 references by `model_call_id`, or by the exact `(model_ref, response_id)` pair when the harness sees
 the protocol response ID. Do not infer ownership from timestamps, text, or list position. The full
 model request and response remain in `CaptureStore`; rollout attachments intentionally omit them.
+
+Compaction records distinguish the calls immediately before and after the context change from
+`model_calls` used to perform the compaction. Compaction calls are exact references to calls owned by
+the enclosing invocation; opaque integrations leave them empty rather than infer them.
 
 Tool timestamps are UTC Unix seconds when the source provides wall-clock time. `duration_ms` is the
 measured interval, and `timing_source` identifies executor, harness, or artifact-derived timing.

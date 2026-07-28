@@ -112,13 +112,31 @@ class ContextCompactionObservation(ObservationModel):
     invocation_id: str
     observed_at: Optional[float] = None
     trigger: Optional[str] = None
-    tokens_before: Optional[int] = None
-    tokens_after: Optional[int] = None
+    tokens_before: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Producer-reported token count before compaction; accounting may differ from tokens_after.",
+    )
+    tokens_after: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Producer-reported token count after compaction; accounting may differ from tokens_before.",
+    )
     outcome: Literal["completed", "failed", "aborted", "unknown"] = "unknown"
     summary: Optional[str] = None
     first_kept_item_id: Optional[str] = None
-    before_model_call: Optional[ModelCallRef] = None
-    after_model_call: Optional[ModelCallRef] = None
+    before_model_call: Optional[ModelCallRef] = Field(
+        default=None,
+        description="Last invocation model call observed before compaction.",
+    )
+    model_calls: list[ModelCallRef] = Field(
+        default_factory=list,
+        description=("Invocation-owned model calls used for compaction, in producer-observed order; never inferred."),
+    )
+    after_model_call: Optional[ModelCallRef] = Field(
+        default=None,
+        description="First invocation model call observed after compaction.",
+    )
 
 
 class ObservationGap(ObservationModel):
@@ -147,16 +165,18 @@ class AgentObservationBundle(ObservationModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "AgentObservationBundle":
+        """Require unique invocation IDs and reject cycles in the observed parent graph."""
         invocation_records = [record for record in self.records if isinstance(record, AgentInvocation)]
         invocations = {record.invocation_id: record for record in invocation_records}
         if len(invocation_records) != len(invocations):
             raise ValueError("invocation_id must be unique within an observation bundle")
 
-        resolved: set[str] = set()
+        # Missing parents are valid when an opaque producer can observe only part of the invocation tree.
+        checked: set[str] = set()
         for invocation_id in invocations:
             chain: set[str] = set()
             current = invocation_id
-            while current in invocations and current not in resolved:
+            while current in invocations and current not in checked:
                 if current in chain:
                     raise ValueError("parent_invocation_id must not form a cycle")
                 chain.add(current)
@@ -164,7 +184,7 @@ class AgentObservationBundle(ObservationModel):
                 if parent is None:
                     break
                 current = parent
-            resolved.update(chain)
+            checked.update(chain)
         return self
 
 
@@ -203,7 +223,7 @@ def join_model_call_observations(
         assert ref.model_ref is not None and ref.response_id is not None
         return by_response.get((ref.model_ref.type, ref.model_ref.name, ref.response_id), [])
 
-    def canonical(ref: ModelCallRef, call: ModelCallRecord) -> ModelCallRef:
+    def canonical(call: ModelCallRecord) -> ModelCallRef:
         return ModelCallRef.model_validate(
             {
                 "model_call_id": call.model_call_id,
@@ -222,14 +242,14 @@ def join_model_call_observations(
         for gap in bundle.gaps
         if gap.code not in join_codes
         and not (
-            captured
-            and gap.code == "model_call_ownership_unavailable"
+            gap.code == "model_call_ownership_unavailable"
             and gap.invocation_id is None
-            and (gap.detail is None or gap.detail.startswith("capture:"))
+            and gap.detail is not None
+            and gap.detail.startswith("capture:")
         )
     ]
 
-    claimed: set[int] = set()
+    owner_by_call: dict[int, str] = {}
     join_gaps: list[ObservationGap] = []
     for invocation in invocations:
         resolved: list[ModelCallRef] = []
@@ -249,7 +269,7 @@ def join_model_call_observations(
 
             call = candidates[0]
             identity = id(call)
-            if identity in claimed:
+            if identity in owner_by_call:
                 join_gaps.append(
                     ObservationGap(
                         code="model_call_reference_conflict",
@@ -259,18 +279,63 @@ def join_model_call_observations(
                 )
                 resolved.append(ref)
                 continue
-            claimed.add(identity)
-            resolved.append(canonical(ref, call))
+            owner_by_call[identity] = invocation.invocation_id
+            resolved.append(canonical(call))
         invocation.model_calls = resolved
 
     for compaction in compactions:
+        resolved: list[ModelCallRef] = []
+        for ref in compaction.model_calls:
+            candidates = matches(ref)
+            detail = ref.model_call_id or ref.response_id
+            if len(candidates) != 1:
+                join_gaps.append(
+                    ObservationGap(
+                        code=("model_call_reference_ambiguous" if candidates else "model_call_reference_unmatched"),
+                        invocation_id=compaction.invocation_id,
+                        detail=f"model_calls:{detail}",
+                    )
+                )
+                resolved.append(ref)
+                continue
+
+            call = candidates[0]
+            owner = owner_by_call.get(id(call))
+            if owner != compaction.invocation_id:
+                join_gaps.append(
+                    ObservationGap(
+                        code=(
+                            "model_call_reference_conflict"
+                            if owner is not None
+                            else "model_call_ownership_unavailable"
+                        ),
+                        invocation_id=compaction.invocation_id,
+                        detail=f"model_calls:{call.model_call_id or call.response_id}",
+                    )
+                )
+                resolved.append(ref)
+                continue
+            resolved.append(canonical(call))
+        compaction.model_calls = resolved
+
         for field_name in ("before_model_call", "after_model_call"):
             ref = getattr(compaction, field_name)
             if ref is None:
                 continue
             candidates = matches(ref)
             if len(candidates) == 1:
-                setattr(compaction, field_name, canonical(ref, candidates[0]))
+                call = candidates[0]
+                owner = owner_by_call.get(id(call))
+                if owner is not None and owner != compaction.invocation_id:
+                    join_gaps.append(
+                        ObservationGap(
+                            code="model_call_reference_conflict",
+                            invocation_id=compaction.invocation_id,
+                            detail=f"{field_name}:{call.model_call_id or call.response_id}",
+                        )
+                    )
+                    continue
+                setattr(compaction, field_name, canonical(call))
             else:
                 join_gaps.append(
                     ObservationGap(
@@ -282,7 +347,7 @@ def join_model_call_observations(
 
     result.gaps.extend(join_gaps)
     for call in captured:
-        if id(call) not in claimed:
+        if id(call) not in owner_by_call:
             result.gaps.append(
                 ObservationGap(
                     code="model_call_ownership_unavailable",

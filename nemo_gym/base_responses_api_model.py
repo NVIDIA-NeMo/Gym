@@ -756,18 +756,24 @@ def _classify_exception(exc: BaseException) -> str:
 
 
 def _exception_http_details(exc: BaseException) -> tuple[Optional[int], bytes]:
-    response = getattr(exc, "response", None)
-    status = getattr(exc, "status", None)
-    if not isinstance(status, int):
-        status = getattr(exc, "status_code", None)
-    if not isinstance(status, int) and response is not None:
-        status = getattr(response, "status_code", None)
+    def read_attr(value: Any, name: str) -> Any:
+        try:
+            return getattr(value, name, None)
+        except Exception:
+            return None
 
-    body = getattr(exc, "response_content", None)
+    response = read_attr(exc, "response")
+    status = read_attr(exc, "status")
+    if not isinstance(status, int):
+        status = read_attr(exc, "status_code")
+    if not isinstance(status, int) and response is not None:
+        status = read_attr(response, "status_code")
+
+    body = read_attr(exc, "response_content")
     if body is None and response is not None:
-        body = getattr(response, "content", None)
+        body = read_attr(response, "content")
         if body is None:
-            body = getattr(response, "text", None)
+            body = read_attr(response, "text")
     if isinstance(body, str):
         body = body.encode()
     return (status if isinstance(status, int) else None, bytes(body) if isinstance(body, (bytes, bytearray)) else b"")

@@ -560,6 +560,25 @@ def test_classify_exception_branches():
     assert _classify_exception(ValueError("x")) == "exception"
 
 
+def test_exception_http_details_tolerates_lazy_response_failure():
+    from nemo_gym.base_responses_api_model import _exception_http_details
+
+    class _Response:
+        status_code = 503
+
+        @property
+        def content(self):
+            raise RuntimeError("body unavailable")
+
+        @property
+        def text(self):
+            raise RuntimeError("body unavailable")
+
+    error = RuntimeError("upstream")
+    error.response = _Response()
+    assert _exception_http_details(error) == (503, b"")
+
+
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
     assert {"observability_enabled", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
@@ -1107,7 +1126,7 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
                     ],
                 }
             ],
-            "gaps": [{"code": "model_call_ownership_unavailable"}],
+            "gaps": [{"code": "model_call_ownership_unavailable", "detail": "capture:stale"}],
         },
     }
     merge_model_call_capture_into_record(record, [tmp_path])
