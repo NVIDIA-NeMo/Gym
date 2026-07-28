@@ -4,11 +4,11 @@ import rich
 from omegaconf import OmegaConf
 
 from nemo_gym.decorators import experimental
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 
 _EXECUTORS = {
-    "slurm": SlurmExecutor,
+    SlurmComputeConfig: SlurmExecutor,
 }
 
 
@@ -38,8 +38,4 @@ def _load_submit_config() -> SubmitConfig:
 def submit() -> None:  # pragma: no cover
     config = _load_submit_config()
     compute = next(iter(config.compute.values()))
-    executor_cls = _EXECUTORS.get(compute.type)
-    if executor_cls is None:
-        rich.print(f"[red]error:[/red] Unsupported compute type '{compute.type}'. Supported: {', '.join(_EXECUTORS)}.")
-        return
-    executor_cls().run(config)
+    _EXECUTORS[type(compute)]().run(config)

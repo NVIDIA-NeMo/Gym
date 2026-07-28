@@ -34,11 +34,21 @@ ServiceConfig = Annotated[
 ]
 
 
-class ComputeConfig(BaseModel):
-    type: str
+class BaseComputeConfig(BaseModel):
+    pass
+
+
+class SlurmComputeConfig(BaseComputeConfig):
+    type: Literal["slurm"]
     hostname: str | None = None
     walltime: str | None = None
     node_pools: dict[str, dict] | None = None
+
+
+ComputeConfig = Annotated[
+    Annotated[SlurmComputeConfig, Tag("slurm")],
+    Discriminator("type"),
+]
 
 
 class BenchmarkRunConfig(BaseModel):

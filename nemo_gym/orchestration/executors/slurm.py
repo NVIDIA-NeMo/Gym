@@ -1,7 +1,7 @@
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
-    ComputeConfig,
     RayServiceConfig,
+    SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,
 )
@@ -15,7 +15,7 @@ def _build_vllm_command(service: VllmServiceConfig) -> str:
     return cmd
 
 
-def _build_ray_command(service: RayServiceConfig) -> str:
+def _build_ray_command(_service: RayServiceConfig) -> str:
     return "ray start --head"
 
 
@@ -33,7 +33,7 @@ class SlurmExecutor(BaseExecutor):
             self._sbatch(script, compute)
 
     def _build_job_script(
-        self, config: SubmitConfig, benchmark: BenchmarkRunConfig, compute: ComputeConfig
+        self, config: SubmitConfig, benchmark: BenchmarkRunConfig, compute: SlurmComputeConfig
     ) -> str:
         lines = ["#!/bin/bash"]
 
@@ -55,5 +55,5 @@ class SlurmExecutor(BaseExecutor):
         lines.append(f"gym eval run --benchmark {benchmark.name}")
         return "\n".join(lines)
 
-    def _sbatch(self, script: str, compute: ComputeConfig) -> None:
+    def _sbatch(self, script: str, compute: SlurmComputeConfig) -> None:
         raise NotImplementedError  # pragma: no cover
