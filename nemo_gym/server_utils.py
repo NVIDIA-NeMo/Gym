@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import json
+import os
 import resource
 import socket
 import sys
@@ -520,6 +521,58 @@ def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no co
     environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
 
 
+class HttpByteCounterMiddleware:
+    """Env-gated per-route HTTP byte counter (`NG_HTTP_BYTES_DIR`).
+
+    Pure ASGI wrapper: sums request-body and response-body bytes per path and
+    periodically flushes an aggregate JSON to
+    ``$NG_HTTP_BYTES_DIR/{server_name}_{pid}.json``. Measurement tooling only;
+    never installed unless the env var is set.
+    """
+
+    FLUSH_EVERY = 25
+
+    def __init__(self, app, server_name: str, out_dir: str) -> None:
+        self.app = app
+        self.server_name = server_name
+        self.out_path = os.path.join(out_dir, f"{server_name}_{os.getpid()}.json")
+        os.makedirs(out_dir, exist_ok=True)
+        self.counts: Dict[str, list] = {}
+        self._events = 0
+
+    def _flush(self) -> None:
+        with open(self.out_path, "w") as f:
+            json.dump(
+                {path: {"requests": c[0], "req_bytes": c[1], "resp_bytes": c[2]} for path, c in self.counts.items()},
+                f,
+            )
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        path = scope["path"]
+        entry = self.counts.setdefault(path, [0, 0, 0])
+        entry[0] += 1
+
+        async def counting_receive():
+            message = await receive()
+            if message["type"] == "http.request":
+                entry[1] += len(message.get("body", b""))
+            return message
+
+        async def counting_send(message):
+            if message["type"] == "http.response.body":
+                entry[2] += len(message.get("body", b""))
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, counting_send)
+        finally:
+            self._events += 1
+            if self._events % self.FLUSH_EVERY == 0:
+                self._flush()
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -689,6 +742,13 @@ repr(e): {repr(e)}"""
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
 
+        byte_dir = os.environ.get("NG_HTTP_BYTES_DIR")
+        if byte_dir:
+            # Wrap the whole ASGI app so every route (incl. sub-apps) is counted.
+            app_with_counter = HttpByteCounterMiddleware(app, server_config.name, byte_dir)
+        else:
+            app_with_counter = None
+
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):
             print(
@@ -744,7 +804,7 @@ Full body: {json.dumps(exc.body, indent=4)}
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers
         else:
-            uvicorn_kwargs["app"] = app
+            uvicorn_kwargs["app"] = app_with_counter if app_with_counter is not None else app
 
         if is_main_fastapi_proc:
             uvicorn.run(**uvicorn_kwargs)
