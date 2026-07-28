@@ -1287,7 +1287,22 @@ def merge_model_call_capture_into_record(
     if observations is not None:
         try:
             bundle = AgentObservationBundle.model_validate(observations)
-            record["ng_agent_observations"] = join_model_call_observations(bundle, calls).model_dump(mode="json")
+            if bundle.source == "claude_code":
+                try:
+                    from responses_api_agents.claude_code_agent.observability import (
+                        associate_claude_code_compaction_calls,
+                    )
+
+                    bundle = associate_claude_code_compaction_calls(bundle, calls)
+                except Exception:
+                    logger.warning(
+                        "Could not associate Claude Code compaction calls for rollout %s.",
+                        rollout_id,
+                        exc_info=True,
+                    )
+                    bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
+            bundle = join_model_call_observations(bundle, calls)
+            record["ng_agent_observations"] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)
             gaps.append(ObservationGap(code="agent_observation_join_failed"))
