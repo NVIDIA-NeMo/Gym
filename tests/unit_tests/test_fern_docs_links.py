@@ -20,7 +20,11 @@ class TestFernDocsLinks(unittest.TestCase):
 
         self.assertNotIn("`fern docs dev` from the repository root", guide)
         self.assertIn("`make docs`", guide)
-        self.assertIn("Node.js 22+", guide)
+        self.assertIn(
+            "For local documentation previews, ensure Node.js 22+ is installed.",
+            guide,
+        )
+        self.assertNotIn("(including npm)", guide)
         self.assertIn("`make docs-login`", guide)
         self.assertIn(
             "https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md",
@@ -30,7 +34,12 @@ class TestFernDocsLinks(unittest.TestCase):
     def test_fern_tooling_uses_current_supported_node_version(self):
         package = json.loads(read("fern/package.json"))
         self.assertEqual(">=22", package["engines"]["node"])
-        self.assertIn("Node.js 22+", read("fern/README.md"))
+        readme = read("fern/README.md")
+        self.assertIn(
+            "Install Node.js 22+, then install the Fern CLI globally",
+            readme,
+        )
+        self.assertNotIn("(including npm)", readme)
 
         workflows = (
             ".github/workflows/fern-docs-ci.yml",
