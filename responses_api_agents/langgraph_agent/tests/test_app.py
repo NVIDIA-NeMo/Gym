@@ -83,6 +83,7 @@ class TestReflectionAgent:
 
     async def test_responses_stops_on_answer_tag(self) -> None:
         agent = ReflectionAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
+        agent.server_client.global_config_dict = dict()
         app = agent.setup_webserver()
         client = TestClient(app)
 
