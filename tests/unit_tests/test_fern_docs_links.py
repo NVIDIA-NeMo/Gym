@@ -14,6 +14,18 @@ def read(path: str) -> str:
 
 
 class TestFernDocsLinks(unittest.TestCase):
+    def test_development_setup_uses_supported_cold_start_docs_command(self):
+        guide = read("fern/versions/latest/pages/contribute/development-setup.mdx")
+
+        self.assertNotIn("`fern docs dev` from the repository root", guide)
+        self.assertIn("`make docs`", guide)
+        self.assertIn("Node.js 20+", guide)
+        self.assertIn("`make docs-login`", guide)
+        self.assertIn(
+            "https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md",
+            guide,
+        )
+
     def test_main_evaluation_tutorial_links_include_the_tutorials_section(self):
         pages = REPO_ROOT / "fern/versions/latest/pages"
         broken_links = []
