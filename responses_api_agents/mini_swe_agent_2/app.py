@@ -78,6 +78,12 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
+    # Optional per-request policy endpoint override. External trainers that
+    # route each episode through its own OpenAI-compatible URL (e.g. RL
+    # trainers recording rollouts via a per-episode proxy) set these per /run;
+    # when unset, the configured model_server is used, as before.
+    policy_base_url: Optional[str] = None
+    policy_api_key: Optional[str] = None
 
 
 class MiniSWEAgentVerifyRequest(BaseVerifyRequest):
@@ -714,9 +720,15 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             split = body.split
             workers = 1
             run_golden = self.config.run_golden
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
-            base_url = f"{self.base_url_for_run(base_url, body)}/v1"
-            dummy_key = "dummy_key"
+            if body.policy_base_url:
+                # The caller owns routing (and any per-rollout correlation) for
+                # its own endpoint; the ng-rollout capture prefix only applies
+                # to the built-in model server.
+                base_url = body.policy_base_url
+            else:
+                base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+                base_url = f"{self.base_url_for_run(base_url, body)}/v1"
+            api_key = body.policy_api_key or "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
             eval_timeout = self.config.eval_timeout
@@ -787,7 +799,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     workers=workers,
                     output=output_file_dir,
                     model=model_name,
-                    api_key=dummy_key,
+                    api_key=api_key,
                     base_url=base_url,
                     env="sandbox",
                     run_golden=run_golden,
