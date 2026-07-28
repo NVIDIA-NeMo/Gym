@@ -35,6 +35,21 @@ def test_observation_bundle_rejects_duplicate_invocation_ids() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "records",
+    (
+        [AgentInvocation(invocation_id="root", parent_invocation_id="root")],
+        [
+            AgentInvocation(invocation_id="a", parent_invocation_id="b"),
+            AgentInvocation(invocation_id="b", parent_invocation_id="a"),
+        ],
+    ),
+)
+def test_observation_bundle_rejects_parent_cycles(records: list[AgentInvocation]) -> None:
+    with pytest.raises(ValidationError, match="parent_invocation_id must not form a cycle"):
+        AgentObservationBundle(source="test", records=records)
+
+
 def test_observation_models_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError, match="producer_extension"):
         ModelCallRef.model_validate({"model_call_id": "call-1", "producer_extension": "unexpected"})

@@ -1180,14 +1180,17 @@ def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: lis
                 store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
 
 
-def merge_model_call_capture_into_record(record: dict[str, Any], capture_dirs: list[Path]) -> dict[str, Any]:
+def merge_model_call_capture_into_record(
+    record: dict[str, Any], capture_dirs: list[Path], *, include_payloads: bool = False
+) -> dict[str, Any]:
     """Attach captured model-call observability data to a rollout record in place.
 
     Keyed by the rollout id derived from the record's task/rollout/attempt indices, so the attached
     shape is identical for every agent harness. Adds
     ``ng_model_call_capture = {rollout_id, metrics, calls}`` where ``calls`` are derived observability
-    records. Raw request and response payloads remain in the capture store. Capture/read/join
-    failures are attached as ``gaps``. The harness output and reward are not modified.
+    records. Raw request and response payloads remain in the capture store and are omitted from the
+    attachment unless ``include_payloads`` is true. Capture/read/join failures are attached as
+    ``gaps``. The harness output and reward are not modified.
     """
     if not capture_dirs:
         return record
@@ -1218,17 +1221,18 @@ def merge_model_call_capture_into_record(record: dict[str, Any], capture_dirs: l
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
     observations = record.get("ng_agent_observations")
-    if observations is not None and calls:
+    if observations is not None:
         try:
             bundle = AgentObservationBundle.model_validate(observations)
             record["ng_agent_observations"] = join_model_call_observations(bundle, calls).model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)
             gaps.append(ObservationGap(code="agent_observation_join_failed"))
+    exclude = None if include_payloads else {"request", "response", "request_raw", "response_raw"}
     capture = {
         "rollout_id": rollout_id,
         "metrics": aggregate_model_call_records(calls),
-        "calls": [call.model_dump(exclude={"request", "response", "request_raw", "response_raw"}) for call in calls],
+        "calls": [call.model_dump(exclude=exclude) for call in calls],
     }
     if gaps:
         capture["gaps"] = [gap.model_dump(mode="json", exclude_none=True) for gap in gaps]

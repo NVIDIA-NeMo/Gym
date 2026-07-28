@@ -147,9 +147,24 @@ class AgentObservationBundle(ObservationModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "AgentObservationBundle":
-        invocation_ids = [record.invocation_id for record in self.records if isinstance(record, AgentInvocation)]
-        if len(invocation_ids) != len(set(invocation_ids)):
+        invocation_records = [record for record in self.records if isinstance(record, AgentInvocation)]
+        invocations = {record.invocation_id: record for record in invocation_records}
+        if len(invocation_records) != len(invocations):
             raise ValueError("invocation_id must be unique within an observation bundle")
+
+        resolved: set[str] = set()
+        for invocation_id in invocations:
+            chain: set[str] = set()
+            current = invocation_id
+            while current in invocations and current not in resolved:
+                if current in chain:
+                    raise ValueError("parent_invocation_id must not form a cycle")
+                chain.add(current)
+                parent = invocations[current].parent_invocation_id
+                if parent is None:
+                    break
+                current = parent
+            resolved.update(chain)
         return self
 
 
@@ -207,7 +222,8 @@ def join_model_call_observations(
         for gap in bundle.gaps
         if gap.code not in join_codes
         and not (
-            gap.code == "model_call_ownership_unavailable"
+            captured
+            and gap.code == "model_call_ownership_unavailable"
             and gap.invocation_id is None
             and (gap.detail is None or gap.detail.startswith("capture:"))
         )

@@ -1129,6 +1129,14 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert joined_ref["model_call_id"] == "call-A"
     assert record["ng_agent_observations"]["gaps"] == []
 
+    with_payloads = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    merge_model_call_capture_into_record(with_payloads, [tmp_path], include_payloads=True)
+    attached_call = with_payloads["ng_model_call_capture"]["calls"][0]
+    assert attached_call["request"] == exchange["request"]
+    assert attached_call["response"] == exchange["response"]
+    assert attached_call["request_raw"] == "malformed request"
+    assert attached_call["response_raw"] == "malformed response"
+
 
 def test_merge_capture_reports_missing_capture(tmp_path):
     from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
@@ -1139,13 +1147,23 @@ def test_merge_capture_reports_missing_capture(tmp_path):
         "reward": 1.0,
         "ng_agent_observations": {
             "source": "test",
+            "records": [
+                {
+                    "kind": "agent_invocation",
+                    "invocation_id": "root",
+                    "model_calls": [{"model_call_id": "missing"}],
+                }
+            ],
             "gaps": [{"code": "model_call_ownership_unavailable"}],
         },
     }
     merge_model_call_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
     assert rec["ng_model_call_capture"]["calls"] == []
     assert [gap["code"] for gap in rec["ng_model_call_capture"]["gaps"]] == ["model_call_capture_no_records"]
-    assert rec["ng_agent_observations"]["gaps"] == [{"code": "model_call_ownership_unavailable"}]
+    assert {gap["code"] for gap in rec["ng_agent_observations"]["gaps"]} == {
+        "model_call_ownership_unavailable",
+        "model_call_reference_unmatched",
+    }
 
     CaptureStore(tmp_path).path_for("8-8").touch()
     empty = {"_ng_task_index": 8, "_ng_rollout_index": 8}
