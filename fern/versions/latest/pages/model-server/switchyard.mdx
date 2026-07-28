@@ -25,6 +25,10 @@ If you set both, Gym attaches to `switchyard_base_url` and logs a warning that `
 
 Nothing to install. Switchyard is a dependency of this model server, so NeMo Gym installs it into the server's virtual environment when the server starts. It is scoped to this server rather than to Gym's core dependencies — Gym itself never imports Switchyard, and runs that do not route through it are unaffected.
 
+<Note>
+While `nemo-switchyard` is pinned to a git commit rather than a release, installing it compiles Switchyard's Rust extension instead of using its published wheels. You do not need a Rust toolchain — maturin bootstraps one if the machine has none — but the first startup spends an extra minute or two building, and the build reaches `static.rust-lang.org` and `crates.io` in addition to PyPI and GitHub. Allow those two hosts if your egress is restricted. Neither applies to the self-managed mode below, which installs nothing.
+</Note>
+
 Point `routing_profiles` at your routing config and run an eval:
 
 ```bash
