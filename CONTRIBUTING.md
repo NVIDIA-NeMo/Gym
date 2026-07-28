@@ -38,7 +38,7 @@ For complete development setup, CI/CD requirements, commit signing, and troubles
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
 uv venv --python 3.12 && source .venv/bin/activate
-uv sync --extra dev --group docs
+uv sync --extra dev
 pre-commit install
 ```
 
@@ -47,3 +47,5 @@ pre-commit install
 ```bash
 git commit -s -m "Your commit message"
 ```
+
+If DCO checks fail after you have already pushed, see the [Development Setup Guide](https://docs.nvidia.com/nemo/gym/main/contribute/development-setup#dco-and-commit-signing). Force-pushing is disallowed on branches in the upstream repo; for fork branches, use `--force-with-lease` only if your fork allows it, otherwise push the signed history to a new branch.

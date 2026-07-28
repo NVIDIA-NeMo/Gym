@@ -11,19 +11,20 @@ Single-box Sokoban puzzle environment. The environment is implemented under `res
 Spin up the server alongside a compatible agent:
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml,\
-resources_servers/grl_sokoban/configs/grl_sokoban.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --config responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml \
+    --resources-server grl_sokoban
 ```
 
 Collect trajectories:
 
 ```bash
-ng_collect_rollouts +agent_name=grl_sokoban_gymnasium_agent \
-    +input_jsonl_fpath=resources_servers/grl_sokoban/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/grl_sokoban/data/example_rollouts.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent grl_sokoban_gymnasium_agent \
+    --input resources_servers/grl_sokoban/data/example.jsonl \
+    --output resources_servers/grl_sokoban/data/example_rollouts.jsonl \
+    --limit 5
 ```
 
 ## Data

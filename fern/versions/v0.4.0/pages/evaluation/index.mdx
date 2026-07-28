@@ -1,0 +1,107 @@
+---
+title: "Evaluate"
+description: "Run repeatable model and agent evaluations with NeMo Gym environments."
+position: 1
+---
+
+<Info>
+
+For the underlying concepts, read [Evaluation](/about/concepts/evaluation) and [Environments](/about/concepts/environments). For server-level architecture, read [Architecture](/about/architecture).
+
+</Info>
+
+NeMo Gym evaluation is environment-native: the same dataset, resources server, verifier, and rollout machinery supports model comparison, harness comparison, benchmark scoring, ablation studies, and training-data analysis.
+
+## Gym Evaluation Loop
+
+1. **Discover** — find an environment or benchmark that matches your target capability: `gym list benchmarks`, `gym list environments`, `gym search <query>`.
+2. **Configure** — choose a model and agent harness; pre-flight check your config with `gym env validate`.
+3. **Run** — collect rollouts with fixed sampling settings and an explicit repeat count: `gym eval run`. Resume an interrupted run with `--resume`.
+4. **Scale** — shard across jobs and merge outputs with `gym eval aggregate`.
+5. **Profile** — compute pass@1, pass@k, and per-task variance: `gym eval profile`.
+6. **Diagnose** — inspect failures, sometimes-pass tasks, and missing rows with BLADE.
+7. **Decide** — use results to determine whether the next action is model training, harness work, verifier repair, prompt change, or skill improvement.
+
+The most important rule: vary one thing at a time. Changing the model, harness, prompt, verifier, and dataset together can still produce a useful release-gate score — but it cannot explain what caused the difference.
+
+## Models
+
+NeMo Gym accesses models through the model server, which keeps provider-specific details behind the Responses API boundary — the same evaluation can compare hosted models, self-hosted vLLM instances, local checkpoints, or pre- and post-training snapshots.
+
+<Cards>
+
+<Card title="Configure Models" href="/model-server">
+Set up a model server for evaluation.
+</Card>
+
+<Card title="Architecture" href="/about/architecture">
+Review how model, agent, and resources servers fit together.
+</Card>
+
+</Cards>
+
+## Agent Harnesses
+
+An agent harness is the orchestration layer that turns a model into an agent — it manages conversation state, routes tool calls, and decides when a task is complete. Harness changes often affect metrics as much as model changes do.
+
+<Cards>
+
+<Card title="Configure Agents" href="/agent-server">
+Set up a built-in or custom agent harness.
+</Card>
+
+<Card title="Agent Skills" href="/agent-server/agent-skills">
+Evaluate skills as a run-level variable — swap skill sets without touching the dataset, and compare variants using the content-hashed <code>skills_ref</code>.
+</Card>
+
+</Cards>
+
+## Benchmarks
+
+A benchmark is a fixed evaluation configuration built on top of an environment's resources server — same verifier, frozen dataset split, documented repeat count. All environments can be used for training; a benchmark is the evaluation-configured overlay.
+
+<Cards>
+
+<Card title="Benchmarks" href="/evaluation/benchmarks">
+How to choose a benchmark, what the categories cover, and how to interpret results.
+</Card>
+
+<Card title="Browse Environments" href="/evaluation/environment-list">
+Full table of built-in benchmarks and training environments by category.
+</Card>
+
+<Card title="Add a Benchmark" href="/contribute/environments/adding-a-benchmark">
+Contribution checklist for adding a new benchmark to Gym.
+</Card>
+
+</Cards>
+
+## Next Steps
+
+<Cards>
+
+<Card title="Quickstart" href="/get-started/quickstart">
+Run a small evaluation and inspect the generated outputs.
+</Card>
+
+<Card title="Evaluation Tutorials" href="/evaluation-tutorials">
+Step-by-step walkthroughs for specific benchmarks and evaluation workflows.
+</Card>
+
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Customize metrics and key metrics for an environment.
+</Card>
+
+<Card title="Diagnose Results" href="/evaluation/diagnose-results">
+Use BLADE to find why scores changed, which tasks failed, and what intervention to prioritize.
+</Card>
+
+<Card title="Reward Profiling" href="/reference/cli-commands#eval-profile">
+Compute per-task pass rates and variance with <code>gym eval profile</code>.
+</Card>
+
+<Card title="Training" href="/training-tutorials">
+Use evaluation results to drive post-training.
+</Card>
+
+</Cards>

@@ -27,7 +27,7 @@ Key transformations:
 - Normalises inconsistent rubric key names (criteria, criteria1, rule, question, …)
   into a uniform ``criteria`` field
 - Falls back to parsing ``response_reference`` when the ``rubrics`` array is empty
-- Wraps the prompt in ``responses_create_params`` for ``ng_collect_rollouts``
+- Wraps the prompt in ``responses_create_params`` for ``gym eval run``
 """
 
 import argparse
@@ -193,7 +193,7 @@ def process_task(task: dict, fallback_id: str = "unknown") -> dict[str, Any]:
             "type": "responses_api_agents",
             "name": "inverse_if_simple_agent",
         },
-        # Input wrapped for ng_collect_rollouts
+        # Input wrapped for gym eval run
         "responses_create_params": {
             "input": [{"role": "user", "content": prompt}],
         },

@@ -18,7 +18,7 @@ the Ray GPU-scheduled COMET path.
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/flores200/config.yaml]"
+gym eval prepare --benchmark flores200
 ```
 
 Writes `data/flores200_devtest_benchmark.jsonl` and pre-fetches the
@@ -41,21 +41,21 @@ only advertised on multi-node SLURM deployments via NeMo-Skills'
 override and rely on corpus-BLEU only:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/flores200/config.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type vllm_model \
+    --benchmark flores200 \
     "++flores200_wmt_translation_resources_server.resources_servers.wmt_translation.compute_comet=false"
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=flores200_wmt_translation_simple_agent \
-    +prompt_config=benchmarks/flores200/prompts/default.yaml \
-    +input_jsonl_fpath=benchmarks/flores200/data/flores200_devtest_benchmark.jsonl \
-    +output_jsonl_fpath=results/flores200_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent flores200_wmt_translation_simple_agent \
+    --input benchmarks/flores200/data/flores200_devtest_benchmark.jsonl \
+    --output results/flores200_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/flores200/prompts/default.yaml
 ```
 
 ## End-to-end on a SLURM cluster (via NeMo-Skills)
@@ -76,7 +76,7 @@ ns run_cmd \
     --cluster <your-cluster> \
     --container nemo-gym \
     --expname flores200_prepare \
-    --command 'ng_prepare_benchmark "+config_paths=[benchmarks/flores200/config.yaml]"'
+    --command 'gym eval prepare --benchmark flores200'
 ```
 
 This populates `benchmarks/flores200/data/flores200_devtest_benchmark.jsonl`

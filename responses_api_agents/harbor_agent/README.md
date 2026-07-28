@@ -9,6 +9,7 @@ It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and re
   - [Custom agents](#custom-agents)
   - [Custom environments](#custom-environments)
 - [Quick Start](#quick-start)
+- [Other datasets through this bridge](#other-datasets-through-this-bridge)
 - [Daytona execution path](#daytona-execution-path)
 - [NeMo RL Training](#nemo-rl-training)
   - [Required patches to Gym](#required-patches-to-gym)
@@ -200,9 +201,9 @@ export APPTAINER_DOCKER_PASSWORD=<registry-password-or-token>
 Then start NeMo Gym:
 
 ```bash
-config_paths="responses_api_agents/harbor_agent/configs/harbor_agent.yaml,\
-responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+  --config responses_api_agents/harbor_agent/configs/harbor_agent.yaml \
+  --model-type vllm_model/vllm_model_for_training
 ```
 
 ### 6) Test Harbor agent
@@ -211,25 +212,60 @@ ng_run "+config_paths=[${config_paths}]"
 python responses_api_agents/harbor_agent/client.py
 ```
 
-After a test run, inspect NeMo Gym rollout outputs under `results/`. For Harbor-
-specific trial artifacts, use `harbor_jobs_dir` (configured in
-`configs/harbor_agent.yaml`, default `jobs/`), where each Harbor run writes a
-timestamped job directory containing per-trial outputs and a top-level
-`result.json` summary.
+### Where rollouts are stored
+
+Each `/run` call writes to **two** places, for two different audiences:
+
+- **`results/runs/<YYYYMMDD>/<dataset_alias>/<model_name>/<run_id>/<instance_id>.json`**
+  — the NeMo Gym-facing `HarborVerifyResponse` (`app.py:run`), i.e. what
+  `ng_collect_rollouts`/`gym eval run` actually consume: `reward`,
+  `response.output` (converted from the ATIF trajectory), `usage`, and
+  `responses_create_params`. This is derived/recomputed from the Harbor job
+  below — it is not the source of truth. If this file has an empty `output`,
+  `reward: 0.0`, and `metadata: {}` even though the trial clearly succeeded, that
+  means the `try` block in `HarborAgent.run()` hit an exception and fell through
+  to the `except` fallback — check the server logs for `Error running Harbor
+  job: ...` to find the real cause.
+- **`harbor_jobs_dir`** (set via `configs/harbor_agent*.yaml`, default `jobs/`,
+  grouped the same way: `<YYYYMMDD>/<dataset_alias>/<model_name>/<job_id>/`) —
+  Harbor's own raw trial artifacts and the actual source of truth: per-trial
+  `result.json` (reward, token counts, timing), `agent/trajectory.json` (full
+  ATIF conversation), and `verifier/{reward.txt,reward.json,test-stdout.txt}`.
+
+When debugging a suspicious `results/runs/...` file, always cross-check the
+corresponding `harbor_jobs_dir/.../<trial_name>/result.json` and
+`verifier/reward.txt` first — if those show the real reward/trajectory, the bug
+is in the `run()` bridge (`app.py`/`utils.py`), not in Harbor or the task itself.
+`run_harbor_job()` has a known-fixed race here: `job.run()` can return before the
+trial's `result.json` is visible on disk, so it retries for up to 5s before
+giving up.
 
 ### 7) Collect rollouts
 
 ```bash
-ng_collect_rollouts +agent_name=harbor_agent \
-  +input_jsonl_fpath=responses_api_agents/harbor_agent/example/example_input.jsonl \
-  +output_jsonl_fpath=responses_api_agents/harbor_agent/example/example_output.jsonl
+gym eval run --no-serve \
+  --agent harbor_agent \
+  --input responses_api_agents/harbor_agent/example/example_input.jsonl \
+  --output responses_api_agents/harbor_agent/example/example_output.jsonl
 ```
 
 ### 8) View trajectories
 
 ```bash
-ng_viewer +jsonl_fpath=responses_api_agents/harbor_agent/example/example_output.jsonl
+jq -C . responses_api_agents/harbor_agent/example/example_output.jsonl | less -R
 ```
+
+## Other datasets through this bridge
+
+Datasets that need their own materialization/download pipeline (rather than a
+checked-in `example/*.jsonl`) live under `environments/<name>/` and reuse this same
+Harbor agent bridge — only the dataset alias in `harbor_datasets` and the
+`--environment-type`/config differ. See
+[`environments/biomnibench_da`](../../environments/biomnibench_da) for a worked
+example (BiomniBench-DA data-analysis tasks): dataset download + materialization
+script, docker/singularity configs, and an LLM-judge verifier, all wired to this
+agent via `harbor_agent_import_path`/`harbor_datasets` the same way as the Quick
+Start above.
 
 ## Daytona execution path
 
@@ -288,32 +324,35 @@ policy_model_name: <served-model-name>
 Then follow the same Harbor-agent workflow with the Daytona config:
 
 ```bash
-config_paths="responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml,\
-responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+  --config responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml \
+  --model-type vllm_model
 ```
 
 Alternatively, pass those values as CLI overrides:
 
 ```bash
-ng_run "+config_paths=[${config_paths}]" \
-  +policy_base_url=<openai-compatible-base-url> \
-  +policy_api_key=<policy-api-key> \
-  +policy_model_name=<served-model-name>
+gym env start \
+  --config responses_api_agents/harbor_agent/configs/harbor_agent_daytona.yaml \
+  --model-type vllm_model \
+  --model-url <openai-compatible-base-url> \
+  --model-api-key <policy-api-key> \
+  --model <served-model-name>
 ```
 
 For five Terminal-Bench rollout inputs, use the checked-in input file:
 
 ```bash
-ng_collect_rollouts +agent_name=harbor_agent \
-  +input_jsonl_fpath=responses_api_agents/harbor_agent/example/terminal_bench_daytona_input.jsonl \
-  +output_jsonl_fpath=/tmp/harbor_daytona_terminal_bench_output.jsonl
+gym eval run --no-serve \
+  --agent harbor_agent \
+  --input responses_api_agents/harbor_agent/example/terminal_bench_daytona_input.jsonl \
+  --output /tmp/harbor_daytona_terminal_bench_output.jsonl
 ```
 
 Inspect the rollout and Harbor job directory:
 
 ```bash
-ng_viewer +jsonl_fpath=/tmp/harbor_daytona_terminal_bench_output.jsonl
+jq -C . /tmp/harbor_daytona_terminal_bench_output.jsonl | less -R
 find responses_api_agents/harbor_agent/jobs -name result.json | tail
 ```
 

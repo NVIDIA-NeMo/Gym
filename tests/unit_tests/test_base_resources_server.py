@@ -14,10 +14,7 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    SimpleResourcesServer,
-)
+from nemo_gym.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer
 from nemo_gym.server_utils import ServerClient
 
 

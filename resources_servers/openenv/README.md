@@ -36,23 +36,25 @@ policy_model_name: <your-model-name>
 
 Running an environment is a **two-step process**:
 
-1. **Start the servers** with `ng_run` — this launches the resource server, agent server, and model server. Wait until you see `All 3 / 3 servers ready!`.
-2. **Collect rollouts** with `ng_collect_rollouts` in a **separate terminal** — this sends the JSONL prompts through the agent, which calls the LLM and environment in a loop, and writes trajectories with rewards to an output file.
+1. **Start the servers** with `gym env start` — this launches the resources server, agent server, and model server. Wait until you see `All 3 / 3 servers ready!`.
+2. **Collect rollouts** with `gym eval run --no-serve` in a **separate terminal** — this sends the JSONL prompts through the agent, which calls the LLM and environment in a loop, and writes trajectories with rewards to an output file.
 
 #### Echo
 
 ```bash
 # Terminal 1: Start servers
 source .venv/bin/activate
-ng_run "+config_paths=[resources_servers/openenv/configs/openenv_echo.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --resources-server openenv/openenv_echo \
+    --model-type openai_model
 
 # Terminal 2: Collect rollouts (after "All 3 / 3 servers ready!")
 source .venv/bin/activate
-ng_collect_rollouts \
-  +agent_name=openenv_echo_simple_agent \
-  +input_jsonl_fpath=resources_servers/openenv/data/echo/example.jsonl \
-  +output_jsonl_fpath=output_echo.jsonl \
-  +num_samples_in_parallel=5
+gym eval run --no-serve \
+  --agent openenv_echo_simple_agent \
+  --input resources_servers/openenv/data/echo/example.jsonl \
+  --output output_echo.jsonl \
+  --concurrency 5
 ```
 
 #### Coding
@@ -60,15 +62,17 @@ ng_collect_rollouts \
 ```bash
 # Terminal 1: Start servers
 source .venv/bin/activate
-ng_run "+config_paths=[resources_servers/openenv/configs/openenv_coding.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --resources-server openenv/openenv_coding \
+    --model-type openai_model
 
 # Terminal 2: Collect rollouts
 source .venv/bin/activate
-ng_collect_rollouts \
-  +agent_name=openenv_coding_simple_agent \
-  +input_jsonl_fpath=resources_servers/openenv/data/coding/example.jsonl \
-  +output_jsonl_fpath=output_coding.jsonl \
-  +num_samples_in_parallel=5
+gym eval run --no-serve \
+  --agent openenv_coding_simple_agent \
+  --input resources_servers/openenv/data/coding/example.jsonl \
+  --output output_coding.jsonl \
+  --concurrency 5
 ```
 
 #### Maze
@@ -76,15 +80,17 @@ ng_collect_rollouts \
 ```bash
 # Terminal 1: Start servers
 source .venv/bin/activate
-ng_run "+config_paths=[resources_servers/openenv/configs/openenv_maze.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --resources-server openenv/openenv_maze \
+    --model-type openai_model
 
 # Terminal 2: Collect rollouts
 source .venv/bin/activate
-ng_collect_rollouts \
-  +agent_name=openenv_maze_simple_agent \
-  +input_jsonl_fpath=resources_servers/openenv/data/maze/example.jsonl \
-  +output_jsonl_fpath=output_maze.jsonl \
-  +num_samples_in_parallel=5
+gym eval run --no-serve \
+  --agent openenv_maze_simple_agent \
+  --input resources_servers/openenv/data/maze/example.jsonl \
+  --output output_maze.jsonl \
+  --concurrency 5
 ```
 
 ## Adding a New Environment
@@ -178,15 +184,17 @@ Then start servers and collect rollouts:
 ```bash
 # Terminal 1: Start servers
 source .venv/bin/activate
-ng_run "+config_paths=[resources_servers/openenv/configs/openenv_<name>.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --config resources_servers/openenv/configs/openenv_<name>.yaml \
+    --model-type openai_model
 
 # Terminal 2: Collect rollouts (after servers are ready)
 source .venv/bin/activate
-ng_collect_rollouts \
-  +agent_name=openenv_<name>_simple_agent \
-  +input_jsonl_fpath=resources_servers/openenv/data/<name>/example.jsonl \
-  +output_jsonl_fpath=output_<name>.jsonl \
-  +num_samples_in_parallel=5
+gym eval run --no-serve \
+  --agent openenv_<name>_simple_agent \
+  --input resources_servers/openenv/data/<name>/example.jsonl \
+  --output output_<name>.jsonl \
+  --concurrency 5
 ```
 
 ## How It Works

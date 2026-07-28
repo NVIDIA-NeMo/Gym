@@ -12,7 +12,7 @@ and `simple_agent` (single-turn, matching NeMo-Skills' evaluation protocol).
 ## Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/proofnet/config.yaml]"
+gym eval prepare --benchmark proofnet
 ```
 
 Downloads the source JSONL, filters to `split == "test"`, and writes
@@ -28,19 +28,20 @@ and set `NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` before starting
 the server.
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/proofnet/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark proofnet
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=proofnet_math_formal_lean_simple_agent \
-    +input_jsonl_fpath=benchmarks/proofnet/data/proofnet_benchmark.jsonl \
-    +output_jsonl_fpath=results/proofnet_rollouts.jsonl \
-    +num_repeats=32 \
-    +prompt_config=benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
-    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+    --agent proofnet_math_formal_lean_simple_agent \
+    --input benchmarks/proofnet/data/proofnet_benchmark.jsonl \
+    --output results/proofnet_rollouts.jsonl \
+    --num-repeats 32 \
+    --max-output-tokens 16384 \
+    --temperature 1.0 \
+    --prompt-config benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
 ```

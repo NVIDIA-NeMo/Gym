@@ -45,7 +45,7 @@ AUDIO_URLS = {
 
 # test-clean is the standard LibriSpeech-PC eval split; test-other (~2.9k
 # harder utterances) can be enabled either by adding a sibling benchmark
-# dir (the idiomatic shape, since `ng_prepare_benchmark` enforces one
+# dir (the idiomatic shape, since `gym eval prepare` enforces one
 # dataset per agent) or by passing `--splits test-other` and pointing a
 # separate config at the resulting JSONL. Default below emits only
 # test-clean.
@@ -173,7 +173,7 @@ def prepare(work_dir: Path | None = None, splits: tuple[str, ...] = DEFAULT_SPLI
     Returns:
         Path to ``librispeech_pc_test_clean.jsonl`` — the file the benchmark
         config's ``datasets[0].jsonl_fpath`` references. Returning a single
-        Path matches the contract ``ng_prepare_benchmark`` enforces.
+        Path matches the contract ``gym eval prepare`` enforces.
     """
     work_dir = work_dir or DATA_DIR
     work_dir.mkdir(parents=True, exist_ok=True)

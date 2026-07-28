@@ -1,0 +1,16 @@
+-e nemo-gym[dev] @ ../../
+# Reference-metric scoring (reference mode).
+rouge-score>=0.1.2
+sacrebleu>=2.4
+nltk>=3.9
+# BERTScore is on by default in reference mode; pulls a roberta-large checkpoint
+# on first use. Drop these three deps (and set include_bertscore=false) for a
+# lightweight ROUGE/BLEU/METEOR-only install. matplotlib + pillow are declared
+# explicitly because bert_score/score.py does `import matplotlib.pyplot` at
+# import time, which needs Pillow — without both, `from bert_score import
+# BERTScorer` raises `No module named 'PIL'`.
+bert-score>=0.3.13
+matplotlib
+pillow
+# Dataset preparation (prepare_rolemrc.py).
+datasets
