@@ -183,6 +183,7 @@ class EnrootExecConfig:
     default_mounts: list[str] = field(default_factory=list)
     extra_exec_args: list[str] = field(default_factory=list)
     concurrency: int = 32
+    exec_shell: str = "sh"
 
     def __post_init__(self) -> None:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
@@ -717,7 +718,7 @@ class EnrootProvider:
         if user is not None and not is_root:
             effective_command = f"su -s /bin/sh -c {shlex.quote(effective_command)} {shlex.quote(str(user))}"
 
-        argv = [self._binary, "exec", *flags, str(instance.container_pid), "sh", "-c", effective_command]
+        argv = [self._binary, "exec", *flags, str(instance.container_pid), self._exec_config.exec_shell, "-c", effective_command]
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
 
         try:

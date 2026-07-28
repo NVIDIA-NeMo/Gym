@@ -37,6 +37,7 @@ sandbox:
       start_timeout_s: 600
       start_poll_s: 0.5
     exec:
+      exec_shell: bash
       default_timeout_s: 180
       concurrency: 32
     probe:

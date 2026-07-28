@@ -454,17 +454,8 @@ def _run_eval_v2(
         env.execute("git apply --check patch.diff")
         env.execute("git apply patch.diff")
 
-    # Write the eval script as a file in the container so the #!/bin/bash shebang is
-    # honored. Without this, the sandbox exec runs via sh (not bash), and SWEbench's
-    # `set -uxo pipefail` fails on sh/dash.
-    eval_script = test_spec.eval_script
-    script_path = f"/tmp/_eval_{run_id}.sh"
-    # Use a UUID-suffixed delimiter so that eval_script lines containing the
-    # bare token "EVEOF" don't silently truncate the heredoc.
-    heredoc_delim = f"EVEOF_{str(uuid4()).replace('-', '')}"
-    env.execute(f"cat > {script_path} << '{heredoc_delim}'\n{eval_script}\n{heredoc_delim}")
-    env.execute(f"chmod +x {script_path}")
-    result = env.execute(script_path, is_eval=True)
+    eval_script = test_spec.eval_script.replace("#!/bin/bash", "")
+    result = env.execute(eval_script, is_eval=True)
     test_output = result["output"]
     returncode = result["returncode"]
     print(f"[EVAL]{test_spec.instance_id} returncode: {returncode}", flush=True)
@@ -748,7 +739,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             top_p = (
                 body.responses_create_params.top_p
                 if body.responses_create_params.top_p is not None
-                else default_model_kwargs.get("top_p", 1.0)
+                else default_model_kwargs.get("top_p", None)
             )
             model_kwargs = _responses_create_params_to_model_kwargs(
                 responses_create_params_dict,
