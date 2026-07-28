@@ -36,7 +36,7 @@ from typing import Any, Optional
 
 from openai import APITimeoutError
 
-from resources_servers.gdpval.judge_panel import merge_create_kwargs, sample_judge
+from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS, merge_create_kwargs, sample_judge
 
 
 LOGGER = logging.getLogger(__name__)
@@ -161,6 +161,51 @@ def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
         return None, []
 
 
+# Keyed by bare (dot-less) extension, mirroring FILE_TYPE_MAP's lookup. Media
+# entries are generated from judge_panel's canonical sets below, so an extension
+# that routing treats as audio/video can never be missing an emitter here. Note
+# these are the mime strings the frontier judges document (e.g. "video/mov",
+# "audio/mp3"), which differ from the IANA names used on the rubric path.
+_AUDIO_MIME_TYPES: dict[str, str] = {
+    "wav": "audio/wav",
+    "mp3": "audio/mp3",
+    "m4a": "audio/mp4",
+    "ogg": "audio/ogg",
+    "oga": "audio/ogg",
+    "opus": "audio/opus",
+    "wma": "audio/x-ms-wma",
+    "aiff": "audio/aiff",
+    "aif": "audio/aiff",
+    "aac": "audio/aac",
+    "flac": "audio/flac",
+}
+_VIDEO_MIME_TYPES: dict[str, str] = {
+    "mp4": "video/mp4",
+    "m4v": "video/x-m4v",
+    "mov": "video/mov",
+    "avi": "video/avi",
+    "mkv": "video/x-matroska",
+    "webm": "video/webm",
+    "wmv": "video/wmv",
+    "flv": "video/x-flv",
+    "mpeg": "video/mpeg",
+    "mpg": "video/mpeg",
+    "3gp": "video/3gpp",
+}
+
+
+def _media_entries(exts: frozenset[str], mime_types: dict[str, str], file_type: str) -> dict[str, dict[str, Any]]:
+    """Build FILE_TYPE_MAP entries for every extension routing can detect."""
+    return {
+        ext.lstrip("."): {
+            "type": file_type,
+            "converter": _load_media,
+            "mime_type": mime_types.get(ext.lstrip("."), "application/octet-stream"),
+        }
+        for ext in exts
+    }
+
+
 FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
     "pdf": {"type": "PDF", "converter": None, "mime_type": "application/pdf"},
     "jpg": {"type": "IMG", "converter": _load_media, "mime_type": "image/jpeg"},
@@ -169,19 +214,8 @@ FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
     "webp": {"type": "IMG", "converter": _load_media, "mime_type": "image/webp"},
     "heic": {"type": "IMG", "converter": _load_media, "mime_type": "image/heic"},
     "heif": {"type": "IMG", "converter": _load_media, "mime_type": "image/heif"},
-    "wav": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/wav"},
-    "mp3": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/mp3"},
-    "ogg": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/ogg"},
-    "aiff": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/aiff"},
-    "aac": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/aac"},
-    "flac": {"type": "AUDIO", "converter": _load_media, "mime_type": "audio/flac"},
-    "mp4": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/mp4"},
-    "mov": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/mov"},
-    "avi": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/avi"},
-    "x-flv": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/x-flv"},
-    "webm": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/webm"},
-    "wmv": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/wmv"},
-    "3gpp": {"type": "VIDEO", "converter": _load_media, "mime_type": "video/3gpp"},
+    **_media_entries(AUDIO_EXTS, _AUDIO_MIME_TYPES, "AUDIO"),
+    **_media_entries(VIDEO_EXTS, _VIDEO_MIME_TYPES, "VIDEO"),
     "docx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
     "pptx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
     "xlsx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},

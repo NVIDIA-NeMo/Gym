@@ -92,7 +92,15 @@ _A = TypeVar("_A", bound=_HasAV)
 # are kept as SEPARATE sets because judge capability is per-modality (e.g. MiniMax-M3
 # reads video but not audio) — a task is routed per the modalities it actually
 # contains. Kept lowercase, dot-prefixed.
-_AUDIO_EXTS = frozenset(
+#
+# These are the SINGLE SOURCE OF TRUTH for media detection. Routing decides judge
+# capability from them, so every emitter must be able to emit everything listed
+# here: an extension that routes as video but that the emitter cannot build a
+# block for is silently dropped, and the judge scores a task whose media it never
+# saw. The emitters are ``comparison.FILE_TYPE_MAP`` and
+# ``stirrup_agent.file_reader.MIME_TYPES``; tests/test_judge_panel.py asserts both
+# stay in sync with these sets.
+AUDIO_EXTS = frozenset(
     {
         ".mp3",
         ".wav",
@@ -107,7 +115,7 @@ _AUDIO_EXTS = frozenset(
         ".aif",
     }
 )
-_VIDEO_EXTS = frozenset(
+VIDEO_EXTS = frozenset(
     {
         ".mp4",
         ".m4v",
@@ -122,7 +130,7 @@ _VIDEO_EXTS = frozenset(
         ".3gp",
     }
 )
-_AUDIO_VIDEO_EXTS = _AUDIO_EXTS | _VIDEO_EXTS
+AUDIO_VIDEO_EXTS = AUDIO_EXTS | VIDEO_EXTS
 
 
 def make_rng(seed: Optional[int], *parts: Any) -> random.Random:
@@ -179,15 +187,15 @@ def panel_summary(judges: Sequence[_HasWeight]) -> List[Dict[str, Any]]:
 
 
 def is_audio_file(name: str) -> bool:
-    return Path(name).suffix.lower() in _AUDIO_EXTS
+    return Path(name).suffix.lower() in AUDIO_EXTS
 
 
 def is_video_file(name: str) -> bool:
-    return Path(name).suffix.lower() in _VIDEO_EXTS
+    return Path(name).suffix.lower() in VIDEO_EXTS
 
 
 def is_audio_video_file(name: str) -> bool:
-    return Path(name).suffix.lower() in _AUDIO_VIDEO_EXTS
+    return Path(name).suffix.lower() in AUDIO_VIDEO_EXTS
 
 
 def _has_av_ext(name: str) -> bool:  # backwards-compat alias

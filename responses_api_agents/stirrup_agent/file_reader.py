@@ -32,6 +32,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+# judge_panel owns the canonical audio/video extension sets and the GDPVal
+# resources server routes tasks to judges from them. Importing rather than
+# redeclaring keeps detection and emission in lockstep: a local copy that missed
+# an extension would send a routed deliverable to a capable judge and then drop
+# it here with no warning. judge_panel is stdlib-only, so this costs nothing.
+from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS
+
 
 MAX_TOTAL_CHARS = 20_000
 
@@ -163,11 +170,10 @@ def _read_pptx(fpath: Path) -> str:
 OFFICE_EXTS = {".docx", ".pptx", ".xlsx"}
 TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".yaml", ".yml", ".py", ".sh", ".log"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}
-# Audio/video are only passed through when the judge is AV-capable (e.g. MiniMax
-# M3); image-only judges can't decode them, so they are otherwise skipped.
-AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
-VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
-
+# Audio/video (AUDIO_EXTS / VIDEO_EXTS, imported above) are only passed through
+# when the judge is AV-capable (e.g. MiniMax M3); image-only judges can't decode
+# them, so they are otherwise skipped. Every extension in those sets needs an
+# entry here, or it routes to a capable judge and is then dropped silently.
 MIME_TYPES = {
     ".pdf": "application/pdf",
     ".png": "image/png",
@@ -181,12 +187,23 @@ MIME_TYPES = {
     ".m4a": "audio/mp4",
     ".flac": "audio/flac",
     ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/opus",
+    ".wma": "audio/x-ms-wma",
+    ".aiff": "audio/aiff",
+    ".aif": "audio/aiff",
     ".aac": "audio/aac",
     ".mp4": "video/mp4",
+    ".m4v": "video/x-m4v",
     ".mov": "video/quicktime",
     ".webm": "video/webm",
     ".mkv": "video/x-matroska",
     ".avi": "video/x-msvideo",
+    ".wmv": "video/x-ms-wmv",
+    ".flv": "video/x-flv",
+    ".mpeg": "video/mpeg",
+    ".mpg": "video/mpeg",
+    ".3gp": "video/3gpp",
 }
 
 

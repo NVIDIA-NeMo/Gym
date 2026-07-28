@@ -17,8 +17,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from resources_servers.gdpval.comparison import B_WIN_RESPONSE, TIE_RESPONSE, Judge, parse_judgement, run_trials
+from resources_servers.gdpval.comparison import (
+    B_WIN_RESPONSE,
+    FILE_TYPE_MAP,
+    TIE_RESPONSE,
+    Judge,
+    parse_judgement,
+    run_trials,
+)
 from resources_servers.gdpval.judge_panel import (
+    AUDIO_EXTS,
+    VIDEO_EXTS,
     ResolvedJudge,
     dir_contains_audio_video,
     dir_media_modalities,
@@ -31,6 +40,51 @@ from resources_servers.gdpval.judge_panel import (
     sample_judge,
     select_av_judges,
 )
+
+
+class TestMediaExtensionSetsAgree:
+    """Detection, routing and emission must share one definition of AV.
+
+    Routing decides judge capability from judge_panel's sets. Any extension it
+    detects but an emitter can't build a block for is silently stubbed/dropped,
+    so the judge scores a task whose media it never saw -- wrong votes, no error.
+    """
+
+    def test_comparison_emitter_covers_every_audio_ext(self) -> None:
+        missing = {e for e in AUDIO_EXTS if e.lstrip(".") not in FILE_TYPE_MAP}
+        assert not missing, f"FILE_TYPE_MAP is missing audio extensions: {sorted(missing)}"
+
+    def test_comparison_emitter_covers_every_video_ext(self) -> None:
+        missing = {e for e in VIDEO_EXTS if e.lstrip(".") not in FILE_TYPE_MAP}
+        assert not missing, f"FILE_TYPE_MAP is missing video extensions: {sorted(missing)}"
+
+    def test_comparison_emitter_classifies_media_correctly(self) -> None:
+        for ext in AUDIO_EXTS:
+            assert FILE_TYPE_MAP[ext.lstrip(".")]["type"] == "AUDIO", ext
+        for ext in VIDEO_EXTS:
+            assert FILE_TYPE_MAP[ext.lstrip(".")]["type"] == "VIDEO", ext
+
+    def test_comparison_emitter_has_no_dotted_media_keys(self) -> None:
+        """Guards the old 'x-flv' / '3gpp' typos, which keyed on the mime subtype.
+
+        get_file_content_block looks up the bare extension, so a key like 'x-flv'
+        can never match and the file falls through to the DOC/PDF branch.
+        """
+        media_keys = {k for k, v in FILE_TYPE_MAP.items() if v["type"] in ("AUDIO", "VIDEO")}
+        expected = {e.lstrip(".") for e in AUDIO_EXTS | VIDEO_EXTS}
+        assert media_keys == expected
+
+    def test_rubric_emitter_covers_every_media_ext(self) -> None:
+        from responses_api_agents.stirrup_agent.file_reader import MIME_TYPES
+
+        missing = (AUDIO_EXTS | VIDEO_EXTS) - set(MIME_TYPES)
+        assert not missing, f"file_reader.MIME_TYPES is missing: {sorted(missing)}"
+
+    def test_rubric_emitter_reuses_canonical_sets(self) -> None:
+        from responses_api_agents.stirrup_agent import file_reader
+
+        assert file_reader.AUDIO_EXTS is AUDIO_EXTS
+        assert file_reader.VIDEO_EXTS is VIDEO_EXTS
 
 
 class TestMakeRng:
