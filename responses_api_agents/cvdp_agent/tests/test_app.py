@@ -68,6 +68,7 @@ class TestApp:
             ),
         )
         server = CVDPAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server.server_client.global_config_dict = dict()
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -180,6 +181,7 @@ class TestApp:
             ),
         )
         server = CVDPAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server.server_client.global_config_dict = dict()
         app = server.setup_webserver()
         client = TestClient(app)
 

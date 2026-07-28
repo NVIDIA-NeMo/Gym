@@ -638,9 +638,6 @@ class TestRolloutCorrelation:
         # CLI appends /v1/messages -> server strips /ng-rollout/<id> and keys capture by it.
         assert base_url == "http://model-server:9000/ng-rollout/task3-roll1"
 
-        with patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"):
-            assert agent._resolve_call_base_url(None) == "http://model-server:9000"
-
         # Real Anthropic endpoint (no model server): never prefixed -- it has no stripping middleware,
         # so a prefix would 404 every /v1/messages call.
         anthropic = _make_agent(anthropic_base_url="https://api.anthropic.com")

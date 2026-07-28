@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from time import time
 from typing import List
 
 from fastapi import Request, Response
@@ -30,6 +31,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.capture_records import ToolCallEvent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -86,7 +88,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
+                url_path=self.resolve_call_path("/v1/responses", request),
                 json=new_body,
                 cookies=model_server_cookies,
             )
@@ -128,6 +130,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             for output_function_call in all_fn_calls:
+                timestamp_start = time()
+
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
                 except (json.JSONDecodeError, TypeError) as e:
@@ -143,6 +147,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
                     )
                     new_outputs.append(tool_response)
+
+                    if self._capture_config.should_capture_calls:
+                        request.state.events.append(
+                            ToolCallEvent(
+                                call_id=output_function_call.call_id,
+                                timestamp_start=timestamp_start,
+                                timestamp_end=time(),
+                            )
+                        )
+
                     continue
 
                 api_response = await self.server_client.post(
@@ -160,6 +174,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     output=(await api_response.content.read()).decode(),
                 )
                 new_outputs.append(tool_response)
+
+                if self._capture_config.should_capture_calls:
+                    request.state.events.append(
+                        ToolCallEvent(
+                            call_id=output_function_call.call_id,
+                            timestamp_start=timestamp_start,
+                            timestamp_end=time(),
+                        )
+                    )
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
@@ -187,7 +210,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         response = await self.server_client.post(
             server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
+            url_path=self.resolve_call_path("/v1/responses", request),
             json=body.responses_create_params,
             cookies=cookies,
         )

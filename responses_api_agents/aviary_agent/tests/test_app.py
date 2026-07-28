@@ -50,6 +50,7 @@ class TestApp:
             max_steps=1,
         )
         server = AviaryAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server.server_client.global_config_dict = dict()
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -185,7 +186,7 @@ class TestApp:
         request = AviaryAgentRunRequest(
             task_idx=0, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
         )
-        response = await agent.responses(request)
+        response = await agent.responses(MagicMock(), request)
 
         assert response.env_id == mock_seed_session_data["env_id"]
         assert response.group_id == "0"
@@ -287,7 +288,7 @@ class TestApp:
         request = AviaryAgentRunRequest(
             task_idx=42, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
         )
-        response = await agent.responses(request)
+        response = await agent.responses(MagicMock(), request)
 
         assert response.env_id == env_id
         assert response.group_id == "42"
@@ -387,7 +388,7 @@ class TestApp:
         request = AviaryAgentRunRequest(
             task_idx=42, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
         )
-        response = await agent.responses(request)
+        response = await agent.responses(MagicMock(), request)
 
         assert response.env_id == env_id
         assert response.group_id == "42"
@@ -482,7 +483,7 @@ class TestApp:
         request = AviaryAgentRunRequest(
             task_idx=0, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
         )
-        await agent.responses(request)
+        await agent.responses(MagicMock(), request)
 
         calls = agent.server_client.post.await_args_list
         second_model_call = calls[3]
@@ -572,7 +573,7 @@ class TestApp:
         request = AviaryAgentRunRequest(
             task_idx=0, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
         )
-        verify_response = await agent.run(request)
+        verify_response = await agent.run(MagicMock(), request)
 
         assert verify_response.reward == 1.0
         assert verify_response.success is True

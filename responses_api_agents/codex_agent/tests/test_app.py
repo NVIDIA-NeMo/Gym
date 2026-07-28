@@ -602,13 +602,14 @@ class TestRolloutCorrelation:
             captured["base_url"] = config["model_providers"]["gym"]["base_url"]
             return self._fake_proc()
 
-        def fake_resolve(name, rollout_id=None):
-            prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
-            return f"http://model-server:9000{prefix}/v1"
+        def fake_resolve(url, rollout_id=None):
+            suffix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
+            return f"{url}{suffix}"
 
         with (
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
-            patch.object(type(agent), "resolve_model_base_url", side_effect=fake_resolve),
+            patch("responses_api_agents.codex_agent.app.get_server_url", return_value="http://model-server:9000"),
+            patch("responses_api_agents.codex_agent.app.create_call_path", side_effect=fake_resolve),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
         ):
             asyncio.run(agent._run_codex("hi", **run_kwargs))
@@ -618,7 +619,7 @@ class TestRolloutCorrelation:
         agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
         base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
         # Codex appends /responses -> server strips /ng-rollout/<id> and keys capture by it.
-        assert base_url == "http://model-server:9000/ng-rollout/task3-roll1/v1"
+        assert base_url == "http://model-server:9000/v1/ng-rollout/task3-roll1"
 
         # Direct endpoint (no model server): never prefixed -- it has no stripping middleware,
         # so a prefix would 404 every /v1/responses call.

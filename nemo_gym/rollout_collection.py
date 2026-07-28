@@ -33,12 +33,15 @@ from wandb import Table
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.base_responses_api_model import (
-    clear_model_call_captures_for_rollouts,
-    merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
+from nemo_gym.capture_records import CallCaptureConfig, CaptureStore, create_call_path
+from nemo_gym.config_types import (
+    NG_CALL_CAPTURE_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    BaseNeMoGymCLIConfig,
+    BaseServerConfig,
+    ConfigError,
+    ConfigPathNotFoundError,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -382,6 +385,9 @@ class RolloutCollectionHelper(BaseModel):
                 row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
                 task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
+                # Populate rollout ID
+                row[ROLLOUT_ID_KEY_NAME] = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+
                 if config.num_repeats_add_seed:
                     metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
                     extra_body = json.loads(metadata.get("extra_body", "{}"))
@@ -452,8 +458,8 @@ class RolloutCollectionHelper(BaseModel):
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
         # Stamp the resume attempt (count of prior failures for this key) on actual retries so their
-        # captured model calls are keyed separately from the prior attempt's (see
-        # maybe_rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
+        # captured model calls are keyed separately from the prior attempt's.
+        # The first attempt (0) is left unstamped -> bare rollout id.
         for row in input_rows:
             attempt = attempts_by_key.get(get_key(row), 0)
             if attempt > 0:
@@ -474,7 +480,7 @@ class RolloutCollectionHelper(BaseModel):
 
         return input_rows, rows, results, result_strs
 
-    async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+    async def run_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         output_fpath = Path(config.output_jsonl_fpath)
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
@@ -522,13 +528,16 @@ class RolloutCollectionHelper(BaseModel):
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        capture_config = CallCaptureConfig.model_validate(get_global_config_dict())
 
-        # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
-        # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
-        if capture_dirs:
-            print("Clearing existing model-call captures for rollouts being dispatched")
-            clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+        # Run-scoping: a fresh (non-resume) run must not append onto a prior run's captures for the
+        # same rollout ids, so clear the capture files this run is about to (re)write.
+        if capture_config.should_capture_calls and not config.resume_from_cache:
+            print(
+                f"Clearing previously captured model calls dir {capture_config.call_capture_dir} because resume_from_cache=false"
+            )
+            store = CaptureStore(capture_config.call_capture_dir)
+            store.clear()
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
@@ -547,8 +556,8 @@ class RolloutCollectionHelper(BaseModel):
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
-            if capture_dirs:
-                merge_model_call_capture_into_record(result, capture_dirs)
+            if capture_config.should_capture_calls:
+                result[NG_CALL_CAPTURE_KEY_NAME] = store.aggregate(rollout_id=row[ROLLOUT_ID_KEY_NAME]).model_dump()
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -726,9 +735,16 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         server_client = self.setup_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
 
+        capture_config = CallCaptureConfig.model_validate(get_global_config_dict())
+
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                url_path = "/run"
+                if capture_config.should_capture_calls:
+                    url_path = create_call_path(url_path, row[ROLLOUT_ID_KEY_NAME])
+
+                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path=url_path, json=row)
+
                 try:
                     await raise_for_status(res)
                 except Exception:
@@ -740,6 +756,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             flush=True,
                         )
                     raise
+
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(

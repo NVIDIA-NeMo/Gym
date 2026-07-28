@@ -87,8 +87,8 @@ NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
-OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
-MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+should_capture_calls_KEY_NAME = "should_capture_calls"
+call_capture_dir_KEY_NAME = "call_capture_dir"
 COMPONENT_NAME_KEY_NAME = "component_name"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -115,8 +115,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     VERBOSE_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
-    OBSERVABILITY_ENABLED_KEY_NAME,
-    MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    should_capture_calls_KEY_NAME,
+    call_capture_dir_KEY_NAME,
     COMPONENT_NAME_KEY_NAME,
 ]
 

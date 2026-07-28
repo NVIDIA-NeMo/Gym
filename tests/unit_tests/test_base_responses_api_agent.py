@@ -37,5 +37,44 @@ class TestBaseResponsesAPIAgent:
             async def run(self, body=...):
                 raise NotImplementedError
 
-        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        agent = TestSimpleResponsesAPIAgent(
+            config=config, server_client=MagicMock(spec=ServerClient, global_config_dict=dict())
+        )
         agent.setup_webserver()
+
+    def test_resolve_call_path(self):
+        mock_agent = MagicMock()
+        mock_agent._capture_config.should_capture_calls = True
+        mock_agent._get_rollout_id = SimpleResponsesAPIAgent._get_rollout_id
+
+        mock_request = MagicMock()
+        mock_request.session = {}
+        mock_request.path_params = {}
+
+        with_id = SimpleResponsesAPIAgent.resolve_call_path(
+            mock_agent, base_url_or_path="http://my-test-url/v1", request=mock_request
+        )
+        assert with_id == "http://my-test-url/v1"
+
+        mock_request.session = {"rollout_id": "2-4"}
+        mock_request.path_params = {}
+        with_id = SimpleResponsesAPIAgent.resolve_call_path(
+            mock_agent,
+            base_url_or_path="http://my-test-url/v1",
+            request=mock_request,
+        )
+        assert with_id == "http://my-test-url/v1/ng-rollout/2-4"
+
+        mock_request.session = {"rollout_id": "2-4"}
+        mock_request.path_params = {}
+        with_id = SimpleResponsesAPIAgent.resolve_call_path(
+            mock_agent, base_url_or_path="/v1/responses", request=mock_request
+        )
+        assert with_id == "/v1/responses/ng-rollout/2-4"
+
+        mock_request.session = {}
+        mock_request.path_params = {"rollout_id": "2-4"}
+        with_id = SimpleResponsesAPIAgent.resolve_call_path(
+            mock_agent, base_url_or_path="/v1/responses", request=mock_request
+        )
+        assert with_id == "/v1/responses/ng-rollout/2-4"

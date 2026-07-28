@@ -250,18 +250,23 @@ class TestTrajectoryToOutputItems:
 class TestRolloutCorrelation:
     """The prefixed self-call path makes responses() build AIAgent with the same model URL prefix."""
 
-    def test_responses_applies_rollout_prefix(self, monkeypatch) -> None:
+    def test_responses_applies_rollout_prefix(self, monkeypatch, tmp_path) -> None:
         from fastapi.testclient import TestClient
 
-        import nemo_gym.base_responses_api_agent as base_agent
+        import nemo_gym.server_utils
         from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
-        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
-        server_client.global_config_dict = {}
+        server_client.global_config_dict = {"should_capture_calls": True, "call_capture_dir": tmp_path}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(), server_client=server_client)
+        agent.setup_webserver()
         monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_config_dict",
+            lambda: {"": {"responses_api_model": {"": {"host": "h", "port": 1}}}},
+        )
 
         seen: dict = {}
 
@@ -277,8 +282,11 @@ class TestRolloutCorrelation:
         monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
         client = TestClient(agent.setup_webserver())
 
-        assert client.post("/ng-rollout/rid/v1/responses", json={"input": "hi"}).status_code == 200
-        assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
+        assert client.post("/v1/responses/ng-rollout/rid", json={"input": "hi"}).status_code == 200
+        assert seen["base_url"] == "http://h:1/v1/ng-rollout/rid"
 
-        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+        request_mock = MagicMock()
+        request_mock.session = dict()
+        request_mock.path_params = dict()
+        asyncio.run(agent.responses(request=request_mock, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["base_url"] == "http://h:1/v1"

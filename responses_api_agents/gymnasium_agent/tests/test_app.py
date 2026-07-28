@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,7 +24,7 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
 
-def _make_agent(max_steps=10, observability=True):
+def _make_agent(tmp_path: Path, max_steps: int = 10, observability: bool = False):
     config = GymnasiumAgentConfig(
         host="",
         port=0,
@@ -34,8 +35,10 @@ def _make_agent(max_steps=10, observability=True):
         max_steps=max_steps,
     )
     server_client = MagicMock(spec=ServerClient)
-    server_client.global_config_dict = {"observability_enabled": observability}
-    return GymnasiumAgent(config=config, server_client=server_client)
+    server_client.global_config_dict = {"should_capture_calls": observability, "call_capture_dir": tmp_path}
+    agent = GymnasiumAgent(config=config, server_client=server_client)
+    agent.setup_webserver()
+    return agent
 
 
 def _model_response(text: str, input_toks=1, output_toks=1) -> dict:
@@ -105,8 +108,8 @@ def _wire_mock_client(agent, responses_per_url):
 
 
 class TestRoutes:
-    def test_routes_registered(self):
-        app = _make_agent().setup_webserver()
+    def test_routes_registered(self, tmp_path: Path):
+        app = _make_agent(tmp_path).setup_webserver()
         routes = {r.path for r in app.routes}
         assert {"/run", "/v1/responses", "/aggregate_metrics"}.issubset(routes)
 
@@ -124,15 +127,15 @@ class TestConfig:
                 max_steps=0,
             )
 
-    def test_default_max_steps(self):
-        assert _make_agent().config.max_steps == 10
+    def test_default_max_steps(self, tmp_path: Path):
+        assert _make_agent(tmp_path).config.max_steps == 10
 
 
 class TestRun:
     @pytest.mark.asyncio
-    async def test_terminates_on_first_step(self):
-        agent = _make_agent()
-        model_path = "/ng-rollout/2-0/v1/responses"
+    async def test_terminates_on_first_step(self, tmp_path: Path):
+        agent = _make_agent(tmp_path, observability=True)
+        model_path = "/v1/responses/ng-rollout/2-0"
         payloads = {
             "/reset": [{"observation": "go", "info": {}}],
             model_path: [_model_response("move A")],
@@ -146,6 +149,7 @@ class TestRun:
 
         agent.server_client.post = AsyncMock(side_effect=_post)
         req = MagicMock()
+        req.session = {"rollout_id": "2-0"}
         req.cookies = {}
         body = GymnasiumAgentRunRequest(
             responses_create_params={"input": [{"role": "user", "content": "play"}]},
@@ -162,8 +166,8 @@ class TestRun:
         assert model_calls == [(model_path, None)]
 
     @pytest.mark.asyncio
-    async def test_no_rollout_prefix_when_observability_disabled(self):
-        agent = _make_agent(observability=False)
+    async def test_no_rollout_prefix_when_observability_disabled(self, tmp_path: Path):
+        agent = _make_agent(tmp_path, observability=False)
         call_log = _wire_mock_client(
             agent,
             {
@@ -184,8 +188,8 @@ class TestRun:
         assert [u for _s, u, _j in call_log if u.startswith("/v1/")] == ["/v1/responses"]
 
     @pytest.mark.asyncio
-    async def test_multi_step_preserves_output_items_in_history(self):
-        agent = _make_agent(max_steps=3)
+    async def test_multi_step_preserves_output_items_in_history(self, tmp_path: Path):
+        agent = _make_agent(tmp_path, max_steps=3)
         call_log = _wire_mock_client(
             agent,
             {
@@ -223,8 +227,8 @@ class TestRun:
         assert any(getattr(m, "role", None) == "user" and getattr(m, "content", "") == "obs-1" for m in turn2_input)
 
     @pytest.mark.asyncio
-    async def test_max_steps_sets_truncated(self):
-        agent = _make_agent(max_steps=2)
+    async def test_max_steps_sets_truncated(self, tmp_path: Path):
+        agent = _make_agent(tmp_path, max_steps=2, observability=False)
         _wire_mock_client(
             agent,
             {
@@ -244,8 +248,8 @@ class TestRun:
         assert result.terminated is False
 
     @pytest.mark.asyncio
-    async def test_usage_accumulates_across_turns(self):
-        agent = _make_agent(max_steps=3)
+    async def test_usage_accumulates_across_turns(self, tmp_path: Path):
+        agent = _make_agent(tmp_path, max_steps=3)
         _wire_mock_client(
             agent,
             {

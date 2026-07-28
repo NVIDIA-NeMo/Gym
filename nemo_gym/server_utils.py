@@ -21,13 +21,14 @@ import sys
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
+from inspect import signature
 from logging import Filter as LoggingFilter
 from logging import LogRecord, getLogger
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -52,11 +53,12 @@ from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, Field
 from requests.exceptions import ConnectionError
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
-    ROLLOUT_PATH_PREFIX,
+    ROLLOUT_ID_KEY_NAME,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
 )
@@ -523,6 +525,8 @@ def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no co
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
+    _is_exception_middleware_setup: bool = False
+
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
@@ -555,6 +559,9 @@ class SimpleServer(BaseServer):
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
+        if self._is_exception_middleware_setup:
+            return
+
         @app.middleware("http")
         async def exception_handling_middleware(request: Request, call_next):
             try:
@@ -582,6 +589,67 @@ repr(e): {repr(e)}"""
                     f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
+
+    def setup_call_capture_middleware(self, app: FastAPI) -> None:
+        # TODO @bxyu-nvidia: We nested import here to avoid circular dependencies.
+        # server_utils -> openai_utils, openai_utils -> capture_records, capture_records -> openai_utils
+        # We can fix this by taking out NeMoGymAsyncOpenAI from the openai_utils
+        from nemo_gym.capture_records import CallCaptureConfig, CaptureStore
+
+        self._capture_config = CallCaptureConfig.model_validate(self.server_client.global_config_dict)
+        if not self._capture_config.should_capture_calls:
+            return
+
+        # Model call capture middleware must be the final middleware added so
+        # 1. It is run first on request, the closest to the original request sent to the endpoint
+        # 2. It is run last on response, so it can capture the response closest to what is sent back.
+        # Here, we setup the exception middleware first so that we guarantee the ordering
+        self.setup_exception_middleware(app)
+
+        self._store = CaptureStore(self._capture_config.call_capture_dir)
+        app.add_middleware(BaseHTTPMiddleware, dispatch=self.call_capture_middleware)
+
+        print(f"Set up model call capture middleware for {self.config.name}")
+
+    @staticmethod
+    def _get_rollout_id(request: Request) -> Optional[str]:
+        if ROLLOUT_ID_KEY_NAME in request.session:
+            return request.session[ROLLOUT_ID_KEY_NAME]
+
+        # Lazily grab the rollout_id here after the route handler has run to populate the path_params
+        request.session[ROLLOUT_ID_KEY_NAME] = request.path_params.get(ROLLOUT_ID_KEY_NAME)
+        return request.session[ROLLOUT_ID_KEY_NAME]
+
+    def resolve_call_path(self, base_url_or_path: str, request: Request) -> str:
+        if not hasattr(self, "_capture_config") or not self._capture_config.should_capture_calls:
+            return base_url_or_path
+
+        maybe_rollout_id = self._get_rollout_id(request)
+        if not maybe_rollout_id:
+            return base_url_or_path
+
+        # We import here for the same reason as the above setup middleware fn
+        from nemo_gym.capture_records import create_call_path
+
+        base_url_or_path = base_url_or_path.rstrip("/")
+        return create_call_path(base_url_or_path, maybe_rollout_id)
+
+    def _maybe_inject_request(
+        self, fn: Callable, request: Request, response: Response, params: Dict[str, Any]
+    ) -> None:
+        # responses() and other function signatures vary across servers: some take a leading `request` injected by FastAPI, some only
+        # `body`. Dispatch on whichever this server declares so the default messages() works for all of them.
+        # This function will modify the params dict to include a request parameter if the function signature requires one.
+        if "request" in signature(fn).parameters:
+            params["request"] = request
+        if "response" in signature(fn).parameters:
+            params["response"] = response
+
+    async def call_capture_middleware(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        # This method is to be overridden by inner classes that need it.
+        raise NotImplementedError
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
@@ -819,15 +887,3 @@ def get_server_url(server_name: str) -> str:
     )
 
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
-
-
-def rollout_path_prefix(rollout_id: Optional[str]) -> str:
-    """Return the leading model-server path prefix for a rollout, if available."""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
-
-
-def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
-    """Append a rollout prefix to a model-server root URL."""
-    if not rollout_id:
-        return base_url
-    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)

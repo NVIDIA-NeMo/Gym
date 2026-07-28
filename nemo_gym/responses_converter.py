@@ -344,7 +344,10 @@ class ResponsesConverter(BaseModel):
     def _chat_completion_to_responses_tools(
         self, chat_completions_tools: List[NeMoGymChatCompletionToolParam]
     ) -> List[NeMoGymFunctionToolParam]:
-        return [tool["function"] | {"type": "function"} for tool in chat_completions_tools]
+        return [
+            tool["function"] | {"type": "function", "strict": tool["function"].get("strict")}
+            for tool in chat_completions_tools
+        ]
 
     def chat_completion_to_responses_create_params(
         self,
@@ -356,14 +359,14 @@ class ResponsesConverter(BaseModel):
             metadata=chat_completion_create_params.metadata,
             model=chat_completion_create_params.model,
             parallel_tool_calls=chat_completion_create_params.parallel_tool_calls,
-            reasoning=Reasoning(reasoning_effort=chat_completion_create_params.reasoning_effort),
+            reasoning=Reasoning(effort=chat_completion_create_params.reasoning_effort),
             service_tier=chat_completion_create_params.service_tier,
             store=chat_completion_create_params.store,
             temperature=chat_completion_create_params.temperature,
             tool_choice=chat_completion_create_params.tool_choice
             if chat_completion_create_params.tool_choice is not None
             else "auto",
-            tools=self._chat_completion_to_responses_tools(chat_completion_create_params.tools),
+            tools=self._chat_completion_to_responses_tools(chat_completion_create_params.tools or []),
             top_logprobs=chat_completion_create_params.top_logprobs,
             top_p=chat_completion_create_params.top_p,
             user=chat_completion_create_params.user,
@@ -504,7 +507,7 @@ class ResponsesConverter(BaseModel):
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=chat_completion.created,
-            model=responses_create_params.model,
+            model=responses_create_params.model or "",
             object="response",
             output=response_output_dicts,
             tool_choice=responses_create_params.tool_choice

@@ -19,6 +19,7 @@ from openai.types.completion_usage import CompletionUsage
 
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChoice,
@@ -566,6 +567,108 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
     )
 
     assert expected_response == actual_response
+
+
+# ===========================================================================
+# chat_completion_to_responses_create_params
+# ===========================================================================
+
+
+def test_chat_completion_to_responses_create_params_sanity(converter: ResponsesConverter):
+    actual_response_create_params = converter.chat_completion_to_responses_create_params(
+        chat_completion_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[
+                {
+                    "role": "user",
+                    "content": "hello",
+                },
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "test tool",
+                        "description": "test description",
+                        "parameters": {
+                            "properties": {
+                                "card_type": {
+                                    "description": "Type of credit card",
+                                    "title": "Card Type",
+                                    "type": "string",
+                                },
+                                "customer_name": {
+                                    "description": "Full legal name",
+                                    "title": "Customer Name",
+                                    "type": "string",
+                                },
+                                "annual_income": {
+                                    "description": "Annual income in USD",
+                                    "title": "Annual Income",
+                                    "type": "number",
+                                },
+                                "rho_bank_subscription": {
+                                    "default": False,
+                                    "description": "Whether user has Rho-Bank+ subscription",
+                                    "title": "Rho Bank Subscription",
+                                    "type": "boolean",
+                                },
+                            },
+                            "required": ["card_type", "customer_name", "annual_income"],
+                            "title": "parameters",
+                            "type": "object",
+                        },
+                        # Omit strict on purpose
+                        # "strict": True,
+                    },
+                }
+            ],
+        )
+    )
+
+    expected_response_create_params = NeMoGymResponseCreateParamsNonStreaming(
+        model=None,
+        input=[
+            dict(
+                role="user",
+                content="hello",
+            ),
+        ],
+        reasoning={"effort": None},
+        tools=[
+            {
+                "name": "test tool",
+                "description": "test description",
+                "parameters": {
+                    "properties": {
+                        "card_type": {"description": "Type of credit card", "title": "Card Type", "type": "string"},
+                        "customer_name": {
+                            "description": "Full legal name",
+                            "title": "Customer Name",
+                            "type": "string",
+                        },
+                        "annual_income": {
+                            "description": "Annual income in USD",
+                            "title": "Annual Income",
+                            "type": "number",
+                        },
+                        "rho_bank_subscription": {
+                            "default": False,
+                            "description": "Whether user has Rho-Bank+ subscription",
+                            "title": "Rho Bank Subscription",
+                            "type": "boolean",
+                        },
+                    },
+                    "required": ["card_type", "customer_name", "annual_income"],
+                    "title": "parameters",
+                    "type": "object",
+                },
+                "strict": None,
+                "type": "function",
+            }
+        ],
+    )
+
+    assert expected_response_create_params == actual_response_create_params
 
 
 # ===========================================================================

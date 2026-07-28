@@ -72,6 +72,7 @@ class TestApp:
     async def test_responses(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()
         server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.global_config_dict = dict()
         server_client_mock.post = server_client_post_mock
         agent_server = ToolSimulationAgent(
             config=agent_config,
@@ -201,6 +202,7 @@ class TestApp:
     async def test_run(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()
         server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.global_config_dict = dict()
         server_client_mock.post = server_client_post_mock
         agent_server = ToolSimulationAgent(
             config=agent_config,

@@ -60,6 +60,7 @@ def _make_agent_and_client(config: FinanceAgentConfig | None = None):
     """Create agent + TestClient pair (the canonical test pattern for responses_api_agents)."""
     config = config or _make_config()
     agent = FinanceAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    agent.server_client.global_config_dict = dict()
     app = agent.setup_webserver()
     client = TestClient(app)
     return agent, client

@@ -709,29 +709,31 @@ class TestApp:
         mock_get_config_path,
         mock_get_first_server_config_dict,
         mock_load_from_global_config,
+        tmp_path,
     ) -> None:
         """Test successful execution of the run method with mocked run_mini_swe."""
 
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         # The rollout prefix is only applied when model-call capture is enabled.
-        mock_server_client.global_config_dict = {"observability_enabled": True}
+        mock_server_client.global_config_dict = {"should_capture_calls": True, "call_capture_dir": tmp_path}
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
+        server.setup_webserver()
 
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote)
 
-        run_request = MiniSWEAgentRunRequest.model_validate(
-            create_run_request().model_dump() | {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 1}
-        )
+        run_request = MiniSWEAgentRunRequest.model_validate(create_run_request().model_dump())
 
-        response = await server.run(run_request)
+        mock_request = MagicMock()
+        mock_request.session = {"rollout_id": "2-1"}
+        response = await server.run(mock_request, run_request)
 
         assert_run_response(response)
 
         assert_run_mini_swe_called(mock_to_thread)
-        assert mock_runner_ray_remote.remote.call_args.args[1]["base_url"] == ("http://0.0.0.0:8080/ng-rollout/2-1/v1")
+        assert mock_runner_ray_remote.remote.call_args.args[1]["base_url"] == ("http://0.0.0.0:8080/v1/ng-rollout/2-1")
 
     @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
@@ -776,7 +778,7 @@ class TestApp:
             },
         )
 
-        await server.run(run_request)
+        await server.run(MagicMock(), run_request)
 
         runtime_env = mock_runner_ray_remote.options.call_args.kwargs["runtime_env"]
         assert runtime_env["env_vars"] == {OPENSANDBOX_API_KEY_ENV: "fixture-value"}  # pragma: allowlist secret
@@ -837,7 +839,7 @@ class TestApp:
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote)
 
-        await server.run(create_run_request())
+        await server.run(MagicMock(), create_run_request())
 
         runtime_env = mock_runner_ray_remote.options.call_args.kwargs["runtime_env"]
         assert runtime_env["env_vars"] == {OPENSANDBOX_API_KEY_ENV: "fixture-value"}  # pragma: allowlist secret
@@ -881,7 +883,7 @@ class TestApp:
 
         run_request = create_run_request(instance_id="test_instance_456", temperature=0.3, top_p=0.95)
 
-        response = await server.run(run_request)
+        response = await server.run(MagicMock(), run_request)
 
         assert_run_response(
             response,
@@ -922,7 +924,7 @@ class TestApp:
 
         run_request = create_run_request(instance_id="test_instance_789", temperature=0.2, top_p=1.0)
 
-        response = await server.run(run_request)
+        response = await server.run(MagicMock(), run_request)
 
         assert_run_response(
             response,
@@ -1022,6 +1024,7 @@ class TestApp:
     def test_endpoints_registration(self) -> None:
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
+        mock_server_client.global_config_dict = {}
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
         app = server.setup_webserver()
