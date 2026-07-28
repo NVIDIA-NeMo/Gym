@@ -9,7 +9,9 @@
 set -euo pipefail
 
 OUTPUT_DIR=""
-LUSTRE_DIR=/lustre
+# Shared filesystem mounted into the container. Named for the site convention
+# it came from; override for a cluster that mounts its shared storage elsewhere.
+SHARED_MOUNT="${GDPVAL_SHARED_MOUNT:-/lustre}"
 
 # Keep the upstream flag names for compatibility with the existing launcher stack.
 VLLM_IMAGE="${VLLM_IMAGE:-}"
@@ -274,7 +276,7 @@ touch "${LOG_FILE}"
 mkdir -p "${OUTPUT_DIR}" "${HF_HOME}" "${VLLM_CACHE_ROOT}"
 
 export WORK_DIR="${OUTPUT_DIR}"
-export OUTPUT_DIR LUSTRE_DIR VLLM_IMAGE MODEL_PATH INSTANCE_MODEL_NAME LOG_FILE
+export OUTPUT_DIR SHARED_MOUNT VLLM_IMAGE MODEL_PATH INSTANCE_MODEL_NAME LOG_FILE
 export RAY_PORT VLLM_PORT NUM_NODES INSTANCE_IDX
 export TENSOR_PARALLEL_SIZE PIPELINE_PARALLEL_SIZE DATA_PARALLEL_SIZE DATA_PARALLEL_SIZE_LOCAL
 export GPU_MEMORY_UTILIZATION API_SERVER_COUNT
@@ -285,7 +287,7 @@ srun \
     --kill-on-bad-exit=1 \
     --no-container-mount-home \
     --container-image="${VLLM_IMAGE}" \
-    --container-mounts="${OUTPUT_DIR}:/outputs,${LUSTRE_DIR}:/lustre" \
+    --container-mounts="${OUTPUT_DIR}:/outputs,${SHARED_MOUNT}:${SHARED_MOUNT}" \
     --export=ALL \
     --mpi=pmix \
     bash -lc '
@@ -378,6 +380,14 @@ srun \
                 VLLM_ARGS+=(--reasoning-parser "${GDPVAL_REASONING_PARSER}")
             [ -n "${GDPVAL_KV_CACHE_DTYPE:-}" ] && \
                 VLLM_ARGS+=(--kv-cache-dtype "${GDPVAL_KV_CACHE_DTYPE}")
+            # Batch scheduling. Left unset these take whatever the containers vLLM
+            # defaults to, which then silently decides how much of the requested
+            # agent concurrency the engine will actually run at once -- and a DP run
+            # that is really capped here looks exactly like one that failed to scale.
+            [ -n "${GDPVAL_MAX_NUM_SEQS:-}" ] && \
+                VLLM_ARGS+=(--max-num-seqs "${GDPVAL_MAX_NUM_SEQS}")
+            [ -n "${GDPVAL_MAX_NUM_BATCHED_TOKENS:-}" ] && \
+                VLLM_ARGS+=(--max-num-batched-tokens "${GDPVAL_MAX_NUM_BATCHED_TOKENS}")
             [ "${GDPVAL_EXPERT_PARALLEL:-1}" = "1" ] && VLLM_ARGS+=(--enable-expert-parallel)
             # Some Blackwell/SM100 ranks fail Inductor autotuning at startup with a
             # CUDA driver error; eager execution keeps every rank out of that path.
