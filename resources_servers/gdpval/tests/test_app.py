@@ -173,37 +173,43 @@ class TestApp:
         assert resp.judge_response == canned_result
 
     @pytest.mark.asyncio
-    async def test_verify_rubric_flags_a_failed_judgement(self) -> None:
-        """A scorer failure must surface on the response, not only in the helper.
+    @pytest.mark.parametrize(
+        "scoring_error, reward, extra_metadata",
+        [
+            ("truncated_json", 0.536, {"partial_score": 0.536}),
+            ("no_score_in_response", 0.0, {"criteria_scores": [{"criterion": "clarity"}]}),
+        ],
+    )
+    async def test_verify_rubric_retries_a_partial_judgement(
+        self, scoring_error: str, reward: float, extra_metadata: dict
+    ) -> None:
+        """A salvaged or score-less judgement must be retried, not recorded.
 
-        Testing ``_is_invalid_judge_result`` alone leaves this call site free to
-        regress to ``judge_result is None`` with the suite still green, and the row
-        then lands in the mean looking like a genuine 0.0.
-
-        Uses a metadata object carrying only ``SCORING_ERROR_KEY``, which is the
-        shape the partial failures (``truncated_json``, ``no_score_in_response``)
-        take. Those are recorded and flagged rather than raised; see
-        ``test_verify_rubric_retries_when_judge_has_no_valid_scores`` for the
-        total-failure path, which additionally sets ``error`` and so raises.
+        Neither case is a judgement: ``truncated_json`` carries a score biased low
+        by however many criteria the judge never emitted, and
+        ``no_score_in_response`` is a flat 0.0 for a deliverable that may be
+        excellent. Both set only ``SCORING_ERROR_KEY``, not the legacy ``error``
+        field, so both used to be recorded rather than raised -- caching a wrong
+        number as a completed rollout that resume then skips forever, and tripping
+        the production validator into halting the run instead of re-judging.
+        Raising routes them to the retryable sidecar under the max-attempts budget.
         """
         from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
 
         server = _server(reward_mode="rubric")
-        failed = {SCORING_ERROR_KEY: "no_valid_scores", "num_trials": 2}
+        failed = {SCORING_ERROR_KEY: scoring_error, **extra_metadata}
 
         async def fake_score_with_rubric(**_kwargs):
-            return 0.0, failed
+            return reward, failed
 
         body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
 
         with (
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            pytest.raises(RuntimeError, match=f"rubric judge produced no valid score: {scoring_error}"),
         ):
-            resp = await server.verify(body)
-
-        assert resp.reward == 0.0
-        assert resp.invalid_judge_response is True, "a failed judgement was reported as a valid score"
+            await server.verify(body)
 
     @pytest.mark.asyncio
     async def test_verify_rubric_retries_when_judge_has_no_valid_scores(self) -> None:

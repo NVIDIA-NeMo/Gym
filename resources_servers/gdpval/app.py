@@ -622,15 +622,25 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
-        # A scorer can exhaust every formatting retry and return an error
-        # metadata object such as ``{"error": "no_valid_scores"}``.  Treating
-        # that object as a successful reward-zero judgement contaminates the
-        # main rollout JSONL and, with rerun-incomplete enabled, permanently
-        # caches the malformed judgement.  Raise so the Stirrup agent routes
-        # the attempt to the retryable failure sidecar and leaves the cached
-        # deliverable available for a later judging attempt.
-        if judge_result is None or judge_result.get("error"):
-            error = judge_result.get("error") if judge_result else "missing_judge_result"
+        # A scorer that could not produce a real judgement still returns a
+        # populated metadata dict: ``no_valid_scores`` when every trial failed to
+        # parse, ``truncated_json`` when only a biased-low partial was salvaged,
+        # and ``no_score_in_response`` when well-formed JSON carried no score.
+        # None of those is a judgement, so recording one -- even flagged -- caches
+        # a wrong number as a completed rollout and, with rerun-incomplete
+        # enabled, makes it permanent. Raise instead: the attempt goes to the
+        # retryable failure sidecar under the NEMO_GYM_MAX_ROLLOUT_ATTEMPTS
+        # budget, and the persisted deliverable stays available so a retry costs
+        # one judge call rather than a fresh rollout.
+        #
+        # Triggered off ``_is_invalid_judge_result`` so this stays in step with
+        # what that helper considers unusable, with the pre-existing ``error``
+        # key still honoured: the structured scorer sets both for
+        # ``no_valid_scores`` and operators read the older one.
+        legacy_error = judge_result.get("error") if isinstance(judge_result, dict) else None
+        if judge_result is None or _is_invalid_judge_result(judge_result) or legacy_error:
+            scoring_error = judge_result.get(SCORING_ERROR_KEY) if isinstance(judge_result, dict) else None
+            error = scoring_error or legacy_error or "missing_judge_result"
             raise RuntimeError(f"rubric judge produced no valid score: {error}")
 
         return GDPValVerifyResponse(
