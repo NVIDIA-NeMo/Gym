@@ -27,6 +27,36 @@ NVIDIA/Slurm clusters, where it pairs with pyxis).
   must own the whole container lifecycle. Switching to another *container* user
   is done with `su` inside the container.
 
+## Pre-fetching images (recommended)
+
+`enroot import` pulls and converts a Docker image to squashfs on first use,
+which can take several minutes per image. For batch evaluation, pre-fetch images
+up front with the bundled helper so every sandbox create is an instant cache hit:
+
+```bash
+python scripts/enroot_prefetch_sqsh.py \
+    --sqsh-dir /path/to/enroot_sqshs \
+    --jobs 4 \
+    ubuntu:22.04 \
+    nvcr.io/nvidia/pytorch:24.01
+```
+
+The helper uses the same SHA-256 cache key as the provider
+(`sha256(image)[:16].sqsh`), so files written here are found automatically at
+runtime without re-importing. Point `sqsh_cache_dir` at the same directory:
+
+```yaml
+enroot:
+  create:
+    sqsh_cache_dir: /path/to/enroot_sqshs
+```
+
+Or pass it as a Hydra override:
+
+```bash
+'++sandbox.enroot.create.sqsh_cache_dir=/path/to/enroot_sqshs'
+```
+
 ## Quick start
 
 The provider is used through NeMo Gym's provider-neutral sandbox API
