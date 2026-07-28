@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from collections import defaultdict
+from datetime import datetime
 from os import environ
 from pathlib import Path
 from time import time
@@ -21,6 +22,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Request
 
+from nemo_gym.capture_records import ToolCallEvent
 from responses_api_agents.tau2.source import ensure_tau2_data_dir
 
 
@@ -195,6 +197,21 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             mean_completion_tokens = sum(completion_usages) / len(completion_usages)
             max_prompt_tokens = max(prompt_usages)
             max_completion_tokens = max(completion_usages)
+
+        if self._capture_config.should_capture_calls:
+            prev_timestamp = None
+            for message in result["messages"]:
+                if message["role"] == "assistant" and message["tool_calls"]:
+                    prev_timestamp = message["timestamp"]
+                elif message["role"] == "tool" and message["requestor"] == "assistant":
+                    request.state.events.append(
+                        ToolCallEvent(
+                            call_id=message["id"],
+                            timestamp_start=datetime.fromisoformat(prev_timestamp).timestamp(),
+                            timestamp_end=datetime.fromisoformat(message["timestamp"]).timestamp(),
+                        ),
+                    )
+                    prev_timestamp = message["timestamp"]
 
         return Tau2VerifyResponse(
             **body_dict,
