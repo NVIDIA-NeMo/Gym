@@ -27,7 +27,7 @@ from uuid import uuid4
 
 import ray
 import yaml
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, Request
 from minisweagent.config import builtin_config_dir, get_config_path
 from pydantic import ConfigDict
 
@@ -590,14 +590,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-
-    def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
-        self.setup_session_middleware(app)
-        app.post("/v1/responses")(self.responses)
-        app.post("/run")(self.run)
-        app.post("/aggregate_metrics")(self.aggregate_metrics)
-        return app
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         metrics, _, _, max_k = compute_pass_majority_metrics(tasks)
