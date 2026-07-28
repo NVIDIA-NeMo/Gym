@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from time import perf_counter
+from time import time
 from typing import List
 
 from fastapi import Request, Response
@@ -130,7 +130,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 break
 
             for output_function_call in all_fn_calls:
-                timestamp_start = perf_counter()
+                timestamp_start = time()
 
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
@@ -151,8 +151,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     if self._capture_config.should_capture_calls:
                         request.state.events.append(
                             ToolCallEvent(
+                                call_id=output_function_call.call_id,
                                 timestamp_start=timestamp_start,
-                                timestamp_end=perf_counter(),
+                                timestamp_end=time(),
                             )
                         )
 
@@ -177,8 +178,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 if self._capture_config.should_capture_calls:
                     request.state.events.append(
                         ToolCallEvent(
+                            call_id=output_function_call.call_id,
                             timestamp_start=timestamp_start,
-                            timestamp_end=perf_counter(),
+                            timestamp_end=time(),
                         )
                     )
 
