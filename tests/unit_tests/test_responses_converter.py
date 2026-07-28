@@ -226,6 +226,58 @@ def test_responses_to_chat_completion_input_image_part(converter: ResponsesConve
     assert {"type": "image_url", "image_url": {"url": "http://img", "detail": "high"}} in parts
 
 
+@pytest.mark.parametrize("part_type", ["input_video", "video_url"])
+@pytest.mark.parametrize(
+    ("video_field", "video_url"),
+    [
+        ("video_url", "file:///videos/example.mp4"),
+        ("video_url", {"url": "https://example.com/video.mp4"}),
+        ("video", "file:///videos/example.mp4"),
+    ],
+)
+def test_responses_to_chat_completion_video_part(
+    converter: ResponsesConverter,
+    part_type: str,
+    video_field: str,
+    video_url: object,
+):
+    if part_type == "video_url" and video_field == "video":
+        pytest.skip("video is an input_video compatibility field")
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "user",
+                    "type": "message",
+                    "content": [
+                        {"type": "input_text", "text": "what happens?"},
+                        {"type": part_type, video_field: video_url},
+                    ],
+                }
+            ]
+        )
+    )
+
+    expected_url = video_url["url"] if isinstance(video_url, dict) else video_url
+    assert params.messages[0]["content"] == [
+        {"type": "text", "text": "what happens?"},
+        {"type": "video_url", "video_url": {"url": expected_url}},
+    ]
+
+
+def test_responses_to_chat_completion_empty_video_url_raises(
+    converter: ResponsesConverter,
+):
+    with pytest.raises(ValueError, match="requires a non-empty video_url"):
+        converter._format_message(
+            {
+                "role": "user",
+                "content": [{"type": "input_video", "video_url": ""}],
+            },
+            ResponsesConverterState(return_token_id_information=False),
+        )
+
+
 def test_responses_to_chat_completion_unsupported_part_raises(converter: ResponsesConverter):
     # Exercise the converter directly with an unsupported content part type. A raw
     # ResponseCreateParams would reject this at schema-validation time, so we call the

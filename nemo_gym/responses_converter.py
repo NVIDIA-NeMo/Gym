@@ -164,12 +164,8 @@ class ResponsesConverter(BaseModel):
                     raise NotImplementedError(f"Unsupported message type: {m}")
 
             if self.return_token_id_information and m.get("prompt_token_ids"):
-                state.token_information = TokenIDLogProbMixin(
-                    prompt_token_ids=m["prompt_token_ids"],
-                    generation_token_ids=m["generation_token_ids"],
-                    generation_log_probs=m["generation_log_probs"],
-                    routed_experts=m.get("routed_experts"),
-                )
+                token_information = {key: m[key] for key in TokenIDLogProbMixin.model_fields if key in m}
+                state.token_information = TokenIDLogProbMixin(**token_information)
 
         state.flush_assistant()
 
@@ -255,6 +251,13 @@ class ResponsesConverter(BaseModel):
                         converted_parts.append(
                             {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
                         )
+                    case "input_video" | "video_url":
+                        video_url = part_param.get("video_url") or part_param.get("video", "")
+                        if isinstance(video_url, dict):
+                            video_url = video_url.get("url", "")
+                        if not video_url:
+                            raise ValueError(f"{part_param['type']} requires a non-empty video_url")
+                        converted_parts.append({"type": "video_url", "video_url": {"url": video_url}})
                     case _:
                         raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
             content = converted_parts
@@ -435,15 +438,12 @@ class ResponsesConverter(BaseModel):
         if self.return_token_id_information and "prompt_token_ids" in message_dict:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
-            extra_training_fields = {}
-            if "routed_experts" in message_dict and message_dict["routed_experts"] is not None:
-                extra_training_fields["routed_experts"] = message_dict["routed_experts"]
+            token_information = {
+                key: message_dict[key] for key in TokenIDLogProbMixin.model_fields if key in message_dict
+            }
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
-                prompt_token_ids=message_dict["prompt_token_ids"],
-                generation_token_ids=message_dict["generation_token_ids"],
-                generation_log_probs=message_dict["generation_log_probs"],
-                **extra_training_fields,
+                **token_information,
             )
 
         return response_output

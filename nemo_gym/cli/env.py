@@ -209,7 +209,16 @@ class RunHelper:  # pragma: no cover
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = run_command(command, dir_path, server_name=top_level_path)
+            # Keep the component's owning Gym checkout ahead of an inherited PYTHONPATH. This is
+            # required when an editable checkout is run from a container that also ships Gym:
+            # otherwise the component entrypoint can come from the checkout while ``nemo_gym``
+            # resolves from the stale container installation.
+            process = run_command(
+                command,
+                dir_path,
+                server_name=top_level_path,
+                project_root=dir_path.parent.parent,
+            )
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
