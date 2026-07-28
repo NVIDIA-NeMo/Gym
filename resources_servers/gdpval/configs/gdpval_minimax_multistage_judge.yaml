@@ -64,35 +64,50 @@ gdpval_resources_server:
       # multi-stage driver picks the `num_models` nearest anchors per stage.
       # This is the ultra-v3 "9-ref no-gold" set (human_gold and gptoss_20b are
       # DELIBERATELY excluded — incomplete/missing deliverables inflate the fit).
-      # Paths are the real Lustre deliverables_cache dirs (gym runs on Lustre
-      # directly; the NEL /gdpval/refs/<name> values are container mounts).
+      # Each deliverables_dir resolves to $GDPVAL_REFS_ROOT/<id>, defaulting to
+      # the NEL /gdpval/refs/<id> container mounts, and holds that reference's
+      # per-task `task_<task_id>/` deliverables. Three ways to point elsewhere:
+      #   - refs share a parent: export GDPVAL_REFS_ROOT=/abs/path/to/refs
+      #   - refs are scattered (e.g. per-run Lustre dirs, which share no parent):
+      #     edit these paths directly in your local checkout, or leave the file
+      #     as-is and override them from `env.yaml` in the repo root — it is
+      #     gitignored and merges over this overlay, so nothing site-specific
+      #     gets committed and no extra flags are needed per run:
+      #
+      #       gdpval_resources_server:
+      #         resources_servers:
+      #           gdpval:
+      #             reference_models:
+      #               kimi_k26: {deliverables_dir: /abs/path/to/deliverables_cache}
+      #
+      #   - one-off: ++...gdpval.reference_models.<id>.deliverables_dir=/abs/path
       reference_models:
         deepseek_v4_pro:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/deepseek-ai/DeepSeek-V4-Pro/20260704_001255-8a81a5f8c6cd779b/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_pro
           elo: 1299
         glm51_fp8:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/zai-org/GLM-5.1-FP8/20260701_165504-891e2ab610b6245a/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/glm51_fp8
           elo: 1250
         kimi_k26:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/moonshotai/Kimi-K2.6/20260701_165625-57da3f0a278c51e4/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/kimi_k26
           elo: 1191
         nemotron3_ultra:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/nemo-evaluator-rundirs/ultra-v3/Nemotron-3-Ultra/20260701_150905-ad896daa1d10372d/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/nemotron3_ultra
           elo: 1160
         qwen36_35b:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/Qwen/Qwen3.6-35B-A3B/20260701_165658-2201d1a5725f3dc4/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen36_35b
           elo: 1045
         qwen35_397b:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/nemo-evaluator-rundirs/ultra-v3/Qwen/Qwen3.5-397B-A17B/20260629_204422-486041cb0306a434/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen35_397b
           elo: 960
         gptoss_120b:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/openai/gpt-oss-120b/20260703_170141-2024253d07358ee5/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/gptoss_120b
           elo: 795
         gemma4_26b:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/vadams/nemo-evaluator-rundirs/ultra-v3/google/gemma-4-26B-A4B/20260701_142723-8f72499defe0d9ac/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/gemma4_26b
           elo: 752
         qwen3_30b_thinking:
-          deliverables_dir: /lustre/fsw/portfolios/llmservice/users/agronskiy/nemo-evaluator-rundirs/ultra-v3/Qwen/Qwen3-30B-A3B-Thinking-2507/20260701_165542-ae0139e80cda2f81/nemo_gym.0/artifacts/gdpval/deliverables_cache
+          deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen3_30b_thinking
           elo: 267
       # Pairwise trials per (task x reference x repeat). 4 debiases position with
       # swap/no-swap; lower to 2 for a faster smoke test.
