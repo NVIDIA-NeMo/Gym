@@ -1,0 +1,72 @@
+# E2B sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `e2b` selects the provider class and its value is passed to the
+# provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping providers is
+# swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/e2b/configs/e2b.yaml, $MODEL]"
+#
+# Requires the SDK: `pip install 'e2b>=2.25.0'`.
+#
+# Works against e2b.dev and against any e2b-compatible gateway -- point
+# `connection.api_url`/`connection.sandbox_url` at the gateway.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: e2b
+  e2b:
+    connection:
+      # Leave unset to use the SDK's own env vars: E2B_API_KEY, E2B_API_URL,
+      # E2B_SANDBOX_URL, E2B_DOMAIN, E2B_ACCESS_TOKEN.
+      api_key: ${oc.env:E2B_API_KEY,null}
+      # Self-hosted / e2b-compatible gateway. Both are usually the same host.
+      api_url: ${oc.env:E2B_API_URL,null}
+      sandbox_url: ${oc.env:E2B_SANDBOX_URL,null}
+      # Per-HTTP-request timeout. Keep well below `exec.default_timeout_s`, which
+      # bounds the command itself rather than a single request.
+      request_timeout_s: 120.0
+    create:
+      # E2B starts sandboxes from a pre-built TEMPLATE ALIAS, not a registry
+      # reference: aliases allow only letters, digits, '-' and '_'.
+      #
+      # Resolution order for each sandbox:
+      #   1. SandboxSpec.provider_options.template
+      #   2. this template_map, keyed by SandboxSpec.image
+      #   3. SandboxSpec.image itself, when it is already a valid alias
+      #   4. this `template` fallback
+      #
+      # Map image references that are not valid aliases, e.g.:
+      #   template_map:
+      #     "ghcr.io/acme/task:1.0": acme-task-1-0
+      template: null
+      template_map: {}
+      # Sandbox lifetime; E2B kills the sandbox when it elapses. Overridden per
+      # sandbox by SandboxSpec.ttl_s.
+      timeout_s: 3600.0
+      allow_internet_access: true
+      secure: true
+      # E2B fixes cpu/memory when the TEMPLATE IS BUILT (`cpu_count`/`memory_mb`
+      # arguments to the build), so a per-sandbox SandboxSpec.resources request
+      # cannot be applied at create time. false: log a warning once per template.
+      # true: raise instead, so an unsatisfiable resource request fails loudly.
+      strict_resources: false
+    exec:
+      # Applied when a caller passes no timeout. The SDK's own default is 60s,
+      # which silently truncates builds and test suites; verifiers in particular
+      # often run for many minutes.
+      default_timeout_s: 1800.0
+      user: null
+      request_timeout_s: null
+    operations:
+      # Retries for transient transport/5xx failures. Deterministic errors
+      # (not-found, auth, invalid-argument, timeout) are never retried.
+      retries: 2
+      retry_delay_s: 0.5
+      retry_max_delay_s: 8.0
