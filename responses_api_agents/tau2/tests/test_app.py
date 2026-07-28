@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_agent import AggregateMetricsRequest
@@ -113,6 +114,45 @@ class TestApp:
             return d
 
         assert _clean(expected_response_dict) == _clean(actual_response_dict)
+
+    @pytest.mark.parametrize(
+        ("observability_enabled", "url_suffix"),
+        [(True, "/ng-rollout/7-2/v1"), (False, "/v1")],
+    )
+    def test_policy_and_user_model_calls_share_rollout_correlation(
+        self, observability_enabled: bool, url_suffix: str
+    ) -> None:
+        example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
+        request_body = json.loads(example_jsonl.read_text().splitlines()[0])
+        request_body |= {"_ng_task_index": 7, "_ng_rollout_index": 2}
+
+        config, server = self._dummy_server()
+        config.model_server.name = "policy"
+        config.user_model_server.name = "user"
+        server.server_client.global_config_dict = {"observability_enabled": observability_enabled}
+        with patch("responses_api_agents.tau2.app.ensure_tau2_data_dir"):
+            client = TestClient(server.setup_webserver())
+
+        class StopRun(Exception):
+            pass
+
+        captured = {}
+
+        async def stop_after_config(**kwargs):
+            captured.update(kwargs)
+            raise StopRun
+
+        model_urls = {"policy": "http://policy:8000", "user": "http://user:8001"}
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", side_effect=model_urls.__getitem__),
+            patch("responses_api_agents.tau2.app.run_single_task", stop_after_config),
+            pytest.raises(StopRun),
+        ):
+            client.post("/run", json=request_body)
+
+        config = captured["config"]
+        assert config.llm_args_agent["api_base"] == model_urls["policy"] + url_suffix
+        assert config.llm_args_user["api_base"] == model_urls["user"] + url_suffix
 
     async def test_compute_metrics(self) -> None:
         example_rollouts_fpath = Path(__file__).parent.parent / "data" / "example_rollouts.jsonl"

@@ -25,6 +25,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.stirrup_agent.app import (
     NG_FAILURE_CLASS_KEY,
@@ -124,6 +125,20 @@ class TestApp:
             ),
         )
         StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_model_base_url_accepts_rollout_correlation(self) -> None:
+        wrapper = StirrupAgentWrapper(config=_make_config(), server_client=MagicMock(spec=ServerClient))
+
+        with patch.object(
+            StirrupAgentWrapper,
+            "resolve_model_base_url",
+            side_effect=lambda _, rollout_id: (
+                f"http://model-host:8000/ng-rollout/{rollout_id}/v1" if rollout_id else "http://model-host:8000/v1"
+            ),
+        ):
+            with rollout_context("7-3"):
+                assert wrapper._get_model_base_url() == "http://model-host:8000/ng-rollout/7-3/v1"
+            assert wrapper._get_model_base_url() == "http://model-host:8000/v1"
 
     def test_output_history_preserves_nemo_user_tool_results(self) -> None:
         """Run-history export should keep NeMo user-role tool results as tool outputs."""

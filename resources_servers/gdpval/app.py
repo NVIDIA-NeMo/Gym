@@ -50,7 +50,8 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.server_utils import get_server_url
+from nemo_gym.rollout_correlation import current_rollout_id
+from nemo_gym.server_utils import apply_rollout_prefix, get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
     dir_contains_audio_video,
@@ -337,7 +338,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         legacy_overrides = dict(self.config.judge_responses_create_params_overrides or {})
 
         def _url(server: ModelServerRef) -> str:
-            return get_server_url(server.name) + "/v1"
+            return apply_rollout_prefix(get_server_url(server.name), current_rollout_id()) + "/v1"
 
         judges: List[ResolvedJudge] = []
         for i, member in enumerate(self._effective_panel()):

@@ -22,6 +22,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -244,6 +245,7 @@ class TestApp:
         body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
 
         with (
+            rollout_context("7-3"),
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
         ):
@@ -259,7 +261,7 @@ class TestApp:
         assert judges[0].create_overrides == {"reasoning_effort": "medium"}
         assert judges[2].weight == 2.0
         # All share the single proxy base_url.
-        assert {j.base_url for j in judges} == {"http://localhost:9999/v1"}
+        assert {j.base_url for j in judges} == {"http://localhost:9999/ng-rollout/7-3/v1"}
         # A seeded rng is threaded through for reproducible sampling.
         assert captured["rng"] is not None
 
