@@ -67,6 +67,9 @@ class DockerContainer(BaseModel):
     # TODO @bxyu-nvidia: start(), exec_run(), put_archive(), stop()
 
 
+# TODO @bxyu-nvidia: Patch build_container, copy_to_container, cleanup_container
+
+
 class SwebenchResourcesServer(SimpleResourcesServer):
     config: SwebenchResourcesServerConfig
 
@@ -105,13 +108,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             model_patch = body.patch
         else:
             # TODO @bxyu-nvidia: pwd in the fresh container (defaults to WORKDIR)
-            # TODO @bxyu-nvidia: cd into WORKDIR in the input container
-            # TODO @bxyu-nvidia: extract the patch via git
+            # cd into WORKDIR in the input container
+            # extract the patch via git
             model_patch = None
-
-        # TODO @bxyu-nvidia: Patch build_container. Container: start() and id
-        # TODO @bxyu-nvidia: Patch copy_to_container. Container: exec_run() and put_archive()
-        # TODO @bxyu-nvidia: Patch cleanup_container. Container: stop()
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         res = run_instance(
