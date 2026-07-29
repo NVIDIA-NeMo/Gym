@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Discriminator, Tag, model_validator
 
@@ -69,6 +69,7 @@ ComputeConfig = Annotated[
 
 class BenchmarkRunConfig(BaseModel):
     name: str
+    run: dict[str, Any] = {}
 
 
 class DriverConfig(BaseModel):
