@@ -1,5 +1,5 @@
-# Policy sampling and context remain owned by NeMo-RL. Matching policy
-# settings are temperature=1.0, top_p=1.0, max_new_tokens=8192, and
+# Policy sampling and context remain owned by the training runtime. Matching
+# policy settings are temperature=1.0, top_p=1.0, max_new_tokens=8192, and
 # max_model_len=131072.
 
 conversational_tool_use_simulation:
@@ -8,7 +8,7 @@ conversational_tool_use_simulation:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Conversational tool-use simulation environment for NeMo-RL training.
+      description: Conversational tool-use simulation environment with training-oriented model parameters.
       simulator_model_server:
         type: responses_api_models
         name: simulator_model

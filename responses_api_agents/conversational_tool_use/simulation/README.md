@@ -10,6 +10,37 @@ The complete workflow and shared design documents live with the simulation resou
 - [Scenario generation](../scenario_generation/README.md)
 - [Rollout behavior](../../../resources_servers/conversational_tool_use_simulation/docs/rollout.md)
 
+## Configuration
+
+[`configs/conversational_tool_use_simulation.yaml`](configs/conversational_tool_use_simulation.yaml) registers the
+`conversational_tool_use_agent` instance and expects a resource-server instance named
+`conversational_tool_use_simulation`. For a complete runnable stack, use one of the resource-server configs, which
+registers both instances:
+
+- [standard configuration](../../../resources_servers/conversational_tool_use_simulation/configs/conversational_tool_use_simulation.yaml)
+- [training configuration](../../../resources_servers/conversational_tool_use_simulation/configs/conversational_tool_use_simulation_for_training.yaml)
+
+`max_agent_steps` caps policy-model responses, not simulator or tool messages. `seed_first_user_message=true` makes the
+resource server generate the first customer turn when the input has no prefilled conversation.
+
+## Initial User Turn and Prefilled History
+
+Conversation rows may omit the first customer message or provide it explicitly:
+
+- With no prefilled user message, the default `seed_first_user_message=true` flow asks the resource server to generate
+  one before the first policy-model call.
+- A row may put a user message directly in `responses_create_params.input`.
+- A row may instead set top-level `initial_user_message`; the agent copies it into `responses_create_params.input`
+  before seeding. If both forms are present, their first user messages must match.
+- A row may provide a longer user, assistant, function-call, and function-call-output history and resume from the next
+  actor.
+
+When the resource server generates the first user turn, `/v1/responses` initially returns it as a leading output item.
+Before `/run` writes the scored rollout row, the agent moves that item into `responses_create_params.input` and removes
+it from `response.output`. The model-generated continuation therefore begins with the first assistant reasoning,
+message, or function call. See [rollout behavior](../../../resources_servers/conversational_tool_use_simulation/docs/rollout.md#initial-user-turn-and-prefilled-history)
+for the trajectory-side counters and complete contract.
+
 It differs from `simple_agent` in one critical way: when the policy model emits a normal assistant message, the rollout
 does not stop. The agent records the assistant message with the simulation resource server, asks the server for
 `/next_user_message`, appends that user turn, and continues until a stop marker, transfer marker, max step limit,
@@ -57,3 +88,11 @@ passes the same correlation ID to the resource server, which applies it to simul
 
 If a seeded `/run` exits before successful verification, the agent makes an idempotent `/discard_session` call.
 Rollout errors, verification errors, and cancelled attempts therefore cannot leave abandoned session state behind.
+
+## Tests
+
+```bash
+gym env test \
+  +entrypoint=responses_api_agents/conversational_tool_use/simulation \
+  +should_validate_data=false
+```

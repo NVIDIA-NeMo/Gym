@@ -128,6 +128,11 @@ python -m responses_api_agents.conversational_tool_use.scenario_generation.mater
   --output /tmp/conversational_tool_use/conversation_inputs.jsonl
 ```
 
+The materializer writes the policy system prompt and tools but intentionally omits an initial customer message. With
+the default `seed_first_user_message=true` setting, the simulator generates that first turn. Callers may instead add
+`initial_user_message` or prefilled Responses history as described in
+[rollout behavior](rollout.md#initial-user-turn-and-prefilled-history).
+
 ## 7. Run Conversation Simulation
 
 ```bash
