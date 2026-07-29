@@ -204,7 +204,21 @@ class GlobalConfigDictParser(BaseModel):
         original_get_args_parser = hydra_main_module.get_args_parser
 
         def new_get_args_parser():
-            parser: ArgumentParser = original_get_args_parser()
+            # Python 3.14 added ArgumentParser._check_help which validates help strings via
+            # `'%' not in help_string`, breaking hydra's LazyCompletionHelp (which implements
+            # __repr__ but not __contains__). Disable the check around hydra's parser setup;
+            # the upstream fix is in facebookresearch/hydra main but not yet released.
+            import argparse as _argparse
+
+            if sys.version_info >= (3, 14):
+                _orig_check_help = _argparse.ArgumentParser._check_help  # type: ignore[attr-defined]
+                _argparse.ArgumentParser._check_help = lambda self, action: None  # type: ignore[attr-defined]
+                try:
+                    parser: ArgumentParser = original_get_args_parser()
+                finally:
+                    _argparse.ArgumentParser._check_help = _orig_check_help  # type: ignore[attr-defined]
+            else:
+                parser: ArgumentParser = original_get_args_parser()
             # Set the conflict handlers to resolve so we can disable the help.
             parser.conflict_handler = "resolve"
             for action_group in parser._action_groups:
