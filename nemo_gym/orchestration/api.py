@@ -1,15 +1,19 @@
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Discriminator, Tag, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Tag, model_validator
 
 
-class HealthCheckConfig(BaseModel):
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class HealthCheckConfig(_StrictModel):
     path: str = "/health"
     port: int
     timeout_seconds: int = 60
 
 
-class BaseServiceConfig(BaseModel):
+class BaseServiceConfig(_StrictModel):
     container: str
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
@@ -45,7 +49,7 @@ ServiceConfig = Annotated[
 ]
 
 
-class NodePool(BaseModel):
+class NodePool(_StrictModel):
     partition: str
     nodes: int = 1
     ntasks_per_node: int = 1
@@ -53,7 +57,7 @@ class NodePool(BaseModel):
     extra_args: dict[str, str] = {}
 
 
-class BaseComputeConfig(BaseModel):
+class BaseComputeConfig(_StrictModel):
     pass
 
 
@@ -72,22 +76,28 @@ ComputeConfig = Annotated[
 ]
 
 
-class BenchmarkRunConfig(BaseModel):
+class BenchmarkRunConfig(_StrictModel):
     name: str
     run: dict[str, Any] = {}
 
 
-class DriverConfig(BaseModel):
+class GymInstallConfig(_StrictModel):
+    repo: str = "https://github.com/NVIDIA-NeMo/gym"
+    ref: str
+
+
+class DriverConfig(_StrictModel):
     container: str = "python:3.12"
+    gym_install: GymInstallConfig | None = None
     policy_model: str | None = None
     benchmarks: list[BenchmarkRunConfig]
 
 
-class JobConfig(BaseModel):
+class JobConfig(_StrictModel):
     output_path: str
 
 
-class SubmitConfig(BaseModel):
+class SubmitConfig(_StrictModel):
     services: dict[str, ServiceConfig]
     compute: dict[str, ComputeConfig]
     driver: DriverConfig

@@ -1,7 +1,7 @@
 import shlex
 from pathlib import Path
 
-from nemo_gym.orchestration.executors.script_templates import bash_var, render_health_check
+from nemo_gym.orchestration.executors.script_templates import bash_var, render_gym_cmd, render_gym_install, render_health_check
 from nemo_gym.orchestration.executors.utils import flatten_run_args
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
@@ -96,12 +96,13 @@ def build_sbatch_script(
         if service.health_check
     )
 
-    run_args = " ".join(flatten_run_args(benchmark.run))
+    gym_cmd = render_gym_cmd(benchmark.name, flatten_run_args(benchmark.run))
+    gi = config.driver.gym_install
+    entrypoint = render_gym_install(gi.repo, gi.ref) if gi else '"${GYM_CMD[@]}"'
     driver_command = (
+        f"{gym_cmd}\n"
         f"srun --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver.log "
-        f"gym eval run --benchmark {shlex.quote(benchmark.name)}"
-        + (f" {run_args}" if run_args else "")
+        f"--output=logs/driver.log {entrypoint}"
     )
 
     return _SCRIPT_TEMPLATE.format(
