@@ -130,8 +130,8 @@ The advertised URL must be reachable *from your service's machine*:
    reachability is only testable from your side.
 
 <Warning>
-Forgetting step 4 on an off-host deployment is the classic mistake: your service receives an
-unroutable bind address (`127.0.0.1` or `0.0.0.0`), every tool call misses Gym, and rewards are
+The easiest step to forget on an off-host deployment is step 4: without it, your service receives
+an unroutable bind address (`127.0.0.1` or `0.0.0.0`), every tool call misses Gym, and rewards are
 silently zero. The agent logs a warning when it detects this combination, but it cannot verify
 reachability for you.
 </Warning>
