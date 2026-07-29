@@ -51,3 +51,31 @@ def test_multiple_compute_raises():
 def test_invalid_placement_raises():
     with pytest.raises(ValidationError, match="does not match any compute resource"):
         SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "placement": "nonexistent"}}))
+
+
+def test_valid_policy_model():
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "policy_model": "svc"}))
+    assert config.driver.policy_model == "svc"
+
+
+def test_invalid_policy_model_raises():
+    with pytest.raises(ValidationError, match="does not match any service"):
+        SubmitConfig.model_validate(_config(driver={**DRIVER, "policy_model": "nonexistent"}))
+
+
+def test_no_policy_model():
+    config = SubmitConfig.model_validate(_config())
+    assert config.driver.policy_model is None
+
+
+def test_policy_model_injects_run_args():
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "policy_model": "svc"}))
+    benchmark = config.driver.benchmarks[0]
+    assert benchmark.run["policy_base_url"] == "http://localhost:8000/v1"
+    assert benchmark.run["policy_model_name"] == "org/model"
+
+
+def test_policy_model_conflict_raises():
+    driver = {**DRIVER, "policy_model": "svc", "benchmarks": [{"name": "gsm8k", "run": {"policy_base_url": "http://other"}}]}
+    with pytest.raises(ValidationError, match="already sets"):
+        SubmitConfig.model_validate(_config(driver=driver))

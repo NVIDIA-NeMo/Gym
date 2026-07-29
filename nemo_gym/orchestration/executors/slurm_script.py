@@ -9,7 +9,7 @@ from nemo_gym.orchestration.api import (
     RayServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
-    VllmServiceConfig,
+    VllmServiceConfig,  # used in _BUILDERS dispatch table
 )
 
 _SCRIPT_TEMPLATE = """\
