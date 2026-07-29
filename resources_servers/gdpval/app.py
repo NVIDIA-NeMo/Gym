@@ -50,7 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.judge import JudgeError, run_judge
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -361,7 +361,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if self.config.reward_mode == "comparison":
-            return await run_judge(self._verify_comparison(body))
+            return await self._verify_comparison(body)
 
         return await self._verify_rubric(body)
 
@@ -670,11 +670,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
         finally:
             clean_up_paths(clean_up_list)
 
-        # Every matchup failed → this rollout is genuinely unjudgeable. Surface
-        # it as a failure (matches pre-resilience behavior) rather than emitting
-        # a fake neutral reward that would pollute the metrics.
+        # Every matchup failed → this rollout is genuinely unjudgeable. Raise
+        # JudgeError so the row goes to the failures sidecar rather than emitting
+        # a fake neutral reward that would pollute the metrics. Individual matchup
+        # failures are already isolated above, so this is the only judge-call
+        # outcome the whole rollout can't survive.
         if attempted_matchups > 0 and not per_reference:
-            raise RuntimeError(
+            raise JudgeError(
                 f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
             )
 

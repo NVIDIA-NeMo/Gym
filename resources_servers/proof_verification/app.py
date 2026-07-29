@@ -21,7 +21,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import run_judge
+from nemo_gym.judge import reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -195,14 +195,12 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
         if not full_response:
             return ProofVerificationVerifyResponse(**body.model_dump(), reward=0.0)
 
-        reward, details = await run_judge(
-            self._judge_single(
-                problem=problem,
-                proof=proof,
-                ground_truth_judgement=ground_truth_judgement,
-                ground_truth_verify_score=ground_truth_verify_score,
-                full_response=full_response,
-            )
+        reward, details = await self._judge_single(
+            problem=problem,
+            proof=proof,
+            ground_truth_judgement=ground_truth_judgement,
+            ground_truth_verify_score=ground_truth_verify_score,
+            full_response=full_response,
         )
         if LOG_JSONL_PATH:
             await self._append_log_jsonl(
@@ -345,8 +343,8 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
     async def _call_judge(self, user_content: str) -> tuple[str, int]:
         """Route to external (JUDGE_SERVER_ARGS) or internal (Gym /v1/responses) judge."""
         if os.environ.get("JUDGE_SERVER_ARGS"):
-            return await self._call_judge_external(user_content)
-        return await self._call_judge_internal(user_content)
+            return await reraise_judge_errors(self._call_judge_external(user_content))
+        return await reraise_judge_errors(self._call_judge_internal(user_content))
 
     async def _judge_single(
         self,

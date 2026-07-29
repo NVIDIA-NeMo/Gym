@@ -44,7 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import run_judge
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -264,7 +264,7 @@ class MultiChallengeServer(SimpleResourcesServer):
         payload.pop("context", None)
         payload.pop("rubric", None)
 
-        evaluations = await run_judge(self._evaluate_rubric(rubric, context, generated_response))
+        evaluations = await self._evaluate_rubric(rubric, context, generated_response)
 
         # Aggregate scores
         reward = self._aggregate_scores(evaluations)
@@ -317,12 +317,13 @@ class MultiChallengeServer(SimpleResourcesServer):
         request_params.input = msgs
 
         # Call judge model
-        response_obj = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=request_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await response_obj.json())
         judge_text = _extract_text_from_response(judge_response, exclude_thinking=True)
 
         # Extract verdict

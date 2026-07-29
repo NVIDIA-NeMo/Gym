@@ -56,7 +56,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import run_judge
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -67,7 +67,6 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
-from nemo_gym.server_utils import get_response_json
 
 
 logger = logging.getLogger(__name__)
@@ -259,10 +258,10 @@ class ArenaJudgeServer(SimpleResourcesServer):
     ) -> tuple[str, Optional[str]]:
         """Run a single judge call via /v1/chat/completions.
 
-        Returns (raw_text, parsed_verdict). A failed judge CALL raises
-        JudgeError (via run_judge) — routed to the failures sidecar, not scored
-        as a wrong answer. A successful call with no parseable label yields
-        (text, None), the existing "invalid verdict" outcome.
+        Returns (raw_text, parsed_verdict). A failed judge CALL raises JudgeError
+        (via call_judge) — routed to the failures sidecar, not scored as a wrong
+        answer. A successful call with no parseable label yields (text, None), the
+        existing "invalid verdict" outcome.
         """
         prompt = self._prompts[category]
         fill = {"question": question, "answer_1": answer_1, "answer_2": answer_2}
@@ -275,15 +274,13 @@ class ArenaJudgeServer(SimpleResourcesServer):
         request_params = self.config.judge_chat_completions_create_params.model_copy(deep=True)
         request_params.messages = messages
 
-        async def _call() -> NeMoGymChatCompletion:
-            response_obj = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/chat/completions",
-                json=request_params,
-            )
-            return NeMoGymChatCompletion.model_validate(await get_response_json(response_obj))
-
-        judge_response = await run_judge(_call())
+        judge_response = await call_judge(
+            self.server_client,
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/chat/completions",
+            json=request_params,
+            response_model=NeMoGymChatCompletion,
+        )
         text = self._extract_chat_completion_text(judge_response)
         verdict = self._parse_verdict(text)
         return text, verdict

@@ -34,7 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, run_judge
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -511,12 +511,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     content=judge_prompt,
                 ),
             ]
-            http_response = await self.server_client.post(
+            judge_response = await call_judge(
+                self.server_client,
                 server_name=self.config.judge_model_server.name,
                 url_path="/v1/responses",
                 json=judge_create_params,
+                response_model=NeMoGymResponse,
             )
-            judge_response = NeMoGymResponse.model_validate(await http_response.json())
             return judge_create_params, judge_response
 
         def _grade_sample(
@@ -539,9 +540,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
 
         try:
-            judge_create_params, judge_response = await run_judge(
-                _get_judge_response(question, ground_truth, response)
-            )
+            judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
         except JudgeError as e:
             return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), str(e)
         judge_evaluation = _grade_sample(judge_create_params, judge_response)

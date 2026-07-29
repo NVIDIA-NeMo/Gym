@@ -22,9 +22,8 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, run_judge
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json
 
 
 class AalcrResourcesServerConfig(BaseResourcesServerConfig):
@@ -58,14 +57,6 @@ class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
 
 class AalcrResourcesServer(SimpleResourcesServer):
     config: AalcrResourcesServerConfig
-
-    async def _call_judge(self, judge_responses_create_params: dict) -> NeMoGymResponse:
-        http_response = await self.server_client.post(
-            server_name=self.config.judge_model_server.name,
-            url_path="/v1/responses",
-            json=judge_responses_create_params,
-        )
-        return NeMoGymResponse.model_validate(await get_response_json(http_response))
 
     async def verify(self, body: AALCRVerifyRequest) -> AALCRVerifyResponse:
         match body.input_tokens_band:
@@ -102,8 +93,14 @@ Reply only with CORRECT or INCORRECT."""
         judge_responses_create_params = dict(input=[{"role": "user", "content": judge_prompt}])
         judge_responses_create_params |= self.config.judge_responses_create_params_overrides
 
-        judge_response = await run_judge(self._call_judge(judge_responses_create_params))
-        judge_response_text = judge_response.output_text.strip() if judge_response is not None else ""
+        judge_response = await call_judge(
+            self.server_client,
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=judge_responses_create_params,
+            response_model=NeMoGymResponse,
+        )
+        judge_response_text = judge_response.output_text.strip()
         if not judge_response_text:
             raise JudgeError("empty judge response")
 

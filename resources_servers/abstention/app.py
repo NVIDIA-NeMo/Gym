@@ -44,7 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, run_judge
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -307,12 +307,13 @@ class AbstentionServer(SimpleResourcesServer):
         request_params = self.config.judge_responses_create_params.model_copy(deep=True)
         request_params.input = msgs
 
-        response_obj = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=request_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await response_obj.json())
         return extract_text_from_response(judge_response)
 
     async def verify(self, body: AbstentionVerifyRequest) -> AbstentionVerifyResponse:
@@ -337,7 +338,7 @@ class AbstentionServer(SimpleResourcesServer):
                 predicted_answer=extracted,
             )
 
-            judge_text = await run_judge(self._call_judge(judge_prompt))
+            judge_text = await self._call_judge(judge_prompt)
             if not judge_text:
                 raise JudgeError("empty judge response")
 

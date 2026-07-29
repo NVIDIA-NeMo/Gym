@@ -309,9 +309,9 @@ class TestJudgeFailureInheritance:
     async def test_judge_transport_failure_raises_through_inherited_verify(
         self, server: MathWithAutograderResourcesServer
     ) -> None:
-        # Covered transitively: the inherited math_with_judge.verify() wraps the
-        # overridden _verify_answer in run_judge, so a judge transport failure
-        # surfaces as JudgeError (routed to the failures sidecar), not a raw 500.
+        # Covered transitively: the inherited math_with_judge judge call goes through
+        # call_judge, so a transport failure surfaces as JudgeError (routed to the
+        # failures sidecar), not a raw 500.
         server.server_client.post = AsyncMock(side_effect=RuntimeError("judge down"))
         request = LibraryJudgeMathVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),

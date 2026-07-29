@@ -1033,6 +1033,37 @@ class TestRolloutCollection:
             assert "ng_model_call_capture" not in item
             assert "usage" in item["response"]
 
+    async def test_call_aggregate_metrics_records_sidecar_failures(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Failed rollouts stay out of the metrics, but are counted next to them.
+
+        Also covers an agent with no successes at all: it still gets an entry, or the
+        run reads as though that agent never ran.
+        """
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **kw: MagicMock(post=AsyncMock())
+        )
+        output_fpath = tmp_path / "output.jsonl"
+        _failures_path_for(output_fpath).write_bytes(
+            b"\n".join(
+                orjson.dumps({AGENT_REF_KEY_NAME: {"name": "my_agent"}, NG_FAILURE_CLASS_KEY: cls})
+                for cls in ("judge_failed", "judge_failed", "timeout_exceeded")
+            )
+        )
+
+        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics([], [], output_fpath)
+
+        assert json.loads(metrics_fpath.read_text()) == [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                "agent_metrics": {},
+                "key_metrics": {},
+                "group_level_metrics": {},
+                "failure_counts": {"judge_failed": 2, "timeout_exceeded": 1},
+            }
+        ]
+
     async def test_call_aggregate_metrics_multiple_agents(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

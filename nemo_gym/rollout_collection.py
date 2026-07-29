@@ -562,10 +562,8 @@ class RolloutCollectionHelper(BaseModel):
                 # naturally re-dispatches; per-task timeout bounds wallclock.
                 pass
             elif failure_class is not None:
-                # Non-kill_shaped failure → sidecar. The file-based re-aggregation
-                # (`gym eval aggregate`) reads only the main jsonl and so excludes
-                # it. (The default in-memory single-pass aggregation below does not
-                # yet filter these rows — see _call_aggregate_metrics.)
+                # Non-kill_shaped failure → sidecar. The aggregator only reads
+                # the main jsonl, so this keeps win-rate uncontaminated.
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
             else:
@@ -626,6 +624,26 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results
 
+    @staticmethod
+    def _summarize_failures(failures_fpath: Path) -> Dict[str, Counter]:
+        """Per-agent counts of sidecar failure rows, keyed by ``_ng_failure_class``.
+
+        Read from the sidecar, not this run's in-memory rows, so the summary also
+        covers attempts made by earlier (resumed) runs.
+        """
+        per_agent: Dict[str, Counter] = {}
+        if not failures_fpath.exists():
+            return per_agent
+        for line in failures_fpath.read_bytes().splitlines():
+            try:
+                row = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                continue  # a kill mid-write can tear the last line; don't lose the metrics over it
+            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            if agent_name:
+                per_agent.setdefault(agent_name, Counter())[row.get(NG_FAILURE_CLASS_KEY) or "unknown"] += 1
+        return per_agent
+
     async def _call_aggregate_metrics(
         self,
         results: List[Dict],
@@ -635,9 +653,13 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         """Call /aggregate_metrics on each agent server after rollouts complete.
 
         Writes a single _aggregate_metrics.json with one entry per agent (same shape
-        as the old _agent_metrics.json). Returns the file path.
+        as the old _agent_metrics.json), each carrying a ``failure_counts`` record of
+        the rollouts diverted to the failures sidecar (``judge_failed`` among them) so
+        a run's headline metric can be read next to how many rollouts it excluded.
+        Returns the file path.
         """
-        if not results:
+        failures_by_agent = self._summarize_failures(failures_path_for(output_fpath))
+        if not results and not failures_by_agent:
             return None
 
         # Group results by agent name
@@ -696,6 +718,21 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
             key_metrics = agent_entry.get("key_metrics", {})
             print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+
+        # Attach the sidecar failure record. An agent whose every rollout failed has no
+        # successful results and so no entry above; give it a metric-less one, or the
+        # run reads as though that agent never ran at all.
+        judged = {entry[AGENT_REF_KEY_NAME]["name"] for entry in all_agent_metrics}
+        all_agent_metrics += [
+            {AGENT_REF_KEY_NAME: {"name": name}, "agent_metrics": {}, "key_metrics": {}, "group_level_metrics": {}}
+            for name in failures_by_agent
+            if name not in judged
+        ]
+        for agent_entry in all_agent_metrics:
+            name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            agent_entry["failure_counts"] = dict(failures_by_agent.get(name, {}))
+            if agent_entry["failure_counts"]:
+                print(f"\nRollouts excluded for {name}:\n" + json.dumps(agent_entry["failure_counts"], indent=4))
 
         primitive_types = (bool, int, float, str, type(None))
         metrics_to_log = dict()

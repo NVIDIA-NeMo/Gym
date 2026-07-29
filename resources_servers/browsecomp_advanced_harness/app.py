@@ -41,7 +41,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, run_judge
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -1189,12 +1189,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     async def _call_judge(
         self, judge_create_params: NeMoGymResponseCreateParamsNonStreaming
     ) -> tuple[NeMoGymResponse, str]:
-        http_response = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=judge_create_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await http_response.json())
+        if not judge_response.output:
+            raise JudgeError("empty judge response")
         return judge_response, judge_response.output[-1].content[-1].text
 
     async def _verify_answer_with_judge(
@@ -1224,7 +1227,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 flush=True,
             )
             try:
-                judge_response, text = await run_judge(self._call_judge(judge_create_params))
+                judge_response, text = await self._call_judge(judge_create_params)
             except JudgeError as e:
                 last_error = str(e)
                 sleep_s = min(2**attempt, 30)

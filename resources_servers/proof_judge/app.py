@@ -31,7 +31,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import run_judge
+from nemo_gym.judge import reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -236,7 +236,7 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
         if not full_response:
             reward, details = 0.0, {"r_format": 0.0, "reason": "empty_response", "judge_generated_tokens": 0}
         else:
-            reward, details = await run_judge(self._judge_single(problem, full_response))
+            reward, details = await self._judge_single(problem, full_response)
         reward, details = await self._maybe_zero_incorrect_group_reward(
             problem=problem, reward=reward, details=details
         )
@@ -410,8 +410,8 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
     async def _call_judge(self, user_content: str) -> tuple[str, int]:
         """Route to external (JUDGE_SERVER_ARGS) or internal (Gym /v1/responses) judge."""
         if os.environ.get("JUDGE_SERVER_ARGS"):
-            return await self._call_judge_external(user_content)
-        return await self._call_judge_internal(user_content)
+            return await reraise_judge_errors(self._call_judge_external(user_content))
+        return await reraise_judge_errors(self._call_judge_internal(user_content))
 
     async def _call_verifier_and_meta_verifier(
         self,
