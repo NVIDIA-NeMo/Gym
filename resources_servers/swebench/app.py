@@ -16,7 +16,7 @@
 from typing import Optional
 
 from fastapi import Request
-from swebench.harness.run_evaluation import TestSpec, run_instance
+from swebench.harness.run_evaluation import make_test_spec, run_instance
 from swebench.harness.test_spec.test_spec import LATEST
 
 from nemo_gym.base_resources_server import (
@@ -83,22 +83,12 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         5. Restrict number of turns - same as interleaved thinking, we could add in Responses API model proxy
         """
 
-        test_spec = TestSpec(
-            instance_id=body.instance_id,
-            repo=body.repo,
-            version=body.version,
-            repo_script_list=None,  # TODO
-            eval_script_list=None,  # TODO
-            env_script_list=None,  # TODO
-            arch=None,  # TODO
-            FAIL_TO_PASS=body.FAIL_TO_PASS,
-            PASS_TO_PASS=body.PASS_TO_PASS,
-            language=None,  # TODO
-            docker_specs=None,  # TODO
-            namespace=None,  # TODO
-            base_image_tag=LATEST,
-            env_image_tag=LATEST,
+        test_spec = make_test_spec(
+            # This accepts a SWEbenchInstance which is identically our body.
+            body.model_dump(),
+            namespace="swebench",  # Dockerhub namespace
             instance_image_tag=LATEST,
+            env_image_tag=LATEST,
         )
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
