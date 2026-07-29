@@ -390,8 +390,29 @@ class TestOmniscienceServer:
         assert "What is the capital of France?" in judge_input
         assert "Paris" in judge_input
 
-    async def test_verify_no_think_tag_produces_empty(self, config: OmniscienceConfig) -> None:
-        """When model output has no </think>, generation should be empty (matching parse_reasoning=True)."""
+    async def test_verify_no_think_tag_preserves_plain_answer(self, config: OmniscienceConfig) -> None:
+        """Plain answers from non-reasoning models should be judged as-is."""
+        server_mock = MagicMock(spec=ServerClient)
+        server = OmniscienceServer(config=config, server_client=server_mock)
+
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=self._make_judge_response("A"))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        model_response = self._make_model_response("Paris")
+        request = OmniscienceVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            question="What is the capital of France?",
+            expected_answer="Paris",
+        )
+
+        result = await server.verify(request)
+        assert result.extracted_answer == "Paris"
+        assert result.verdict == "correct"
+
+    async def test_verify_unclosed_think_tag_produces_empty(self, config: OmniscienceConfig) -> None:
+        """An unclosed reasoning block indicates a response truncated before its answer."""
         server_mock = MagicMock(spec=ServerClient)
         server = OmniscienceServer(config=config, server_client=server_mock)
 
@@ -399,8 +420,7 @@ class TestOmniscienceServer:
         response_mock.json = AsyncMock(return_value=self._make_judge_response("D"))
         server_mock.post = AsyncMock(return_value=response_mock)
 
-        # Model output without </think> — reasoning that never finished
-        model_response = self._make_model_response("Let me think about this... I'm not sure about the answer")
+        model_response = self._make_model_response("<think>Let me think about this...")
         request = OmniscienceVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
             response=model_response,
