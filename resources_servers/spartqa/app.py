@@ -130,9 +130,16 @@ def _extract_answer(text: str) -> str:
     ]
     extracted = None
     for pattern in patterns:
-        matches = list(re.finditer(pattern, text, flags=re.IGNORECASE | re.DOTALL | re.MULTILINE))
-        if matches:
-            extracted = matches[-1].group(1).strip()
+        matches = list(re.finditer(pattern, text, flags=re.IGNORECASE | re.MULTILINE))
+        # Drop the instruction-template echo (``Final answer: <candidate
+        # answer>``) and empty captures; keep the last remaining real answer.
+        candidates = [
+            captured
+            for m in matches
+            if (captured := m.group(1).strip()) and _normalize(captured) != "candidate answer"
+        ]
+        if candidates:
+            extracted = candidates[-1]
             break
     if extracted is not None:
         text = extracted

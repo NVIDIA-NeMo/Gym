@@ -111,6 +111,23 @@ class TestExtractAnswer:
         text = "Thinking process: I consider the layout\ngreen cup"
         assert _extract_answer(text) == "green cup"
 
+    def test_ignores_template_echo_and_takes_last_answer(self) -> None:
+        # Reasoning models often restate the prompt's format instruction
+        # ("Final answer: <candidate answer>") mid-thought. The extractor must
+        # skip that placeholder echo and return the real concluding answer,
+        # not the first "Final answer:" line it sees.
+        text = (
+            "To answer I must end with 'Final answer: <candidate answer>'.\n"
+            "Working through the layout, the yellow circle is below.\n"
+            "Final answer: a big yellow circle that is touching the bottom edge of a block"
+        )
+        assert _extract_answer(text) == "a big yellow circle that is touching the bottom edge of a block"
+
+    def test_multiple_final_answer_lines_takes_last(self) -> None:
+        # A model that drafts an answer then revises it: the last line wins.
+        text = "Final answer: a small blue shape\nOn reflection:\nFinal answer: both of them"
+        assert _extract_answer(text) == "both of them"
+
     def test_empty_returns_empty(self) -> None:
         assert _extract_answer("   ") == ""
 
