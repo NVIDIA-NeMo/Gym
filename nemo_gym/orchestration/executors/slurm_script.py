@@ -119,7 +119,7 @@ def build_sbatch_script(
     )
 
     health_checks = "\n\n".join(
-        render_health_check(name, service.health_check.port, service.health_check.timeout_seconds)
+        render_health_check(name, service.health_check.port, service.health_check.path, service.health_check.timeout_seconds)
         for name, service in config.services.items()
         if service.health_check
     )

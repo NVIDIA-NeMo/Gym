@@ -22,7 +22,7 @@ _HEALTH_WAIT_MULTI = """\
 echo "Waiting for {name} at {url}..."
 {name_upper}_READY=0
 for _i in $(seq 1 {max_attempts}); do
-    if curl -sf "{url}/health" > /dev/null 2>&1 || curl -sf "{url}/openapi.json" > /dev/null 2>&1; then
+    if curl -sf "{url}{path}" > /dev/null 2>&1; then
         echo "  {name} ready."
         {name_upper}_READY=1
         break
@@ -44,11 +44,12 @@ def bash_var(name: str) -> str:
     return re.sub(r"[^A-Z0-9]", "_", name.upper())
 
 
-def render_health_check(name: str, port: int, timeout: int) -> str:
+def render_health_check(name: str, port: int, path: str, timeout: int) -> str:
     return _HEALTH_WAIT_MULTI.format(
         name=name,
         name_upper=bash_var(name),
         url=f"http://localhost:{port}",
+        path=path,
         max_attempts=timeout // 5,
     )
 
