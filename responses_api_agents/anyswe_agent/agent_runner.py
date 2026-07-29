@@ -22,7 +22,10 @@ from pathlib import Path
 
 
 sys.path.insert(0, "/nemo_gym_mount")
-os.environ["PATH"] = "/agent_deps_mount/bin:" + os.environ.get("PATH", "")
+agent_deps_dir = os.environ.get("NGSWE_AGENT_DEPS_DIR", "/agent_deps_mount")
+os.environ["PATH"] = f"{agent_deps_dir}/bin:" + os.environ.get("PATH", "")
+if sandbox_root := os.environ.get("NGSWE_SANDBOX_ROOT"):
+    os.environ.update({"HOME": f"{sandbox_root}/home", "TMPDIR": f"{sandbox_root}/tmp"})
 
 
 def _json_env(name: str) -> dict:
@@ -47,10 +50,16 @@ def main() -> None:
     agent_class = getattr(module, os.environ["NGSWE_AGENT_CLASS"])
     config_class = getattr(module, os.environ["NGSWE_AGENT_CONFIG_CLASS"])
 
-    client = ServerClient.model_construct(global_config_dict={})
+    server_name = "policy_model"
+    global_config = (
+        {server_name: {"responses_api_models": {"model": {"host": "0.0.0.0", "port": 0}}}} if model_url else {}
+    )
+    client = ServerClient.model_construct(global_config_dict=global_config)
     client._build_server_base_url = lambda config: model_url
     config_sampling = {key: value for key, value in sampling.items() if key in config_class.model_fields}
-    model_server = ModelServerRef(name=model_name, type="responses_api_models") if model_url else None
+    model_server = ModelServerRef(name=server_name, type="responses_api_models") if model_url else None
+    if model_server and "model" in config_class.model_fields:
+        agent_kwargs["model"] = model_name
     config = config_class(
         host="0.0.0.0",
         port=0,
@@ -61,13 +70,6 @@ def main() -> None:
         **{**agent_kwargs, **config_sampling},
     )
     agent = agent_class(config=config, server_client=client)
-
-    if model_url:
-        if hasattr(agent, "_resolve_model_base_url"):
-            v1_url = model_url if model_url.endswith("/v1") else f"{model_url}/v1"
-            agent._resolve_model_base_url = lambda: v1_url
-        if hasattr(agent, "_resolve_base_url"):
-            agent._resolve_base_url = lambda: model_url
 
     body = NeMoGymResponseCreateParamsNonStreaming(
         input=[NeMoGymEasyInputMessage(role="user", content=instruction)],

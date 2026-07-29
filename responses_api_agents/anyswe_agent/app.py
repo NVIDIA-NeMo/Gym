@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import base64
-import copy
 import hashlib
 import json
 import shlex
@@ -194,6 +193,7 @@ class GymAgentHarnessProcessor(BaseModel):
             script,
             scripts / "_portable_python.sh",
             PARENT_DIR / "responses_api_agents" / self._agent_key / "requirements.txt",
+            *sorted((PARENT_DIR / "responses_api_agents" / self._agent_key).glob("*.py")),
         )
         recipe = hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
@@ -261,7 +261,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             sentinel = agent_deps_dir / ".installed"
             if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
                 temporary = agent_deps_archive.with_suffix(".tmp")
-                with tarfile.open(temporary, "w:gz") as archive:
+                with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
                     archive.add(agent_deps_dir, arcname=".")
                 temporary.replace(agent_deps_archive)
         elif self.config.agent_runtime_source != "baked":
@@ -340,27 +340,13 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             if getattr(params.body, key, None) is not None
         }
         model_name = params.body.model or "model"
-        agent_kwargs = copy.deepcopy(params.agent_kwargs)
-        if params.model_server_url and params.agent_server_module.split(".")[-2] == "opencode_agent":
-            model_url = params.model_server_url.rstrip("/")
-            model_url = model_url if model_url.endswith("/v1") else f"{model_url}/v1"
-            agent_kwargs["model"] = f"nemo/{model_name}"
-            agent_kwargs["openai_base_url"] = model_url
-            agent_kwargs["openai_api_key"] = "EMPTY"  # pragma: allowlist secret
-            providers = agent_kwargs.setdefault("opencode_config", {}).setdefault("provider", {})
-            nemo = providers.setdefault("nemo", {"npm": "@ai-sdk/openai-compatible"})
-            nemo.setdefault("options", {}).update(
-                {"baseURL": model_url, "apiKey": "EMPTY"}  # pragma: allowlist secret
-            )
-            model_config = nemo.setdefault("models", {}).get(model_name, {})
-            nemo["models"] = {model_name: model_config}
         return {
             "NGSWE_MODEL_NAME": model_name,
             "NGSWE_MODEL_URL": params.model_server_url,
             "NGSWE_AGENT_MODULE": params.agent_server_module,
             "NGSWE_AGENT_CLASS": params.agent_server_class,
             "NGSWE_AGENT_CONFIG_CLASS": params.agent_config_class,
-            "NGSWE_AGENT_KWARGS_B64": base64.b64encode(json.dumps(agent_kwargs).encode()).decode(),
+            "NGSWE_AGENT_KWARGS_B64": base64.b64encode(json.dumps(params.agent_kwargs).encode()).decode(),
             "NGSWE_SAMPLING_B64": base64.b64encode(json.dumps(sampling).encode()).decode(),
         }
 
@@ -479,13 +465,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         started = time.time()
         try:
             await sandbox.start()
-            await sandbox.exec("mkdir -p /agent_deps_mount /trajectories_mount", timeout_s=30, user="root")
+            await sandbox.exec(
+                "mkdir -p /agent_deps_mount /sandbox/home /sandbox/tmp /trajectories_mount",
+                timeout_s=30,
+                user="root",
+            )
             external_runtime = params.agent_deps_archive is not None or params.agent_deps_url is not None
             if params.agent_deps_archive is not None:
-                await sandbox.upload(params.agent_deps_archive, "/tmp/anyswe_agent_deps.tar.gz")
+                await sandbox.upload(params.agent_deps_archive, "/sandbox/anyswe_agent_deps.tar.gz")
             elif params.agent_deps_url is not None:
                 fetched = await sandbox.exec(
-                    f"curl -fsSL -o /tmp/anyswe_agent_deps.tar.gz {shlex.quote(params.agent_deps_url)}",
+                    f"curl -fsSL -o /sandbox/anyswe_agent_deps.tar.gz {shlex.quote(params.agent_deps_url)}",
                     timeout_s=600,
                     user="root",
                 )
@@ -495,6 +485,16 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 runtime = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
                 if runtime.return_code != 0:
                     raise RuntimeError("task image does not contain /agent_deps_mount/bin/python")
+            if external_runtime:
+                unpacked = await sandbox.exec(
+                    "mkdir -p /sandbox/agent_deps_runtime && "
+                    "tar -xzf /sandbox/anyswe_agent_deps.tar.gz -C /sandbox/agent_deps_runtime && "
+                    "rm -f /sandbox/anyswe_agent_deps.tar.gz",
+                    timeout_s=600,
+                    user="root",
+                )
+                if unpacked.return_code != 0:
+                    raise RuntimeError(f"agent runtime extraction failed: {(unpacked.stderr or '')[:300]}")
             if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
                 await sandbox.exec(
                     "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests; "
@@ -503,13 +503,16 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     timeout_s=30,
                     user="root",
                 )
-            command = "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py"
+            runtime_dir = "/sandbox/agent_deps_runtime" if external_runtime else "/agent_deps_mount"
+            agent_env = self._sandbox_agent_env(params)
+            agent_env["NGSWE_AGENT_DEPS_DIR"] = runtime_dir
             if external_runtime:
-                command = "tar -xzf /tmp/anyswe_agent_deps.tar.gz -C /agent_deps_mount && " + command
+                agent_env["NGSWE_SANDBOX_ROOT"] = "/sandbox"
+            command = f"{runtime_dir}/bin/python /trajectories_mount/agent_runner.py"
             result = await sandbox.exec(
                 command,
                 cwd="/testbed",
-                env=self._sandbox_agent_env(params),
+                env=agent_env,
                 timeout_s=params.swebench_agent_timeout,
                 user="root",
             )

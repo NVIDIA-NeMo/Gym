@@ -21,25 +21,6 @@ anyswe_openclaw:
               workspace: /testbed
           tools:
             profile: coding
-          models:
-            providers:
-              nvinf:
-                api: openai-completions
-                baseUrl: ${policy_base_url}
-                apiKey: ${policy_api_key}
-                models:
-                - id: azure/openai/gpt-5.4
-                  name: azure/openai/gpt-5.4
-                  api: openai-completions
-                - id: nvidia/qwen/qwen3.6-35b-a3b
-                  name: nvidia/qwen/qwen3.6-35b-a3b
-                  api: openai-completions
-                - id: nvidia/moonshotai/kimi-k2.6
-                  name: nvidia/moonshotai/kimi-k2.6
-                  api: openai-completions
-                - id: aws/anthropic/bedrock-claude-opus-4-7
-                  name: aws/anthropic/bedrock-claude-opus-4-7
-                  api: openai-completions
 
       container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
       sandbox_provider: sandbox
@@ -47,6 +28,10 @@ anyswe_openclaw:
       swebench_agent_timeout: 2100
       swebench_tests_timeout: 1800
       concurrency: 2
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
 
       datasets:
         - name: example

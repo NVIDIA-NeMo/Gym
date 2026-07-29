@@ -122,28 +122,19 @@ class TestSandboxAPI:
         assert spec.provider_options == {"platform": {"arch": "amd64"}}
         assert spec.files == {"/tmp/input": "data"}
 
-    def test_opencode_model_wiring_is_provider_independent(self) -> None:
+    def test_agent_config_is_forwarded_without_harness_specific_changes(self) -> None:
         params = SimpleNamespace(
             body=SimpleNamespace(model="model", temperature=1.0, top_p=0.95, max_output_tokens=None),
-            agent_kwargs={
-                "model": "nemo/model",
-                "opencode_config": {
-                    "provider": {"nemo": {"npm": "@ai-sdk/openai-compatible", "models": {"model": {}}}}
-                },
-            },
+            agent_kwargs={"model": "configured-model", "custom": {"enabled": True}},
             model_server_url="http://model-host:8000/v1",
-            agent_server_module="responses_api_agents.opencode_agent.app",
-            agent_server_class="OpenCodeAgent",
-            agent_config_class="OpenCodeAgentConfig",
+            agent_server_module="example.agent",
+            agent_server_class="ExampleAgent",
+            agent_config_class="ExampleAgentConfig",
         )
         env = AnySweAgent._sandbox_agent_env(params)
         kwargs = json.loads(base64.b64decode(env["NGSWE_AGENT_KWARGS_B64"]))
         assert env["NGSWE_MODEL_NAME"] == "model"
-        assert kwargs["model"] == "nemo/model"
-        assert kwargs["opencode_config"]["provider"]["nemo"]["options"] == {
-            "baseURL": "http://model-host:8000/v1",
-            "apiKey": "EMPTY",  # pragma: allowlist secret
-        }
+        assert kwargs == params.agent_kwargs
 
     def test_agent_error_classification_matches_swe_agents(self) -> None:
         assert _classify_agent_error("maximum iteration reached") == "max_iteration"
@@ -199,6 +190,8 @@ class TestSetupScriptsExist:
         assert (scripts / "hermes_agent_deps.sh").exists()
         assert (scripts / "claude_code_agent_deps.sh").exists()
         assert (scripts / "opencode_agent_deps.sh").exists()
+        assert (scripts / "openclaw_agent_deps.sh").exists()
+        assert (scripts / "pi_agent_deps.sh").exists()
         assert (scripts / "_portable_python.sh").exists()
 
 

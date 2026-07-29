@@ -67,7 +67,7 @@ agent into each task image. `agent_runtime_source` controls other delivery modes
 - A local tarball path uploads a prebuilt runtime.
 - An HTTP(S) URL downloads a prebuilt runtime inside the sandbox.
 
-Each archive must unpack the runtime directly under `/agent_deps_mount`.
+Each archive must contain the runtime's `bin/python` at its root.
 
 Private task images can pass registry credentials through
 `sandbox_spec.provider_options.image_auth`.
