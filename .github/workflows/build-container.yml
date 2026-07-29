@@ -41,6 +41,9 @@ jobs:
   test:
     needs: [build]
     runs-on: linux-amd64-cpu16
+    environment:
+      name: nemo-ci
+      deployment: false
     permissions:
       id-token: write
       contents: read
