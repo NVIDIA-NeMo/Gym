@@ -29,6 +29,8 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
+    is_verifying_golden_patch: bool = False
+
     evaluation_timeout: Optional[int] = None
 
 
@@ -91,12 +93,17 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             env_image_tag=LATEST,
         )
 
+        if self.config.is_verifying_golden_patch:
+            model_patch = body.patch
+        else:
+            model_patch = None  # TODO
+
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         res = run_instance(
             test_spec=test_spec,
             pred={
                 "instance_id": test_spec.instance_id,
-                "model_patch": None,  # TODO
+                "model_patch": model_patch,
             },
             rm_image=False,
             force_rebuild=False,
