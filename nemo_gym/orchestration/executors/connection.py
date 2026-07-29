@@ -68,9 +68,12 @@ class SSHConnection(Connection):
             [
                 "ssh",
                 *self._OPTS,
-                "-o", "ControlMaster=yes",
-                "-o", f"ControlPath={self._socket}",
-                "-o", "ControlPersist=yes",
+                "-o",
+                "ControlMaster=yes",
+                "-o",
+                f"ControlPath={self._socket}",
+                "-o",
+                "ControlPersist=yes",
                 "-N",  # no remote command — just keep the tunnel open
                 self._hostname,
             ],
@@ -85,7 +88,7 @@ class SSHConnection(Connection):
             if self._socket.exists():
                 return
             if self._master and self._master.poll() is not None:
-                stderr = (self._master.stderr.read().decode(errors="replace") if self._master.stderr else "")
+                stderr = self._master.stderr.read().decode(errors="replace") if self._master.stderr else ""
                 raise RuntimeError(
                     f"SSH master to '{self._hostname}' exited with code {self._master.returncode}.\n{stderr.strip()}"
                 )
@@ -104,8 +107,11 @@ class SSHConnection(Connection):
         )
         _checked(
             [
-                "rsync", "-az", "--delete",
-                "-e", f"ssh {' '.join(self._ssh_opts())}",
+                "rsync",
+                "-az",
+                "--delete",
+                "-e",
+                f"ssh {' '.join(self._ssh_opts())}",
                 f"{local}/",
                 f"{self._hostname}:{remote}",
             ],
@@ -137,9 +143,7 @@ def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> 
     if result.returncode != 0:
         label = f" ({context})" if context else ""
         raise RuntimeError(
-            f"Command failed{label} with exit code {result.returncode}:\n"
-            f"  {' '.join(cmd)}\n"
-            f"{result.stderr.strip()}"
+            f"Command failed{label} with exit code {result.returncode}:\n  {' '.join(cmd)}\n{result.stderr.strip()}"
         )
     return result.stdout
 

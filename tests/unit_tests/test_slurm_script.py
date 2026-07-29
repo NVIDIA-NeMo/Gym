@@ -26,9 +26,11 @@ from nemo_gym.orchestration.executors.slurm_script import (
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
 
+
 # ---------------------------------------------------------------------------
 # flatten_run_args
 # ---------------------------------------------------------------------------
+
 
 def test_scalar_values():
     assert _flatten_run_args({"temperature": 0.05, "top_p": 0.9}) == [
@@ -66,6 +68,7 @@ def test_deeply_nested():
 # _render_pool_directives
 # ---------------------------------------------------------------------------
 
+
 def test_render_pool_directives_basic(pool):
     lines = _render_pool_directives("main", pool)
     assert "#SBATCH --partition=batch  # pool: main" in lines
@@ -88,6 +91,7 @@ def test_render_pool_directives_extra_args(pool):
 # ---------------------------------------------------------------------------
 # _render_directives
 # ---------------------------------------------------------------------------
+
 
 def test_render_directives_job_name(compute, bench_dir):
     out = _render_directives(compute, bench_dir, "gsm8k")
@@ -120,6 +124,7 @@ def test_render_directives_chdir(compute, bench_dir):
 # _render_service_command
 # ---------------------------------------------------------------------------
 
+
 def test_render_service_command_contains_srun():
     out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model")
     assert "srun --overlap --no-container-mount-home" in out
@@ -141,6 +146,7 @@ def test_render_service_command_log_file():
 # ---------------------------------------------------------------------------
 # _build_vllm_command
 # ---------------------------------------------------------------------------
+
 
 def test_build_vllm_command_basic(vllm_service):
     cmd = _build_vllm_command(vllm_service)
@@ -164,6 +170,7 @@ def test_build_vllm_command_no_trust_remote_code_by_default(vllm_service):
 # render_gym_cmd
 # ---------------------------------------------------------------------------
 
+
 def test_render_gym_cmd_subcommand():
     out = render_gym_cmd("eval run", "GYM_CMD", ["+foo=bar"])
     assert out.startswith("GYM_CMD=(")
@@ -180,6 +187,7 @@ def test_render_gym_cmd_prepare():
 # ---------------------------------------------------------------------------
 # render_driver_entrypoint
 # ---------------------------------------------------------------------------
+
 
 def test_render_driver_entrypoint_no_install_no_prepare():
     out = render_driver_entrypoint(None, None, None)
@@ -212,6 +220,7 @@ def test_render_driver_entrypoint_install_and_prepare():
 # ---------------------------------------------------------------------------
 # build_sbatch_script (integration)
 # ---------------------------------------------------------------------------
+
 
 def test_build_sbatch_script_contains_shebang(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
@@ -257,6 +266,7 @@ def test_build_sbatch_script_policy_model_flags(submit_config_with_policy, bench
 # ---------------------------------------------------------------------------
 
 import pytest
+
 from nemo_gym.orchestration.api import NodePool, SlurmComputeConfig, VllmServiceConfig
 
 
@@ -282,19 +292,23 @@ def vllm_service():
 
 @pytest.fixture
 def submit_config():
-    return SubmitConfig.model_validate({
-        "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
-        "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-        "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
-        "job": {"output_path": "/remote/jobs"},
-    })
+    return SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
 
 
 @pytest.fixture
 def submit_config_with_policy():
-    return SubmitConfig.model_validate({
-        "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
-        "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-        "driver": {"container": "python:3.12", "policy_model": "vllm_model", "benchmarks": {"gsm8k": {}}},
-        "job": {"output_path": "/remote/jobs"},
-    })
+    return SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "policy_model": "vllm_model", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )

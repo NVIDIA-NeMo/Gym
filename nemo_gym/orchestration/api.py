@@ -139,9 +139,7 @@ class SubmitConfig(_StrictModel):
         compute_names = set(self.compute)
 
         if len(compute_names) > 1:
-            raise ValueError(
-                f"Multiple compute resources are not supported yet ({', '.join(sorted(compute_names))})."
-            )
+            raise ValueError(f"Multiple compute resources are not supported yet ({', '.join(sorted(compute_names))}).")
 
         sole_compute = next(iter(compute_names))
 
@@ -163,7 +161,9 @@ class SubmitConfig(_StrictModel):
             service = self.services[self.driver.policy_model]
             if isinstance(service, BaseModelServiceConfig):
                 for bench_name, benchmark in self.driver.benchmarks.items():
-                    conflicts = [k for k in ("policy_base_url", "policy_model_name", "policy_api_key") if k in benchmark.run]
+                    conflicts = [
+                        k for k in ("policy_base_url", "policy_model_name", "policy_api_key") if k in benchmark.run
+                    ]
                     if conflicts:
                         raise ValueError(
                             f"Benchmark '{bench_name}' run config already sets {conflicts} "
