@@ -1,0 +1,65 @@
+# NeMo Gym observability configuration.
+#
+# Add to your run config via:
+#   config_paths: [nemo_gym/observability/configs/observability.yaml, your_benchmark/config.yaml]
+#
+# Then enable by setting observability_dir on the CLI:
+#   gym eval run ... ++observability_dir=/path/to/obs-output
+#
+# Live trace export to Honeycomb (or any OTLP backend) is configured via env vars:
+#   export NEMO_LENS_ENABLED=1
+#   export OTEL_SERVICE_NAME=nemo-gym-eval
+#   export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
+#   export OTEL_EXPORTER_OTLP_HEADERS="x-honeycomb-team=<api-key>,x-honeycomb-dataset=nemo-gym"
+#
+# Local test without a backend:
+#   export NEMO_LENS_ENABLED=1 NEMO_LENS_EXPORTER=console
+#
+# @package _global_
+
+# Output directory for JSONL events, summary.json, OTLP traces, and HTML/PNG reports.
+# Leave null to disable the JSONL recorder (NeMo Lens trace export is still active
+# when NEMO_LENS_ENABLED=1).
+observability_dir: null
+
+observability:
+  # Set output_dir here or use the top-level observability_dir shorthand above.
+  output_dir: null
+
+  resource_sample_interval_s: 10
+  max_rendered_trajectories: 40
+
+  artifacts:
+    enabled: true
+    render_html: true
+    render_png: true
+    export_otlp_json: true
+
+  # OTel metrics sink (separate from NeMo Lens trace export).
+  # Set endpoint to push histograms/counters to an OTLP metrics backend.
+  otel:
+    enabled: false
+    endpoint: null
+    service_name: nemo-gym-eval
+
+  wandb:
+    enabled: false  # null = auto (attach to existing W&B run if one is active)
+    artifact_name: gym-observability
+    log_artifact: true
+    log_metrics: true
+    log_time_series: true
+    max_time_series_points: 10000
+    log_reports: true
+    max_media_items: 20
+    log_tables: true
+    max_table_rows: 10000
+    metric_prefix: gym/observability
+
+  privacy:
+    include_command_text: false  # set true to include raw command strings in events
+
+  process_trace:
+    enabled: false
+    sample_interval_s: 1.0
+    max_processes_per_sample: 128
+    include_cmdline: false

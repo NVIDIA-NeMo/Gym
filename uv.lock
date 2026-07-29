@@ -1725,6 +1725,7 @@ dependencies = [
     { name = "mlflow-skinny" },
     { name = "omegaconf" },
     { name = "openai" },
+    { name = "opentelemetry-api" },
     { name = "orjson" },
     { name = "psutil" },
     { name = "pydantic" },
@@ -1768,6 +1769,11 @@ dev = [
     { name = "requests-mock" },
     { name = "ruff" },
 ]
+observability = [
+    { name = "matplotlib" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+]
 sandbox = [
     { name = "boto3" },
     { name = "daytona" },
@@ -1790,6 +1796,7 @@ requires-dist = [
     { name = "gprof2dot" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
+    { name = "matplotlib", marker = "extra == 'observability'", specifier = ">=3.9" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "mlflow", specifier = ">=3.14.0" },
     { name = "mlflow-skinny", specifier = ">=3.14.0" },
@@ -1798,6 +1805,9 @@ requires-dist = [
     { name = "omegaconf" },
     { name = "openai", specifier = "<=2.7.2" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.9" },
+    { name = "opentelemetry-api", specifier = ">=1.20.0" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'observability'", specifier = ">=1.20.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = ">=1.20.0" },
     { name = "orjson" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "psutil" },
@@ -1821,7 +1831,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi" },
 ]
-provides-extras = ["all", "sandbox", "dev"]
+provides-extras = ["all", "sandbox", "observability", "dev"]
 
 [[package]]
 name = "nodeenv"

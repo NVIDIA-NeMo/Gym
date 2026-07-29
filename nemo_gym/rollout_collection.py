@@ -42,12 +42,19 @@ from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, Config
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    OBSERVABILITY_DIR_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
     get_wandb_run,
+)
+from nemo_gym.observability import (
+    build_recorder_from_config,
+    event_context,
+    reset_current_recorder,
+    set_current_recorder,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_utils import (
@@ -520,9 +527,12 @@ class RolloutCollectionHelper(BaseModel):
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
         failures_fpath = _failures_path_for(output_fpath)
 
-        # Resolve capture dirs once so each rollout's captured model calls can be folded
+        # Resolve global config once; used for capture dirs and observability below.
+        global_cfg = get_global_config_dict()
+
+        # Resolve capture dirs so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        capture_dirs = model_call_capture_dirs_from_config(global_cfg)
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
@@ -530,67 +540,101 @@ class RolloutCollectionHelper(BaseModel):
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
 
+        # Build observability recorder when observability_dir is configured.
+        # NeMo Lens is initialised via NEMO_LENS_ENABLED + OTEL_* env vars for live
+        # trace export to Honeycomb / Grafana Tempo / any OTLP backend.
+        obs_dir = global_cfg.get(OBSERVABILITY_DIR_KEY_NAME)
+        obs_cfg = dict(global_cfg.get("observability") or {})
+        if obs_dir:
+            obs_cfg.setdefault("output_dir", obs_dir)
+        obs_recorder = build_recorder_from_config(obs_cfg)
+        if obs_recorder is not None:
+            print(f"Observability recording enabled → {obs_recorder.output_dir}")
+
+        _lens_handle = None
+        try:
+            from nemo.lens import NemoLensConfig, setup_telemetry
+
+            _lens_handle = setup_telemetry(NemoLensConfig.from_env())
+        except (ImportError, Exception):
+            pass
+
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
-            row, result = await future
+        _obs_token = set_current_recorder(obs_recorder) if obs_recorder is not None else None
+        try:
+            for future in self.run_examples(input_rows, semaphore=semaphore):
+                row, result = await future
 
-            result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
-            result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
-            if SKILLS_REF_KEY_NAME in row:
-                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-            if ATTEMPT_INDEX_KEY_NAME in row:
-                result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+                result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+                result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                if SKILLS_REF_KEY_NAME in row:
+                    result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+                if ATTEMPT_INDEX_KEY_NAME in row:
+                    result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
 
-            # Fold this rollout's captured model calls into its record (uniform across agents; no-op
-            # when capture is off). Never alters the harness output/reward already in `result`.
-            if capture_dirs:
-                merge_model_call_capture_into_record(result, capture_dirs)
+                # Fold this rollout's captured model calls into its record (uniform across agents; no-op
+                # when capture is off). Never alters the harness output/reward already in `result`.
+                if capture_dirs:
+                    merge_model_call_capture_into_record(result, capture_dirs)
 
-            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
-            failure_class = result.get(NG_FAILURE_CLASS_KEY)
+                no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+                failure_class = result.get(NG_FAILURE_CLASS_KEY)
 
-            rows.append(row)
-            results.append(result)
-            serialized = orjson.dumps(result)
-            result_strs.append([serialized])
+                rows.append(row)
+                results.append(result)
+                serialized = orjson.dumps(result)
+                result_strs.append([serialized])
 
-            if no_persist:
-                # kill_shaped: don't write anywhere. Set-difference on resume
-                # naturally re-dispatches; per-task timeout bounds wallclock.
-                pass
-            elif failure_class is not None:
-                # Non-kill_shaped failure → sidecar. The aggregator only reads
-                # the main jsonl, so this keeps win-rate uncontaminated.
-                failures_file.write(serialized + b"\n")
-                failures_file.flush()
-            else:
-                # Success → main jsonl.
-                results_file.write(serialized + b"\n")
-                results_file.flush()
-                persisted_rows.append(row)
-                persisted_results.append(result)
+                if no_persist:
+                    # kill_shaped: don't write anywhere. Set-difference on resume
+                    # naturally re-dispatches; per-task timeout bounds wallclock.
+                    pass
+                elif failure_class is not None:
+                    # Non-kill_shaped failure → sidecar. The aggregator only reads
+                    # the main jsonl, so this keeps win-rate uncontaminated.
+                    failures_file.write(serialized + b"\n")
+                    failures_file.flush()
+                else:
+                    # Success → main jsonl.
+                    results_file.write(serialized + b"\n")
+                    results_file.flush()
+                    persisted_rows.append(row)
+                    persisted_results.append(result)
 
-            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+                counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
+                if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
+                    counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
-            current_pct = 100 * len(results) / len(input_rows)
-            if pcts_to_print and current_pct >= pcts_to_print[0]:
-                while pcts_to_print and current_pct >= pcts_to_print[0]:
-                    pcts_to_print.pop(0)
+                current_pct = 100 * len(results) / len(input_rows)
+                if pcts_to_print and current_pct >= pcts_to_print[0]:
+                    while pcts_to_print and current_pct >= pcts_to_print[0]:
+                        pcts_to_print.pop(0)
 
-                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
-                if top_left:
-                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    # Use tqdm.write here so we can print properly with tqdm being used.
-                    tqdm.write(f"Examples left:\n{top_left_str}")
+                    top_left = counts_left.most_common(5)  # Fix to top 3 for now.
+                    if top_left:
+                        top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                        # Use tqdm.write here so we can print properly with tqdm being used.
+                        tqdm.write(f"Examples left:\n{top_left_str}")
+        finally:
+            if _obs_token is not None:
+                reset_current_recorder(_obs_token)
 
         results_file.close()
         failures_file.close()
+
+        # Finalize observability: write summary.json, export OTLP traces, render reports.
+        if obs_recorder is not None:
+            await asyncio.to_thread(obs_recorder.finalize)
+
+        if _lens_handle is not None:
+            try:
+                _lens_handle.shutdown()
+            except Exception:
+                pass
 
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
@@ -728,19 +772,25 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                try:
-                    await raise_for_status(res)
-                except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
-                    raise
-                return row, await get_response_json(res)
+                with event_context(
+                    trajectory_id=f"{row.get(TASK_INDEX_KEY_NAME, '')}-{row.get(ROLLOUT_INDEX_KEY_NAME, '')}",
+                    task_index=row.get(TASK_INDEX_KEY_NAME),
+                    rollout_index=row.get(ROLLOUT_INDEX_KEY_NAME),
+                    agent=(row.get(AGENT_REF_KEY_NAME) or {}).get("name", ""),
+                ):
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    try:
+                        await raise_for_status(res)
+                    except Exception:
+                        if is_global_aiohttp_client_request_debug_enabled():
+                            print(
+                                "[rollout_collection] /run failed "
+                                f"status={getattr(res, 'status', None)} "
+                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                                flush=True,
+                            )
+                        raise
+                    return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

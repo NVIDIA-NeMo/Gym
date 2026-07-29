@@ -23,6 +23,11 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.observability import (
+    SandboxResourceSampler,
+    current_recorder,
+    observability_span,
+)
 from nemo_gym.sandbox.providers import (
     SandboxExecResult,
     SandboxHandle,
@@ -69,20 +74,25 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        handle = await self._provider.create(requested_spec)
-        try:
-            if requested_spec.files:
-                with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
-                    tmp_path = Path(tmp_dir)
-                    for index, (target_path, contents) in enumerate(requested_spec.files.items()):
-                        source_path = tmp_path / f"file-{index}"
-                        source_path.write_text(contents, encoding="utf-8")
-                        await self._provider.upload_file(handle, source_path, target_path)
-        except Exception:
-            await self._provider.close(handle)
-            await self._provider.aclose()
-            self._closed = True
-            raise
+        async with observability_span(
+            "sandbox.start",
+            phase="startup",
+            attributes={"provider": type(self._provider).__name__},
+        ):
+            handle = await self._provider.create(requested_spec)
+            try:
+                if requested_spec.files:
+                    with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
+                        tmp_path = Path(tmp_dir)
+                        for index, (target_path, contents) in enumerate(requested_spec.files.items()):
+                            source_path = tmp_path / f"file-{index}"
+                            source_path.write_text(contents, encoding="utf-8")
+                            await self._provider.upload_file(handle, source_path, target_path)
+            except Exception:
+                await self._provider.close(handle)
+                await self._provider.aclose()
+                self._closed = True
+                raise
 
         self._spec = requested_spec
         self._handle = handle
@@ -98,14 +108,27 @@ class AsyncSandbox:
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        return await self._provider.exec(
-            self._require_handle(),
-            command,
-            cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
-            env=env,
-            timeout_s=timeout_s,
-            user=user,
-        )
+        from nemo_gym.observability.events import command_attributes
+
+        recorder = current_recorder()
+        include_cmd = recorder.include_command_text if recorder is not None else False
+        async with observability_span(
+            "sandbox.exec",
+            phase="execution",
+            attributes={
+                "provider": type(self._provider).__name__,
+                **command_attributes(command, include_command_text=include_cmd),
+                **({"timeout_s": timeout_s} if timeout_s is not None else {}),
+            },
+        ):
+            return await self._provider.exec(
+                self._require_handle(),
+                command,
+                cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+            )
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
@@ -124,12 +147,47 @@ class AsyncSandbox:
         if self._closed:
             return
         try:
-            if self._handle is not None and not self._stopped:
-                self._stopped = True
-                await self._provider.close(self._handle)
+            async with observability_span(
+                "sandbox.stop",
+                phase="cleanup",
+                attributes={"provider": type(self._provider).__name__},
+            ):
+                if self._handle is not None and not self._stopped:
+                    self._stopped = True
+                    await self._provider.close(self._handle)
         finally:
             await self._provider.aclose()
             self._closed = True
+
+    async def start_resource_sampler(
+        self,
+        *,
+        interval_s: float | None = None,
+        process_trace: dict[str, Any] | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> "SandboxResourceSampler | None":
+        """Start a background resource sampler inside this sandbox.
+
+        Returns None when no recorder is active. The caller is responsible for
+        calling ``await sampler.stop()`` before stopping the sandbox.
+        """
+        recorder = current_recorder()
+        if recorder is None:
+            return None
+        handle = self._require_handle()
+        effective_interval = interval_s if interval_s is not None else recorder.resource_sampler_interval_s()
+        if effective_interval <= 0:
+            return None
+        sampler = SandboxResourceSampler(
+            provider=self._provider,
+            handle=handle,
+            recorder=recorder,
+            interval_s=effective_interval,
+            process_trace=process_trace or recorder.process_trace,
+            attributes=attributes or {},
+        )
+        sampler.start()
+        return sampler
 
     async def __aenter__(self) -> "AsyncSandbox":
         return self
