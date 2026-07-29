@@ -3143,6 +3143,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         self._switchyard_procs: Dict[str, Process] = {}
         # Round-robin counter for distributing spawns across generation backends.
         self._switchyard_spawn_count: int = 0
+        # Limit concurrent Switchyard spawns: 1024 simultaneous spawns on one node cause
+        # port exhaustion (ClientOSError) and uvicorn connection saturation (ServerDisconnectedError).
+        # Semaphore is released once Switchyard is up (TCP-ready), not when the rollout finishes,
+        # so all agents still run concurrently — only the startup burst is staggered.
+        self._switchyard_spawn_sem: asyncio.Semaphore = asyncio.Semaphore(64)
 
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
@@ -3956,8 +3961,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params, dataset_processor = self._setup_params(body)
 
         if self._switchyard_spawn_needed(params):
-            # run() reaps the spawned instance after trace retrieval.
-            params.switchyard_base_url = await self._spawn_switchyard(params)
+            # Semaphore limits concurrent spawns to avoid port exhaustion and
+            # uvicorn connection saturation on the single Gym node. Released once
+            # Switchyard is up; agents then run concurrently without restriction.
+            async with self._switchyard_spawn_sem:
+                params.switchyard_base_url = await self._spawn_switchyard(params)
         if self._agent_command_deferred(params):
             if params.switchyard_base_url and self.config.agent_framework == "opencode":
                 params.opencode_context_len = await self._fetch_switchyard_max_model_len(
@@ -4215,7 +4223,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # Distribute spawns across all generation backends round-robin so no
         # single vLLM server becomes a bottleneck when many rollouts run in parallel.
-        _cfg = OmegaConf.create(shlex.split(self.config.ng_global_config_dict_str)[0])
+        _cfg = OmegaConf.create(shlex.split(params.ng_global_config_dict_str)[0])
         _urls = [u for u in (_cfg.get("policy_base_url") or []) if u]
         _backend_url = _urls[self._switchyard_spawn_count % len(_urls)] if _urls else None
         self._switchyard_spawn_count += 1
@@ -4239,14 +4247,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
         self._switchyard_procs[params.agent_run_id] = process
         try:
-            await self._wait_switchyard_ready(f"http://127.0.0.1:{port}", process)
+            await self._wait_switchyard_ready(port, process)
         except Exception:
             await self._teardown_switchyard(params.agent_run_id)
             raise
         return base_url
 
-    async def _wait_switchyard_ready(self, local_url: str, process: Process, timeout_s: float = 60.0) -> None:
-        """Poll the spawned instance until it serves ``/v1/models`` or fail."""
+    async def _wait_switchyard_ready(self, port: int, process: Process, timeout_s: float = 60.0) -> None:
+        """Wait until the spawned Switchyard's port accepts TCP connections.
+
+        Uses a lightweight TCP socket probe instead of HTTP polling — no aiohttp
+        overhead, no connection pool pressure. With 1024 concurrent spawns on one
+        node, HTTP polling caused ClientOSError and uvicorn connection saturation.
+        """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if process.returncode is not None:
@@ -4255,12 +4268,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     "(see the run's switchyard.log)"
                 )
             try:
-                response = await request("GET", f"{local_url}/v1/models", timeout=ClientTimeout(total=5))
-                if response.status == 200:
-                    return
-            except Exception:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", port), timeout=1.0
+                )
+                writer.close()
+                await writer.wait_closed()
+                return
+            except (ConnectionRefusedError, OSError, asyncio.TimeoutError):
                 pass
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
         raise RuntimeError(f"spawned Switchyard not ready after {timeout_s}s")
 
     async def _teardown_switchyard(self, agent_run_id: str) -> None:
