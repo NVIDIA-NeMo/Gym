@@ -27,6 +27,26 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
+class SWEBenchVerifyRequest(BaseVerifyRequest):
+    # See https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified
+    repo: str
+    instance_id: str
+    base_commit: str
+    patch: str
+    test_patch: str
+    problem_statement: str
+    hints_text: str
+    created_at: str
+    version: str
+    # These are JSON strings.
+    FAIL_TO_PASS: str
+    PASS_TO_PASS: str
+    environment_setup_commit: str
+    difficulty: str
+    subset: str
+    split: str
+
+
 class SwebenchResourcesServer(SimpleResourcesServer):
     config: SwebenchResourcesServerConfig
 
