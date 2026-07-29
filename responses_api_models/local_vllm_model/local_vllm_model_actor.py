@@ -162,7 +162,6 @@ class LocalVLLMModelActor:
     def _patch_create_dp_placement_groups(self) -> None:
         head_node_placement_group = self.head_node_placement_group
 
-        from ray.util.placement_group import PlacementGroup
         from vllm.v1.engine.utils import (
             CoreEngineActorManager,
             current_platform,

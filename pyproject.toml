@@ -161,9 +161,9 @@ dependencies = [
     "aiohttp>=3.14.1",
 
     # yappi: profiling tool
-    # Updated Mon Sep 22, 2025 with yappi==1.6.10
+    # Updated Mon Jul 29, 2026 with yappi>=1.7.6 (Python 3.14 support added in 1.7.3)
     # License: MIT https://github.com/sumerc/yappi/blob/1d3f7501701e1f050b6dcd6a86fd36aec08185c7/LICENSE
-    "yappi",
+    "yappi>=1.7.6",
 
     # Ray: Used for distributed processing
     # Updated Mon Jul 28, 2026 with ray[default]>=2.56.1 (security remediation)
