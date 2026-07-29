@@ -31,6 +31,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
+from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 
 
@@ -87,6 +88,22 @@ class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
 
+class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
+    """Base verify response for environments with multiple reward objectives.
+
+    Subclass this response instead of declaring ``reward_components`` on an
+    environment-specific ``BaseVerifyResponse`` subclass. The mapping is required, and
+    its objective keys should remain consistent across every task in the environment.
+
+    Set the inherited ``reward`` to the scalar aggregate expected by single-reward
+    consumers. To include individual objectives in aggregate metrics, also expose them
+    as top-level numeric fields because metrics do not descend into this mapping. See
+    ``resources_servers/example_tool_call_multireward`` for a complete example.
+    """
+
+    reward_components: dict[str, float]
+
+
 class BaseSeedSessionRequest(BaseModel):
     pass
 
@@ -111,6 +128,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
         app.post("/verify")(judge_failsafe(self.verify))

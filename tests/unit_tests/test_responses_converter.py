@@ -168,6 +168,44 @@ def test_responses_to_chat_completion_all_message_roles(converter: ResponsesConv
     assert params.messages[-1]["content"] == "assistant content"
 
 
+def test_responses_to_chat_completion_instructions_become_leading_system_message(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            instructions="you are a coding agent",
+            input=[NeMoGymEasyInputMessage(role="user", content="usr", type="message")],
+        )
+    )
+    # instructions are inserted before any input-derived messages (Responses API semantics)
+    assert params.messages[0] == {"role": "system", "content": "you are a coding agent"}
+    assert [m["role"] for m in params.messages] == ["system", "user"]
+
+
+def test_responses_to_chat_completion_instructions_fold_leading_system_and_developer(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            instructions="you are a coding agent",
+            input=[
+                NeMoGymEasyInputMessage(role="system", content="sys", type="message"),
+                NeMoGymEasyInputMessage(role="developer", content="dev", type="message"),
+                NeMoGymEasyInputMessage(role="user", content="usr", type="message"),
+            ],
+        )
+    )
+    # chat backends commonly admit a single system message at position 0, so the leading run of
+    # system/developer messages is folded into the instructions message
+    assert params.messages[0] == {"role": "system", "content": "you are a coding agent\n\nsys\n\ndev"}
+    assert [m["role"] for m in params.messages] == ["system", "user"]
+
+
+def test_responses_to_chat_completion_no_instructions_adds_no_message(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(role="user", content="usr", type="message")]
+        )
+    )
+    assert [m["role"] for m in params.messages] == ["user"]
+
+
 def test_responses_to_chat_completion_input_image_part(converter: ResponsesConverter):
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
