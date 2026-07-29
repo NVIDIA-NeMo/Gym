@@ -117,9 +117,9 @@ dependencies = [
     "fastapi",
 
     # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
-    # Updated Tue Jun 23, 2026 with mcp>=1.27,<2
+    # Updated Tue Jul 29, 2026 with mcp>=1.28.1,<2
     # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE
-    "mcp>=1.27,<2",
+    "mcp>=1.28.1,<2",
 
     # itsdangerous: Requirement for Starlette SessionMiddleware
     # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
@@ -166,10 +166,9 @@ dependencies = [
     "yappi",
 
     # Ray: Used for distributed processing
-    # Updated Mon May 19, 2026 with ray[default]>=2.55.1
-    # Security: Requires ray>=2.55.1 (CVE remediation)
+    # Updated Tue Jul 29, 2026 with ray[default]>=2.56.1
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]>=2.55.1",
+    "ray[default]>=2.56.1",
 
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
@@ -210,6 +209,16 @@ dependencies = [
     # Updated: Mon May 19, 2026 with GitPython>=3.1.50
     # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
     "GitPython>=3.1.50",
+
+    # pyasn1: ASN.1 library (transitive dependency via google-auth, pinned for security)
+    # Updated: Tue Jul 29, 2026 with pyasn1>=0.6.4
+    # License: BSD 2-Clause https://pyasn1.readthedocs.io/en/latest/license.html
+    "pyasn1>=0.6.4",
+
+    # pyarrow: columnar data library (transitive dependency via datasets, pinned for security)
+    # Updated: Tue Jul 29, 2026 with pyarrow>=25.0.0
+    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
+    "pyarrow>=25.0.0",
 
     # gprof2dot and pydot: Used for outputting dot graphs for profiling.
     # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
