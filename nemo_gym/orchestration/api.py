@@ -23,6 +23,12 @@ class VllmServiceConfig(BaseServiceConfig):
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
 
+    @model_validator(mode="after")
+    def _default_health_check(self) -> "VllmServiceConfig":
+        if self.health_check is None:
+            self.health_check = HealthCheckConfig(port=self.port)
+        return self
+
 
 class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
