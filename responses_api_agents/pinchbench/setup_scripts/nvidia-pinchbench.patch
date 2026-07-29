@@ -151,7 +151,7 @@ index 6207029..2fe4e1d 100644
              "baseUrl": base_url,
              "apiKey": key_ref,
              "api": "openai-completions",
-+            "timeoutSeconds": int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "14400")),
++            "timeoutSeconds": int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "120")),
              "models": [
                  {
                      "id": model_id,
