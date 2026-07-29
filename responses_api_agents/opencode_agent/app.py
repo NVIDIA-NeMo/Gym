@@ -279,7 +279,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     def _env(self, data_home: str) -> dict[str, str]:
         env = {**os.environ, "XDG_DATA_HOME": data_home}
         base_url = self._resolve_model_base_url() if self.config.model_server else self.config.openai_base_url
-        api_key = "EMPTY" if self.config.model_server else self.config.openai_api_key
+        api_key = "EMPTY" if self.config.model_server else self.config.openai_api_key  # pragma: allowlist secret
         if base_url:
             env["OPENAI_BASE_URL"] = base_url
         if api_key:
