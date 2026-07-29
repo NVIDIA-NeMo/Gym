@@ -114,11 +114,6 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
-    # Raise the OpenClaw provider model HTTP request timeout — which includes the LLM
-    # stream-idle watchdog (default 120s) — to this many seconds. Maps to
-    # `models.providers.<id>.timeoutSeconds` in OpenClaw. None keeps the 120s default.
-    # See README § "Increasing the LLM idle timeout".
-    openclaw_provider_timeout_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
     # Where per-task transcripts are archived (kept on disk for inspection, like
     # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
@@ -200,8 +195,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         # it never hits the shared-workspace WorkspaceVanishedError cliff). The client
         # in-container picks up the token from this env var.
         env["OPENCLAW_GATEWAY_TOKEN"] = self.config.gateway_token
-        if self.config.openclaw_provider_timeout_seconds:
-            env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
         if self.config.brave_api_key:
             env["BRAVE_API_KEY"] = self.config.brave_api_key
         if self.config.tavily_api_key:
@@ -305,9 +298,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                     }
                 ],
             }
-            provider_timeout = int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "0"))
-            if provider_timeout > 0:
-                custom_provider["timeoutSeconds"] = provider_timeout
             models = cfg.setdefault("models", {})
             models["mode"] = "merge"
             models.setdefault("providers", {})["custom"] = custom_provider

@@ -140,7 +140,7 @@ index 6207029..9257b30 100644
 +        ).strip()
 +        context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "524288"))
 +        max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "131072"))
-+        provider_timeout = int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "0"))
++        provider_timeout = int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "14400"))
 +        runtime_params = {
 +            "temperature": 1,
 +            "maxTokens": max_tokens,
