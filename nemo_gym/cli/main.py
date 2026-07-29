@@ -306,7 +306,6 @@ SEARCH_DIR = Flag(
 )
 
 
-
 def _merge_config_paths(overrides: list[str]) -> list[str]:
     """Coalesce all `+config_paths=[...]` tokens (from --config and asset selectors) into one (Hydra rejects dupes)."""
     prefix = "+config_paths=["
@@ -322,6 +321,7 @@ def _merge_config_paths(overrides: list[str]) -> list[str]:
 
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from omegaconf import OmegaConf
+
     from nemo_gym.orchestration.api import SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
@@ -668,10 +668,14 @@ COMMANDS = {
         summary="Submit a job.",
         flags=(
             Flag(
-                register=lambda p: p.add_argument("--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."),
+                register=lambda p: p.add_argument(
+                    "--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."
+                ),
             ),
             Flag(
-                register=lambda p: p.add_argument("--dry-run", action="store_true", help="Print generated job scripts without submitting."),
+                register=lambda p: p.add_argument(
+                    "--dry-run", action="store_true", help="Print generated job scripts without submitting."
+                ),
             ),
         ),
     ),

@@ -15,10 +15,7 @@
 import asyncio
 import importlib
 import json
-import sys
 from copy import deepcopy
-from dataclasses import dataclass
-from glob import glob
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -479,4 +476,3 @@ Reward profile completion: {completion_summary["completed_rollout_rows"]}/{compl
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}""")
-
