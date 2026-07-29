@@ -200,10 +200,6 @@ dependencies = [
     # License: BSD 2-Clause https://pyasn1.readthedocs.io/en/latest/license.html
     "pyasn1>=0.6.4",
 
-    # pyarrow: columnar data library (transitive dependency via datasets, pinned for security)
-    # Updated: Mon Jul 28, 2026 with pyarrow>=25.0.0 (security remediation)
-    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
-    "pyarrow>=25.0.0",
 
     # python-multipart: Streaming multipart parser (transitive dependency, pinned for security)
     # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22

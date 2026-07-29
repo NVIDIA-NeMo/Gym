@@ -26,9 +26,10 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.21+ supports Python 3.14.6; 0.12.0 is the latest stable and
-  # resolves the 0.11.20 regression that dropped pinned deps from uv pip install.
-  UV_INSTALL_URL: "https://astral.sh/uv/0.12.0/install.sh"
+  # Pin uv: 0.11.21+ supports Python 3.14.6; 0.11.29 is the latest 0.11.x stable.
+  # 0.11.20 had a regression dropping pinned deps from uv pip install (fixed in 0.11.21).
+  # 0.12.0 removed exclude-dependencies from pyproject.toml which we use.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.11.29/install.sh"
 
 jobs:
   detect:

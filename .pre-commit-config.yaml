@@ -25,7 +25,7 @@ repos:
       files: \.py$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: "v0.16.0" # py314 support added in v0.14.0
+    rev: "v0.14.1" # py314 support added in v0.14.0; v0.15.0+ has 2026 style guide changes
     hooks:
     - id: ruff
       args: ["--fix"]
