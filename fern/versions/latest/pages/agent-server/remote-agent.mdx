@@ -161,8 +161,6 @@ name the failing URL or the timeout knob involved.
   tasks in a failures sidecar). Output rows carry the old run's results (`reward`, `response`,
   `error`, internal `_ng_*` flags); those fields are stripped from each row on the way in, so a
   stale result can't collide with or leak into the new run's output.
-- **`num_samples_in_parallel` and `concurrency` stack safely**: the collector bounds one run's
-  politeness, the agent bounds your service's total load; the tighter one wins.
 - **Exposing your service on the public internet needs network-level trust.** Gym sends no
   credential on the `/v1/responses` call (`agent_base_url` rejects embedded credentials), so an
   internet-exposed service should sit behind a VPN, private network, IP allowlist, or
