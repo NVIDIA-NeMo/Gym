@@ -187,7 +187,13 @@ class TestConfig:
 
     @pytest.mark.parametrize(
         "bad_url",
-        ["ftp://h:1", "localhost:9000", "http://h:1?token=abc", "http://h:1#frag", "http://user:pass@h:1"],
+        [
+            "ftp://h:1",
+            "localhost:9000",
+            "http://h:1?token=abc",
+            "http://h:1#frag",
+            "http://user:pass@h:1",  # pragma: allowlist secret
+        ],
     )
     def test_agent_base_url_rejected(self, bad_url: str) -> None:
         with pytest.raises(ValidationError):
@@ -195,7 +201,7 @@ class TestConfig:
 
     def test_normalize_remote_url_never_echoes_credentials(self) -> None:
         with pytest.raises(ValueError) as exc_info:
-            normalize_remote_url("http://user:hunter2@h:1")
+            normalize_remote_url("http://user:hunter2@h:1")  # pragma: allowlist secret
         assert "hunter2" not in str(exc_info.value)
 
     def test_cookie_header_value_shapes(self) -> None:

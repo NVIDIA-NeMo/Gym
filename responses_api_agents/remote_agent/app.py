@@ -356,7 +356,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         # response.ok is `status < 400`; reject 3xx explicitly (redirects are not followed).
         if not response.ok or response.status >= 300:
             if is_global_aiohttp_client_request_debug_enabled():
-                print(f"[remote_agent] full HTTP {response.status} body: {content.decode(errors='replace')}", flush=True)
+                print(
+                    f"[remote_agent] full HTTP {response.status} body: {content.decode(errors='replace')}", flush=True
+                )
             location = response.headers.get("Location", "")
             return (
                 None,
