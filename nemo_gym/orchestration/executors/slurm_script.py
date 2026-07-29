@@ -1,6 +1,7 @@
 import shlex
 from pathlib import Path
 
+from nemo_gym.orchestration.executors.script_templates import bash_var, render_health_check
 from nemo_gym.orchestration.executors.utils import flatten_run_args
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
@@ -51,16 +52,11 @@ def _render_pool_directives(pool_name: str, pool: NodePool) -> list[str]:
 
 
 def _render_service_command(name: str, container: str, command: str) -> str:
+    var = bash_var(name)
     return (
         f"# service: {name}\n"
-        f"srun --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &"
-    )
-
-
-def _render_health_check(name: str, port: int, path: str, timeout: int) -> str:
-    return (
-        f"# health check: {name} (timeout {timeout}s)\n"
-        f"timeout {timeout} bash -c 'until curl -sf http://localhost:{port}{shlex.quote(path)}; do sleep 2; done'"
+        f"srun --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"{var}_PID=$!"
     )
 
 
@@ -95,7 +91,7 @@ def build_sbatch_script(
     )
 
     health_checks = "\n\n".join(
-        _render_health_check(name, service.health_check.port, service.health_check.path, service.health_check.timeout_seconds)
+        render_health_check(name, service.health_check.port, service.health_check.timeout_seconds)
         for name, service in config.services.items()
         if service.health_check
     )
