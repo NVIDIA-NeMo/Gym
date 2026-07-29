@@ -338,6 +338,32 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 "pkill -9 -f openclaw 2>/dev/null || true",
                 'kill -9 "$GW_PID" 2>/dev/null || true',
             )
+            text = text.replace(
+                'cd "$WORK"\n',
+                '''cd "$WORK"
+
+python3 - <<'PYTIMEOUT'
+import os
+from pathlib import Path
+
+if os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"):
+    path = Path("scripts/lib_agent.py")
+    text = path.read_text()
+    marker = 'custom_provider["timeoutSeconds"] = provider_timeout'
+    if marker not in text:
+        text = text.replace(
+            '        providers = data.setdefault("providers", {})\\n',
+            '        provider_timeout = int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "0"))\\n'
+            '        if provider_timeout > 0:\\n'
+            '            custom_provider["timeoutSeconds"] = provider_timeout\\n'
+            '        providers = data.setdefault("providers", {})\\n',
+            1,
+        )
+        path.write_text(text)
+PYTIMEOUT
+''',
+                1,
+            )
             dst.write_text(text)
             dst.chmod(0o755)
             PYSCRIPT
