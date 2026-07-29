@@ -126,12 +126,15 @@ invocation's `conversation` contains the ordered, normalized items exposed by th
 
 Agent observations and model-call capture are separate evidence. Join an invocation's model-call
 references by `model_call_id`, or by the exact `(model_ref, response_id)` pair when the harness sees
-the protocol response ID. Do not infer ownership from timestamps, text, or list position. The full
-model request and response remain in `CaptureStore`; rollout attachments intentionally omit them.
+the protocol response ID. An integration may resolve an otherwise hidden call only through a
+producer-specific, unique exact match against its retained artifact and the raw capture. Ambiguous
+matches remain unowned; timestamps or list position alone are never sufficient. The full model
+request and response remain in `CaptureStore`; rollout attachments intentionally omit them.
 
 Compaction records distinguish the calls immediately before and after the context change from
 `model_calls` used to perform the compaction. Compaction calls are exact references to calls owned by
-the enclosing invocation; opaque integrations leave them empty rather than infer them.
+the enclosing invocation. Integrations without an explicit identifier or a unique exact match leave
+them empty and report the gap.
 
 Tool timestamps are UTC Unix seconds when the source provides wall-clock time. `duration_ms` is the
 measured interval, and `timing_source` identifies executor, harness, or artifact-derived timing.

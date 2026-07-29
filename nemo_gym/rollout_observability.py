@@ -131,7 +131,10 @@ class ContextCompactionObservation(ObservationModel):
     )
     model_calls: list[ModelCallRef] = Field(
         default_factory=list,
-        description=("Invocation-owned model calls used for compaction, in producer-observed order; never inferred."),
+        description=(
+            "Invocation-owned model calls used for compaction, joined by explicit identifiers or a unique "
+            "producer-specific exact match."
+        ),
     )
     after_model_call: Optional[ModelCallRef] = Field(
         default=None,
