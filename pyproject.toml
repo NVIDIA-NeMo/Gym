@@ -215,11 +215,6 @@ dependencies = [
     # License: BSD 2-Clause https://pyasn1.readthedocs.io/en/latest/license.html
     "pyasn1>=0.6.4",
 
-    # pyarrow: columnar data library (transitive dependency via datasets, pinned for security)
-    # Updated: Tue Jul 29, 2026 with pyarrow>=25.0.0
-    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
-    "pyarrow>=25.0.0",
-
     # gprof2dot and pydot: Used for outputting dot graphs for profiling.
     # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
     # gprof2dot License: GNU Lesser General Public License v3.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
