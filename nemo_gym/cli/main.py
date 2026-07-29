@@ -74,7 +74,19 @@ def dispatch(target: str, overrides: list[str]) -> None:
     # Drop the parsed command tokens so the downstream Hydra parsing only sees overrides.
     sys.argv = [sys.argv[0], *overrides]
     func = getattr(importlib.import_module(module_path), func_name)
-    func()
+    # Python 3.14 added ArgumentParser._check_help which validates help strings via
+    # `'%' not in help_string`, breaking hydra's LazyCompletionHelp (which implements
+    # __repr__ but not __contains__). Disable the check around hydra init; the upstream
+    # fix is tracked at https://github.com/facebookresearch/hydra (not yet released).
+    if sys.version_info >= (3, 14):
+        _orig_check_help = argparse.ArgumentParser._check_help  # type: ignore[attr-defined]
+        argparse.ArgumentParser._check_help = lambda self, action: None  # type: ignore[attr-defined]
+        try:
+            func()
+        finally:
+            argparse.ArgumentParser._check_help = _orig_check_help  # type: ignore[attr-defined]
+    else:
+        func()
 
 
 def _value_flag(
