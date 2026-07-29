@@ -53,6 +53,7 @@ from nemo_gym.global_config import (
 from nemo_gym.observability import (
     build_recorder_from_config,
     event_context,
+    observability_span,
     reset_current_recorder,
     set_current_recorder,
 )
@@ -785,25 +786,36 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
+                trajectory_id = f"{row.get(TASK_INDEX_KEY_NAME, '')}-{row.get(ROLLOUT_INDEX_KEY_NAME, '')}"
                 with event_context(
-                    trajectory_id=f"{row.get(TASK_INDEX_KEY_NAME, '')}-{row.get(ROLLOUT_INDEX_KEY_NAME, '')}",
+                    trajectory_id=trajectory_id,
                     task_index=row.get(TASK_INDEX_KEY_NAME),
                     rollout_index=row.get(ROLLOUT_INDEX_KEY_NAME),
                     agent=(row.get(AGENT_REF_KEY_NAME) or {}).get("name", ""),
                 ):
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                    try:
-                        await raise_for_status(res)
-                    except Exception:
-                        if is_global_aiohttp_client_request_debug_enabled():
-                            print(
-                                "[rollout_collection] /run failed "
-                                f"status={getattr(res, 'status', None)} "
-                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                                flush=True,
-                            )
-                        raise
-                    return row, await get_response_json(res)
+                    async with observability_span(
+                        "rollout.run",
+                        phase="rollout",
+                        attributes={
+                            "trajectory_id": trajectory_id,
+                            "task_index": row.get(TASK_INDEX_KEY_NAME),
+                            "rollout_index": row.get(ROLLOUT_INDEX_KEY_NAME),
+                            "agent": (row.get(AGENT_REF_KEY_NAME) or {}).get("name", ""),
+                        },
+                    ):
+                        res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                        try:
+                            await raise_for_status(res)
+                        except Exception:
+                            if is_global_aiohttp_client_request_debug_enabled():
+                                print(
+                                    "[rollout_collection] /run failed "
+                                    f"status={getattr(res, 'status', None)} "
+                                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                                    flush=True,
+                                )
+                            raise
+                        return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

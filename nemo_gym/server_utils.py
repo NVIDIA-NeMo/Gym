@@ -357,6 +357,18 @@ class ServerClient(BaseModel):
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
+        # Inject W3C traceparent into outgoing headers so downstream server spans
+        # (agent, model, resources) become children of the current OTel span.
+        try:
+            from opentelemetry.propagate import inject as _otel_inject
+
+            hdrs = dict(kwargs.get("headers") or {})
+            _otel_inject(hdrs)
+            if hdrs:
+                kwargs["headers"] = hdrs
+        except Exception:
+            pass
+
         return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
     async def get(
@@ -706,6 +718,27 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
+
+        # Extract W3C traceparent from incoming requests so all child spans
+        # (sandbox ops, LLM calls) automatically become part of the caller's trace.
+        # No-op when opentelemetry-api is absent or no propagator is configured.
+        try:
+            from opentelemetry import context as _otel_ctx
+            from opentelemetry.propagate import extract as _otel_extract
+            from starlette.middleware.base import BaseHTTPMiddleware
+
+            class _OtelPropagationMiddleware(BaseHTTPMiddleware):
+                async def dispatch(self, request, call_next):
+                    ctx = _otel_extract(dict(request.headers))
+                    token = _otel_ctx.attach(ctx)
+                    try:
+                        return await call_next(request)
+                    finally:
+                        _otel_ctx.detach(token)
+
+            app.add_middleware(_OtelPropagationMiddleware)
+        except Exception:
+            pass
 
         # Initialise NeMo Lens once per server process so OTel spans emitted by
         # nemo_gym.observability (sandbox ops, etc.) flow to the configured OTLP backend.

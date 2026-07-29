@@ -989,6 +989,40 @@ def _record(
         except Exception:
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
 
+    # Emit a historical OTel span for the LLM call. Uses wall-clock start/end times
+    # already captured by the middleware. Becomes a child of the current OTel context
+    # (set by _OtelPropagationMiddleware extracting the incoming traceparent header).
+    try:
+        import opentelemetry.trace as _ot
+
+        tracer = _ot.get_tracer("nemo_gym.observability")
+        attrs: dict = {
+            "dialect": dialect or "",
+            "rollout_id": rollout_id or "",
+            "latency_ms": round(latency_ms, 2),
+        }
+        if model_server_name:
+            attrs["model_server"] = model_server_name
+        if status_code is not None:
+            attrs["status_code"] = status_code
+        if ttft_ms is not None:
+            attrs["ttft_ms"] = round(ttft_ms, 2)
+        if error_category:
+            attrs["error_category"] = error_category
+        if isinstance(response_body, dict):
+            usage = response_body.get("usage") or {}
+            for token_key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                if isinstance(usage.get(token_key), int):
+                    attrs[token_key] = usage[token_key]
+            if isinstance(response_body.get("model"), str):
+                attrs["model"] = response_body["model"]
+        span = tracer.start_span("llm.request", start_time=int(started_at * 1_000_000_000), attributes=attrs)
+        if error_category:
+            span.set_status(_ot.StatusCode.ERROR, error_category)
+        span.end(end_time=int(completed_at * 1_000_000_000))
+    except Exception:
+        pass
+
 
 class _CaptureMiddleware:
     """Pure-ASGI per-rollout capture.
