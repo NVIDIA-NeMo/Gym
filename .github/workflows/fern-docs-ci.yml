@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Validates Fern docs configuration on pull requests.
-# See fern/AUTODOCS_GUIDE.md and docs.yml `libraries`.
+# See fern/README.md and docs.yml `libraries`.
 
 name: Fern docs (check)
 
@@ -28,6 +28,7 @@ on:
       - "pull-request/[0-9]+"
     paths:
       - 'fern/**'
+      - 'tests/unit_tests/test_fern_docs_links.py'
       - '.github/workflows/fern-docs-ci.yml'
 
 permissions:
@@ -43,7 +44,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
+
+      - name: Check internal documentation links
+        run: python3 tests/unit_tests/test_fern_docs_links.py
 
       - name: Validate Fern configuration
         working-directory: ./fern
