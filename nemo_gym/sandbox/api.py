@@ -44,6 +44,52 @@ SYNC_OPERATION_TIMEOUT_S = 3600.0
 SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
 
 
+def _start_otel_span(name: str, attributes: dict[str, Any]) -> Any:
+    """Start a long-lived OTel span not tied to a context manager."""
+    try:
+        import opentelemetry.trace as _ot
+
+        tracer = _ot.get_tracer("nemo_gym.observability")
+        return tracer.start_span(name, attributes={k: v for k, v in attributes.items() if v is not None})
+    except Exception:
+        return None
+
+
+def _attach_otel_span(span: Any) -> Any:
+    """Make an OTel span the current span so nested spans become children. Returns a detach token."""
+    if span is None:
+        return None
+    try:
+        import opentelemetry.context as _ctx
+        import opentelemetry.trace as _ot
+
+        return _ctx.attach(_ot.set_span_in_context(span))
+    except Exception:
+        return None
+
+
+def _detach_otel_token(token: Any) -> None:
+    """Undo a previous _attach_otel_span call."""
+    if token is None:
+        return
+    try:
+        import opentelemetry.context as _ctx
+
+        _ctx.detach(token)
+    except Exception:
+        pass
+
+
+def _end_otel_span(span: Any) -> None:
+    """End a long-lived OTel span opened with _start_otel_span."""
+    if span is None:
+        return
+    try:
+        span.end()
+    except Exception:
+        pass
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider."""
 
@@ -57,6 +103,8 @@ class AsyncSandbox:
         self._handle: SandboxHandle | None = None
         self._stopped = True
         self._closed = False
+        self._obs_sandbox_span: Any = None  # OTel span held for the sandbox lifetime
+        self._obs_sampler: Any = None  # SandboxResourceSampler, auto-managed
 
     def _require_handle(self) -> SandboxHandle:
         if self._handle is None or self._stopped:
@@ -75,29 +123,47 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        async with observability_span(
-            "sandbox.start",
-            phase="startup",
-            attributes={"provider": type(self._provider).__name__},
-        ):
-            handle = await self._provider.create(requested_spec)
-            try:
-                if requested_spec.files:
-                    with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
-                        tmp_path = Path(tmp_dir)
-                        for index, (target_path, contents) in enumerate(requested_spec.files.items()):
-                            source_path = tmp_path / f"file-{index}"
-                            source_path.write_text(contents, encoding="utf-8")
-                            await self._provider.upload_file(handle, source_path, target_path)
-            except Exception:
-                await self._provider.close(handle)
-                await self._provider.aclose()
-                self._closed = True
-                raise
+        # Open the sandbox lifetime OTel span FIRST so sandbox.start becomes a child.
+        self._obs_sandbox_span = _start_otel_span("sandbox", {"provider": type(self._provider).__name__})
+        _token = _attach_otel_span(self._obs_sandbox_span)
+        try:
+            async with observability_span(
+                "sandbox.start",
+                phase="startup",
+                attributes={"provider": type(self._provider).__name__},
+            ):
+                handle = await self._provider.create(requested_spec)
+                try:
+                    if requested_spec.files:
+                        with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
+                            tmp_path = Path(tmp_dir)
+                            for index, (target_path, contents) in enumerate(requested_spec.files.items()):
+                                source_path = tmp_path / f"file-{index}"
+                                source_path.write_text(contents, encoding="utf-8")
+                                await self._provider.upload_file(handle, source_path, target_path)
+                except Exception:
+                    await self._provider.close(handle)
+                    await self._provider.aclose()
+                    self._closed = True
+                    raise
+        except Exception:
+            _end_otel_span(self._obs_sandbox_span)
+            self._obs_sandbox_span = None
+            raise
+        finally:
+            _detach_otel_token(_token)
 
         self._spec = requested_spec
         self._handle = handle
         self._stopped = False
+
+        # Auto-start resource sampler when enabled in config (interval_s > 0).
+        recorder = current_recorder()
+        if recorder is not None and recorder.resource_sampler_interval_s() > 0:
+            self._obs_sampler = await self.start_resource_sampler(
+                otel_span=self._obs_sandbox_span,
+            )
+
         return self
 
     async def exec(
@@ -113,23 +179,28 @@ class AsyncSandbox:
 
         recorder = current_recorder()
         include_cmd = recorder.include_command_text if recorder is not None else False
-        async with observability_span(
-            "sandbox.exec",
-            phase="execution",
-            attributes={
-                "provider": type(self._provider).__name__,
-                **command_attributes(command, include_command_text=include_cmd),
-                **({"timeout_s": timeout_s} if timeout_s is not None else {}),
-            },
-        ):
-            return await self._provider.exec(
-                self._require_handle(),
-                command,
-                cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
-                env=env,
-                timeout_s=timeout_s,
-                user=user,
-            )
+        # Attach sandbox lifetime span so sandbox.exec appears as its child in OTel.
+        _token = _attach_otel_span(self._obs_sandbox_span)
+        try:
+            async with observability_span(
+                "sandbox.exec",
+                phase="execution",
+                attributes={
+                    "provider": type(self._provider).__name__,
+                    **command_attributes(command, include_command_text=include_cmd),
+                    **({"timeout_s": timeout_s} if timeout_s is not None else {}),
+                },
+            ):
+                return await self._provider.exec(
+                    self._require_handle(),
+                    command,
+                    cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
+                    env=env,
+                    timeout_s=timeout_s,
+                    user=user,
+                )
+        finally:
+            _detach_otel_token(_token)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
@@ -148,17 +219,28 @@ class AsyncSandbox:
         if self._closed:
             return
         try:
-            async with observability_span(
-                "sandbox.stop",
-                phase="cleanup",
-                attributes={"provider": type(self._provider).__name__},
-            ):
-                if self._handle is not None and not self._stopped:
-                    self._stopped = True
-                    await self._provider.close(self._handle)
+            # Stop resource sampler before closing the sandbox.
+            if self._obs_sampler is not None:
+                await self._obs_sampler.stop()
+                self._obs_sampler = None
+
+            _token = _attach_otel_span(self._obs_sandbox_span)
+            try:
+                async with observability_span(
+                    "sandbox.stop",
+                    phase="cleanup",
+                    attributes={"provider": type(self._provider).__name__},
+                ):
+                    if self._handle is not None and not self._stopped:
+                        self._stopped = True
+                        await self._provider.close(self._handle)
+            finally:
+                _detach_otel_token(_token)
         finally:
             await self._provider.aclose()
             self._closed = True
+            _end_otel_span(self._obs_sandbox_span)
+            self._obs_sandbox_span = None
 
     async def start_resource_sampler(
         self,
@@ -166,11 +248,13 @@ class AsyncSandbox:
         interval_s: float | None = None,
         process_trace: dict[str, Any] | None = None,
         attributes: dict[str, Any] | None = None,
+        otel_span: Any = None,
     ) -> "SandboxResourceSampler | None":
         """Start a background resource sampler inside this sandbox.
 
-        Returns None when no recorder is active. The caller is responsible for
-        calling ``await sampler.stop()`` before stopping the sandbox.
+        Returns None when no recorder is active or interval is 0. When started
+        automatically by ``start()``, ``stop()`` will stop it automatically.
+        Manual callers are responsible for calling ``await sampler.stop()``.
         """
         recorder = current_recorder()
         if recorder is None:
@@ -186,6 +270,7 @@ class AsyncSandbox:
             interval_s=effective_interval,
             process_trace=process_trace or recorder.process_trace,
             attributes=attributes or {},
+            otel_span=otel_span,
         )
         sampler.start()
         return sampler

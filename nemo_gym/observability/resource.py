@@ -225,6 +225,7 @@ class SandboxResourceSampler:
         interval_s: float,
         process_trace: dict[str, Any] | None = None,
         attributes: dict[str, Any],
+        otel_span: Any = None,
     ) -> None:
         self._provider = provider
         self._handle = handle
@@ -232,6 +233,7 @@ class SandboxResourceSampler:
         self._interval_s = interval_s
         self._process_trace = process_trace or {"enabled": False}
         self._attributes = attributes
+        self._otel_span = otel_span  # Optional OTel span; resource samples are added as span events
         self._task: asyncio.Task[None] | None = None
         self._last_cpu_usage_s: float | None = None
         self._last_sample_monotonic_s: float | None = None
@@ -304,3 +306,20 @@ class SandboxResourceSampler:
             sample=sample,
             attributes=self._attributes,
         )
+        # Attach resource data as a timestamped event on the sandbox OTel span so
+        # CPU/memory appear inline with tool call spans in Honeycomb / Tempo / Jaeger.
+        if self._otel_span is not None:
+            try:
+                if getattr(self._otel_span, "is_recording", lambda: False)():
+                    event_attrs = {
+                        k: v
+                        for k, v in {
+                            "memory_usage_bytes": sample.get("memory_usage_bytes"),
+                            "cpu_utilization": sample.get("cpu_utilization"),
+                            "process_count": sample.get("process_count"),
+                        }.items()
+                        if v is not None
+                    }
+                    self._otel_span.add_event("resource.sample", event_attrs)
+            except Exception:
+                pass
