@@ -15,7 +15,13 @@
 import asyncio
 from unittest.mock import MagicMock
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
+from nemo_gym.base_resources_server import (
+    BaseMultiRewardVerifyResponse,
+    BaseResourcesServerConfig,
+    ReverifyMode,
+    SimpleResourcesServer,
+)
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 
 
@@ -27,6 +33,19 @@ def _resources_server() -> SimpleResourcesServer:
             pass
 
     return TestSimpleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestBaseMultiRewardVerifyResponse:
+    def test_reward_components_round_trip(self) -> None:
+        response = BaseMultiRewardVerifyResponse(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            response=NeMoGymResponse.model_construct(id="resp-1", output=[]),
+            reward=2.0,
+            reward_components={"correctness": 1.0, "format": 1.0},
+        )
+        dumped = response.model_dump()
+        assert dumped["reward_components"] == {"correctness": 1.0, "format": 1.0}
+        assert dumped["reward"] == 2.0
 
 
 class TestBaseResourcesServer:

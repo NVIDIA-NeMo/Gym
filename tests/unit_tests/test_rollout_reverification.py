@@ -26,6 +26,8 @@ from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, SKILLS_REF_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.rollout_reverification import (
+    _RECOVERY_TWO_SOURCES_WARNING,
+    JUDGE_FAILED_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
@@ -43,13 +45,16 @@ from nemo_gym.rollout_reverification import (
     _drop_cache_from_payloads,
     _get_rs_names,
     _guard_reverify_mode,
+    _is_judge_failure,
     _load_cache_keys_by_status,
     _load_reverified_results,
     _parse_output_line_key,
     _prepare_output_fpaths,
     _prepare_payloads,
+    _recovery_rollout_predicate,
     _rollout_verify_debug_summary,
     _run_verification_payloads,
+    _seed_output_with_successes,
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
@@ -88,6 +93,27 @@ class TestRolloutReverificationConfig:
         """overwrite is opt-in: by default an existing output file is protected (raises)."""
         assert RolloutReverificationConfig(**self._kwargs()).overwrite is False
         assert RolloutReverificationConfig(**self._kwargs(overwrite=True)).overwrite is True
+
+    def test_judge_failed_only_defaults_to_false(self) -> None:
+        """judge_failed_only is opt-in: default reverify is not in recovery mode."""
+        assert RolloutReverificationConfig(**self._kwargs()).judge_failed_only is False
+        assert RolloutReverificationConfig(**self._kwargs(judge_failed_only=True)).judge_failed_only is True
+
+    def test_append_defaults_to_false(self) -> None:
+        assert RolloutReverificationConfig(**self._kwargs()).append is False
+
+    def test_append_requires_judge_failed_only(self) -> None:
+        """append is a recovery-only knob; using it without judge_failed_only is a config error."""
+        with pytest.raises(ValidationError, match="only valid together with `judge_failed_only`"):
+            RolloutReverificationConfig(**self._kwargs(append=True))
+
+    def test_append_and_overwrite_are_mutually_exclusive(self) -> None:
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            RolloutReverificationConfig(**self._kwargs(append=True, judge_failed_only=True, overwrite=True))
+
+    def test_append_with_judge_failed_only_is_valid(self) -> None:
+        cfg = RolloutReverificationConfig(**self._kwargs(append=True, judge_failed_only=True))
+        assert cfg.append is True
 
 
 class TestAgentToRsMappingFromAgentBlocks:
@@ -345,6 +371,42 @@ class TestYieldInputsAndRolloutsPaired:
         assert pairs[0].input[ROLLOUT_INDEX_KEY_NAME] == 0
         assert pairs[1].input[ROLLOUT_INDEX_KEY_NAME] == 1
 
+    def test_rollout_predicate_filters_out_non_matching_rows(self, tmp_path: Path) -> None:
+        inputs = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "q": i} for i in range(4)]
+        rollouts = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reward": float(i)} for i in range(4)]
+        self._write_jsonl(tmp_path / "inputs.jsonl", inputs)
+        self._write_jsonl(tmp_path / "rollouts.jsonl", rollouts)
+
+        # keep only even task indices
+        pairs = list(
+            _yield_inputs_and_rollouts_paired(
+                tmp_path / "inputs.jsonl",
+                tmp_path / "rollouts.jsonl",
+                rollout_predicate=lambda r: r[TASK_INDEX_KEY_NAME] % 2 == 0,
+            )
+        )
+
+        assert [p.rollout[TASK_INDEX_KEY_NAME] for p in pairs] == [0, 2]
+
+    def test_limit_counts_rows_yielded_after_the_predicate(self, tmp_path: Path) -> None:
+        """limit bounds rows actually yielded (post-predicate), not lines scanned."""
+        inputs = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "q": i} for i in range(6)]
+        rollouts = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reward": float(i)} for i in range(6)]
+        self._write_jsonl(tmp_path / "inputs.jsonl", inputs)
+        self._write_jsonl(tmp_path / "rollouts.jsonl", rollouts)
+
+        # predicate keeps evens (0,2,4); limit=2 should give the first two evens
+        pairs = list(
+            _yield_inputs_and_rollouts_paired(
+                tmp_path / "inputs.jsonl",
+                tmp_path / "rollouts.jsonl",
+                limit=2,
+                rollout_predicate=lambda r: r[TASK_INDEX_KEY_NAME] % 2 == 0,
+            )
+        )
+
+        assert [p.rollout[TASK_INDEX_KEY_NAME] for p in pairs] == [0, 2]
+
 
 class TestBuildVerifyPayload:
     def test_merges_input_row_with_response(self) -> None:
@@ -383,6 +445,112 @@ class TestBuildVerifyPayload:
         result = _build_verify_payload(pair)
 
         assert set(result.keys()) == {"task", "response"}
+
+
+# ---------------------------------------------------------------------------
+# Judge-failure recovery helpers (--judge-failed-only)
+# ---------------------------------------------------------------------------
+
+
+class TestIsJudgeFailure:
+    def test_true_only_for_judge_failed_class(self) -> None:
+        assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}) is True
+
+    def test_false_for_other_failure_classes(self) -> None:
+        assert _is_judge_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
+
+    def test_false_when_no_failure_class(self) -> None:
+        assert _is_judge_failure({}) is False
+
+    def test_legacy_judge_failed_boolean_is_not_honored(self) -> None:
+        """v2 marks judge failures only via _ng_failure_class; the older boolean is ignored."""
+        assert _is_judge_failure({"_ng_failure_judge_failed": True}) is False
+
+
+class TestRecoveryRolloutPredicate:
+    def _row(self, task: int, rollout: int = 0, failure_class: str | None = JUDGE_FAILED_FAILURE_CLASS) -> dict:
+        row = {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout}
+        if failure_class is not None:
+            row[NG_FAILURE_CLASS_KEY] = failure_class
+        return row
+
+    def test_dedups_repeated_keys_yielding_first_only(self) -> None:
+        predicate = _recovery_rollout_predicate()
+        assert predicate(self._row(0)) is True
+        assert predicate(self._row(0)) is False  # same (task, rollout) seen again
+
+    def test_drops_non_judge_rows(self) -> None:
+        predicate = _recovery_rollout_predicate()
+        assert predicate(self._row(0, failure_class="timeout_exceeded")) is False
+        assert predicate(self._row(1)) is True
+
+    def test_dropped_non_judge_row_does_not_pollute_seen(self) -> None:
+        """A row filtered out by the judge filter must not consume its key from the dedup set."""
+        predicate = _recovery_rollout_predicate()
+        # first: same key but non-judge → dropped, key must remain available
+        assert predicate(self._row(0, failure_class="timeout_exceeded")) is False
+        # later a judge failure for the same key arrives → must be kept
+        assert predicate(self._row(0)) is True
+
+    def test_skips_judge_failures_whose_key_is_already_in_the_output(self) -> None:
+        """A judge-failure key already present in the output (a seeded success or an already-recovered
+        row) is skipped — no re-verify/duplicate — without any resume/cache machinery."""
+        predicate = _recovery_rollout_predicate(skip_keys={(0, 0), (2, 0)})
+        assert predicate(self._row(0)) is False  # already present in output
+        assert predicate(self._row(1)) is True  # genuinely still to recover
+        assert predicate(self._row(2)) is False  # already present in output
+
+
+class TestSeedOutputWithSuccesses:
+    def test_copies_all_rows_verbatim_and_returns_their_keys(self, tmp_path: Path) -> None:
+        src = tmp_path / "successes.jsonl"
+        rows = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reward": float(i)} for i in range(3)]
+        src.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+        out = tmp_path / "output.jsonl"
+
+        keys = _seed_output_with_successes(src, out)
+
+        assert keys == {(0, 0), (1, 0), (2, 0)}
+        seeded = [orjson.loads(line) for line in out.read_bytes().splitlines() if line.strip()]
+        assert seeded == rows
+
+    def test_empty_source_creates_empty_output_and_returns_empty_set(self, tmp_path: Path) -> None:
+        src = tmp_path / "successes.jsonl"
+        src.write_bytes(b"")
+        out = tmp_path / "output.jsonl"
+
+        keys = _seed_output_with_successes(src, out)
+
+        assert keys == set()
+        assert out.exists()
+        assert out.read_bytes() == b""
+
+    def test_normalizes_missing_trailing_newline_and_skips_blanks(self, tmp_path: Path) -> None:
+        src = tmp_path / "successes.jsonl"
+        # two keyless rows (no task/rollout index), second without a trailing newline, plus a blank line
+        src.write_bytes(orjson.dumps({"a": 1}) + b"\n\n" + orjson.dumps({"a": 2}))
+        out = tmp_path / "output.jsonl"
+
+        keys = _seed_output_with_successes(src, out)
+
+        assert keys == set()  # keyless rows contribute no dedup keys
+        lines = out.read_bytes().splitlines()
+        assert [orjson.loads(line) for line in lines] == [{"a": 1}, {"a": 2}]  # still written
+
+    def test_returns_all_output_keys_incl_prior_rows_and_does_not_duplicate(self, tmp_path: Path) -> None:
+        """The returned set is every key present in the output afterward — including a row already in the
+        output that is NOT in the successes source (e.g. a prior-recovered row) — and nothing is duplicated."""
+        row = lambda t: {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
+        src = tmp_path / "successes.jsonl"
+        src.write_bytes(b"\n".join(orjson.dumps(row(t)) for t in (1, 2)) + b"\n")  # successes = tasks 1, 2
+        out = tmp_path / "output.jsonl"
+        out.write_bytes(orjson.dumps(row(0)) + b"\n")  # task 0 already in output, NOT in the source
+
+        keys = _seed_output_with_successes(src, out)
+
+        assert keys == {(0, 0), (1, 0), (2, 0)}  # union of pre-existing (0) + seeded successes (1, 2)
+        seeded = [orjson.loads(line) for line in out.read_bytes().splitlines() if line.strip()]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in seeded) == [0, 1, 2]  # no duplicate of task 0
 
 
 # ---------------------------------------------------------------------------
@@ -534,11 +702,12 @@ class TestPreparePayloads:
         )
 
     def _patch_yield(self, monkeypatch: pytest.MonkeyPatch, pairs: list, capture: dict | None = None) -> None:
-        def fake_yield(inputs_path, rollouts_path, limit=None):
+        def fake_yield(inputs_path, rollouts_path, limit=None, rollout_predicate=None):
             if capture is not None:
                 capture["inputs_path"] = inputs_path
                 capture["rollouts_path"] = rollouts_path
                 capture["limit"] = limit
+                capture["rollout_predicate"] = rollout_predicate
             return iter(pairs)
 
         monkeypatch.setattr("nemo_gym.rollout_reverification._yield_inputs_and_rollouts_paired", fake_yield)
@@ -617,6 +786,31 @@ class TestPreparePayloads:
         )
 
         assert [p[TASK_INDEX_KEY_NAME] for p in payloads] == [0, 1]
+
+    def test_rollout_predicate_is_forwarded_to_yield_pairs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        capture: dict = {}
+        self._patch_yield(monkeypatch, [], capture)
+        predicate = lambda _row: True  # noqa: E731
+
+        _prepare_payloads(
+            tmp_path / "in.jsonl",
+            tmp_path / "r.jsonl",
+            self._paths(tmp_path),
+            resume_from_cache=False,
+            rollout_predicate=predicate,
+        )
+
+        assert capture["rollout_predicate"] is predicate
+
+    def test_rollout_predicate_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        capture: dict = {}
+        self._patch_yield(monkeypatch, [], capture)
+
+        _prepare_payloads(tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False)
+
+        assert capture["rollout_predicate"] is None
 
 
 class TestRunVerificationPayloads:
@@ -831,7 +1025,7 @@ class TestPrepareOutputFpaths:
         and crashing run_from_config on its default (non-resume) path.
         """
         nested = tmp_path / "does" / "not" / "exist" / "out.jsonl"
-        paths = _prepare_output_fpaths("", str(nested), resume_from_cache=False, overwrite=False)
+        paths = _prepare_output_fpaths("", str(nested), resume_from_cache=False, overwrite=False, append=False)
 
         assert paths.output.parent.is_dir()
         assert not paths.output.is_dir()
@@ -841,13 +1035,15 @@ class TestPrepareOutputFpaths:
 
     def test_applies_name_prefix_to_output_and_failures(self, tmp_path: Path) -> None:
         paths = _prepare_output_fpaths(
-            "unsafe_", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False
+            "unsafe_", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
         )
         assert paths.output.name == "unsafe_out.jsonl"
         assert paths.failures.name == "unsafe_out_failures.jsonl"
 
     def test_empty_prefix_leaves_names_unchanged(self, tmp_path: Path) -> None:
-        paths = _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+        paths = _prepare_output_fpaths(
+            "", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
+        )
         assert paths.output.name == "out.jsonl"
         assert paths.failures.name == "out_failures.jsonl"
 
@@ -856,7 +1052,7 @@ class TestPrepareOutputFpaths:
         out = tmp_path / "out.jsonl"
         out.write_text("precious prior rollouts")
         with pytest.raises(ConfigError, match="already exists"):
-            _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=False)
+            _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=False, append=False)
         # the file is left untouched
         assert out.read_text() == "precious prior rollouts"
 
@@ -865,7 +1061,9 @@ class TestPrepareOutputFpaths:
         failures = tmp_path / "out_failures.jsonl"
         failures.write_text("prior failures")
         with pytest.raises(ConfigError, match="already exists"):
-            _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+            _prepare_output_fpaths(
+                "", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
+            )
 
     def test_deletes_existing_files_when_overwrite_and_not_resuming(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -875,7 +1073,7 @@ class TestPrepareOutputFpaths:
         out.write_text("stale")
         failures.write_text("stale")
 
-        paths = _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=True)
+        paths = _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=True, append=False)
 
         assert not paths.output.exists()
         assert not paths.failures.exists()
@@ -883,7 +1081,9 @@ class TestPrepareOutputFpaths:
 
     def test_no_existing_files_is_fine_without_overwrite(self, tmp_path: Path) -> None:
         """A first run (no prior files) proceeds without needing overwrite."""
-        paths = _prepare_output_fpaths("", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False)
+        paths = _prepare_output_fpaths(
+            "", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
+        )
         assert not paths.output.exists()
 
     def test_keeps_existing_files_when_resuming_regardless_of_overwrite(self, tmp_path: Path) -> None:
@@ -893,7 +1093,20 @@ class TestPrepareOutputFpaths:
         failures.write_text("keep me too")
 
         # resume reuses the file; overwrite is ignored and nothing is deleted or raised
-        paths = _prepare_output_fpaths("", str(out), resume_from_cache=True, overwrite=False)
+        paths = _prepare_output_fpaths("", str(out), resume_from_cache=True, overwrite=False, append=False)
+
+        assert paths.output.read_text() == "keep me"
+        assert paths.failures.read_text() == "keep me too"
+
+    def test_keeps_existing_files_when_appending_regardless_of_overwrite(self, tmp_path: Path) -> None:
+        """--append reuses the existing output: nothing is deleted or raised even without overwrite."""
+        out = tmp_path / "out.jsonl"
+        failures = tmp_path / "out_failures.jsonl"
+        out.write_text("keep me")
+        failures.write_text("keep me too")
+
+        # append reuses the file; overwrite is ignored and nothing is deleted or raised
+        paths = _prepare_output_fpaths("", str(out), resume_from_cache=False, overwrite=False, append=True)
 
         assert paths.output.read_text() == "keep me"
         assert paths.failures.read_text() == "keep me too"
@@ -1174,13 +1387,32 @@ class TestGuardReverifyMode:
     subset referenced by the current payload batch), reading the force flag from the config.
     """
 
-    def _make_config(self, tmp_path: Path, *, force: bool = False) -> RolloutReverificationConfig:
+    def _make_config(
+        self, tmp_path: Path, *, force: bool = False, judge_failed_only: bool = False
+    ) -> RolloutReverificationConfig:
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "in.jsonl"),
             rollouts_jsonl_fpath=str(tmp_path / "r.jsonl"),
             output_jsonl_fpath=str(tmp_path / "out.jsonl"),
             force=force,
+            judge_failed_only=judge_failed_only,
         )
+
+    async def test_judge_failed_only_skips_the_guard_and_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Recovery bypasses the reverify-mode check: the guard returns None without querying any RS
+        (so a UNKNOWN/UNSUPPORTED server does not block recovery, and no `unsafe_` prefix is applied)."""
+        called = False
+
+        def _boom() -> None:
+            nonlocal called
+            called = True
+            raise AssertionError("setup_server_client must not be called for judge_failed_only")
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", _boom)
+        assert await _guard_reverify_mode(self._make_config(tmp_path, judge_failed_only=True)) is None
+        assert called is False
 
     def _patch(
         self,
@@ -1813,3 +2045,414 @@ class TestRunFromConfigResumeFromCache:
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in agg_results) == [0, 1, 2]
         assert len(agg_rows) == 3
         assert all(r[AGENT_REF_KEY_NAME] == {"name": "agent_a"} for r in agg_rows)
+
+
+class TestRunFromConfigJudgeFailedOnly:
+    """Smoke test: the whole `gym eval reverify --judge-failed-only` recovery path end to end.
+
+    Fast and fully mocked (no marker, no live server): only the network dispatch, aggregate call,
+    reverify-mode guard, wandb, and path resolution are stubbed. The recovery logic under test —
+    seeding successes, deriving + reading the failures sidecar, the judge-failure predicate, the
+    cache-drop dedup, and aggregation over the union — all runs for real off tmp_path fixtures.
+    """
+
+    def _make_config(
+        self,
+        tmp_path: Path,
+        *,
+        resume_from_cache: bool = False,
+        disable_aggregation: bool = True,
+        overwrite: bool = False,
+        append: bool = False,
+        output_name: str = "recovered.jsonl",
+    ) -> RolloutReverificationConfig:
+        return RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
+            rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            output_jsonl_fpath=str(tmp_path / output_name),
+            judge_failed_only=True,
+            disable_aggregation=disable_aggregation,
+            resume_from_cache=resume_from_cache,
+            overwrite=overwrite,
+            append=append,
+        )
+
+    def _mat(self, task: int, rollout: int = 0, agent: str = "agent_a") -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": agent},
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "question": f"q{task}",
+            "responses_create_params": {"input": f"prompt {task}"},
+        }
+
+    def _success(self, task: int, rollout: int = 0, agent: str = "agent_a", reward: float = 1.0) -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": agent},
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "response": {"o": task},
+            "reward": reward,
+            "verdict": "correct",
+        }
+
+    def _failure(
+        self, task: int, rollout: int = 0, agent: str = "agent_a", failure_class: str = JUDGE_FAILED_FAILURE_CLASS
+    ) -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": agent},
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "response": {"o": task},
+            "reward": 0.0,
+            NG_FAILURE_CLASS_KEY: failure_class,
+        }
+
+    def _write(self, path: Path, rows: list) -> None:
+        path.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n" if rows else b"")
+
+    def _setup_fixture(self, tmp_path: Path, materialized: list, successes: list, failures: list) -> None:
+        self._write(tmp_path / "inputs.jsonl", materialized)
+        self._write(tmp_path / "rollouts.jsonl", successes)
+        # the failures sidecar sits next to rollouts.jsonl (failures_path_for convention)
+        self._write(tmp_path / "rollouts_failures.jsonl", failures)
+
+    def _patch_with_result(self, monkeypatch: pytest.MonkeyPatch, dispatched: list, result_fn):
+        """Stub the dispatch/guard/aggregate delegates; result_fn(payload) chooses each row's /verify
+        result (so a test can make some rows re-fail on a first pass)."""
+        monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
+
+        def fake_run(payloads, semaphore=None):
+            dispatched.extend(payloads)
+
+            async def fut(p: dict) -> tuple[dict, dict]:
+                return p, dict(result_fn(p))
+
+            return [fut(p) for p in payloads]
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification._run_verification_payloads", fake_run)
+        # Recovery skips the reverify-mode guard entirely; stub it so we can assert it is never awaited.
+        guard_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", guard_mock)
+        agg_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        return guard_mock, agg_mock
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, dispatched: list, recovered_reward: float = 0.9):
+        return self._patch_with_result(
+            monkeypatch, dispatched, lambda _p: {"reward": recovered_reward, "verdict": "correct"}
+        )
+
+    def _read_jsonl(self, path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
+
+    async def test_recovers_only_judge_failed_rows_and_merges_with_successes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(4)],
+            successes=[self._success(0), self._success(1)],
+            failures=[self._failure(2), self._failure(3)],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        # only the two judge-failed keys are re-verified; the two successes are not
+        assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched) == [2, 3]
+
+        rows = self._read_jsonl(tmp_path / "recovered.jsonl")
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2, 3]
+        # seeded successes kept their original reward; recovered rows carry the fresh reward and are no
+        # longer tagged as failures
+        by_task = {r[TASK_INDEX_KEY_NAME]: r for r in rows}
+        assert by_task[0]["reward"] == 1.0 and by_task[1]["reward"] == 1.0
+        assert by_task[2]["reward"] == 0.9 and by_task[3]["reward"] == 0.9
+        assert all(NG_FAILURE_CLASS_KEY not in by_task[t] for t in (2, 3))
+
+        # the returned union covers all four, sorted
+        assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0, 1, 2, 3]
+
+        # recovery does not apply the reverify-mode guard's outcome (the guard early-returns None for
+        # judge_failed_only), so the output is un-prefixed (no `unsafe_`), regardless of RS mode
+        assert (tmp_path / "recovered.jsonl").exists()
+        assert not (tmp_path / "unsafe_recovered.jsonl").exists()
+
+    async def test_prints_two_sources_warning(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0)],
+            successes=[],
+            failures=[self._failure(0)],
+        )
+        self._patch(monkeypatch, [])
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert _RECOVERY_TWO_SOURCES_WARNING in capsys.readouterr().out
+
+    async def test_non_judge_failures_are_not_recovered(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0)],
+            failures=[self._failure(1), self._failure(2, failure_class="timeout_exceeded")],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        # only the judge failure (task 1) is re-verified; the timeout failure (task 2) is skipped
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [1]
+        rows = self._read_jsonl(tmp_path / "recovered.jsonl")
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1]
+
+    async def test_aggregates_over_the_union_of_successes_and_recovered(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0)],
+            failures=[self._failure(1), self._failure(2)],
+        )
+        dispatched: list = []
+        _, agg_mock = self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path, disable_aggregation=False))
+
+        # only the two failures were re-verified...
+        assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched) == [1, 2]
+        # ...but aggregation covers the full union (seeded success 0 + recovered 1,2)
+        agg_results = agg_mock.call_args.args[0]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in agg_results) == [0, 1, 2]
+
+    async def test_empty_successes_recovers_all_failures(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Fully-failed run: no successes to seed, every judge-failed row is recovered."""
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[],
+            failures=[self._failure(t) for t in range(3)],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched) == [0, 1, 2]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in returned) == [0, 1, 2]
+
+    async def test_key_present_in_both_successes_and_failures_is_not_reverified(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A key that already succeeded is seeded once and skipped by the cache-drop dedup."""
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0), self._mat(1)],
+            successes=[self._success(0, reward=1.0)],
+            failures=[self._failure(0), self._failure(1)],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        # task 0 already succeeded → not re-verified; only task 1 is
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [1]
+        rows = self._read_jsonl(tmp_path / "recovered.jsonl")
+        assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(0) == 1
+        task0 = next(r for r in rows if r[TASK_INDEX_KEY_NAME] == 0)
+        assert task0["reward"] == 1.0  # the seeded success, not a fresh re-verification
+
+    async def test_resume_does_not_reseed_and_reverifies_only_still_failing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # a prior recovery invocation already produced this output (seeded success 0 + recovered 1)
+        out = tmp_path / "recovered.jsonl"
+        out.write_bytes(
+            orjson.dumps(self._success(0, reward=1.0))
+            + b"\n"
+            + orjson.dumps({**self._success(1), "reward": 0.9})
+            + b"\n"
+        )
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0)],
+            failures=[self._failure(1), self._failure(2)],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path, resume_from_cache=True))
+
+        # tasks 0 (seeded) and 1 (already recovered) are cached; only task 2 still needs re-verifying
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [2]
+        rows = self._read_jsonl(out)
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2]
+        # no re-seed: task 0 appears exactly once
+        assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(0) == 1
+
+    async def test_resume_as_first_invocation_still_seeds_successes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """--resume on the FIRST recovery call (no prior seeded output) must still seed the successes,
+        so the aggregate covers the full population — not just the recovered rows."""
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0), self._success(1)],
+            failures=[self._failure(2)],
+        )
+        dispatched: list = []
+        _, agg_mock = self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=True, disable_aggregation=False)
+        )
+
+        # only the judge failure is re-verified...
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [2]
+        # ...but the successes were seeded despite --resume, so output + aggregate cover all three
+        rows = self._read_jsonl(tmp_path / "recovered.jsonl")
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in agg_mock.call_args.args[0]) == [0, 1, 2]
+
+    async def test_no_judge_failed_rows_warns_and_recovers_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A sidecar with only non-judge failures re-verifies nothing and prints a clear warning
+        (guards the silent no-op)."""
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0), self._mat(1)],
+            successes=[self._success(0)],
+            failures=[self._failure(1, failure_class="timeout_exceeded")],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert dispatched == []
+        assert "Nothing to be re-verified" in capsys.readouterr().out
+        # the seeded success is still present
+        assert [r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")] == [0]
+
+    async def test_append_adds_recovered_rows_to_existing_output_without_seeding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """--append: the recovered judge-failure results are appended to an existing --output that already
+        holds the successes; the successes are NOT re-seeded and the file is not cleared."""
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0), self._success(1)],
+            failures=[self._failure(2)],
+        )
+        # --output is an existing file that already holds the two successes (e.g. the run's rollouts file).
+        out = tmp_path / "merged.jsonl"
+        self._write(out, [self._success(0), self._success(1)])
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, append=True, output_name="merged.jsonl")
+        )
+
+        # only the judge failure is re-verified and appended; nothing is re-seeded or cleared
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [2]
+        rows = self._read_jsonl(out)
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2]
+        assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(0) == 1  # not re-seeded
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in returned) == [0, 1, 2]
+
+    async def test_append_is_idempotent_on_rerun(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Re-running --append must not duplicate already-recovered rows (cache-drop against the output)."""
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0), self._mat(1)],
+            successes=[self._success(0)],
+            failures=[self._failure(1)],
+        )
+        out = tmp_path / "merged.jsonl"
+        self._write(out, [self._success(0)])
+        cfg = self._make_config(tmp_path, append=True, output_name="merged.jsonl")
+
+        self._patch(monkeypatch, [])
+        await RolloutReverificationHelper().run_from_config(cfg)
+        # second identical append run
+        dispatched2: list = []
+        self._patch(monkeypatch, dispatched2)
+        await RolloutReverificationHelper().run_from_config(cfg)
+
+        assert dispatched2 == []  # task 1 already recovered → nothing re-verified
+        rows = self._read_jsonl(out)
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1]
+        assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(1) == 1  # not duplicated
+
+    async def test_missing_failures_sidecar_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # inputs + successes exist, but no rollouts_failures.jsonl sidecar → recovery has nothing to read
+        self._write(tmp_path / "inputs.jsonl", [self._mat(0)])
+        self._write(tmp_path / "rollouts.jsonl", [self._success(0)])
+        self._patch(monkeypatch, [])
+
+        with pytest.raises(FileNotFoundError, match="rollouts_failures.jsonl"):
+            await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+    async def test_resume_incrementally_recovers_judge_failures_across_invocations(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """--judge-failed-only + --resume: a first pass recovers some judge failures while others re-fail;
+        a second --resume pass re-verifies ONLY the still-failing ones and completes the population.
+
+        The resume cache is the OUTPUT file (`recovered.jsonl` / `recovered_failures.jsonl`) — a different
+        name than the original --rollouts / auto-derived source sidecar — keyed on (task, rollout)."""
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(4)],
+            successes=[self._success(0)],
+            failures=[self._failure(1), self._failure(2), self._failure(3)],
+        )
+
+        # First pass: task 1 recovers; tasks 2 & 3 hit the judge again → routed to the reverify sidecar.
+        def first_pass(payload: dict) -> dict:
+            if payload[TASK_INDEX_KEY_NAME] == 1:
+                return {"reward": 1.0, "verdict": "correct"}
+            return {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed"}
+
+        dispatched1: list = []
+        self._patch_with_result(monkeypatch, dispatched1, first_pass)
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        # all three judge failures were attempted; output has seeded 0 + recovered 1; 2,3 in the sidecar
+        assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched1) == [1, 2, 3]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")) == [0, 1]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered_failures.jsonl")) == [
+            2,
+            3,
+        ]
+
+        # Second pass (--resume): only the still-failing 2,3 are retried (0,1 are cached in the output),
+        # and now succeed.
+        dispatched2: list = []
+        self._patch_with_result(monkeypatch, dispatched2, lambda _p: {"reward": 1.0, "verdict": "correct"})
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, resume_from_cache=True)
+        )
+
+        assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched2) == [2, 3]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in returned) == [0, 1, 2, 3]
+        # task 0 seeded exactly once across both invocations (idempotent seeding)
+        assert [r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")].count(0) == 1

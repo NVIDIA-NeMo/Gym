@@ -97,6 +97,9 @@ A benchmark/agent config's agent references a model server, so a model config mu
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
 | `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard (see below). Output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
+| `--resume` | Resume a partial run: skip rows already in the output (and its failures sidecar) and re-verify only the rest. |
+| `--judge-failed-only` | Recover only the rollouts whose judge call failed in the original run (see [Recover judge failures](#recover-judge-failures)). |
+| `--append` | With `--judge-failed-only`: append recovered rows to an existing `--output` instead of writing a fresh file. Mutually exclusive with `--overwrite`. |
 | `--disable-aggregation` | Skip aggregate-metrics computation. Use when sharding (see [Sharding](#sharding)). |
 
 Hydra overrides work the same as in other `gym eval` commands:
@@ -134,6 +137,38 @@ gym eval reverify \
   --output results/rollouts_reverified.jsonl \
   --force
 # Output written to: results/unsafe_rollouts_reverified.jsonl
+```
+
+## Recover judge failures
+
+When a run uses an LLM-as-judge verifier, the judge is a second model call made *after* the expensive policy inference. If that judge call fails (bad key, unreachable or rate-limited endpoint), the sample fails even though the policy `response` is already computed and stored in `<rollouts>_failures.jsonl`. `--judge-failed-only` re-runs the judge on **only** those rollouts, reusing the stored responses — no inference — and merges the recovered rows back with the ones that already scored, so the metrics match a clean run.
+
+- `--rollouts` is the run's **successful** rollouts (`rollouts.jsonl`); they are carried through unchanged.
+- The failed subset is read automatically from the sidecar next to it (`rollouts_failures.jsonl`), filtered to the rows tagged as judge failures.
+- The reverify-mode guard is skipped, so `--force` is not needed and the output is not prefixed with `unsafe_`.
+
+```bash
+gym eval reverify --judge-failed-only \
+  --config my_resources_server.yaml \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_recovered.jsonl
+```
+
+The output holds the successes plus the recovered rows. Re-running is idempotent, and `--resume` picks up any rows a fixed-but-still-flaky judge left behind.
+
+<Note>
+The judge model must be healthy (and configured the same as the original run) when you recover. Since the recovered rewards are computed now while the successes were scored during the original run, keep the verifier/judge config identical between the two so the merged metrics stay consistent.
+</Note>
+
+To add the recovered rows onto a file that already holds the successes — for example, to complete the run's own `rollouts.jsonl` in place — use `--append` instead of writing a fresh output:
+
+```bash
+gym eval reverify --judge-failed-only --append \
+  --config my_resources_server.yaml \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts.jsonl
 ```
 
 ## Sharding

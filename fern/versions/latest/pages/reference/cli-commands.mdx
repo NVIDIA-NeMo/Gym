@@ -696,6 +696,9 @@ Servers that report `unsupported` or `unknown` cause the command to abort unless
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
 | `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard; output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
+| `--resume` | Resume a partial run: skip rows already in the output and re-verify only the rest. |
+| `--judge-failed-only` | Recover only the rollouts whose judge call failed in the original run (from `<rollouts>_failures.jsonl`), reusing the stored responses. Skips the reverify-mode guard. |
+| `--append` | With `--judge-failed-only`: append recovered rows to an existing `--output` instead of a fresh file. Mutually exclusive with `--overwrite`. |
 | `--disable-aggregation` | Skip aggregate-metrics computation (use when combining shards with `gym eval aggregate` afterward). |
 
 ```bash
@@ -715,6 +718,13 @@ gym eval reverify \
     --inputs results/rollouts_materialized_inputs.jsonl \
     --rollouts results/rollouts.jsonl \
     --output results/rollouts_lenient.jsonl
+
+# Re-run the judge on only the rollouts whose judge failed (reuses stored responses; no inference)
+gym eval reverify --judge-failed-only \
+    --config my_resources_server.yaml \
+    --inputs results/rollouts_materialized_inputs.jsonl \
+    --rollouts results/rollouts.jsonl \
+    --output results/rollouts_recovered.jsonl
 
 # Force through an UNSUPPORTED or UNKNOWN server (output prefixed with unsafe_)
 gym eval reverify \
