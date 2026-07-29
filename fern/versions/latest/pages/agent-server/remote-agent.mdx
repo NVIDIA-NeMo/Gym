@@ -13,9 +13,9 @@ results land in the standard artifacts (`gym eval profile`, aggregation, and tra
 all work unchanged).
 
 ```
-collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──▶ your service
-                        │  1. seed_session                        (your model, your tools,
-                        │  4. verify (same session)                returns one trajectory)
+collector ──/run──▶ remote_agent (Gym) ──2. POST /v1/responses──▶ your service
+                        │  1. seed_session                           (your model, your tools,
+                        │  3. verify (same session)                   returns one trajectory)
                         ▼
                   resources server
 ```
