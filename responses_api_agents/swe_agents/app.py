@@ -269,6 +269,10 @@ class SWEBenchMetrics(BaseModel):
     patch_exists: Optional[bool] = None
     model_patch: Optional[str] = None
 
+    # Set by the worker when an episode failed due to infrastructure.
+    mask_sample: bool = False
+    failure_reason: Optional[str] = None
+
     # Failure-mode signals used to decide mask_sample downstream.
     agent_error_kind: Optional[str] = None
     agent_timed_out: Optional[bool] = None
@@ -2315,6 +2319,11 @@ class ActiveContainerCommand(BaseModel):
     watchdog_stats: Dict[str, Any] = Field(default_factory=dict)
 
 
+_CONTAINER_COMMAND_POLL_INTERVAL_S = 5.0
+_OPENHANDS_COMPLETION_MARKER = "Instances processed: 100%"
+_OPENHANDS_OUTPUT_GRACE_S = 60.0
+
+
 class RunOpenHandsAgent(BaseModel):
     config: SWEBenchWrapperInstanceConfig
 
@@ -2460,14 +2469,70 @@ class RunOpenHandsAgent(BaseModel):
             )
         return active_command
 
+    async def _terminate_lingering_process(self, active_command: ActiveContainerCommand) -> None:
+        """SIGKILL a container whose useful work is done but whose process lingers."""
+        if active_command.process.returncode is not None:
+            return
+        _kill_container_tree(active_command.process.pid)
+        try:
+            active_command.process.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(active_command.process.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
+
     async def _finish_container_command(
         self, active_command: ActiveContainerCommand, command: ExecuteContainerCommandArgs
     ) -> str:
         data_point = self.config.problem_info
+        terminated_after_completion = False
+        completion_marker_seen_at: Optional[float] = None
 
         try:
-            # Wait for completion with timeout
-            await asyncio.wait_for(active_command.process.communicate(), timeout=command.timeout)
+            # Wait for completion with timeout, polling so a finished-but-lingering
+            # agent can be rescued. This happens when a command is left running.
+            # Without the polling rescue, such episodes spend their full timeout
+            # and are reported as failures, despite having valid output files.
+            deadline = asyncio.get_running_loop().time() + command.timeout
+            while active_command.process.returncode is None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    await asyncio.wait_for(
+                        active_command.process.wait(),
+                        timeout=min(_CONTAINER_COMMAND_POLL_INTERVAL_S, remaining),
+                    )
+                except asyncio.TimeoutError:
+                    if command.mode != "agent":
+                        continue
+
+                    active_command.log_file.flush()
+                    log_text = active_command.log_file_path.read_text(errors="replace")
+                    if _OPENHANDS_COMPLETION_MARKER in log_text:
+                        now = asyncio.get_running_loop().time()
+                        if completion_marker_seen_at is None:
+                            completion_marker_seen_at = now
+                        pred_files = glob.glob(command.expected_file_pattern, recursive=True)
+                        complete_pred_files = []
+                        for pred_file in pred_files:
+                            try:
+                                json.loads(Path(pred_file).read_text().strip())
+                                complete_pred_files.append(pred_file)
+                            except (OSError, json.JSONDecodeError):
+                                continue
+                        if complete_pred_files:
+                            await self._terminate_lingering_process(active_command)
+                            terminated_after_completion = True
+                            break
+                        if now - completion_marker_seen_at >= _OPENHANDS_OUTPUT_GRACE_S:
+                            await self._terminate_lingering_process(active_command)
+                            raise RuntimeError(
+                                "OpenHands finished without output or with incomplete output; "
+                                "terminated its lingering container process group"
+                            )
         except asyncio.TimeoutError:
             if active_command.process.returncode is None:
                 _kill_container_tree(active_command.process.pid)
@@ -2488,7 +2553,7 @@ class RunOpenHandsAgent(BaseModel):
                 f"Peak tree RSS: {active_command.watchdog_stats.get('agent_peak_rss_mb')}MB."
             )
 
-        if active_command.process.returncode != 0:
+        if active_command.process.returncode != 0 and not terminated_after_completion:
             raise RuntimeError(
                 f"Command failed with return code {active_command.process.returncode}. "
                 f"Logs:\n{active_command.log_file_path.read_text(errors='replace')}"
@@ -2565,6 +2630,11 @@ class RunOpenHandsAgent(BaseModel):
             self._apply_watchdog_stats(metrics, openhands_active_command, mode="agent")
             metrics.openhands_run_time += time.time()
             metrics.patch_exists = False
+            # An agent command that died without producing output is an infrastructure failure,
+            # not a model failure; allow for it to be masked out of the gradient.
+            metrics.mask_sample = True
+            metrics.failure_reason = "agent_command_failure"
+            metrics.agent_error_kind = "other"
             metrics.final_eval_apptainer_spinup_time = None
             # Detect wall-clock agent timeout: openhands_run_time (elapsed since start)
             # reached or exceeded the configured swebench_agent_timeout.
@@ -3570,14 +3640,30 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
         oom_killed = bool(persisted_metrics.oom_killed)
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
+        failure_reason = persisted_metrics.failure_reason
         if (
-            (resolved_now and agent_error_kind in ("max_iteration", "context_window"))
+            persisted_metrics.mask_sample
+            or (resolved_now and agent_error_kind in ("max_iteration", "context_window"))
             or eval_timed_out
             or agent_timed_out
             or oom_killed
             or eval_oom_killed
         ):
             params.mask_sample = True
+            if not failure_reason:
+                if agent_timed_out:
+                    failure_reason = "agent_timeout"
+                elif eval_timed_out:
+                    failure_reason = "eval_timeout"
+                elif oom_killed:
+                    failure_reason = "agent_oom"
+                elif eval_oom_killed:
+                    failure_reason = "eval_oom"
+                else:
+                    failure_reason = f"agent_{agent_error_kind}"
+        # Persist the decision + reason next to the other metrics.
+        metrics_to_update["mask_sample"] = params.mask_sample
+        metrics_to_update["failure_reason"] = failure_reason
 
         trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools, prefix_msg_count = (

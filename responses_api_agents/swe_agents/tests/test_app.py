@@ -1598,6 +1598,64 @@ class TestRunOpenHandsAgent:
                 await agent._finish_container_command(active, cmd)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("output_state", "grace_s", "expect"),
+        [
+            # run_infer completed but produced NO output: after the grace the
+            # lingering container is killed and the episode fails loudly
+            # instead of burning the full timeout.
+            ("missing", 0.1, "raises"),
+            # Complete output exists but a command the model left running
+            # holds the container open: the episode is the success it is.
+            ("complete", 60.0, "returns"),
+            # Output exists but is still being written (not yet valid JSON):
+            # the grace window lets the writer finish rather than killing the
+            # container mid-flush.
+            ("late", 1.0, "returns"),
+        ],
+    )
+    async def test_finish_agent_rescues_or_fails_lingering_containers(
+        self, monkeypatch, output_state: str, grace_s: float, expect: str
+    ) -> None:
+        monkeypatch.setattr(swe_app, "_CONTAINER_COMMAND_POLL_INTERVAL_S", 0.05)
+        monkeypatch.setattr(swe_app, "_OPENHANDS_OUTPUT_GRACE_S", grace_s)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._make_agent(tmpdir)
+            agent.config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            expected_file = Path(tmpdir) / "output.jsonl"
+            writer = None
+            if output_state == "complete":
+                expected_file.write_text("{}")
+            elif output_state == "late":
+                expected_file.touch()
+
+                async def finish_write() -> None:
+                    await asyncio.sleep(0.15)
+                    expected_file.write_text("{}")
+
+                writer = asyncio.create_task(finish_write())
+
+            cmd = ExecuteContainerCommandArgs(
+                command="agent",
+                expected_file_pattern=str(expected_file),
+                mode="agent",
+                timeout=10,
+            )
+            active = await agent._start_container_command(
+                cmd,
+                "printf 'Instances processed: 100%%\\n'; sleep 100",
+            )
+            if expect == "raises":
+                with pytest.raises(RuntimeError, match="finished without output"):
+                    await agent._finish_container_command(active, cmd)
+            else:
+                result = await agent._finish_container_command(active, cmd)
+                assert result == str(expected_file)
+            if writer:
+                await writer
+            assert active.process.returncode is not None
+
+    @pytest.mark.asyncio
     async def test_finish_container_command_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)
@@ -2433,7 +2491,14 @@ class TestSWEBenchWrapperRun:
             tools=[],
             metadata={
                 "input": "[]",
-                "metrics": json.dumps({"resolved": False, "patch_exists": True}),
+                "metrics": json.dumps(
+                    {
+                        "resolved": False,
+                        "patch_exists": True,
+                        "mask_sample": True,
+                        "failure_reason": "agent_timeout",
+                    }
+                ),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
             },
         )
@@ -2459,6 +2524,8 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 0.0
+            assert result.mask_sample is True
+            assert result.failure_reason == "agent_timeout"
 
 
 ########################################
