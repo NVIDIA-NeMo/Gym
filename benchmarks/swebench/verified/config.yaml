@@ -1,0 +1,14 @@
+config_paths:
+- responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+mini_swe_agent_2_swebench_verified:
+  _inherit_from: mini_swe_agent_2
+  responses_api_agents:
+    mini_swe_agent_2:
+      datasets:
+        - name: swebench_verified
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
+          prepare_script: benchmarks/swebench/verified/prepare.py
+          num_repeats: 3
