@@ -55,7 +55,7 @@ Start the sampler and any supported model server. This example uses the generic 
 
 ```bash
 gym env start \
-  --config responses_api_agents/conversational_tool_use/domain_generation/configs/domain_generation.yaml \
+  --config responses_api_agents/conversational_tool_use/domain_generation/configs/conversational_tool_use_domain_generation.yaml \
   --model-type openai_model \
   --model-url "$MODEL_BASE_URL" \
   --model "$MODEL_NAME" \

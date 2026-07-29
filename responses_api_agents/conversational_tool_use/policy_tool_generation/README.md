@@ -44,7 +44,7 @@ Start the agent and its model servers:
 
 ```bash
 gym env start \
-  --config responses_api_agents/conversational_tool_use/policy_tool_generation/configs/policy_tool_generation.yaml \
+  --config responses_api_agents/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml \
   --model-type openai_model \
   --model-url "$MODEL_BASE_URL" \
   --model "$MODEL_NAME" \

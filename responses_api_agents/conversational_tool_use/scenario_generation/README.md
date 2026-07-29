@@ -36,7 +36,7 @@ Start the agent and its model server:
 
 ```bash
 gym env start \
-  --config responses_api_agents/conversational_tool_use/scenario_generation/configs/scenario_generation.yaml \
+  --config responses_api_agents/conversational_tool_use/scenario_generation/configs/conversational_tool_use_scenario_generation.yaml \
   --model-type openai_model \
   --model-url "$MODEL_BASE_URL" \
   --model "$MODEL_NAME" \

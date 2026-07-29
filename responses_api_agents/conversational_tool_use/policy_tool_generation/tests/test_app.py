@@ -192,7 +192,7 @@ async def test_public_responses_endpoint_transparently_forwards_body() -> None:
 
 
 def test_config_example_and_routes() -> None:
-    raw_config = OmegaConf.load(PACKAGE_DIR / "configs" / "policy_tool_generation.yaml")
+    raw_config = OmegaConf.load(PACKAGE_DIR / "configs" / "conversational_tool_use_policy_tool_generation.yaml")
     assert raw_config["policy_generation_model"]["_copy"] == "policy_model"
     assert raw_config["policy_tool_judge_model"]["_copy"] == "policy_model"
     inner = OmegaConf.to_container(

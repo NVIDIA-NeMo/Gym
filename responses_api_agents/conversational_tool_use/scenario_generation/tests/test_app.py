@@ -192,7 +192,7 @@ def test_prompt_and_schema_bytes() -> None:
 
 
 def test_config_and_example_data_contract() -> None:
-    raw_config = OmegaConf.load(PACKAGE_DIR / "configs" / "scenario_generation.yaml")
+    raw_config = OmegaConf.load(PACKAGE_DIR / "configs" / "conversational_tool_use_scenario_generation.yaml")
     assert raw_config["scenario_generation_model"]["_copy"] == "policy_model"
     inner = OmegaConf.to_container(
         raw_config["conversational_tool_use_scenario_generation"]["responses_api_agents"][

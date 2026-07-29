@@ -20,9 +20,9 @@ Start the model, generation agents, conversation agent, and simulation resource 
 
 ```bash
 gym env start \
-  --config responses_api_agents/conversational_tool_use/domain_generation/configs/domain_generation.yaml \
-  --config responses_api_agents/conversational_tool_use/policy_tool_generation/configs/policy_tool_generation.yaml \
-  --config responses_api_agents/conversational_tool_use/scenario_generation/configs/scenario_generation.yaml \
+  --config responses_api_agents/conversational_tool_use/domain_generation/configs/conversational_tool_use_domain_generation.yaml \
+  --config responses_api_agents/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml \
+  --config responses_api_agents/conversational_tool_use/scenario_generation/configs/conversational_tool_use_scenario_generation.yaml \
   --config resources_servers/conversational_tool_use_simulation/configs/conversational_tool_use_simulation.yaml \
   --model-type openai_model \
   --model-url "$MODEL_BASE_URL" \
