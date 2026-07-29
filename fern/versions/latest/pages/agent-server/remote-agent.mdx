@@ -164,5 +164,6 @@ name the failing URL or the timeout knob involved.
 - **Exposing your service on the public internet needs network-level trust.** Gym sends no
   credential on the `/v1/responses` call (`agent_base_url` rejects embedded credentials), so an
   internet-exposed service should sit behind a VPN, private network, IP allowlist, or
-  authenticating tunnel. Corporate egress proxies are not honored either — Gym's HTTP client
-  ignores `HTTP_PROXY` environment variables.
+  authenticating tunnel. Note that proxies configured via `HTTP_PROXY`/`HTTPS_PROXY` environment
+  variables are ignored (Gym's HTTP client does not read them), so a host that can only reach the
+  internet through such a proxy cannot reach your service.
