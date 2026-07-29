@@ -61,7 +61,22 @@ sandbox:
       # often run for many minutes.
       default_timeout_s: 1800.0
       user: null
+      # Per-HTTP-request timeout for the command. Leave null to derive it from
+      # the command timeout: the SDK applies this to the whole streaming RPC
+      # carrying the command's output, so a value below the command timeout
+      # tears the stream down mid-command.
       request_timeout_s: null
+      # Start commands detached and reattach by pid if the output stream drops.
+      # The command keeps running inside the sandbox when the stream dies, so a
+      # gateway rollout or proxy restart mid-command no longer fails it.
+      #
+      # Off by default because reattaching is lossy: the stream is live rather
+      # than replayed, so stdout/stderr cover only from the reattach onwards
+      # (exit codes are unaffected), and a command that finishes while
+      # disconnected cannot be recovered at all. Worth enabling for long
+      # commands on a busy or frequently-redeployed gateway.
+      background: false
+      reconnect_attempts: 2
     operations:
       # Retries for transient transport/5xx failures. Deterministic errors
       # (not-found, auth, invalid-argument, timeout) are never retried.

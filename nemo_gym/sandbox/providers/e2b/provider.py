@@ -162,6 +162,14 @@ class E2BExecConfig:
     default_timeout_s: float | None = 1800.0
     user: str | None = None
     request_timeout_s: float | None = None
+    # Start commands detached and reattach by pid if the output stream drops.
+    # The command keeps running inside the sandbox when the stream dies, so its
+    # exit code survives a control-plane restart that would otherwise fail the
+    # command outright. Off by default: reattaching loses the output emitted
+    # before it (see :meth:`_run_background`).
+    background: bool = False
+    # How many times to reattach before giving up.
+    reconnect_attempts: int = 2
 
 
 @dataclass(frozen=True)
@@ -421,6 +429,61 @@ class E2BProvider:
 
     # -------------------------------------------------------------- commands
 
+    async def _run_background(self, sandbox: Any, kwargs: dict[str, Any]) -> Any:
+        """Run a command detached, reattaching by pid if the stream drops.
+
+        ``commands.run(background=True)`` returns as soon as the process has
+        started, handing back its pid. The command then keeps running inside
+        the sandbox independently of the stream carrying its output, so losing
+        that stream -- a gateway rollout, a proxy restart, a network blip --
+        no longer destroys the command: reattach with ``commands.connect(pid)``
+        and the real exit code still arrives.
+
+        Two limits are inherent to reattaching, which is why this is opt-in:
+
+        * **Output before the reattach is lost.** The stream is live, not
+          replayed, so ``stdout``/``stderr`` cover only from the reattach on.
+          Exit codes are unaffected.
+        * **The process must still be running.** ``connect`` raises
+          not-found once it has exited, so a command that finishes during the
+          gap cannot be recovered.
+        """
+        e2b = _require_e2b_sdk()
+        handle = await sandbox.commands.run(**kwargs, background=True)
+        pid = getattr(handle, "pid", None)
+
+        # Never swallow these while reattaching: a non-zero exit and a command
+        # timeout are real outcomes, not transport failures.
+        terminal = tuple(
+            exc
+            for exc in (getattr(e2b, "CommandExitException", None), getattr(e2b, "TimeoutException", None))
+            if isinstance(exc, type)
+        )
+
+        for attempt in range(self._exec.reconnect_attempts + 1):
+            try:
+                return await handle.wait()
+            except terminal:
+                raise
+            except Exception as exc:  # noqa: BLE001 - transport failure; try to reattach
+                if pid is None or attempt >= self._exec.reconnect_attempts:
+                    raise
+                LOGGER.warning(
+                    "e2b command stream lost (pid=%s, attempt %d/%d): %s; reattaching",
+                    pid,
+                    attempt + 1,
+                    self._exec.reconnect_attempts,
+                    exc,
+                )
+                try:
+                    handle = await sandbox.commands.connect(pid, timeout=kwargs.get("timeout"))
+                except Exception as reconnect_exc:
+                    # Typically not-found: the command finished while we were
+                    # disconnected, so its result is gone. Report the original
+                    # transport failure, which explains what actually happened.
+                    raise exc from reconnect_exc
+        raise AssertionError("unreachable")  # pragma: no cover
+
     async def exec(
         self,
         handle: SandboxHandle,
@@ -450,7 +513,10 @@ class E2BProvider:
         timeout_exc = getattr(e2b, "TimeoutException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
         try:
-            result = await sandbox.commands.run(**kwargs)
+            if self._exec.background:
+                result = await self._run_background(sandbox, kwargs)
+            else:
+                result = await sandbox.commands.run(**kwargs)
         except Exception as exc:
             # A non-zero exit is a normal outcome, not a provider failure.
             if isinstance(exit_exc, type) and isinstance(exc, exit_exc):

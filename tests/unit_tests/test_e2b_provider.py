@@ -67,6 +67,22 @@ def _reject_connection_params(method: str, kwargs: dict) -> None:
         raise TypeError(f"{method}() got an unexpected keyword argument {leaked[0]!r}")
 
 
+class FakeCommandHandle:
+    """Background handle: `wait()` replays a scripted sequence of outcomes."""
+
+    def __init__(self, pid: int, outcomes: list) -> None:
+        self.pid = pid
+        self._outcomes = outcomes
+        self.waits = 0
+
+    async def wait(self):
+        self.waits += 1
+        outcome = self._outcomes.pop(0) if self._outcomes else FakeCommandResult(stdout="ok")
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
 class FakeCommands:
     def __init__(self, sandbox: "FakeSandbox") -> None:
         self._sandbox = sandbox
@@ -75,9 +91,17 @@ class FakeCommands:
         _reject_connection_params("Commands.run", kwargs)
         self._sandbox.exec_calls.append(kwargs)
         behaviour = self._sandbox.exec_behaviour
+        if kwargs.get("background"):
+            return FakeCommandHandle(self._sandbox.pid, self._sandbox.wait_outcomes)
         if isinstance(behaviour, Exception):
             raise behaviour
         return behaviour or FakeCommandResult(stdout="ok")
+
+    async def connect(self, pid, timeout=None, **kwargs):
+        self._sandbox.connect_calls.append({"pid": pid, "timeout": timeout})
+        if self._sandbox.connect_error is not None:
+            raise self._sandbox.connect_error
+        return FakeCommandHandle(pid, self._sandbox.wait_outcomes)
 
 
 class FakeFiles:
@@ -108,6 +132,10 @@ class FakeSandbox:
         self.killed = False
         self.running = True
         self.exec_behaviour = None
+        self.pid = 4242
+        self.wait_outcomes: list = []
+        self.connect_calls: list[dict] = []
+        self.connect_error = None
         self.commands = FakeCommands(self)
         self.files = FakeFiles(self)
         FakeSandbox.instances.append(self)
@@ -310,6 +338,93 @@ class TestConnectionParamScoping:
         handle = await provider.create(_spec())
         assert handle.raw.create_kwargs["api_key"] == "k"
         assert handle.raw.create_kwargs["api_url"] == "http://gw:8080"
+
+
+# --------------------------------------------------------------------------
+# Background exec -- survive a lost output stream
+# --------------------------------------------------------------------------
+
+
+class TestBackgroundExec:
+    """A dropped stream must not destroy a command that is still running.
+
+    `run(background=True)` returns once the process has started, so the command
+    outlives the stream carrying its output and can be reattached by pid.
+    """
+
+    @staticmethod
+    def _provider(**exec_opts) -> E2BProvider:
+        opts = {"background": True, **exec_opts}
+        return E2BProvider(create={"template": "base"}, exec=opts)
+
+    async def test_off_by_default(self) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "echo hi")
+        assert "background" not in handle.raw.exec_calls[0]
+
+    async def test_background_flag_is_sent(self) -> None:
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        result = await provider.exec(handle, "echo hi")
+        assert handle.raw.exec_calls[0]["background"] is True
+        assert result.return_code == 0
+
+    async def test_lost_stream_is_reattached_by_pid(self) -> None:
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        handle.raw.wait_outcomes = [
+            ConnectionError("peer closed connection without sending complete message body"),
+            FakeCommandResult(stdout="finished", exit_code=0),
+        ]
+        result = await provider.exec(handle, "make -j8")
+        assert handle.raw.connect_calls == [{"pid": 4242, "timeout": 1800.0}]
+        assert result.return_code == 0
+        assert result.stdout == "finished"
+
+    async def test_reattach_recovers_the_real_exit_code(self) -> None:
+        # The exit code is what a benchmark scores on, and it survives even
+        # though the output emitted before the reattach does not.
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        handle.raw.wait_outcomes = [ConnectionError("stream lost"), FakeCommandExit(7, stdout="", stderr="boom")]
+        result = await provider.exec(handle, "false")
+        assert result.return_code == 7
+
+    async def test_reattach_attempts_are_bounded(self) -> None:
+        provider = self._provider(reconnect_attempts=2)
+        handle = await provider.create(_spec())
+        handle.raw.wait_outcomes = [ConnectionError("a"), ConnectionError("b"), ConnectionError("c")]
+        with pytest.raises(ConnectionError):
+            await provider.exec(handle, "sleep 1")
+        assert len(handle.raw.connect_calls) == 2
+
+    async def test_non_zero_exit_is_not_treated_as_a_lost_stream(self) -> None:
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        handle.raw.wait_outcomes = [FakeCommandExit(3, stdout="out", stderr="err")]
+        result = await provider.exec(handle, "false")
+        assert result.return_code == 3
+        assert handle.raw.connect_calls == [], "a real exit must not trigger a reattach"
+
+    async def test_timeout_is_not_treated_as_a_lost_stream(self) -> None:
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        handle.raw.wait_outcomes = [FakeTimeout("timed out")]
+        with pytest.raises(TimeoutError):
+            await provider.exec(handle, "sleep 999")
+        assert handle.raw.connect_calls == []
+
+    async def test_process_gone_reports_the_original_failure(self) -> None:
+        # connect() raises not-found once the command has exited, so a command
+        # that finishes during the gap cannot be recovered; the transport
+        # failure is the useful error to surface.
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        handle.raw.wait_outcomes = [ConnectionError("stream lost")]
+        handle.raw.connect_error = FakeSandboxNotFound("process with pid 4242 not found")
+        with pytest.raises(ConnectionError, match="stream lost"):
+            await provider.exec(handle, "quick")
 
 
 # --------------------------------------------------------------------------
