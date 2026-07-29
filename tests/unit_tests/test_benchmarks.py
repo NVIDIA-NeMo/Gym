@@ -19,12 +19,19 @@ import pytest
 from omegaconf import OmegaConf
 from yaml import safe_load
 
+import nemo_gym.global_config
 from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 
 
 def _mock_global_config(config: dict = None):
     """Return an OmegaConf config without CLI/file parsing."""
     return OmegaConf.create(config or {})
+
+
+@pytest.fixture(autouse=True)
+def _mock_port_allocation(monkeypatch):
+    """Keep benchmark-discovery tests independent of socket availability."""
+    monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", lambda **_: 12345)
 
 
 class TestListBenchmarks:

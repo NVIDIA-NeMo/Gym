@@ -3359,7 +3359,7 @@ def _make_minimal_audio_model() -> VLLMModel:
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
     )
-    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 class TestAudioDataSplice:
@@ -3647,8 +3647,8 @@ class TestAudioPathSplice:
 # Exercises VLLMModel when ``use_completions_api`` is True: the chat
 # completions handler talks to vLLM's /v1/completions instead of
 # /v1/chat/completions, and a synthesized chat-completion shape is returned to
-# the caller. Covers rendering rules, hard-rejects, and the native
-# logprobs.tokens-based token-id extraction path.
+# the caller. Covers rendering rules, hard-rejects, and inline/fallback
+# token-ID extraction.
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -3671,7 +3671,10 @@ def _make_completions_backend_model(
         use_completions_api=True,
         extra_body=extra_body,
     )
-    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+    return VLLMModel(
+        config=config,
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
 
 
 class TestCompletionsBackendRawRender:
@@ -3816,6 +3819,7 @@ class TestCompletionsBackendBodyTranslation:
         assert out["stop"] == ["</s>"]
         # No token-id machinery requested.
         assert "logprobs" not in out
+        assert "return_token_ids" not in out
         assert "return_tokens_as_token_ids" not in out
         assert "prompt_logprobs" not in out
 
@@ -3828,6 +3832,21 @@ class TestCompletionsBackendBodyTranslation:
         model = _make_completions_backend_model()
         out = model._build_completion_body_from_chat_body({"top_logprobs": 5}, prompt="x")
         assert out["logprobs"] == 5
+
+    def test_response_format_passthrough(self) -> None:
+        model = _make_completions_backend_model()
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {"type": "object"},
+            },
+        }
+        out = model._build_completion_body_from_chat_body(
+            {"response_format": response_format},
+            prompt="x",
+        )
+        assert out["response_format"] == response_format
 
     def test_extra_body_does_not_override_request_fields(self) -> None:
         model = _make_completions_backend_model(extra_body={"top_p": 0.1, "min_p": 0.05})
@@ -3843,8 +3862,9 @@ class TestCompletionsBackendBodyTranslation:
         model = _make_completions_backend_model(return_token_id_information=True)
         out = model._build_completion_body_from_chat_body({}, prompt="x")
         assert out["logprobs"] == 0
+        assert out["return_token_ids"] is True
         assert out["return_tokens_as_token_ids"] is True
-        assert out["prompt_logprobs"] == 0
+        assert "prompt_logprobs" not in out
 
 
 class TestCompletionsBackendResponseTranslation:
@@ -3865,7 +3885,7 @@ class TestCompletionsBackendResponseTranslation:
         assert chat_completion.choices[0].finish_reason == "stop"
         assert chat_completion.usage.prompt_tokens == 5
 
-    def test_matched_stop_appended(self) -> None:
+    def test_matched_stop_not_appended(self) -> None:
         model = _make_completions_backend_model()
         chat_completion = model._completion_dict_to_chat_completion(
             {
@@ -3883,9 +3903,9 @@ class TestCompletionsBackendResponseTranslation:
                 ],
             }
         )
-        assert chat_completion.choices[0].message.content == "answer</s>"
+        assert chat_completion.choices[0].message.content == "answer"
 
-    def test_token_ids_extracted_from_logprobs(self) -> None:
+    def test_inline_token_ids_used(self) -> None:
         model = _make_completions_backend_model(return_token_id_information=True)
         chat_completion = model._completion_dict_to_chat_completion(
             {
@@ -3902,22 +3922,51 @@ class TestCompletionsBackendResponseTranslation:
                             "tokens": ["token_id:42", "token_id:43"],
                             "token_logprobs": [-0.1, -0.2],
                         },
+                        "prompt_token_ids": [6, 7, 8],
+                        "token_ids": [42, 43],
                     }
-                ],
-                "prompt_logprobs": [
-                    None,
-                    {"token_id:7": {"logprob": -1.0, "rank": 1}},
-                    {"token_id:8": {"logprob": -2.0, "rank": 1}},
                 ],
             }
         )
         msg = chat_completion.choices[0].message
         assert isinstance(msg, NeMoGymChatCompletionMessageForTraining)
-        # TokenIDLogProbMixin declares these as List[int]; Pydantic coerces our
-        # "42"/"7" string emissions, matching what the chat-completions path does.
         assert msg.generation_token_ids == [42, 43]
         assert msg.generation_log_probs == [-0.1, -0.2]
-        assert msg.prompt_token_ids == [7, 8]
+        assert msg.prompt_token_ids == [6, 7, 8]
+
+    def test_default_id_uses_chat_completion_prefix(self) -> None:
+        model = _make_completions_backend_model()
+        chat_completion = model._completion_dict_to_chat_completion(
+            {
+                "object": "text_completion",
+                "created": 123,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+            }
+        )
+        assert chat_completion.id == "chatcmpl-completions"
+
+    def test_missing_logprobs_raises(self) -> None:
+        model = _make_completions_backend_model(return_token_id_information=True)
+        with raises(RuntimeError, match="Cannot extract token IDs or logprobs"):
+            model._completion_dict_to_chat_completion(
+                {
+                    "id": "cmpl-1",
+                    "object": "text_completion",
+                    "created": 123,
+                    "model": "base-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "text": "ok",
+                            "finish_reason": "stop",
+                            "logprobs": None,
+                            "prompt_token_ids": [6, 7],
+                            "token_ids": [42],
+                        }
+                    ],
+                }
+            )
 
 
 class TestCompletionsBackendEndToEnd:
@@ -3979,7 +4028,7 @@ class TestCompletionsBackendEndToEnd:
 
     def test_responses_with_string_input_routes_to_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
-        monkeypatch.setattr("nemo_gym.base_responses_api_model.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         model = _make_completions_backend_model()
@@ -4011,6 +4060,95 @@ class TestCompletionsBackendEndToEnd:
         ]
         assert output_texts == [" 4"]
         assert captured["kwargs"]["prompt"] == "What is 2+2?"
+
+    def test_inline_token_ids_skip_tokenize(self) -> None:
+        import asyncio
+
+        model = _make_completions_backend_model(return_token_id_information=True)
+        fake_client, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "ok",
+                        "finish_reason": "stop",
+                        "logprobs": {
+                            "tokens": ["token_id:42"],
+                            "token_logprobs": [-0.1],
+                        },
+                        "prompt_token_ids": [6, 7],
+                        "token_ids": [42],
+                    }
+                ],
+            },
+        )
+        fake_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("create_tokenize must not be called when inline IDs are present")
+        )
+        model._resolve_client = lambda _request: fake_client  # type: ignore[assignment]
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        result = asyncio.run(model._chat_completions_via_completions_api(MagicMock(), body))
+
+        assert captured["kwargs"]["return_token_ids"] is True
+        fake_client.create_tokenize.assert_not_awaited()
+        message = result.choices[0].message
+        assert isinstance(message, NeMoGymChatCompletionMessageForTraining)
+        assert message.prompt_token_ids == [6, 7]
+        assert message.generation_token_ids == [42]
+
+    def test_missing_inline_token_ids_fall_back(self) -> None:
+        import asyncio
+
+        model = _make_completions_backend_model(
+            return_token_id_information=True,
+            extra_body={"add_special_tokens": False},
+        )
+        fake_client, _ = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "ok",
+                        "finish_reason": "stop",
+                        "logprobs": {
+                            "tokens": ["token_id:42", "token_id:43"],
+                            "token_logprobs": [-0.1, -0.2],
+                        },
+                    }
+                ],
+            },
+        )
+        fake_client.create_tokenize = AsyncMock(return_value={"tokens": [6, 7, 8]})
+        model._resolve_client = lambda _request: fake_client  # type: ignore[assignment]
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        result = asyncio.run(model._chat_completions_via_completions_api(MagicMock(), body))
+
+        fake_client.create_tokenize.assert_awaited_once_with(
+            model="base-model",
+            prompt="hello",
+            add_special_tokens=False,
+        )
+        message = result.choices[0].message
+        assert isinstance(message, NeMoGymChatCompletionMessageForTraining)
+        assert message.prompt_token_ids == [6, 7, 8]
+        assert message.generation_token_ids == [42, 43]
+        assert message.generation_log_probs == [-0.1, -0.2]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -4071,7 +4209,10 @@ def _make_chat_template_model(
         # injecting a _FakeTokenizer instance.
         chat_template_kwargs=chat_template_kwargs,
     )
-    model = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+    model = VLLMModel(
+        config=config,
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
     fake_tokenizer = _FakeTokenizer(has_chat_template=has_chat_template)
     model._chat_template_tokenizer = fake_tokenizer
     # Now flip the config flag — model_post_init has already run; we just
@@ -4108,6 +4249,20 @@ class TestCompletionsBackendChatTemplateRender:
             }
         )
         assert tokenizer.last_call["tools"] == tools
+
+    def test_image_block_rejected(self) -> None:
+        model, _ = _make_chat_template_model()
+        with raises(ValueError, match="only accepts text content blocks"):
+            model._render_messages_via_chat_template(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "image_url", "image_url": {"url": "x"}}],
+                        }
+                    ]
+                }
+            )
 
     def test_chat_template_kwargs_merged_with_metadata_override(self) -> None:
         model, tokenizer = _make_chat_template_model(
@@ -4169,7 +4324,10 @@ class TestCompletionsBackendChatTemplateRender:
             render_chat_template=True,
             tokenizer="some-instruct-model",
         )
-        VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
 
         assert captured["name_or_path"] == "some-instruct-model"
         assert captured["kwargs"].get("trust_remote_code") is True
@@ -4203,7 +4361,10 @@ class TestCompletionsBackendChatTemplateRender:
             render_chat_template=True,
             # tokenizer left unset
         )
-        VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+        VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
         assert captured["name_or_path"] == "base-model"
 
     def test_post_init_raises_when_loaded_tokenizer_has_no_chat_template(self, monkeypatch: MonkeyPatch) -> None:
@@ -4232,7 +4393,10 @@ class TestCompletionsBackendChatTemplateRender:
             render_chat_template=True,
         )
         try:
-            VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+            VLLMModel(
+                config=config,
+                server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+            )
         except RuntimeError as e:
             assert "no chat_template" in str(e)
         else:
