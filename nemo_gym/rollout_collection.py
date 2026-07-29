@@ -653,7 +653,17 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             # Strip heavyweight fields before sending, but preserve response.usage
             stripped = []
             for r in agent_result_list:
-                entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+                entry = {
+                    k: v
+                    for k, v in r.items()
+                    if k
+                    not in (
+                        "response",
+                        "responses_create_params",
+                        "ng_agent_observations",
+                        "ng_model_call_capture",
+                    )
+                }
                 usage = (r.get("response") or {}).get("usage")
                 if usage:
                     entry["response"] = {"usage": usage}
