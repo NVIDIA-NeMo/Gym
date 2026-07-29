@@ -23,6 +23,7 @@ from nemo_gym.sandbox.providers.openshell.provider import (
     OpenShellOperationsConfig,
     OpenShellProbeConfig,
     OpenShellProvider,
+    OpenShellProviderOptions,
 )
 
 
@@ -35,4 +36,5 @@ __all__ = [
     "OpenShellOperationsConfig",
     "OpenShellProbeConfig",
     "OpenShellProvider",
+    "OpenShellProviderOptions",
 ]

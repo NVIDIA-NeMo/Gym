@@ -250,9 +250,13 @@ sandbox = [
     "opensandbox>=0.1.9",
 
     # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
-    # Updated: Mon Jul 13, 2026 with openshell>=0.0.82
+    # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
+    # lifecycle calls. Upper bound <0.1: the SDK is alpha 0.0.x and the provider also relies on
+    # its generated protos (openshell._proto), so minor bumps can break call shapes; the
+    # SDK-conformance unit test guards the raise of this ceiling.
+    # Updated: Tue Jul 14, 2026 with openshell>=0.0.92,<0.1
     # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
-    "openshell>=0.0.82",
+    "openshell>=0.0.92,<0.1",
 
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
