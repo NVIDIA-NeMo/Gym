@@ -625,23 +625,31 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         return results
 
     @staticmethod
-    def _summarize_failures(failures_fpath: Path) -> Dict[str, Counter]:
-        """Per-agent counts of sidecar failure rows, keyed by ``_ng_failure_class``.
+    def _summarize_failures(failures_fpath: Path, succeeded: set) -> Dict[str, Counter]:
+        """Per-agent count of rollouts *excluded* from the metrics, by ``_ng_failure_class``.
 
-        Read from the sidecar, not this run's in-memory rows, so the summary also
-        covers attempts made by earlier (resumed) runs.
+        Counts rollouts, not attempts. The sidecar is append-only and outlives a fresh
+        run (only the main jsonl is unlinked), so a raw tally would double-count
+        retries and inherit a previous run's failures. Seeding ``seen`` with the
+        rollouts that did reach the main jsonl drops both those and any retry that
+        eventually succeeded, leaving exactly what the aggregate excluded.
         """
-        per_agent: Dict[str, Counter] = {}
         if not failures_fpath.exists():
-            return per_agent
+            return {}
+
+        per_agent: Dict[str, Counter] = {}
+        seen = set(succeeded)
         for line in failures_fpath.read_bytes().splitlines():
             try:
                 row = orjson.loads(line)
             except orjson.JSONDecodeError:
                 continue  # a kill mid-write can tear the last line; don't lose the metrics over it
+            key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if agent_name:
-                per_agent.setdefault(agent_name, Counter())[row.get(NG_FAILURE_CLASS_KEY) or "unknown"] += 1
+            if None in key or not agent_name or key in seen:
+                continue
+            seen.add(key)
+            per_agent.setdefault(agent_name, Counter())[row.get(NG_FAILURE_CLASS_KEY) or "unknown"] += 1
         return per_agent
 
     async def _call_aggregate_metrics(
@@ -658,7 +666,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         a run's headline metric can be read next to how many rollouts it excluded.
         Returns the file path.
         """
-        failures_by_agent = self._summarize_failures(failures_path_for(output_fpath))
+        succeeded = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results}
+        failures_by_agent = self._summarize_failures(failures_path_for(output_fpath), succeeded)
         if not results and not failures_by_agent:
             return None
 
