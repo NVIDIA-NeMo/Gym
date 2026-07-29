@@ -1,0 +1,106 @@
+# M5/M6: durable in-cluster OSWorld Omni-Nano-v3 domain gate.
+#
+# Runs `gym eval run` (CPU-only; inference is an external OpenAI-compatible endpoint via POLICY_BASE_URL)
+# on an x86 node, reaching:
+#   - the sandbox KVM pool cross-cluster via istio: opensandbox-cell-1-5.opensandbox-system:80
+#   - the Nemotron-Omni endpoint: whatever POLICY_BASE_URL points at
+# Code + per-server venvs are staged on the <YOUR_SHARED_PVC> PVC (no image build).
+#
+# Durability: results flush per-rollout to the PVC; backoffLimit + a resume-aware
+# entrypoint auto-adds --resume when results.jsonl exists, so a retried pod continues
+# only the remaining tasks. Set OSWORLD_INPUT / OSWORLD_RUN_NAME to pick a domain.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: osworld-osworld-omni-os-gate
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: osworld-osworld-m3
+    nrl-k8s/owner: <YOUR_USER>
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 43200 # 12h
+  template:
+    metadata:
+      labels:
+        app: osworld-osworld-omni-gate
+        nrl-k8s/owner: <YOUR_USER>
+      annotations:
+        nvidia.com/kai-scheduler-queue: backfill
+        # gym runs its own subprocess servers + reaches the istio sandbox mesh; keep the
+        # sidecar out of the way of that traffic like the pool pods do.
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: nemo-rl-endpoint-registry
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsUser: 0
+      volumes:
+        - name: <YOUR_SHARED_PVC>
+          persistentVolumeClaim:
+            claimName: <YOUR_SHARED_PVC>
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+      containers:
+        - name: main
+          image: ghcr.io/astral-sh/uv:python3.12-bookworm
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -Eeuo pipefail
+              exec bash <SHARED_PVC_MOUNT>/osworld-omni/nemo-gym/scripts/sandbox_runtime_poc/osworld-omni-gate.entrypoint.sh
+          env:
+            - name: HOME
+              value: /root
+            - name: OSWORLD_INPUT
+              value: resources_servers/osworld/data/test_nogdrive.jsonl
+            - name: OSWORLD_REPO_DIR
+              value: <SHARED_PVC_MOUNT>/osworld-omni/nemo-gym
+            - name: OSWORLD_RUNS_DIR
+              value: <SHARED_PVC_MOUNT>/osworld-omni/runs
+            - name: OSWORLD_RUN_NAME
+              value: m8-full-conc48
+            - name: OSWORLD_CONCURRENCY
+              value: "48"
+            - name: OPENSANDBOX_DOMAIN
+              value: opensandbox-cell-1-5.opensandbox-system:80
+            - name: OPENSANDBOX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: opensandbox-api-key
+                  key: api-key
+            - name: POLICY_BASE_URL
+              value: <YOUR_OPENAI_COMPATIBLE_ENDPOINT>/v1
+            - name: POLICY_MODEL_NAME
+              value: vllm_local
+            - name: POLICY_API_KEY
+              value: EMPTY
+            - name: OSWORLD_MODEL_NAME
+              value: vllm_local
+            - name: RAY_TMPDIR
+              value: /tmp
+            # OCR-based evaluators (compare_image_text) load EasyOCR; without a
+            # pre-populated cache every eval re-downloads the models (minutes,
+            # network-dependent). Stage the models once on the shared PVC:
+            #   EASYOCR_MODULE_PATH=<dir> python -c "import easyocr; easyocr.Reader(['en'], gpu=False)"
+            - name: EASYOCR_MODULE_PATH
+              value: <SHARED_PVC_MOUNT>/osworld-omni/easyocr-models
+            - name: UV_CACHE_DIR
+              value: /mnt/<YOUR_SHARED_PVC>/<YOUR_USER>/.uv-cache
+          volumeMounts:
+            - name: <YOUR_SHARED_PVC>
+              mountPath: /mnt/<YOUR_SHARED_PVC>
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "16"
+              memory: 32Gi
+            limits:
+              cpu: "32"
+              memory: 64Gi
