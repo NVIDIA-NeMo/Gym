@@ -200,6 +200,13 @@ dependencies = [
     # License: BSD 2-Clause https://pyasn1.readthedocs.io/en/latest/license.html
     "pyasn1>=0.6.4",
 
+    # pyarrow: columnar data library (transitive dependency via mlflow).
+    # mlflow caps pyarrow<25; versions >=22.0.0 ship cp314 Linux wheels so uv
+    # can install without building from source on Python 3.14.
+    # Updated: Mon Jul 29, 2026 with pyarrow>=22.0.0
+    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
+    "pyarrow>=22.0.0",
+
 
     # python-multipart: Streaming multipart parser (transitive dependency, pinned for security)
     # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22
