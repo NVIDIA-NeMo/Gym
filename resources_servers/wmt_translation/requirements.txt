@@ -6,6 +6,7 @@ setuptools>=70
 torch==2.12.0
 torchvision==0.27.0
 sacrebleu[ja,ko]>=2.4
+mecab-python3>=1.0.12
 unbabel-comet>=2.2
 # scipy is a transitive dep of unbabel-comet (via comet.models.metrics →
 # scipy.stats) but uv's resolution doesn't pull it automatically here —

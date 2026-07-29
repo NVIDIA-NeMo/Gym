@@ -93,7 +93,7 @@ jobs:
           export UV_CACHE_DIR="$HOME/.cache/uv"
           echo "UV_CACHE_DIR=$UV_CACHE_DIR" >> "$GITHUB_ENV"
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          sudo apt-get install -y --no-install-recommends git curl ca-certificates libsdl2-dev
           curl -LsSf "$UV_INSTALL_URL" | sh
           uv venv --python 3.14.6
           source .venv/bin/activate
