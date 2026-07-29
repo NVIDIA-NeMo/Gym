@@ -147,11 +147,12 @@ index 6207029..2fe4e1d 100644
 +                "top_p": 0.95,
 +            },
 +        }
++        provider_timeout_s = int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "120"))
 +        custom_provider = {
              "baseUrl": base_url,
              "apiKey": key_ref,
              "api": "openai-completions",
-+            "timeoutSeconds": int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "120")),
++            "timeoutSeconds": provider_timeout_s,
              "models": [
                  {
                      "id": model_id,
@@ -187,9 +188,11 @@ index 6207029..2fe4e1d 100644
 +                    if agent.get("id") == agent_id:
 +                        agent["model"] = agent_model
 +                        agent["params"] = runtime_params
++                        agent["timeoutSeconds"] = provider_timeout_s
 +                agents_cfg.setdefault("defaults", {}).setdefault("models", {})[agent_model] = {
 +                    "params": runtime_params
 +                }
++                agents_cfg.setdefault("defaults", {})["timeoutSeconds"] = provider_timeout_s
 +                plugin_entries = cfg.setdefault("plugins", {}).setdefault("entries", {})
 +                plugin_entries.setdefault("brave", {}).update(
 +                    {

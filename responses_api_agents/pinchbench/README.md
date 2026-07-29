@@ -54,7 +54,7 @@ small NVIDIA integration patch:
 | `sandbox_spec` | the per-task sandbox: `image` (`${sandbox_image}` — a `.sif` path or `docker://` ref built from `Dockerfile.benchmark`), `resources`, `ready_timeout_s`, … |
 | `sandbox_work_base` | writable, per-sandbox-isolated working mount (default `/sandbox`); run_task.sh puts the skill copy, `$HOME`, `$TMPDIR` and the benchmark run-root here |
 | `task_timeout_s` | per-task exec timeout |
-| `openclaw_provider_timeout_seconds` | optional OpenClaw provider request timeout in seconds; unset keeps OpenClaw's original 120s stream-idle default |
+| `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to both the provider timeout and agent timeout ceiling so values above OpenClaw's 120s default are effective |
 | `model_base_url` / `model_api_key` / `model_name` | policy model OpenClaw runs against |
 | `judge_model` / `judge_base_url` / `judge_api_key` | judge for hybrid / `llm_judge` tasks |
 | `max_tokens`, `context_window`, `max_concurrent`, `timeout_multiplier` | run tuning |
@@ -103,8 +103,10 @@ Each rollout returns `reward` (continuous `[0,1]`), `grading_type`, `grading_bre
 OpenClaw aborts a model request if the endpoint produces no tokens inside its stream-idle watchdog
 window. The default stays at OpenClaw's original 120s. For slow or highly concurrent endpoints, raise
 the provider timeout with `openclaw_provider_timeout_seconds`; the agent passes it as
-`PINCHBENCH_PROVIDER_TIMEOUT_SECONDS`, and the baked PinchBench patch writes it to OpenClaw's
-`models.providers.custom.timeoutSeconds`.
+`PINCHBENCH_PROVIDER_TIMEOUT_SECONDS`, and the direct-exec wrapper plus baked PinchBench patch write it
+to OpenClaw's `models.providers.custom.timeoutSeconds` and `agents.defaults.timeoutSeconds`. Both are
+needed: a provider timeout lower than the default shortens the watchdog, but a provider timeout above
+120s is still capped unless the agent timeout ceiling is raised too.
 
 ```yaml
 pinchbench_agent:
