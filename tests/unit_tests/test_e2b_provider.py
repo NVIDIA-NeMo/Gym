@@ -68,16 +68,24 @@ def _reject_connection_params(method: str, kwargs: dict) -> None:
 
 
 class FakeCommandHandle:
-    """Background handle: `wait()` replays a scripted sequence of outcomes."""
+    """Background handle: `wait()` replays a scripted sequence of outcomes.
 
-    def __init__(self, pid: int, outcomes: list) -> None:
+    Falls back to the sandbox's `exec_behaviour` so a test can script an
+    outcome once and have it apply in either exec mode.
+    """
+
+    def __init__(self, pid: int, outcomes: list, fallback=None) -> None:
         self.pid = pid
         self._outcomes = outcomes
+        self._fallback = fallback
         self.waits = 0
 
     async def wait(self):
         self.waits += 1
-        outcome = self._outcomes.pop(0) if self._outcomes else FakeCommandResult(stdout="ok")
+        if self._outcomes:
+            outcome = self._outcomes.pop(0)
+        else:
+            outcome = self._fallback or FakeCommandResult(stdout="ok")
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -92,7 +100,7 @@ class FakeCommands:
         self._sandbox.exec_calls.append(kwargs)
         behaviour = self._sandbox.exec_behaviour
         if kwargs.get("background"):
-            return FakeCommandHandle(self._sandbox.pid, self._sandbox.wait_outcomes)
+            return FakeCommandHandle(self._sandbox.pid, self._sandbox.wait_outcomes, behaviour)
         if isinstance(behaviour, Exception):
             raise behaviour
         return behaviour or FakeCommandResult(stdout="ok")
@@ -101,7 +109,7 @@ class FakeCommands:
         self._sandbox.connect_calls.append({"pid": pid, "timeout": timeout})
         if self._sandbox.connect_error is not None:
             raise self._sandbox.connect_error
-        return FakeCommandHandle(pid, self._sandbox.wait_outcomes)
+        return FakeCommandHandle(pid, self._sandbox.wait_outcomes, self._sandbox.exec_behaviour)
 
 
 class FakeFiles:
@@ -357,8 +365,16 @@ class TestBackgroundExec:
         opts = {"background": True, **exec_opts}
         return E2BProvider(create={"template": "base"}, exec=opts)
 
-    async def test_off_by_default(self) -> None:
+    async def test_on_by_default(self) -> None:
+        # Matches Harbor's own e2b environment, which always dispatches with
+        # background=True.
         provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "echo hi")
+        assert handle.raw.exec_calls[0]["background"] is True
+
+    async def test_can_be_turned_off(self) -> None:
+        provider = E2BProvider(create={"template": "base"}, exec={"background": False})
         handle = await provider.create(_spec())
         await provider.exec(handle, "echo hi")
         assert "background" not in handle.raw.exec_calls[0]

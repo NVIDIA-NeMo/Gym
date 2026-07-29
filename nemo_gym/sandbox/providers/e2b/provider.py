@@ -165,9 +165,13 @@ class E2BExecConfig:
     # Start commands detached and reattach by pid if the output stream drops.
     # The command keeps running inside the sandbox when the stream dies, so its
     # exit code survives a control-plane restart that would otherwise fail the
-    # command outright. Off by default: reattaching loses the output emitted
-    # before it (see :meth:`_run_background`).
-    background: bool = False
+    # command outright.
+    #
+    # On by default, matching Harbor's own e2b environment, which dispatches
+    # every command with ``background=True``. Set False to have the SDK block
+    # on the stream instead; note that reattaching is lossy (see
+    # :meth:`_run_background`).
+    background: bool = True
     # How many times to reattach before giving up.
     reconnect_attempts: int = 2
 

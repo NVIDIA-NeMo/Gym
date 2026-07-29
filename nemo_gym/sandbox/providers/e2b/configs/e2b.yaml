@@ -70,12 +70,14 @@ sandbox:
       # The command keeps running inside the sandbox when the stream dies, so a
       # gateway rollout or proxy restart mid-command no longer fails it.
       #
-      # Off by default because reattaching is lossy: the stream is live rather
-      # than replayed, so stdout/stderr cover only from the reattach onwards
-      # (exit codes are unaffected), and a command that finishes while
-      # disconnected cannot be recovered at all. Worth enabling for long
-      # commands on a busy or frequently-redeployed gateway.
-      background: false
+      # On by default, matching Harbor's own e2b environment, which dispatches
+      # every command with background=True.
+      #
+      # Reattaching is lossy, so it is a fallback rather than the happy path:
+      # the stream is live rather than replayed, so stdout/stderr cover only
+      # from the reattach onwards (exit codes are unaffected), and a command
+      # that finishes while disconnected cannot be recovered at all.
+      background: true
       reconnect_attempts: 2
     operations:
       # Retries for transient transport/5xx failures. Deterministic errors
