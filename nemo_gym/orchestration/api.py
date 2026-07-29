@@ -3,18 +3,21 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Discriminator, Tag, model_validator
 
 
+# Reject unknown fields on all config models so typos in YAML surface immediately.
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
 class HealthCheckConfig(_StrictModel):
     path: str = "/health"
+    # port defaults to None so VllmServiceConfig can fill it from service.port when omitted.
     port: int | None = None
     timeout_seconds: int = 60
 
 
 class BaseServiceConfig(_StrictModel):
     container: str
+    # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
 
@@ -34,6 +37,8 @@ class VllmServiceConfig(BaseModelServiceConfig):
 
     @model_validator(mode="after")
     def _default_health_check(self) -> "VllmServiceConfig":
+        # vLLM always exposes /health on its serving port; set it automatically
+        # so the sbatch script gets a health check without the user having to repeat the port.
         if self.health_check is None:
             self.health_check = HealthCheckConfig(port=self.port)
         elif self.health_check.port is None:
@@ -45,6 +50,7 @@ class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
 
 
+# Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.
 ServiceConfig = Annotated[
     Annotated[VllmServiceConfig, Tag("vllm")] | Annotated[RayServiceConfig, Tag("ray")],
     Discriminator("type"),
@@ -55,7 +61,9 @@ class NodePool(_StrictModel):
     partition: str
     nodes: int = 1
     ntasks_per_node: int = 1
+    # Structured field the executor uses for smart deployment decisions (e.g. multi-instance vLLM).
     gpus_per_node: int | None = None
+    # Arbitrary #SBATCH directives forwarded verbatim for options we don't model explicitly.
     extra_args: dict[str, str] = {}
 
 
@@ -66,10 +74,10 @@ class BaseComputeConfig(_StrictModel):
 class SlurmComputeConfig(BaseComputeConfig):
     type: Literal["slurm"]
     account: str
-    hostname: str | None = None
+    hostname: str | None = None  # None means we're already on the login node; skip SSH.
     walltime: str | None = None
     node_pools: dict[str, NodePool] = {}
-    extra_args: dict[str, str] = {}
+    extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
 
 
 ComputeConfig = Annotated[
@@ -79,23 +87,29 @@ ComputeConfig = Annotated[
 
 
 class BenchmarkRunConfig(_StrictModel):
+    # Hydra overrides forwarded to `gym eval prepare`. Flattened to +key=value tokens.
     prepare: dict[str, Any] = {}
+    # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
+    # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
 
 
 class GymInstallConfig(_StrictModel):
     repo: str = "https://github.com/NVIDIA-NeMo/gym"
-    ref: str
+    ref: str  # Git tag or commit hash.
 
 
 class DriverConfig(_StrictModel):
     container: str = "python:3.12"
     gym_install: GymInstallConfig | None = None
+    # Name of a service in `services:` to use as the policy model. When set, injects
+    # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
     benchmarks: dict[str, BenchmarkRunConfig]
 
 
 class JobConfig(_StrictModel):
+    # Remote base directory. Each submit creates a timestamped subdirectory here.
     output_path: str
 
 
@@ -142,6 +156,7 @@ class SubmitConfig(_StrictModel):
                         )
                     benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"
                     benchmark.run["policy_model_name"] = service.model
+                    # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"
 
         return self

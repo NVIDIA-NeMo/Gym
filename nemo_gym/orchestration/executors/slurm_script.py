@@ -32,6 +32,7 @@ def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benc
     lines.append(f"#SBATCH --account={compute.account}")
     if compute.walltime:
         lines.append(f"#SBATCH --time={compute.walltime}")
+    # --chdir makes relative paths (logs/, artifacts/) resolve correctly inside the job.
     lines.append(f"#SBATCH --chdir={remote_bench_dir}")
     for key, val in compute.extra_args.items():
         lines.append(f"#SBATCH --{key}={val}")
@@ -55,6 +56,9 @@ def _render_pool_directives(pool_name: str, pool: NodePool) -> list[str]:
 
 def _render_service_command(name: str, container: str, command: str) -> str:
     var = bash_var(name)
+    # --overlap lets this step share the allocation with other concurrent steps (driver + services).
+    # --no-container-mount-home avoids polluting the container with host home directory contents.
+    # PID is captured so the health check can detect early service death.
     return (
         f"# service: {name}\n"
         f"srun --overlap --no-container-mount-home --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"

@@ -47,6 +47,8 @@ class SSHConnection(Connection):
         self._master: subprocess.Popen | None = None
 
     def __enter__(self) -> "SSHConnection":
+        # Open a persistent master connection. Subsequent ssh/rsync calls reuse
+        # the same socket via ControlMaster=no, avoiding per-command handshakes.
         self._master = subprocess.Popen(
             [
                 "ssh",
@@ -54,7 +56,7 @@ class SSHConnection(Connection):
                 "-o", "ControlMaster=yes",
                 "-o", f"ControlPath={self._socket}",
                 "-o", "ControlPersist=yes",
-                "-N",
+                "-N",  # no remote command — just keep the tunnel open
                 self._hostname,
             ],
             stderr=subprocess.PIPE,
@@ -96,6 +98,8 @@ class SSHConnection(Connection):
         )
 
     def run(self, commands: list[str]) -> str:
+        # Send all commands as a single bash script over one SSH session to avoid
+        # repeated connection overhead for multi-benchmark submits.
         script = "\n".join(commands)
         return _checked(
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
