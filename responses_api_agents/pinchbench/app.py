@@ -118,6 +118,11 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     # Where per-task transcripts are archived (kept on disk for inspection, like
     # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
+    # Opt-in debug capture for rows whose temporary PinchBench work directory would
+    # otherwise be deleted before we can inspect the inner benchmark logs.
+    preserve_debug_artifacts: bool = False
+    debug_artifacts_dir: Optional[str] = None
+    preserve_debug_artifacts_on_success: bool = False
 
 
 # Failure-routing sentinels read by the rollout dispatcher (nemo_gym.rollout_collection).
@@ -629,6 +634,170 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 pass
         return events, archive
 
+    @staticmethod
+    def _safe_path_fragment(value: str) -> str:
+        return "".join(c if c.isascii() and (c.isalnum() or c in "._-") else "_" for c in value)[:180] or "unknown"
+
+    def _debug_artifacts_root(self) -> Path:
+        if self.config.debug_artifacts_dir:
+            return Path(self.config.debug_artifacts_dir)
+        return Path(self.config.transcripts_dir) / "_debug_artifacts"
+
+    @staticmethod
+    def _copy_debug_artifact(src: Path, dest_root: Path, base: Path) -> str:
+        rel = src.relative_to(base)
+        dest = dest_root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, dest)
+        return str(rel)
+
+    def _debug_result_summary(self, task_id: str, out_dir: Path) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        result_files = [p for p in out_dir.glob("*.json") if "transcript" not in p.name]
+        for result_path in sorted(result_files):
+            entry: dict[str, Any] = {"path": str(result_path.relative_to(out_dir))}
+            try:
+                data = json.loads(result_path.read_text())
+            except Exception as exc:  # noqa: BLE001 -- diagnostic path only
+                entry["read_error"] = f"{type(exc).__name__}: {exc}"
+                summaries.append(entry)
+                continue
+            task_summaries = []
+            for task in data.get("tasks") or []:
+                if not isinstance(task, dict) or task.get("task_id") != task_id:
+                    continue
+                task_summary = {
+                    key: task.get(key)
+                    for key in (
+                        "task_id",
+                        "status",
+                        "error",
+                        "error_type",
+                        "exception",
+                        "timed_out",
+                        "timeout",
+                        "execution_time",
+                        "duration",
+                        "num_steps",
+                        "step_count",
+                    )
+                    if key in task
+                }
+                grading = task.get("grading") if isinstance(task.get("grading"), dict) else {}
+                if grading:
+                    task_summary["grading_mean"] = grading.get("mean")
+                    run0 = (grading.get("runs") or [{}])[0]
+                    if isinstance(run0, dict):
+                        task_summary["grading_type"] = run0.get("grading_type")
+                        task_summary["grading_notes"] = run0.get("notes")
+                task_summaries.append(task_summary)
+            entry["matching_tasks"] = task_summaries
+            summaries.append(entry)
+        return summaries
+
+    def _should_preserve_debug_artifacts(
+        self,
+        result: dict,
+        transcript_events: list,
+        archive_path: str,
+        failure_exc: BaseException | None,
+    ) -> str:
+        if self.config.preserve_debug_artifacts_on_success:
+            return "preserve_debug_artifacts_on_success"
+        if failure_exc is not None:
+            return "exception"
+        if result.get("status") != "success":
+            return f"status={result.get('status')}"
+        if not transcript_events:
+            return "no_transcript_events"
+        if not archive_path:
+            return "no_transcript_archive"
+        return ""
+
+    def _maybe_preserve_debug_artifacts(
+        self,
+        *,
+        task_id: str,
+        out_dir: Path,
+        run_id: str,
+        result: dict,
+        transcript_events: list,
+        archive_path: str,
+        routing: dict,
+        failure_exc: BaseException | None,
+    ) -> str:
+        if not self.config.preserve_debug_artifacts:
+            return ""
+        reason = self._should_preserve_debug_artifacts(result, transcript_events, archive_path, failure_exc)
+        if not reason:
+            return ""
+
+        safe_task = self._safe_path_fragment(task_id)
+        dest_root = self._debug_artifacts_root() / f"{safe_task}_{run_id}"
+        copied: list[str] = []
+        copy_errors: list[str] = []
+        candidates: list[Path] = [
+            out_dir / "out.tgz",
+            out_dir / "run.log",
+            out_dir / "gateway.log",
+            out_dir / "0001_transcripts",
+            out_dir / "sandbox" / "apptainer.stdout.log",
+            out_dir / "sandbox" / "apptainer.stderr.log",
+            out_dir / "sandbox" / "out" / "out.tgz",
+            out_dir / "sandbox" / "out" / "run.log",
+            out_dir / "sandbox" / "out" / "gateway.log",
+            out_dir / "sandbox" / "out" / "0001_transcripts",
+        ]
+        candidates.extend(p for p in out_dir.glob("*.json") if "transcript" not in p.name)
+        candidates.extend(out_dir.glob("*.log"))
+        sandbox_out = out_dir / "sandbox" / "out"
+        if sandbox_out.exists():
+            candidates.extend(p for p in sandbox_out.glob("*.json") if "transcript" not in p.name)
+            candidates.extend(sandbox_out.glob("*.log"))
+
+        for src in candidates:
+            if not src.exists():
+                continue
+            try:
+                copied.append(self._copy_debug_artifact(src, dest_root, out_dir))
+            except Exception as exc:  # noqa: BLE001 -- diagnostic path only
+                copy_errors.append(f"{src}: {type(exc).__name__}: {exc}")
+
+        meta = {
+            "task_id": task_id,
+            "run_id": run_id,
+            "reason": reason,
+            "out_dir": str(out_dir),
+            "result": {
+                "reward": result.get("reward"),
+                "status": result.get("status"),
+                "grading_type": result.get("grading_type"),
+                "notes": result.get("notes"),
+            },
+            "transcript_event_count": len(transcript_events),
+            "archived_to": archive_path,
+            "routing": routing,
+            "failure": (
+                {"type": type(failure_exc).__name__, "message": str(failure_exc)} if failure_exc is not None else None
+            ),
+            "result_files": self._debug_result_summary(task_id, out_dir),
+            "copied": sorted(set(copied)),
+            "copy_errors": copy_errors,
+        }
+        try:
+            dest_root.mkdir(parents=True, exist_ok=True)
+            (dest_root / "debug_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), "utf-8")
+            return str(dest_root)
+        except Exception as exc:  # noqa: BLE001 -- never let diagnostics change scoring/routing
+            print(
+                f"[pinchbench-debug-artifacts] failed for {task_id}: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            return ""
+
     def _empty_response(self, task_id: str) -> NeMoGymResponse:
         """Minimal valid response for the failure path, so /run can return 200
         with reward 0 (never 500) even when no transcript was ever produced."""
@@ -666,6 +835,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         response = self._empty_response(task_id)
         transcript_events: list = []
         archive_path = ""
+        debug_artifacts_path = ""
+        failure_exc: BaseException | None = None
         try:
             async with self._sem:
                 await self._run_in_sandbox(task_id, out_dir)  # one sandbox per task
@@ -687,8 +858,27 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 routing[NG_NO_PERSIST_KEY] = True
             elif failure_class == "timeout_exceeded":
                 routing[NG_TERMINAL_KEY] = True
+            failure_exc = exc
         finally:
+            debug_artifacts_path = self._maybe_preserve_debug_artifacts(
+                task_id=task_id,
+                out_dir=out_dir,
+                run_id=run_id,
+                result=result,
+                transcript_events=transcript_events,
+                archive_path=archive_path,
+                routing=routing,
+                failure_exc=failure_exc,
+            )
             shutil.rmtree(out_dir, ignore_errors=True)
+
+        raw_rollout = {
+            "transcript_event_count": len(transcript_events),
+            "archived_to": archive_path,
+            "run_id": run_id,
+        }
+        if debug_artifacts_path:
+            raw_rollout["debug_artifacts_to"] = debug_artifacts_path
 
         return PinchBenchVerifyResponse(
             **record,
@@ -699,11 +889,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             grading_breakdown=result["breakdown"],
             grading_notes=result["notes"],
             status=result["status"],
-            raw_rollout={
-                "transcript_event_count": len(transcript_events),
-                "archived_to": archive_path,
-                "run_id": run_id,
-            },
+            raw_rollout=raw_rollout,
             **routing,
         )
 

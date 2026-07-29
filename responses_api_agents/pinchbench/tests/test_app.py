@@ -19,6 +19,7 @@ fast and offline.
 """
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -247,6 +248,59 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     assert resp.status == "error"
     assert resp.task_id == "task_x"
     assert "sandbox exploded" in resp.grading_notes
+
+
+@pytest.mark.asyncio
+async def test_debug_artifacts_preserved_on_failure(tmp_path, monkeypatch):
+    agent = make_agent(
+        work_root=str(tmp_path / "work"),
+        transcripts_dir=str(tmp_path / "arch"),
+        preserve_debug_artifacts=True,
+    )
+
+    async def boom(task_id, out_dir):
+        sandbox_out = out_dir / "sandbox" / "out"
+        sandbox_out.mkdir(parents=True)
+        (out_dir / "sandbox" / "apptainer.stdout.log").write_text("apptainer stdout")
+        (out_dir / "sandbox" / "apptainer.stderr.log").write_text("apptainer stderr")
+        (sandbox_out / "run.log").write_text("inner run log")
+        (sandbox_out / "gateway.log").write_text("inner gateway log")
+        raise RuntimeError("sandbox exploded")
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", boom)
+
+    resp = await agent.run(body=_run_body())
+    debug_path = resp.raw_rollout["debug_artifacts_to"]
+    debug_dir = tmp_path / "arch" / "_debug_artifacts"
+    assert str(debug_dir) in debug_path
+    assert (Path(debug_path) / "sandbox" / "out" / "run.log").read_text() == "inner run log"
+    meta = json.loads((Path(debug_path) / "debug_meta.json").read_text())
+    assert meta["reason"] == "exception"
+    assert meta["failure"]["type"] == "RuntimeError"
+    assert "sandbox/out/gateway.log" in meta["copied"]
+    assert not any((tmp_path / "work").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_debug_artifacts_preserved_for_success_without_transcript(tmp_path, monkeypatch):
+    agent = make_agent(
+        work_root=str(tmp_path / "work"),
+        transcripts_dir=str(tmp_path / "arch"),
+        preserve_debug_artifacts=True,
+    )
+
+    async def ok_without_transcript(task_id, out_dir):
+        _write_result(out_dir, task_id, 0.5, "automated", {"ok": True}, "graded without transcript")
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", ok_without_transcript)
+
+    resp = await agent.run(body=_run_body())
+    debug_path = resp.raw_rollout["debug_artifacts_to"]
+    meta = json.loads((Path(debug_path) / "debug_meta.json").read_text())
+    assert resp.reward == pytest.approx(0.5)
+    assert meta["reason"] == "no_transcript_events"
+    assert meta["result"]["status"] == "success"
+    assert meta["result_files"][0]["matching_tasks"][0]["grading_notes"] == "graded without transcript"
 
 
 # Failure routing: rows without `_ng_failure_class` land in the main jsonl, where
