@@ -2155,7 +2155,9 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             print(f"Installing upstream opencode-ai at {setup_dir}...", flush=True)
             setup_dir.mkdir(parents=True, exist_ok=True)
             install_dir.mkdir(parents=True, exist_ok=True)
-            self._run_setup_command(f"BUN_INSTALL={bun_dir} curl -fsSL https://bun.sh/install | bash")
+            # The env assignment must ride the pipeline stage that runs the
+            # installer: `VAR=x cmd1 | cmd2` binds VAR to cmd1 only.
+            self._run_setup_command(f"curl -fsSL https://bun.sh/install | BUN_INSTALL={bun_dir} bash")
             self._run_setup_command(f"cd {install_dir} && PATH={bun_dir}/bin:$PATH bun add opencode-ai")
             return setup_dir
 
@@ -3139,6 +3141,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         _validate_switchyard_config(self.config)
         # Spawned per-run Switchyard instances, keyed by agent_run_id; reaped in run().
         self._switchyard_procs: Dict[str, Process] = {}
+        # Round-robin counter for distributing spawns across generation backends.
+        self._switchyard_spawn_count: int = 0
 
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
@@ -4208,6 +4212,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         rl_log_dir = params.persistent_dir / "switchyard_traces"
         rl_log_dir.mkdir(parents=True, exist_ok=True)
         log_path = params.persistent_dir / "switchyard.log"
+
+        # Distribute spawns across all generation backends round-robin so no
+        # single vLLM server becomes a bottleneck when many rollouts run in parallel.
+        _cfg = OmegaConf.create(shlex.split(self.config.ng_global_config_dict_str)[0])
+        _urls = [u for u in (_cfg.get("policy_base_url") or []) if u]
+        _backend_url = _urls[self._switchyard_spawn_count % len(_urls)] if _urls else None
+        self._switchyard_spawn_count += 1
+        spawn_env = {**os.environ, "SWITCHYARD_VLLM_BASE_URL": _backend_url} if _backend_url else None
+
         with log_path.open("w") as log_file:
             process = await asyncio.create_subprocess_exec(
                 "switchyard",
@@ -4222,6 +4235,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 str(port),
                 stdout=log_file,
                 stderr=log_file,
+                env=spawn_env,
             )
         self._switchyard_procs[params.agent_run_id] = process
         try:
