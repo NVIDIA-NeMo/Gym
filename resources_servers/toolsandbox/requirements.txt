@@ -1,0 +1,33 @@
+# ToolSandbox is an opt-in benchmark: its (heavy) dependencies are NOT part of
+# the base nemo-gym install. They are installed only when this server's venv is
+# built (ng_run / ng_test create a per-server .venv from this file), so nothing
+# here leaks into gym/pyproject.toml.
+-e nemo-gym[dev] @ ../../
+
+# Vendored apple/ToolSandbox core (see tool_sandbox/): sandbox state,
+# milestone scoring, scenarios, message/tool conversion.
+attrs>=23.2.0            # MIT
+# polars-lts-cpu (not polars): the default polars wheel is compiled with modern
+# SIMD (AVX2+) and segfaults under QEMU emulation (the suite image is built
+# --platform linux/amd64, often on Apple Silicon) and on older CPUs. The
+# -lts-cpu build targets baseline x86-64, imports as the same `polars` module,
+# and runs correctly both at bake time and on the x86 cluster.
+polars-lts-cpu>=1.0.0    # MIT
+numpy>=1.26.0            # BSD-3-Clause
+networkx>=3.0            # BSD-3-Clause (milestone/minefield DAGs)
+rouge-score>=0.1.2       # Apache-2.0 (ROUGE-L similarity)
+rapidfuzz>=3.0.0         # MIT (fuzzy string matching)
+dill>=0.3.7              # BSD-3-Clause (sandbox console serialization)
+StrEnum>=0.4.15          # MIT (string enums used by the vendored code)
+tqdm>=4.66.0             # MPL-2.0/MIT (scenario playback progress)
+tenacity>=9.1.4          # Apache-2.0 (user-sim retry)
+requests>=2.31.0         # Apache-2.0 (RapidAPI-backed search tools)
+
+# Built-in sandbox tools (contacts/messaging/reminders/settings/utilities),
+# executed inside the sandbox REPL when the agent calls a tool.
+phonenumbers>=8.13.0     # Apache-2.0
+geopy>=2.4.0             # MIT
+holidays>=0.40           # MIT
+pint>=0.23               # BSD-3-Clause
+ccy>=1.4.0               # BSD-3-Clause
+decorator>=5.1.0         # BSD-2-Clause
