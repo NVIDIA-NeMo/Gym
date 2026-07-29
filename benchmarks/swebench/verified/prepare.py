@@ -26,6 +26,8 @@ def prepare() -> Path:
                 "responses_create_params": {
                     "input": [],
                 },
+                "subset": "verified",
+                "split": "test",
             }
             fout.write(json.dumps(row) + "\n")
 
