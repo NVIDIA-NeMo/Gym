@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import hashlib
 import json
 import os
@@ -805,7 +804,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 if runtime_env.get("env_vars"):
                     runner = runner.options(runtime_env=runtime_env)
                 future = runner.remote(run_mini_swe_with_sandbox, params)
-                result = await asyncio.to_thread(ray.get, future)
+                result = await future
                 result = result[instance_id]
                 input_messages = result["input_messages"]
                 response_output = result["response_output"]
