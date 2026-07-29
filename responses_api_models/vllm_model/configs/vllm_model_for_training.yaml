@@ -7,3 +7,14 @@ policy_model:
       model: ${policy_model_name}
       return_token_id_information: true
       uses_reasoning_parser: true
+      # On-policy training: force generation to the sampling params the policy is optimized under,
+      # overriding whatever an external harness requests, so captured rollouts stay on-policy. The
+      # integrating training framework supplies these via the generic keys below (Gym does not know
+      # any framework); the defaults are standard on-policy sampling when a framework sets nothing.
+      # top_k is pinned to -1 (disabled) rather than to a framework value: a training worker
+      # that constrains top_k rejects anything else outright, and a harness that sends its own
+      # top_k is the common way a request arrives with one set.
+      sampling_overrides:
+        temperature: ${oc.select:policy_generation_temperature,1.0}
+        top_p: ${oc.select:policy_generation_top_p,1.0}
+        top_k: ${oc.select:policy_generation_top_k,-1}
