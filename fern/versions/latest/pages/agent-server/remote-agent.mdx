@@ -1,6 +1,6 @@
 ---
 title: "Drive a Remote Agent"
-description: "Evaluate an agent service you host yourself — one endpoint, verification stays in Gym"
+description: "Evaluate an agent service you host yourself — Gym drives the loop, your service is called like a model"
 position: 3
 ---
 
@@ -8,37 +8,80 @@ position: 3
 
 The `remote_agent` server lets an agent that runs as **its own HTTP service** — in your repo, on
 your infrastructure — be driven by standard rollout collection. Your service implements one
-endpoint; Gym keeps the session, the verification, and the task answer keys on its side, and your
-results land in the standard artifacts (`gym eval profile`, aggregation, and training pipelines
-all work unchanged).
+endpoint and is **called like a model**: it receives the conversation so far and returns what it
+wants to do next. Gym runs the loop, executes environment tools, holds the session, and verifies.
+Your results land in the standard artifacts (`gym eval profile`, aggregation, and training
+pipelines all work unchanged).
 
 ```
-collector ──/run──▶ remote_agent (Gym) ──2. POST /v1/responses──▶ your service
-                        │  1. seed_session                           (your model, your tools,
-                        │  3. verify (same session)                   returns one trajectory)
+collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──▶ your service
+                        │      ▲                                 (returns tool asks
+                        │      └── tool results appended,         or a final answer)
+                        │          loop repeats
                         ▼
-                  resources server
+                  resources server (seed / tools / verify — never exposed to your service)
 ```
 
-## The contract for your service
+## Who does what
 
-Implement `POST {agent_base_url}/v1/responses`:
+**Gym is responsible for:**
 
-| | |
+1. Seeding a fresh environment session per rollout and holding its cookies — session state
+   and the task's answer key (`verifier_metadata`) never reach your service.
+2. Driving the loop: calling your service, executing the tool calls it asks for against the
+   environment, appending the results, and calling again.
+3. All failure handling: bounded connect retries, per-call and whole-rollout timeouts, and
+   converting every failure into a reward-0 row in the failures sidecar (a bad rollout never
+   crashes the collection run).
+4. Verifying the finished trajectory and reporting the reward.
+
+**Your service is responsible for:**
+
+1. Implementing `POST {agent_base_url}/v1/responses` and answering every call with a valid
+   Responses API object (the schema is validated strictly; an invalid object is a terminal,
+   non-retried failure).
+2. Deciding what to do next on each call: ask for environment tools, run its own internal
+   tools, or finish with an assistant message.
+3. Being callable N times per rollout. Each call carries the full conversation so far, so a
+   stateless service needs nothing extra; if you want per-rollout state, set a cookie — Gym
+   echoes your cookies back on every subsequent call of the same rollout.
+4. Reporting `usage` (or omitting it entirely — allowed, but your token metrics are empty).
+
+## The contract, exactly
+
+**Every request you receive** is the task's `responses_create_params` with the conversation
+accumulated in `input`:
+
+1. `input` — the task messages, plus (from turn 2 onward) everything so far: your previous
+   output items and one `function_call_output` per tool call Gym executed for you.
+2. `tools` — the tool schemas this environment serves, verbatim from the dataset row. These
+   are the only tools you may ask Gym to execute.
+3. Your own cookies from earlier calls of this rollout, echoed back.
+
+**Every response you return** is one Responses API object whose `output` decides the next step:
+
+| You return | Gym does |
 |---|---|
-| **Request body** | The task's `responses_create_params` — the input messages and any declared tool schemas. Never `verifier_metadata` (the answer key stays inside Gym). |
-| **Request headers** (only with `tools_mode: forward`) | `X-NeMo-Gym-Resources-Server-Url` and `X-NeMo-Gym-Session-Cookie` — see [Gym-hosted tools](#gym-hosted-tools-tools_mode). |
-| **Response** | One **finished** Responses API object: run your whole loop (any number of model turns and tool calls) and return the merged trajectory, ending with an assistant message. Populate the full `usage` object — `input_tokens`, `output_tokens`, `total_tokens`, `input_tokens_details: {cached_tokens}`, `output_tokens_details: {reasoning_tokens}` — or omit `usage` entirely (allowed; token metrics are then empty). A partial `usage` object fails validation. |
+| One or more `function_call` items **without** a matching `function_call_output` (same `call_id`, same response) | Executes each against the resources server, appends each result as a `function_call_output`, and calls you again. |
+| `function_call` + `function_call_output` **pairs** (same `call_id`) | Nothing — that's your own internal tool record; it passes into the trajectory untouched. |
+| An assistant `message` and no unpaired calls | The rollout is done: Gym merges the full conversation into one trajectory and verifies it. |
+| `incomplete_details` set | The loop stops and the trajectory so far is verified. |
 
-<Note>
-The response is validated strictly against the Responses API schema. An invalid object is
-recorded as a terminal failure (a schema bug will not fix itself on retry) and never reaches the
-verifier.
-</Note>
+**Expectations and edge semantics:**
+
+1. Ask only for tools the request's `tools` declared. An unknown tool name is not an error —
+   Gym sends the resources server's error text (e.g. a 404) back to you as that call's
+   `function_call_output`, and the rollout continues.
+2. Malformed `arguments` (not valid JSON) likewise come back to you as an error output,
+   never a crash.
+3. Never return an unpaired `function_call` for a tool you already executed yourself —
+   unpaired means "Gym, run this."
+4. One rollout = one conversation. Requests of the same rollout share your cookies;
+   different rollouts (including retries of the same task) start clean.
 
 ## Quickstart
 
-A minimal service (FastAPI, ~20 lines):
+A minimal service — ask for a tool once, then answer (FastAPI, ~25 lines):
 
 ```python
 from fastapi import FastAPI, Request
@@ -48,13 +91,17 @@ app = FastAPI()
 @app.post("/v1/responses")
 async def responses(request: Request):
     params = await request.json()
-    answer = my_agent_loop(params["input"])   # your model, your tools, your turns
+    tool_results = [i for i in params["input"] if i.get("type") == "function_call_output"]
+    if not tool_results:                      # turn 1: ask Gym to run a tool
+        output = [{"type": "function_call", "id": "fc_1", "call_id": "c1",
+                   "name": params["tools"][0]["name"], "arguments": "{}"}]
+    else:                                     # turn 2: answer from the tool result
+        output = [{"type": "message", "role": "assistant", "status": "completed", "id": "msg_1",
+                   "content": [{"type": "output_text", "text": tool_results[-1]["output"],
+                                "annotations": []}]}]
     return {
         "id": "my-service", "created_at": 0.0, "model": "my-model", "object": "response",
-        "output": [{
-            "type": "message", "role": "assistant", "status": "completed", "id": "msg_0",
-            "content": [{"type": "output_text", "text": answer, "annotations": []}],
-        }],
+        "output": output,
         "parallel_tool_calls": False, "tools": [], "tool_choice": "auto",
         "usage": {
             "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
@@ -75,7 +122,6 @@ remote_agent:
       resources_server:
         type: resources_servers
         name: my_env_resources_server            # the top-level key of that environment's config
-      tools_mode: refuse
 ```
 
 ```bash
@@ -88,75 +134,34 @@ gym eval run --no-serve +agent_name=remote_agent \
 
 | Field | Default | What it does |
 |---|---|---|
-| `agent_base_url` | required | Your service's base URL. Validated: `http(s)` only, no query string or fragment, no embedded credentials. |
-| `resources_server` | required | The environment that seeds and verifies each rollout. Swap benchmarks by changing this ref — your service doesn't change. |
-| `tools_mode` | `refuse` | Who serves the tools a dataset declares — see below. |
-| `concurrency` | `32` | Maximum rollouts in flight against your service, enforced server-side. This is the *owner's* bound: it caps total pressure from every collection run calling into this agent process. (A second, independently started Gym stack has its own bound.) |
-| `remote_responses_timeout_secs` | `1800` | Wallclock bound on one `/v1/responses` call. Raise it if your rollouts legitimately run longer than 30 minutes. |
-| `run_timeout_secs` | `2100` | Bound on a whole `/run` (seed + your service + verify), started after the concurrency slot is acquired — queue wait doesn't count. |
-| `advertised_resources_url` | unset | With `tools_mode: forward`: the resources-server URL told to your service. The default advertises the bind address (typically `127.0.0.1`), which another machine cannot reach — set this when your service runs off-host. It changes only the header string; making the address route to Gym is your infrastructure's job. |
-
-## Gym-hosted tools (`tools_mode`)
-
-- **`refuse`** (default) — tool-declaring tasks are rejected up front with a clear, terminal error.
-  Use this whenever your tasks don't declare Gym-hosted tools — text-only benchmarks, tasks whose
-  tools all live inside your own service — which is the common case. Tool-free rows run completely
-  normally under `refuse`; the guard only fires if a row *declares* tools. Keeping it on also acts
-  as a tripwire while you wire things up: if a tool-declaring dataset shows up before your service
-  echoes the session cookie, you get an immediate, named error instead of the silent failure mode —
-  without session access, tools that mutate per-session state never run, and every rollout scores 0
-  with no error anywhere.
-- **`forward`** — each request to your service carries the resources-server URL and the rollout's
-  session cookie as headers. Echo the cookie on every tool call you make against that URL and
-  stateful environments work end to end. The URL is re-sent per request because Gym assigns
-  servers random ports on every start; the cookie is minted per rollout.
-- **`remote`** — your service implements the declared tools itself; nothing is forwarded.
-
-<Note>
-`forward` covers environments whose tools are plain HTTP routes on the resources server (the
-session cookie is the only credential involved). Environments that expose their tools **over MCP**
-mint additional per-session token headers that are not forwarded in this version.
-</Note>
-
-### Running your service off-host with `tools_mode: forward`
-
-The advertised URL must be reachable *from your service's machine*:
-
-1. Bind the resources server on all interfaces and pin its port (`host: 0.0.0.0`, `port: <fixed>`).
-2. Make the path route — internal DNS, firewall rule, SSH tunnel, or load balancer (your infra).
-3. Verify once **from the remote machine**: `curl http://<address>:<port>/`.
-4. Set `advertised_resources_url: http://<address>:<port>`.
-5. Recommended: probe the advertised URL from your service on first request and fail loudly —
-   reachability is only testable from your side.
-
-<Warning>
-The easiest step to forget on an off-host deployment is step 4: without it, your service receives
-an unroutable bind address (`127.0.0.1` or `0.0.0.0`), every tool call misses Gym, and rewards are
-silently zero. The agent logs a warning when it detects this combination, but it cannot verify
-reachability for you.
-</Warning>
+| `agent_base_url` | required | Your service's base URL. Validated: `http(s)` only, no query string or fragment, no embedded credentials. This is the only network direction — Gym calls you; your service never needs to reach Gym. |
+| `resources_server` | required | The environment that seeds, serves tools for, and verifies each rollout. Swap benchmarks by changing this ref — your service doesn't change. |
+| `concurrency` | `32` | Maximum rollouts in flight against your service, enforced server-side. |
+| `remote_responses_timeout_secs` | `1800` | Wallclock bound on ONE call to your service (a rollout makes one call per loop step). |
+| `run_timeout_secs` | `2100` | Bound on a whole rollout (seed + every loop step + verify), started after the concurrency slot is acquired — queue wait doesn't count. |
+| `max_steps` | unset | Maximum loop steps per rollout. Unset leaves `run_timeout_secs` as the only bound. |
 
 ## Failure handling and resume
 
-Failures never crash a collection run. A down service (bounded connect retries), a timeout, a
-malformed reply, or a verifier error becomes a reward-0 row with `_ng_failure_class:
-"remote_agent_error"` in the failures sidecar (`<output>_failures.jsonl`) — the main rollouts
-file stays clean, and `+resume_from_cache=true` retries failed tasks up to the attempt cap
-(`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3; terminal failures are not retried). Error messages
-name the failing URL or the timeout knob involved.
+Failures never crash a collection run. A down service (3 connection attempts, then fail), a
+timed-out call, a malformed reply, or a verifier error becomes a reward-0 row with
+`_ng_failure_class: "remote_agent_error"` in the failures sidecar (`<output>_failures.jsonl`) —
+the main rollouts file stays clean, and `+resume_from_cache=true` retries failed tasks up to the
+attempt cap (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3; terminal failures — an invalid response
+shape — are not retried). Error messages name the failing URL or the timeout knob involved.
 
 ## Gotchas
 
+- **Your service is called multiple times per rollout.** Design for it: everything you need is
+  in each request's `input`, or in your own cookies.
 - **Redirects are rejected, not followed.** Any `3xx` from your service fails the rollout with
   the `Location` shown — point `agent_base_url` at the final address. (Followed, a `301/302/303`
   would silently re-issue the POST as a body-less GET; a `307/308` would silently re-send the
   task to an address you never configured.)
-- **Missing `usage` = empty token metrics.** The run succeeds and warns; your cost/token
-  accounting is empty. Report real token counts.
-- **Timeouts don't retry inline** — a timed-out rollout goes to the sidecar and is retried on
-  resume, so one hung request doesn't burn triple wallclock.
-- **Skills are not forwarded.** A `+skills` config stamps rows but cannot stage files into a
-  remote process; the agent warns and ignores it.
+- **Partial `usage` fails validation.** Report the full object — `input_tokens`,
+  `output_tokens`, `total_tokens`, `input_tokens_details: {cached_tokens}`,
+  `output_tokens_details: {reasoning_tokens}` — or omit `usage` entirely (allowed; token
+  metrics are then empty, with a warning).
 - **A previous run's output can be reused as the input dataset** (for example, re-running the
   tasks in a failures sidecar). Output rows carry the old run's results (`reward`, `response`,
   `error`, internal `_ng_*` flags); those fields are stripped from each row on the way in, so a

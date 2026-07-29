@@ -1,53 +1,37 @@
 # Remote Agent
 
-A thin agent server that brokers rollouts to an agent service you host yourself — in your own
-repo, on your own infrastructure. Your service implements one endpoint, `POST /v1/responses`:
-it receives the task's `responses_create_params`, runs its own agent loop (its own model and
-tools, however many turns it needs), and returns one finished Responses API trajectory.
+An agent server that drives an agent service you host yourself — in your own repo, on your own
+infrastructure. Your service implements one endpoint, `POST /v1/responses`, and is **called like
+a model**: each call it receives the conversation so far and returns what it wants to do next.
+Gym runs the loop.
 
-Gym keeps everything else on its side: this server seeds the session, holds the session
-cookies, verifies the trajectory on the resources server (`verifier_metadata` never leaves
-Gym), and reports the verify response — so your rollouts land in the standard artifacts and
-work with `gym eval profile`, aggregation, and (when your service routes its model calls
-through a Gym model server) token-id capture for training.
+## Who does what
 
-## Contract for your service
+Gym: seeds a fresh environment session per rollout and holds its cookies (session state and
+`verifier_metadata` never reach your service), executes the tool calls your service asks for
+against the resources server, appends the results and calls your service again, converts every
+failure into a reward-0 sidecar row (never a crashed run), and verifies the finished trajectory.
 
-- `POST {agent_base_url}/v1/responses` with the row's `responses_create_params` as the JSON body.
-- Return a single finished Responses API object: the last output item is an assistant message,
-  no dangling tool calls, `usage` populated with the full shape — `{input_tokens, output_tokens,
-  total_tokens, input_tokens_details: {cached_tokens}, output_tokens_details: {reasoning_tokens}}`.
-  (Omitting `usage` entirely is allowed and only warns; a partial `usage` object fails validation.)
-- Failures on Gym's side never crash a collection run: they are recorded as reward-0 rows in
-  the failures sidecar and retried on resume up to the attempt cap
-  (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3). Failures marked terminal — an invalid response
-  shape, or the tools guard — are not retried.
+Your service: answers each call with a valid Responses API object; decides whether to ask for
+environment tools, run its own internal tools, or finish; tolerates being called N times per
+rollout (each request carries the full conversation; set a cookie if you want per-rollout state —
+Gym echoes your cookies back within the rollout); reports full `usage` or omits it.
 
-## Gym-hosted tools (optional)
+## The response contract
 
-`tools_mode` decides who serves the tools a dataset declares:
+- `function_call` items **without** a matching `function_call_output` (same `call_id`, same
+  response) are asks: Gym executes them on the resources server and feeds the results back as
+  `function_call_output` items on the next call.
+- `function_call` + `function_call_output` **pairs** are your own internal tool records; they
+  pass into the trajectory untouched.
+- An assistant `message` with no unpaired calls finishes the rollout; Gym merges the whole
+  conversation into one trajectory and verifies it.
+- Unknown tool names and malformed arguments are not crashes: the error text comes back to you
+  as that call's output and the rollout continues. An invalid Responses object is a terminal,
+  non-retried failure.
 
-- `refuse` (default): tool-declaring tasks are rejected up front with a clear error instead of
-  silently scoring zero against untouched session state.
-- `forward`: each request to your service carries two headers, `X-NeMo-Gym-Resources-Server-Url`
-  and `X-NeMo-Gym-Session-Cookie`. Echo the cookie on every tool call you make against that URL
-  and stateful environments work end to end. The URL is re-sent per request because Gym assigns
-  servers random ports on every start; the cookie is minted per rollout.
-- `remote`: your service implements the declared tools itself; nothing is forwarded.
-
-### Running the service off-host (`tools_mode: forward`)
-
-The advertised URL must be reachable *from your service's machine* — Gym serves the tools and
-tells your service where they are; making that address route to Gym is on you:
-
-1. Bind the resources server on all interfaces and pin its port (`host: 0.0.0.0`, `port: <fixed>`).
-2. Make the path route (internal DNS / firewall rule / SSH tunnel / load balancer — your infra).
-3. Verify once from the remote machine: `curl http://<address>:<port>/` should connect.
-4. Set `advertised_resources_url: http://<address>:<port>` on this agent. It changes only the
-   header string; the default advertises the bind address, which is typically a loopback address
-   other machines cannot reach (you'll see a warning for that combination).
-5. Recommended: have your service probe the advertised URL on its first request and fail loudly —
-   reachability is only testable from your side.
+The tool schemas your service may ask for arrive in every request's `tools` field, verbatim from
+the dataset row.
 
 ## Run
 
@@ -55,3 +39,5 @@ tells your service where they are; making that address route to Gym is on you:
 gym env start --resources-server <your_env> # plus this agent's config
 gym eval run --no-serve +agent_name=remote_agent +input_jsonl_fpath=... +output_jsonl_fpath=...
 ```
+
+Knobs and the full contract: see the "Drive a Remote Agent" docs page.
