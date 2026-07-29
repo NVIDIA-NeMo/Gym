@@ -56,11 +56,14 @@ def render_driver_entrypoint(
     preamble: list[str] = []
 
     if repo and ref:
-        install_cmd = shlex.quote(f"git+{repo}@{ref}")
+        repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
-            f"uv pip install --system {install_cmd}",
+            f"git clone {shlex.quote(repo)}",
+            f"cd {shlex.quote(repo_name)}",
+            f"git checkout {shlex.quote(ref)}",
+            "uv pip install -e . --system",
         ]
 
     if prepare_cmd:

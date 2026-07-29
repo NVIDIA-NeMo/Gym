@@ -134,7 +134,7 @@ class SubmitConfig(_StrictModel):
             service = self.services[self.driver.policy_model]
             if isinstance(service, BaseModelServiceConfig):
                 for bench_name, benchmark in self.driver.benchmarks.items():
-                    conflicts = [k for k in ("policy_base_url", "policy_model_name") if k in benchmark.run]
+                    conflicts = [k for k in ("policy_base_url", "policy_model_name", "policy_api_key") if k in benchmark.run]
                     if conflicts:
                         raise ValueError(
                             f"Benchmark '{bench_name}' run config already sets {conflicts} "
@@ -142,5 +142,6 @@ class SubmitConfig(_StrictModel):
                         )
                     benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"
                     benchmark.run["policy_model_name"] = service.model
+                    benchmark.run["policy_api_key"] = "dummy"
 
         return self

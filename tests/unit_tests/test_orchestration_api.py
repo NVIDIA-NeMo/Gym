@@ -73,6 +73,7 @@ def test_policy_model_injects_run_args():
     benchmark = config.driver.benchmarks["gsm8k"]
     assert benchmark.run["policy_base_url"] == "http://localhost:8000/v1"
     assert benchmark.run["policy_model_name"] == "org/model"
+    assert benchmark.run["policy_api_key"] == "dummy"
 
 
 def test_policy_model_conflict_raises():
