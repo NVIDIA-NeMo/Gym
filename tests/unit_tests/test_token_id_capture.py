@@ -718,3 +718,28 @@ def test_lineage_resolves_a_tool_using_turn_echoed_in_anthropic_shape():
     parent = lineage.resolve(next_request)
     assert parent is not None and parent.call_id == "call-1"
     assert parent.cum_tokens == [1, 2, 3]
+
+
+def test_read_route_requires_a_token_when_one_is_configured(tmp_path):
+    """The route serves raw training tokens on the same app the harness calls to
+    generate. Inside a trusted cluster that is fine; once the harness runs in a
+    sandbox whose only egress is this server it could read its own training data,
+    or another rollout's."""
+    config = dict(_both_enabled(tmp_path))
+    config["token_id_capture_read_token"] = "s3cret"  # pragma: allowlist secret
+    client = TestClient(_server(config).setup_webserver())
+    client.post("/ng-rollout/auth0-roll0/v1/responses", json={"input": "hi"})
+
+    assert client.get("/ng-capture/tokens/auth0-roll0").status_code == 401
+    assert client.get("/ng-capture/tokens/auth0-roll0", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+    ok = client.get("/ng-capture/tokens/auth0-roll0", headers={"Authorization": "Bearer s3cret"})
+    assert ok.status_code == 200
+    assert TokenEntry.model_validate_json(ok.text.splitlines()[0]).generation_token_ids == GTOKS
+
+
+def test_read_route_stays_open_when_no_token_is_configured(tmp_path):
+    """Existing deployments keep working; the gap is logged rather than enforced."""
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    client.post("/ng-rollout/auth1-roll0/v1/responses", json={"input": "hi"})
+    assert client.get("/ng-capture/tokens/auth1-roll0").status_code == 200
