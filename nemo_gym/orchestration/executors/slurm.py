@@ -31,13 +31,14 @@ class SlurmExecutor(BaseExecutor):
             self._dry_run(config, compute, remote_run_dir)
             return
 
-        staging = self._stage(config, compute, remote_run_dir)
-        with get_connection(compute.hostname) as conn:
-            conn.copy(staging, remote_run_dir)
-            output = conn.run([
-                f"sbatch {shlex.quote(str(remote_run_dir / name / 'job.sh'))}"
-                for name in config.driver.benchmarks
-            ])
+        with tempfile.TemporaryDirectory(prefix="gym-submit-") as staging_str:
+            staging = self._stage(config, compute, remote_run_dir, Path(staging_str))
+            with get_connection(compute.hostname) as conn:
+                conn.copy(staging, remote_run_dir)
+                output = conn.run([
+                    f"sbatch {shlex.quote(str(remote_run_dir / name / 'job.sh'))}"
+                    for name in config.driver.benchmarks
+                ])
 
         benchmark_names = list(config.driver.benchmarks)
         job_ids = _SBATCH_JOB_ID_RE.findall(output)
@@ -55,8 +56,7 @@ class SlurmExecutor(BaseExecutor):
             print(f"{'='*60}")
             print(script)
 
-    def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> Path:
-        staging = Path(tempfile.mkdtemp(prefix="gym-submit-"))
+    def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path, staging: Path) -> Path:
         for name, benchmark in config.driver.benchmarks.items():
             bench_dir = staging / name
             bench_dir.mkdir()
