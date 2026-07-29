@@ -21,6 +21,7 @@ response is re-emitted as a synthesized ``chat.completion.chunk`` SSE stream. No
 requests keep the historical strict-validation behavior.
 """
 
+import asyncio
 import json
 from time import time
 from unittest.mock import MagicMock
@@ -37,8 +38,10 @@ from nemo_gym.base_responses_api_model import (
     _reconstruct_chat_sse,
 )
 from nemo_gym.chat_streaming import (
+    SSE_HEARTBEAT,
     sanitize_streaming_chat_body,
     synthesize_chat_completion_sse,
+    synthesize_chat_completion_sse_with_heartbeat,
 )
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -390,3 +393,155 @@ class TestSynthesizeSystemFingerprint:
         events = _events("".join(synthesize_chat_completion_sse(completion)))
         assert events
         assert all(event.get("system_fingerprint") == "fp_abc123" for event in events)
+
+
+class _SlowChatModel(_EchoChatModel):
+    """Echo model whose generation outlasts the heartbeat grace window."""
+
+    delay_s: float = 0.3
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        await asyncio.sleep(self.delay_s)
+        return await super().chat_completions(body)
+
+
+class _FailingChatModel(_EchoChatModel):
+    """Echo model that raises, optionally only after the grace window has elapsed."""
+
+    delay_s: float = 0.0
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        raise RuntimeError("backend exploded")
+
+
+class TestChatStreamHeartbeat:
+    """A non-streaming backend leaves the socket silent; slow generations must not read as hung.
+
+    The OpenClaw agent aborts a session after 120s without bytes ("LLM idle timeout"). Slow
+    models routinely exceed that while generating normally, and every such session is graded as
+    an empty failure.
+    """
+
+    def test_slow_generation_emits_heartbeats_before_the_completion(self) -> None:
+        client, server = _client(_SlowChatModel)
+        server.chat_stream_heartbeat_interval_s = 0.05
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"stream": True, "messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert SSE_HEARTBEAT in resp.text
+        # the payload still arrives intact after the heartbeats
+        assert resp.text.endswith("data: [DONE]\n\n")
+        rebuilt = _reconstruct_chat_sse(_parse_sse_events(resp.text.encode()))
+        assert rebuilt["choices"][0]["message"]["content"] == "hello"
+
+    def test_heartbeats_are_sse_comments_ignored_by_reconstruction(self) -> None:
+        # A comment carries bytes (refreshing idle timers) without adding a parsed event.
+        assert SSE_HEARTBEAT.startswith(":")
+        assert not _parse_sse_events(SSE_HEARTBEAT.encode())
+
+    def test_fast_generation_emits_no_heartbeats(self) -> None:
+        client, _ = _client(_EchoChatModel)
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"stream": True, "messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert resp.status_code == 200
+        assert SSE_HEARTBEAT not in resp.text
+
+    def test_fast_failure_still_surfaces_as_an_error_not_a_stream(self) -> None:
+        # Errors inside the grace window keep their status code, so retries still see failures.
+        client, _ = _client(_FailingChatModel)
+        with pytest.raises(RuntimeError):
+            client.post(
+                "/v1/chat/completions",
+                json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_failure_after_stream_started_terminates_cleanly(self) -> None:
+        # Past the grace window the response has begun, so the client gets a terminated stream
+        # rather than a hang.
+        async def _drain() -> list[str]:
+            async def _boom() -> dict:
+                await asyncio.sleep(0.15)
+                raise RuntimeError("late failure")
+
+            pending = asyncio.ensure_future(_boom())
+            return [chunk async for chunk in synthesize_chat_completion_sse_with_heartbeat(pending, interval_s=0.05)]
+
+        chunks = asyncio.run(_drain())
+        assert SSE_HEARTBEAT in chunks
+        assert chunks[-1] == "data: [DONE]\n\n"
+
+    def test_bytes_reach_the_wire_before_generation_completes(self) -> None:
+        """Regression: the socket must not stay silent for a whole slow generation.
+
+        Driven at the ASGI layer on purpose. ``TestClient`` buffers a streaming response, so it
+        reports the same time-to-first-byte whether or not the server heartbeats -- it cannot
+        observe this defect at all. Only the raw send() timeline shows what a socket peer, and
+        therefore an idle timeout, actually sees.
+        """
+        gen_s, grace_s = 0.6, 0.1
+
+        async def _timeline() -> list[tuple[float, str]]:
+            client, server = _client(_SlowChatModel)
+            server.delay_s = gen_s
+            server.chat_stream_heartbeat_interval_s = grace_s
+            app = server.setup_webserver()
+
+            body = b'{"stream": true, "messages": [{"role": "user", "content": "hi"}]}'
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/v1/chat/completions",
+                "raw_path": b"/v1/chat/completions",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+                "client": ("127.0.0.1", 12345),
+                "server": ("testserver", 80),
+            }
+
+            start = asyncio.get_running_loop().time()
+            seen: list[tuple[float, str]] = []
+            delivered = False
+
+            async def receive():
+                # Body once, then stay connected: starlette also polls receive() for disconnects.
+                nonlocal delivered
+                if not delivered:
+                    delivered = True
+                    return {"type": "http.request", "body": body, "more_body": False}
+                await asyncio.Event().wait()
+
+            async def send(message):
+                elapsed = asyncio.get_running_loop().time() - start
+                if message["type"] == "http.response.body" and message.get("body"):
+                    seen.append((elapsed, message["body"].decode()))
+
+            await asyncio.wait_for(app(scope, receive, send), timeout=gen_s * 10)
+            return seen
+
+        seen = asyncio.run(_timeline())
+        assert seen, "no bytes were ever written to the wire"
+        first_at, first_payload = seen[0]
+        assert first_at < gen_s, f"socket stayed silent {first_at:.2f}s for a {gen_s:.2f}s generation"
+        assert first_payload == SSE_HEARTBEAT
+        # the real completion still lands, after the heartbeats
+        assert seen[-1][0] >= gen_s
+        assert "".join(payload for _, payload in seen).endswith("data: [DONE]\n\n")

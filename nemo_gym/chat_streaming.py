@@ -36,15 +36,23 @@ streaming clients: token ids and logprobs from the backend response are not carr
 gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
 """
 
+import asyncio
 import json
 import logging
 from copy import deepcopy
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Awaitable, Iterator
 
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 
 
 LOG = logging.getLogger(__name__)
+
+# An SSE comment: ignored by every conforming client parser, but still bytes on the wire, so it
+# refreshes read/idle timers while the buffered backend call is still running.
+SSE_HEARTBEAT = ": keepalive\n\n"
+
+# Well under the 120s idle timeout the OpenClaw agent applies to its model endpoint.
+DEFAULT_HEARTBEAT_INTERVAL_S = 15.0
 
 _PARAM_FIELDS = frozenset(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
 
@@ -155,3 +163,36 @@ def synthesize_chat_completion_sse(completion: dict[str, Any], include_usage: bo
         yield _sse_data(_chunk(completion, [], usage=usage))
 
     yield "data: [DONE]\n\n"
+
+
+async def synthesize_chat_completion_sse_with_heartbeat(
+    pending: Awaitable[dict[str, Any]],
+    include_usage: bool = False,
+    interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S,
+) -> AsyncIterator[str]:
+    """Emit SSE heartbeats until ``pending`` resolves, then the synthesized completion stream.
+
+    The backend call is non-streaming, so nothing can be emitted until it returns. On a slow
+    model that silence is indistinguishable from a hung endpoint: the OpenClaw agent aborts the
+    session after 120s of quiet ("LLM idle timeout"), and the rollout is graded as an empty
+    failure even though the model is still working. Heartbeating keeps the socket alive for the
+    whole generation without changing what the client ultimately parses.
+
+    A failure after the first heartbeat cannot be reported as an HTTP status (the response has
+    already begun), so it is logged and the stream is terminated with ``data: [DONE]`` rather
+    than left hanging. Callers should therefore await a short grace window first, so fast
+    failures still surface with their normal status code.
+    """
+    while True:
+        try:
+            completion = await asyncio.wait_for(asyncio.shield(pending), timeout=interval_s)
+            break
+        except asyncio.TimeoutError:
+            yield SSE_HEARTBEAT
+        except Exception:
+            LOG.exception("Chat completion failed after the SSE stream had already started")
+            yield "data: [DONE]\n\n"
+            return
+
+    for chunk in synthesize_chat_completion_sse(completion, include_usage=include_usage):
+        yield chunk
