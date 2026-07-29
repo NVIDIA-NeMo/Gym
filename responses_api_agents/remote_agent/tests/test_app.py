@@ -14,54 +14,87 @@
 # limitations under the License.
 import asyncio
 import json
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
-from aiohttp import ClientConnectorError, ClientPayloadError, ServerDisconnectedError
-from pydantic import ValidationError
+from aiohttp import ClientConnectorError, ClientPayloadError, ClientResponseError, ServerDisconnectedError
+from fastapi import Response
+from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
 from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,
-    RESOURCES_URL_HEADER,
-    SESSION_COOKIE_HEADER,
     RemoteAgent,
     RemoteAgentConfig,
     RemoteAgentRunRequest,
-    cookie_header_value,
     normalize_remote_url,
 )
 
 
-_MINIMAL_TRAJECTORY = {
-    "id": "traj_1",
-    "created_at": 1.0,
-    "model": "their-model",
-    "object": "response",
-    "output": [
-        {
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "id": "msg_1",
-            "content": [{"type": "output_text", "text": "the answer is 42", "annotations": []}],
+def msg(text: str, item_id: str = "msg_1") -> dict:
+    return {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "id": item_id,
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def fn_call(call_id: str, name: str, arguments: str) -> dict:
+    return {"type": "function_call", "call_id": call_id, "name": name, "arguments": arguments, "id": f"fc_{call_id}"}
+
+
+def fn_output(call_id: str, output: str) -> dict:
+    return {"type": "function_call_output", "call_id": call_id, "output": output}
+
+
+def traj(output: list, usage: dict | None = "default") -> dict:
+    t = {
+        "id": "traj_1",
+        "created_at": 1.0,
+        "model": "their-model",
+        "object": "response",
+        "output": output,
+        "parallel_tool_calls": False,
+        "tools": [],
+        "tool_choice": "auto",
+    }
+    if usage == "default":
+        usage = {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
         }
-    ],
-    "parallel_tool_calls": False,
-    "tools": [],
-    "tool_choice": "auto",
-    "usage": {
-        "input_tokens": 10,
-        "output_tokens": 5,
-        "total_tokens": 15,
-        "input_tokens_details": {"cached_tokens": 0},
-        "output_tokens_details": {"reasoning_tokens": 0},
-    },
-}
+    if usage is not None:
+        t["usage"] = usage
+    return t
+
+
+_MINIMAL_TRAJECTORY = traj([msg("the answer is 42")])
+
+_COUNTER_TOOLS = [
+    {
+        "type": "function",
+        "name": "increment_counter",
+        "parameters": {
+            "type": "object",
+            "properties": {"count": {"type": "integer", "description": ""}},
+            "required": ["count"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+        "description": "",
+    }
+]
 
 
 def make_config(**overrides) -> RemoteAgentConfig:
@@ -75,13 +108,6 @@ def make_config(**overrides) -> RemoteAgentConfig:
     )
     fields.update(overrides)
     return RemoteAgentConfig(**fields)
-
-
-def make_agent(server_client=None, **config_overrides) -> RemoteAgent:
-    return RemoteAgent(
-        config=make_config(**config_overrides),
-        server_client=server_client or MagicMock(spec=ServerClient),
-    )
 
 
 def make_row(tools=None, **extras) -> dict:
@@ -104,11 +130,14 @@ def make_request(cookies=None) -> MagicMock:
 class FakeRemoteResponse:
     """Stands in for an aiohttp ClientResponse from the remote service."""
 
-    def __init__(self, status: int, content: bytes, headers=None, read_exc=None):
+    def __init__(self, status: int, content: bytes, headers=None, read_exc=None, set_cookies=None):
         self.status = status
         self._content = content
         self.headers = headers or {}
         self._read_exc = read_exc
+        self.cookies = SimpleCookie()
+        for k, v in (set_cookies or {}).items():
+            self.cookies[k] = v
 
     @property
     def ok(self) -> bool:
@@ -143,8 +172,10 @@ class FakeServerClientResponse:
         return reader
 
     def raise_for_status(self):
+        # Mirror aiohttp so nemo_gym.raise_for_status attaches response_content, the
+        # channel run() reads middleware-serialized errors (incl. terminal names) from.
         if not self.ok:
-            raise RuntimeError(f"HTTP {self.status}")
+            raise ClientResponseError(request_info=MagicMock(), history=(), status=self.status, message="error")
 
     async def read(self) -> bytes:
         return orjson.dumps(self._body)
@@ -158,8 +189,41 @@ def mock_remote(monkeypatch: pytest.MonkeyPatch, request_mock: AsyncMock) -> Mag
     return client
 
 
-def seed_verify_server_client(verify_body=None, seed_cookies=None, seed_status=200, verify_status=200):
-    """A ServerClient mock that answers /seed_session and /verify."""
+def scripted_service(*turns):
+    """AsyncMock remote service returning one canned trajectory per call, recording payloads."""
+    received = []
+
+    async def handler(method, url, data=None, headers=None, cookies=None, **kwargs):
+        received.append({"payload": orjson.loads(data), "cookies": dict(cookies or {})})
+        turn = turns[min(len(received) - 1, len(turns) - 1)]
+        if isinstance(turn, FakeRemoteResponse):
+            return turn
+        return FakeRemoteResponse(200, orjson.dumps(turn))
+
+    request_mock = AsyncMock(side_effect=handler)
+    request_mock.received = received
+    return request_mock
+
+
+def make_agent(server_client=None, **config_overrides) -> RemoteAgent:
+    return RemoteAgent(
+        config=make_config(**config_overrides),
+        server_client=server_client or MagicMock(spec=ServerClient),
+    )
+
+
+def wire_gym(
+    agent: RemoteAgent,
+    verify_body=None,
+    seed_cookies=None,
+    seed_status=200,
+    verify_status=200,
+    tool_handler=None,
+):
+    """A ServerClient mock that emulates the Gym side: seed_session and verify on the
+    resources server, tool routes via tool_handler, and — the load-bearing part — the
+    /v1/responses self-post routed into the agent's REAL responses() with the exception
+    middleware emulated (exceptions become a 500 body carrying repr(e))."""
     calls = []
 
     async def _post(server_name, url_path, json=None, cookies=None, **kwargs):
@@ -169,12 +233,45 @@ def seed_verify_server_client(verify_body=None, seed_cookies=None, seed_status=2
         if url_path == "/verify":
             body = verify_body if verify_body is not None else (json | {"reward": 1.0})
             return FakeServerClientResponse(body, status=verify_status)
+        if url_path.endswith("/v1/responses"):
+            wire = json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json
+            params = NeMoGymResponseCreateParamsNonStreaming.model_validate(wire)
+            fastapi_response = Response()
+            try:
+                result = await agent.responses(make_request(dict(cookies or {})), fastapi_response, params)
+            except Exception as e:  # noqa: BLE001 -- emulate SimpleServer's exception middleware
+                return FakeServerClientResponse({"error": repr(e)}, status=500)
+            out_cookies = SimpleCookie()
+            for header_value in fastapi_response.headers.getlist("set-cookie"):
+                out_cookies.load(header_value)
+            return FakeServerClientResponse(
+                result.model_dump(mode="json"), cookies={k: m.value for k, m in out_cookies.items()}
+            )
+        if tool_handler is not None:
+            return await tool_handler(url_path, json, cookies)
         return FakeServerClientResponse({}, status=200)
 
     server_client = MagicMock(spec=ServerClient)
     server_client.post = AsyncMock(side_effect=_post)
     server_client.calls = calls
+    agent.server_client = server_client
     return server_client
+
+
+def make_wired_agent(monkeypatch, request_mock, *, tool_handler=None, verify_body=None, **kwargs):
+    client = mock_remote(monkeypatch, request_mock)
+    agent = make_agent(
+        **{k: v for k, v in kwargs.items() if k not in ("seed_cookies", "seed_status", "verify_status")}
+    )
+    server_client = wire_gym(
+        agent,
+        verify_body=verify_body,
+        seed_cookies=kwargs.get("seed_cookies"),
+        seed_status=kwargs.get("seed_status", 200),
+        verify_status=kwargs.get("verify_status", 200),
+        tool_handler=tool_handler,
+    )
+    return agent, client, server_client
 
 
 class TestConfig:
@@ -184,6 +281,9 @@ class TestConfig:
 
     def test_agent_base_url_normalized(self) -> None:
         assert make_config(agent_base_url="http://localhost:9000/").agent_base_url == "http://localhost:9000"
+
+    def test_max_steps_defaults_to_none(self) -> None:
+        assert make_config().max_steps is None
 
     @pytest.mark.parametrize(
         "bad_url",
@@ -204,40 +304,28 @@ class TestConfig:
             normalize_remote_url("http://user:hunter2@h:1")  # pragma: allowlist secret
         assert "hunter2" not in str(exc_info.value)
 
-    def test_cookie_header_value_shapes(self) -> None:
-        assert cookie_header_value({}) is None
-        assert cookie_header_value({"a": "1", "b": "2"}) == "a=1; b=2"
-        morsel = MagicMock()
-        morsel.value = "xyz"
-        assert cookie_header_value({"session": morsel}) == "session=xyz"
-
 
 class TestRunHappyPath:
-    async def test_seed_then_remote_then_verify(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        request_mock = AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY)))
-        client = mock_remote(monkeypatch, request_mock)
-        server_client = seed_verify_server_client(seed_cookies={"session": "s1"})
-        agent = make_agent(server_client=server_client)
+    async def test_seed_then_loop_then_verify(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        service = scripted_service(_MINIMAL_TRAJECTORY)
+        agent, client, server_client = make_wired_agent(monkeypatch, service, seed_cookies={"session": "s1"})
 
         row = make_row()
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))
 
-        # Order and payloads: seed first, remote POST in between, verify last on the seed cookies
-        assert [c["url_path"] for c in server_client.calls] == ["/seed_session", "/verify"]
+        paths = [c["url_path"] for c in server_client.calls]
+        assert paths == ["/seed_session", "/v1/responses", "/verify"]
+        # Seeded cookies reach the loop and verify; verify carries the trajectory + row keys
         assert server_client.calls[1]["cookies"] == {"session": "s1"}
-        assert server_client.calls[1]["json"]["response"]["id"] == "traj_1"
-        assert server_client.calls[1]["json"]["verifier_metadata"] == {"expected_answer": "42"}
+        assert server_client.calls[2]["json"]["response"]["id"] == "traj_1"
+        assert server_client.calls[2]["json"]["verifier_metadata"] == {"expected_answer": "42"}
 
-        args, kwargs = client.request.call_args
-        assert args == ("POST", "http://localhost:9000/v1/responses")
         # The remote service receives ONLY create-params: no verifier_metadata, no row keys
-        remote_payload = orjson.loads(kwargs["data"])
-        assert remote_payload == row["responses_create_params"]
-        assert kwargs["allow_redirects"] is False
-        assert kwargs["timeout"].total == 1800.0
-        # No session forwarding by default
-        assert RESOURCES_URL_HEADER not in kwargs["headers"]
-        assert SESSION_COOKIE_HEADER not in kwargs["headers"]
+        assert service.received[0]["payload"] == row["responses_create_params"]
+        args, request_kwargs = client.request.call_args
+        assert args == ("POST", "http://localhost:9000/v1/responses")
+        assert request_kwargs["allow_redirects"] is False
+        assert request_kwargs["timeout"].total == 1800.0
 
         dumped = result.model_dump()
         assert dumped["reward"] == 1.0
@@ -246,10 +334,9 @@ class TestRunHappyPath:
         assert NG_TERMINAL_KEY not in dumped
 
     async def test_verify_extras_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))))
         row = make_row()
         verify_body = row | {"response": _MINIMAL_TRAJECTORY, "reward": 0.5, "grading_notes": "close enough"}
-        agent = make_agent(server_client=seed_verify_server_client(verify_body=verify_body))
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(_MINIMAL_TRAJECTORY), verify_body=verify_body)
 
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))
 
@@ -257,11 +344,150 @@ class TestRunHappyPath:
         assert result.reward == 0.5
 
 
+class TestAgentToolLoop:
+    """The Gym-driven loop: the service returns unpaired function_calls as asks; Gym
+    executes them on the resources server and re-posts the grown conversation."""
+
+    @staticmethod
+    async def counter_tool_handler(url_path, body, cookies):
+        if url_path == "/increment_counter":
+            return FakeServerClientResponse({"success": True}, cookies={"tool_session": "t1"})
+        if url_path == "/get_counter_value":
+            return FakeServerClientResponse({"count": 6})
+        return FakeServerClientResponse({"detail": f"Not Found: {url_path}"}, status=404)
+
+    async def test_multi_turn_tool_execution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        service = scripted_service(
+            traj([fn_call("c1", "increment_counter", '{"count": 3}')]),
+            traj([msg("done, counter incremented")]),
+        )
+        agent, _, server_client = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler)
+
+        row = make_row(tools=_COUNTER_TOOLS)
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))
+
+        dumped = result.model_dump()
+        assert NG_FAILURE_CLASS_KEY not in dumped
+        assert dumped["reward"] == 1.0
+
+        # Gym executed the tool: one resources-server POST to /increment_counter with parsed args
+        tool_calls = [c for c in server_client.calls if c["url_path"] == "/increment_counter"]
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["json"] == {"count": 3}
+
+        # Turn 2 payload = original input + call + tool output
+        second_input = service.received[1]["payload"]["input"]
+        assert [i.get("type", "message") for i in second_input] == ["message", "function_call", "function_call_output"]
+        assert second_input[2]["output"] == '{"success":true}'
+
+        # The final trajectory carries the merged conversation
+        types = [o["type"] for o in dumped["response"]["output"]]
+        assert types == ["function_call", "function_call_output", "message"]
+
+    async def test_paired_calls_pass_through_unexecuted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # call_a is the service's own internal tool record (paired); call_b is the ask.
+        service = scripted_service(
+            traj(
+                [
+                    fn_call("call_a", "web_search", '{"q": "counters"}'),
+                    fn_output("call_a", '{"results": []}'),
+                    fn_call("call_b", "increment_counter", '{"count": 3}'),
+                ]
+            ),
+            traj([msg("done")]),
+        )
+        agent, _, server_client = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler)
+
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=_COUNTER_TOOLS)))
+
+        dumped = result.model_dump()
+        assert dumped["reward"] == 1.0
+        executed = [c["url_path"] for c in server_client.calls if c["url_path"].startswith("/increment")]
+        assert executed == ["/increment_counter"]
+        # web_search was never sent to the resources server
+        assert not any(c["url_path"] == "/web_search" for c in server_client.calls)
+        # The paired record survives in the final trajectory
+        types = [o["type"] for o in dumped["response"]["output"]]
+        assert types.count("function_call") == 2 and types.count("function_call_output") == 2
+
+    async def test_unknown_tool_error_fed_back_not_raised(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        service = scripted_service(
+            traj([fn_call("c1", "web_search", "{}")]),  # unpaired ask for a tool the env doesn't serve
+            traj([msg("recovered")]),
+        )
+        agent, _, _ = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler)
+
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=_COUNTER_TOOLS)))
+
+        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
+        # The 404 body came back to the service as the tool output
+        second_input = service.received[1]["payload"]["input"]
+        assert "Not Found" in second_input[-1]["output"]
+
+    async def test_malformed_arguments_fed_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        service = scripted_service(
+            traj([fn_call("c1", "increment_counter", "not json")]),
+            traj([msg("ok")]),
+        )
+        agent, _, server_client = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler)
+
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=_COUNTER_TOOLS)))
+
+        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
+        assert not any(c["url_path"] == "/increment_counter" for c in server_client.calls)
+        second_input = service.received[1]["payload"]["input"]
+        assert "Invalid tool call arguments" in second_input[-1]["output"]
+
+    async def test_max_steps_bounds_the_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        always_ask = traj([fn_call("c1", "increment_counter", '{"count": 1}')])
+        service = scripted_service(always_ask, always_ask, always_ask, always_ask)
+        agent, _, _ = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler, max_steps=2)
+
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=_COUNTER_TOOLS)))
+
+        assert len(service.received) == 2
+        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
+
+    async def test_service_cookies_round_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        turn1 = FakeRemoteResponse(
+            200,
+            orjson.dumps(traj([fn_call("c1", "increment_counter", '{"count": 1}')])),
+            set_cookies={"svc_session": "svc1"},
+        )
+        service = scripted_service(turn1, traj([msg("done")]))
+        agent, _, _ = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler)
+
+        await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=_COUNTER_TOOLS)))
+
+        assert service.received[0]["cookies"] == {}
+        assert service.received[1]["cookies"] == {"svc_session": "svc1"}
+
+    async def test_usage_accumulates_across_turns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        service = scripted_service(
+            traj([fn_call("c1", "increment_counter", '{"count": 1}')]),
+            traj([msg("done")]),
+        )
+        agent, _, _ = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler)
+
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=_COUNTER_TOOLS)))
+
+        usage = result.model_dump()["response"]["usage"]
+        assert usage["input_tokens"] == 20 and usage["output_tokens"] == 10 and usage["total_tokens"] == 30
+
+    async def test_string_input_coerced_to_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        service = scripted_service(_MINIMAL_TRAJECTORY)
+        agent, _, _ = make_wired_agent(monkeypatch, service)
+
+        row = {"responses_create_params": {"input": "just a string"}}
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))
+
+        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
+        assert service.received[0]["payload"]["input"][0]["content"] == "just a string"
+
+
 class TestRemoteFailuresBecomeSentinelRows:
     async def _run(self, monkeypatch, request_mock, **config_overrides):
-        client = mock_remote(monkeypatch, request_mock)
-        server_client = seed_verify_server_client()
-        agent = make_agent(server_client=server_client, **config_overrides)
+        agent, client, server_client = make_wired_agent(monkeypatch, request_mock, **config_overrides)
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
         return client, server_client, result.model_dump()
 
@@ -279,8 +505,8 @@ class TestRemoteFailuresBecomeSentinelRows:
         assert client.request.call_count == 3
         assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
         assert "Is your service running at http://localhost:9000?" in result["error"]
-        # verify is never reached on a failed remote call
-        assert [c["url_path"] for c in server_client.calls] == ["/seed_session"]
+        # verify is never reached on a failed loop
+        assert [c["url_path"] for c in server_client.calls] == ["/seed_session", "/v1/responses"]
 
     async def test_disconnect_then_success_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
         request_mock = AsyncMock(
@@ -332,17 +558,30 @@ class TestRemoteFailuresBecomeSentinelRows:
             monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(bad)))
         )
         assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
+        # Terminal classification survives the HTTP self-post boundary (exception-name match)
         assert result[NG_TERMINAL_KEY] is True
         assert "invalid Responses API object" in result["error"]
-        assert [c["url_path"] for c in server_client.calls] == ["/seed_session"]
+        assert [c["url_path"] for c in server_client.calls] == ["/seed_session", "/v1/responses"]
+
+    async def test_mid_loop_failure_becomes_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Turn 1 succeeds with a tool ask; turn 2 the service dies — the whole rollout
+        # must land in the sidecar, not crash the loop.
+        service = scripted_service(
+            traj([fn_call("c1", "increment_counter", '{"count": 1}')]),
+            FakeRemoteResponse(500, b"died mid-rollout"),
+        )
+        agent, _, _ = make_wired_agent(monkeypatch, service, tool_handler=TestAgentToolLoop.counter_tool_handler)
+        result = (
+            await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=_COUNTER_TOOLS)))
+        ).model_dump()
+        assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
+        assert "died mid-rollout" in result["error"]
 
 
 class TestGymSideFailuresBecomeSentinelRows:
     async def test_seed_failure_skips_remote_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        request_mock = AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY)))
-        client = mock_remote(monkeypatch, request_mock)
-        server_client = seed_verify_server_client(seed_status=500)
-        agent = make_agent(server_client=server_client)
+        service = scripted_service(_MINIMAL_TRAJECTORY)
+        agent, client, _ = make_wired_agent(monkeypatch, service, seed_status=500)
 
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
 
@@ -351,9 +590,7 @@ class TestGymSideFailuresBecomeSentinelRows:
         assert client.request.call_count == 0
 
     async def test_verify_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))))
-        server_client = seed_verify_server_client(verify_status=500)
-        agent = make_agent(server_client=server_client)
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(_MINIMAL_TRAJECTORY), verify_status=500)
 
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
 
@@ -361,68 +598,10 @@ class TestGymSideFailuresBecomeSentinelRows:
         assert "/verify" in result["error"]
         assert result["reward"] == 0.0
 
-
-class TestToolsGuardAndSessionForwarding:
-    _TOOLS = [
-        {
-            "type": "function",
-            "name": "increment_counter",
-            "parameters": {
-                "type": "object",
-                "properties": {"count": {"type": "integer", "description": ""}},
-                "required": ["count"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-            "description": "",
-        }
-    ]
-
-    async def test_declared_tools_refused_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        client = mock_remote(monkeypatch, AsyncMock())
-        server_client = seed_verify_server_client()
-        agent = make_agent(server_client=server_client)
-
-        row = make_row(tools=self._TOOLS)
-        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))).model_dump()
-
-        assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
-        assert result[NG_TERMINAL_KEY] is True
-        assert "tools_mode" in result["error"]
-        # Refused before any network traffic
-        assert client.request.call_count == 0
-        assert server_client.calls == []
-
-    async def test_tools_mode_remote_skips_guard_without_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        request_mock = AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY)))
-        client = mock_remote(monkeypatch, request_mock)
-        agent = make_agent(server_client=seed_verify_server_client(), tools_mode="remote")
-
-        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=self._TOOLS)))
-
-        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
-        headers = client.request.call_args.kwargs["headers"]
-        assert RESOURCES_URL_HEADER not in headers
-
-    async def test_tools_mode_forward_sends_url_and_cookie_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        request_mock = AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY)))
-        client = mock_remote(monkeypatch, request_mock)
-        monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: f"http://resolved-{name}:1234")
-        server_client = seed_verify_server_client(seed_cookies={"session": "cookie-value"})
-        agent = make_agent(server_client=server_client, tools_mode="forward")
-
-        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=self._TOOLS)))
-
-        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
-        headers = client.request.call_args.kwargs["headers"]
-        assert headers[RESOURCES_URL_HEADER] == "http://resolved-my_env:1234"
-        assert headers[SESSION_COOKIE_HEADER] == "session=cookie-value"
-
     async def test_skills_ref_warns_and_continues(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))))
-        agent = make_agent(server_client=seed_verify_server_client())
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(_MINIMAL_TRAJECTORY))
 
         row = make_row(skills_ref={"path": "/skills", "hash": "abc", "skills": []})
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))
@@ -432,26 +611,31 @@ class TestToolsGuardAndSessionForwarding:
 
 
 class TestResponseQualityWarnings:
-    async def _run_with_trajectory(self, monkeypatch, trajectory):
-        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(trajectory))))
-        agent = make_agent(server_client=seed_verify_server_client())
-        return await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
-
     async def test_missing_usage_warns(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        trajectory = dict(_MINIMAL_TRAJECTORY)
-        trajectory.pop("usage")
-        result = await self._run_with_trajectory(monkeypatch, trajectory)
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(traj([msg("hi")], usage=None)))
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
         assert NG_FAILURE_CLASS_KEY not in result.model_dump()
         assert "no usage" in capsys.readouterr().out
 
     async def test_clean_trajectory_no_warnings(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        await self._run_with_trajectory(monkeypatch, _MINIMAL_TRAJECTORY)
-        out = capsys.readouterr().out
-        assert "WARNING" not in out
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(_MINIMAL_TRAJECTORY))
+        await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
+        assert "WARNING" not in capsys.readouterr().out
+
+    async def test_quality_warnings_are_throttled(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(traj([msg("hi")], usage=None)))
+
+        for _ in range(10):
+            await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
+
+        # Head of 5, then every 100th: 10 rollouts -> exactly 5 printed warnings
+        assert capsys.readouterr().out.count("no usage") == 5
 
 
 class TestRunTimeoutAndSemaphore:
@@ -459,8 +643,7 @@ class TestRunTimeoutAndSemaphore:
         async def slow_request(*args, **kwargs):
             await asyncio.sleep(30)
 
-        mock_remote(monkeypatch, AsyncMock(side_effect=slow_request))
-        agent = make_agent(server_client=seed_verify_server_client(), run_timeout_secs=0.05)
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=slow_request), run_timeout_secs=0.05)
 
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
 
@@ -480,8 +663,7 @@ class TestRunTimeoutAndSemaphore:
             in_flight -= 1
             return FakeRemoteResponse(500, b"boom")  # failure path must release the permit too
 
-        mock_remote(monkeypatch, AsyncMock(side_effect=gated_request))
-        agent = make_agent(server_client=seed_verify_server_client(), concurrency=2)
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=gated_request), concurrency=2)
 
         rows = [RemoteAgentRunRequest.model_validate(make_row()) for _ in range(4)]
         tasks = [asyncio.create_task(agent.run(make_request(), row)) for row in rows]
@@ -493,20 +675,44 @@ class TestRunTimeoutAndSemaphore:
         assert all(r.model_dump()[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS for r in results)
         assert agent.sem._value == 2  # every permit released despite 4 failures
 
+    async def test_queue_wait_does_not_count_against_run_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        release_first = asyncio.Event()
+        first_seen = asyncio.Event()
+        call_count = 0
+
+        async def gated_request(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_seen.set()
+                await release_first.wait()
+            return FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))
+
+        agent, _, _ = make_wired_agent(
+            monkeypatch, AsyncMock(side_effect=gated_request), concurrency=1, run_timeout_secs=0.5
+        )
+
+        first = asyncio.create_task(agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row())))
+        second = asyncio.create_task(agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row())))
+        await first_seen.wait()
+        # Hold the only permit for most of the second task's would-be budget
+        await asyncio.sleep(0.4)
+        release_first.set()
+        results = [r.model_dump() for r in await asyncio.gather(first, second)]
+
+        # If queue wait counted against run_timeout_secs, the second task would time out
+        assert all(NG_FAILURE_CLASS_KEY not in r for r in results)
+
 
 class TestRoutes:
-    def _client_and_mocks(self, monkeypatch, request_mock=None):
+    def _client(self, monkeypatch, request_mock=None):
         from fastapi.testclient import TestClient
 
-        mock_remote(
-            monkeypatch,
-            request_mock or AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))),
-        )
-        agent = make_agent(server_client=seed_verify_server_client())
+        agent, _, _ = make_wired_agent(monkeypatch, request_mock or scripted_service(_MINIMAL_TRAJECTORY))
         return TestClient(agent.setup_webserver(), raise_server_exceptions=False)
 
     def test_run_route_happy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        client = self._client_and_mocks(monkeypatch)
+        client = self._client(monkeypatch)
         response = client.post("/run", json=make_row())
         assert response.status_code == 200
         assert response.json()["reward"] == 1.0
@@ -514,7 +720,7 @@ class TestRoutes:
     def test_run_route_failure_serializes_sentinel_with_http_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The sentinel body must survive FastAPI response-model serialization: a 500 here
         # would abort the entire collection run instead of routing to the failures sidecar.
-        client = self._client_and_mocks(monkeypatch, AsyncMock(side_effect=RuntimeError("remote exploded")))
+        client = self._client(monkeypatch, AsyncMock(side_effect=RuntimeError("remote exploded")))
         response = client.post("/run", json=make_row())
         assert response.status_code == 200
         body = response.json()
@@ -522,16 +728,18 @@ class TestRoutes:
         assert body["reward"] == 0.0
         assert body["response"]["output"][0]["type"] == "message"
 
-    async def test_responses_not_implemented(self) -> None:
-        agent = make_agent()
-        with pytest.raises(NotImplementedError):
-            await agent.responses(body={})
+    def test_responses_route_is_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # /v1/responses is a real route now: create-params in, finished trajectory out.
+        client = self._client(monkeypatch)
+        response = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+        assert response.status_code == 200
+        assert response.json()["id"] == "traj_1"
 
 
 class TestStatefulToolsEndToEnd:
-    """The full session contract, in-process: RemoteAgent seeds the counter environment,
-    forwards the session to a fake remote service, the service calls the counter tools with
-    the forwarded cookie, and verify() scores the mutated session state."""
+    """The full session contract, in-process: RemoteAgent seeds the real counter environment,
+    the service asks for tools via unpaired function_calls, GYM executes them against the
+    counter server on the seeded session, and verify() scores the mutated state."""
 
     def _counter_client(self):
         from fastapi.testclient import TestClient
@@ -547,10 +755,43 @@ class TestStatefulToolsEndToEnd:
         server = StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         return TestClient(server.setup_webserver())
 
-    async def test_counter_env_reward_through_forwarded_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_counter_env_reward_through_gym_executed_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
         counter = self._counter_client()
 
+        # The service never sees the counter server: it only returns asks and reads outputs.
+        def turn2(received):
+            return traj([fn_call("c3", "get_counter_value", "{}")])
+
+        service = scripted_service(
+            traj(
+                [
+                    fn_call("c1", "increment_counter", '{"count": 1}'),
+                    fn_call("c2", "increment_counter", '{"count": 2}'),
+                ]
+            ),
+            traj([fn_call("c3", "get_counter_value", "{}")]),
+            # Final turn: read the count Gym fed back and answer with it
+            traj([msg("final count is 6")]),
+        )
+
+        agent = make_agent()
+
         async def gym_post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path.endswith("/v1/responses"):
+                wire = json.model_dump(exclude_unset=True) if isinstance(json, BaseModel) else json
+                params = NeMoGymResponseCreateParamsNonStreaming.model_validate(wire)
+                fastapi_response = Response()
+                try:
+                    result = await agent.responses(make_request(dict(cookies or {})), fastapi_response, params)
+                except Exception as e:  # noqa: BLE001
+                    return FakeServerClientResponse({"error": repr(e)}, status=500)
+                out_cookies = SimpleCookie()
+                for header_value in fastapi_response.headers.getlist("set-cookie"):
+                    out_cookies.load(header_value)
+                return FakeServerClientResponse(
+                    result.model_dump(mode="json"), cookies={k: m.value for k, m in out_cookies.items()}
+                )
+            # Everything else — seed, tools, verify — hits the REAL counter server
             response = counter.post(url_path, json=json, cookies=dict(cookies or {}))
             return FakeServerClientResponse(
                 response.json(), cookies=dict(response.cookies), status=response.status_code
@@ -558,52 +799,13 @@ class TestStatefulToolsEndToEnd:
 
         server_client = MagicMock(spec=ServerClient)
         server_client.post = AsyncMock(side_effect=gym_post)
+        agent.server_client = server_client
+        mock_remote(monkeypatch, service)
 
-        async def remote_service(method, url, data=None, headers=None, **kwargs):
-            # The remote service reads the forwarded session and calls the counter tools
-            # with the cookie echoed on every call — the contract under test.
-            cookie_pair = headers[SESSION_COOKIE_HEADER]
-            cookie_name, cookie_value = cookie_pair.split("=", 1)
-            tool_cookies = {cookie_name: cookie_value}
-            assert headers[RESOURCES_URL_HEADER].startswith("http://")
-
-            assert counter.post("/increment_counter", json={"count": 1}, cookies=tool_cookies).status_code == 200
-            assert counter.post("/increment_counter", json={"count": 2}, cookies=tool_cookies).status_code == 200
-            count = counter.post("/get_counter_value", json={}, cookies=tool_cookies).json()["count"]
-
-            trajectory = dict(_MINIMAL_TRAJECTORY)
-            trajectory["output"] = [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "id": "msg_1",
-                    "content": [{"type": "output_text", "text": f"final count is {count}", "annotations": []}],
-                }
-            ]
-            return FakeRemoteResponse(200, orjson.dumps(trajectory))
-
-        mock_remote(monkeypatch, AsyncMock(side_effect=remote_service))
-        monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: "http://counter-in-process")
-
-        agent = make_agent(server_client=server_client, tools_mode="forward")
         row = {
             "responses_create_params": {
                 "input": [{"role": "user", "content": "add 1 then add 2 then get the count"}],
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": "increment_counter",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"count": {"type": "integer", "description": ""}},
-                            "required": ["count"],
-                            "additionalProperties": False,
-                        },
-                        "strict": True,
-                        "description": "",
-                    }
-                ],
+                "tools": _COUNTER_TOOLS,
             },
             "initial_count": 3,
             "expected_count": 6,
@@ -613,9 +815,11 @@ class TestStatefulToolsEndToEnd:
 
         dumped = result.model_dump()
         assert NG_FAILURE_CLASS_KEY not in dumped
-        # Reward 1.0 only if seed, both tool calls, and verify all shared ONE session
+        # Reward 1.0 only if seed, both Gym-executed tool calls, and verify shared ONE session
         assert dumped["reward"] == 1.0
-        assert "final count is 6" in dumped["response"]["output"][0]["content"][0]["text"]
+        # The service really was fed the counter value Gym read back
+        third_input = service.received[2]["payload"]["input"]
+        assert any('"count":6' in i.get("output", "") for i in third_input if isinstance(i, dict))
 
 
 class TestCollectorRoundTrip:
@@ -633,14 +837,13 @@ class TestCollectorRoundTrip:
         # Hydra CLI parse it would otherwise attempt under pytest (same as the core tests).
         monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", MagicMock(return_value={}))
 
-        async def remote_service(method, url, data=None, headers=None, **kwargs):
+        async def remote_service(method, url, data=None, headers=None, cookies=None, **kwargs):
             params = orjson.loads(data)
             if "fail" in params["input"][0]["content"]:
                 return FakeRemoteResponse(500, b"remote exploded")
             return FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))
 
-        mock_remote(monkeypatch, AsyncMock(side_effect=remote_service))
-        agent = make_agent(server_client=seed_verify_server_client())
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=remote_service))
         agent_http = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
 
         class InProcessHelper(RolloutCollectionHelper):
@@ -696,8 +899,7 @@ class TestReviewFindingPins:
     async def test_failure_on_reused_rollout_row_still_returns_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A rollouts/failures JSONL re-fed as a dataset carries reward/response/error and stale
         # routing keys; the failure path must not TypeError on them (the never-raise contract).
-        mock_remote(monkeypatch, AsyncMock(side_effect=RuntimeError("remote exploded")))
-        agent = make_agent(server_client=seed_verify_server_client())
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=RuntimeError("remote exploded")))
 
         row = make_row(**self._REUSED_ROW_EXTRAS)
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))).model_dump()
@@ -713,8 +915,7 @@ class TestReviewFindingPins:
     def test_failure_on_reused_rollout_row_route_level_stays_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from fastapi.testclient import TestClient
 
-        mock_remote(monkeypatch, AsyncMock(side_effect=RuntimeError("remote exploded")))
-        agent = make_agent(server_client=seed_verify_server_client())
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=RuntimeError("remote exploded")))
         client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
 
         response = client.post("/run", json=make_row(**self._REUSED_ROW_EXTRAS))
@@ -725,8 +926,7 @@ class TestReviewFindingPins:
     async def test_happy_path_reused_row_leaks_no_stale_sentinels(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Stale routing keys on an input row must not echo through verify and misroute a
         # SUCCESS into the failures sidecar.
-        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))))
-        agent = make_agent(server_client=seed_verify_server_client())
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(_MINIMAL_TRAJECTORY))
 
         row = make_row(**self._REUSED_ROW_EXTRAS)
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))).model_dump()
@@ -780,92 +980,9 @@ class TestReviewFindingPins:
         agent = make_agent(server_client=server_client)
         monkeypatch.setattr(remote_agent_app, "_AGGREGATE_PROXY_TIMEOUT_SECS", 0.05)
 
-        from nemo_gym.base_resources_server import AggregateMetricsRequest
-
         with pytest.raises(asyncio.TimeoutError):
-            await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
-
-    async def test_run_timeout_excludes_semaphore_queue_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        release_first = asyncio.Event()
-
-        async def gated(*args, **kwargs):
-            await release_first.wait()
-            return FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))
-
-        mock_remote(monkeypatch, AsyncMock(side_effect=gated))
-        agent = make_agent(server_client=seed_verify_server_client(), concurrency=1, run_timeout_secs=0.5)
-
-        first = asyncio.create_task(agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row())))
-        second = asyncio.create_task(agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row())))
-        # Hold the only permit for most of the second task's would-be budget
-        await asyncio.sleep(0.4)
-        release_first.set()
-        results = [r.model_dump() for r in await asyncio.gather(first, second)]
-
-        # If queue wait counted against run_timeout_secs, the second task would time out
-        assert all(NG_FAILURE_CLASS_KEY not in r for r in results)
-
-    async def test_tools_mode_forward_loopback_warning_for_offhost_remote(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))))
-        monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: "http://127.0.0.1:15022")
-        agent = make_agent(
-            server_client=seed_verify_server_client(),
-            tools_mode="forward",
-            agent_base_url="http://gpu-node-7:9000",
-        )
-
-        await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
-
-        assert "advertised_resources_url" in capsys.readouterr().out
-
-    async def test_tools_mode_forward_warns_on_unroutable_bind_address_too(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # host: 0.0.0.0 makes get_server_url advertise 0.0.0.0 — from the remote machine that
-        # resolves to ITS OWN loopback, the same silent-zero failure as advertising 127.0.0.1.
-        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))))
-        monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: "http://0.0.0.0:15022")
-        agent = make_agent(
-            server_client=seed_verify_server_client(),
-            tools_mode="forward",
-            agent_base_url="http://gpu-node-7:9000",
-        )
-
-        await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
-
-        assert "advertised_resources_url" in capsys.readouterr().out
-
-    async def test_advertised_resources_url_overrides_header_and_silences_warning(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        request_mock = AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY)))
-        client = mock_remote(monkeypatch, request_mock)
-        monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: "http://127.0.0.1:15022")
-        agent = make_agent(
-            server_client=seed_verify_server_client(),
-            tools_mode="forward",
-            agent_base_url="http://gpu-node-7:9000",
-            advertised_resources_url="http://head-node.cluster:15022",
-        )
-
-        await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
-
-        headers = client.request.call_args.kwargs["headers"]
-        assert headers[RESOURCES_URL_HEADER] == "http://head-node.cluster:15022"
-        assert "advertised_resources_url" not in capsys.readouterr().out
-
-    async def test_quality_warnings_are_throttled(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        trajectory = dict(_MINIMAL_TRAJECTORY)
-        trajectory.pop("usage")
-        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(trajectory))))
-        agent = make_agent(server_client=seed_verify_server_client())
-
-        for _ in range(10):
-            await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
-
-        # Head of 5, then every 100th: 10 rollouts -> exactly 5 printed warnings
-        assert capsys.readouterr().out.count("no usage") == 5
+            await agent.aggregate_metrics(
+                __import__(
+                    "nemo_gym.base_resources_server", fromlist=["AggregateMetricsRequest"]
+                ).AggregateMetricsRequest(verify_responses=[])
+            )

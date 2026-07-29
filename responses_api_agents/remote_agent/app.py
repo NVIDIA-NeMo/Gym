@@ -12,14 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Thin agent server that brokers rollouts to a user-hosted remote agent service.
+"""Agent server that drives a user-hosted remote agent service through Gym's tool loop.
 
-The remote service implements ONE endpoint: ``POST {agent_base_url}/v1/responses``.
-It receives the row's ``responses_create_params`` (never ``verifier_metadata`` — the
-answer key stays inside Gym), runs its own agent loop with its own model and tools,
-and returns a single finished Responses API trajectory. This server owns the Gym
-side of the rollout: it seeds the session, holds the session cookies, verifies on
-the resources server, and returns the verify response from ``/run``.
+The remote service implements ONE endpoint, ``POST {agent_base_url}/v1/responses``, and is
+called like a model: each call it receives the conversation so far (the row's
+``responses_create_params`` with the accumulated output and tool results appended to
+``input``) and returns a Responses API object. To have Gym execute a tool from the
+environment, it returns a ``function_call`` item WITHOUT a matching
+``function_call_output``; tool calls it already answered itself (its own internal tools)
+ride along as paired call+output items and are passed through untouched. Gym runs the
+loop — copied from simple_agent — executing unpaired calls against the resources server
+and re-posting until the service returns a final assistant message.
+
+The resources server is never exposed to the service: tool execution, session cookies,
+and ``verifier_metadata`` all stay inside Gym.
 
 Failures never raise out of ``/run``: every failure (remote endpoint down, timeout,
 malformed reply, seed/verify errors) becomes a reward-0 verify response carrying the
@@ -28,13 +34,14 @@ sidecar and retries on resume.
 """
 
 import asyncio
+import json
 from traceback import print_exc
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import orjson
 from aiohttp import ClientOSError, ClientTimeout, ServerDisconnectedError
-from fastapi import Body, Request
+from fastapi import Body, Request, Response
 from pydantic import ConfigDict, PrivateAttr, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
@@ -47,26 +54,24 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
+)
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import (
     get_global_aiohttp_client,
     get_response_json,
-    get_server_url,
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
 )
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"
-
-# Header names of the session-forwarding contract (tools_mode="forward"): the remote
-# service echoes the cookie on every resources-server tool call it makes. The URL is
-# re-sent per request (rather than configured remote-side) because Gym assigns servers
-# random ports on every `gym env start` — a statically configured address goes stale on
-# every restart; the cookie is minted per rollout and has no static equivalent at all.
-RESOURCES_URL_HEADER = "X-NeMo-Gym-Resources-Server-Url"
-SESSION_COOKIE_HEADER = "X-NeMo-Gym-Session-Cookie"
 
 _REMOTE_MAX_TRIES = 3
 _REMOTE_RETRY_SLEEP_SECS = 0.5
@@ -78,6 +83,19 @@ _AGGREGATE_PROXY_TIMEOUT_SECS = 600.0
 # (e.g. a rollouts or failures JSONL re-fed as a dataset); they must never collide with
 # the fresh values or leak through the verify echo into the dispatcher's routing.
 _RESERVED_RESULT_KEYS = ("reward", "response", "error", NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY)
+
+
+class RemoteAgentError(RuntimeError):
+    """A rollout-level failure from the remote hop; retryable on resume."""
+
+
+class RemoteAgentTerminalError(RemoteAgentError):
+    """A failure that will not fix itself on retry (e.g. an invalid response shape).
+
+    run() reaches responses() over an HTTP self-post, so this class's NAME is the wire
+    contract: the exception middleware serializes it into the 500 body and run() matches
+    the name string to set the terminal routing flag.
+    """
 
 
 def normalize_remote_url(url: str) -> str:
@@ -102,50 +120,24 @@ def normalize_remote_url(url: str) -> str:
     return normalized
 
 
-def cookie_header_value(cookies: Any) -> Optional[str]:
-    """Serialize seed-session cookies (SimpleCookie morsels or a plain dict) into a Cookie header."""
-    if not cookies:
-        return None
-    pairs = []
-    for key, value in cookies.items():
-        pairs.append(f"{key}={getattr(value, 'value', value)}")
-    return "; ".join(pairs) if pairs else None
-
-
 class RemoteAgentConfig(BaseResponsesAPIAgentConfig):
     agent_base_url: str
     resources_server: ResourcesServerRef
     concurrency: int = 32
+    # Per-call bound on one POST to the remote service; a rollout makes one call per loop step.
     remote_responses_timeout_secs: float = 1800.0
-    # Bound on the whole /run body (seed + remote call + verify), applied after the
-    # semaphore is acquired so queue wait does not count against it. The collector's
-    # named-agent hop carries no timeout of its own; this is the only wallclock bound.
+    # Bound on the whole /run body (seed + the full agent/tool loop + verify), applied after
+    # the semaphore is acquired so queue wait does not count against it. The collector's
+    # named-agent hop carries no timeout of its own; this is the only whole-rollout bound.
     run_timeout_secs: float = 2100.0
-    # Who serves the tools a dataset declares:
-    #   "refuse"  — nobody can: reject tool-declaring tasks up front (terminal failure row)
-    #               instead of letting verify() score silent zeros against untouched state.
-    #   "forward" — Gym does: send the resources-server URL and session cookie as headers on
-    #               every remote request; the service echoes the cookie on each tool call.
-    #   "remote"  — the service does: it implements the declared tools itself; nothing is
-    #               forwarded and the guard stands down.
-    tools_mode: Literal["refuse", "forward", "remote"] = "refuse"
-    # The resources-server URL advertised to the remote service with tools_mode="forward".
-    # The default (resolved from the global config) is the BIND address — typically
-    # 127.0.0.1, unreachable from another machine. Set this to the externally reachable URL
-    # when the remote service runs off-host (bind vs. advertise can genuinely differ: NAT,
-    # tunnels, load balancers). This only changes the header string; making the address
-    # actually route to the resources server is the operator's job.
-    advertised_resources_url: Optional[str] = None
+    # Maximum loop steps (remote calls) per rollout; None leaves run_timeout_secs as the
+    # only bound, matching simple_agent's default.
+    max_steps: Optional[int] = None
 
     @field_validator("agent_base_url")
     @classmethod
     def _normalize_agent_base_url(cls, value: str) -> str:
         return normalize_remote_url(value)
-
-    @field_validator("advertised_resources_url")
-    @classmethod
-    def _normalize_advertised_resources_url(cls, value: Optional[str]) -> Optional[str]:
-        return normalize_remote_url(value) if value else value
 
 
 class RemoteAgentRunRequest(BaseRunRequest):
@@ -166,11 +158,202 @@ class RemoteAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = asyncio.Semaphore(self.config.concurrency)
 
-    async def responses(self, body=Body()) -> NeMoGymResponse:
-        raise NotImplementedError(
-            "RemoteAgent brokers a remote service; drive it through /run. The remote service's "
-            "own /v1/responses is called by run(), not exposed here."
-        )
+    async def responses(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        # simple_agent's loop with the model hop swapped for the remote service. The service
+        # is called like a model: conversation in, Responses object out. Divergences from
+        # simple_agent are marked; everything else is kept verbatim.
+        body = body.model_copy(deep=True)
+
+        if isinstance(body.input, str):
+            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+
+        new_outputs = []
+        usage = None
+        step = 0
+        agent_server_cookies = None  # the service's own cookies, round-tripped so it can keep per-rollout state
+        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+
+        while True:
+            step += 1
+            new_body = body.model_copy(update={"input": body.input + new_outputs})
+
+            # Divergence: hardened POST to the external service instead of the model server.
+            agent_response, agent_server_cookies = await self._post_agent_responses(new_body, agent_server_cookies)
+
+            output = agent_response.output
+            new_outputs.extend(output)
+
+            if not usage:
+                usage = agent_response.usage
+                agent_response.usage = None
+
+            if usage and agent_response.usage:
+                usage.input_tokens += agent_response.usage.input_tokens
+                usage.output_tokens += agent_response.usage.output_tokens
+                usage.total_tokens += agent_response.usage.total_tokens
+
+                # TODO support more advanced token details
+                usage.input_tokens_details.cached_tokens = 0
+                usage.output_tokens_details.reasoning_tokens = 0
+
+            if agent_response.incomplete_details:
+                break
+
+            # Divergence: execute only UNPAIRED calls. A call the service already answered
+            # itself (matching function_call_output in the same response) is its own internal
+            # tool record — it passes through into the trajectory untouched.
+            answered_call_ids = {o.call_id for o in output if o.type == "function_call_output"}
+            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [
+                o for o in output if o.type == "function_call" and o.call_id not in answered_call_ids
+            ]
+            all_output_messages: List[NeMoGymResponseOutputMessage] = [
+                o for o in output if o.type == "message" and o.role == "assistant"
+            ]
+            if not all_fn_calls and all_output_messages:
+                break
+
+            for output_function_call in all_fn_calls:
+                try:
+                    parsed_arguments = json.loads(output_function_call.arguments)
+                except (json.JSONDecodeError, TypeError) as e:
+                    # The service produced malformed tool-call arguments. Surface the
+                    # error back as a tool response so the rollout can continue
+                    # (or terminate with a low reward) instead of crashing the
+                    # whole batch on json.loads.
+                    tool_response = NeMoGymFunctionCallOutput(
+                        type="function_call_output",
+                        call_id=output_function_call.call_id,
+                        # Use repr(e) so the exception type name is always
+                        # included even when str(e) would be empty.
+                        output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
+                    )
+                    new_outputs.append(tool_response)
+                    continue
+
+                api_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path=f"/{output_function_call.name}",
+                    json=parsed_arguments,
+                    cookies=resources_server_cookies,
+                )
+                # We don't raise for status here since it's a valid return for the API to error e.g. if the service asks for an unknown tool or passes an invalid call.
+                resources_server_cookies = api_response.cookies
+
+                tool_response = NeMoGymFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=output_function_call.call_id,
+                    output=(await api_response.content.read()).decode(),
+                )
+                new_outputs.append(tool_response)
+
+            # Check if max steps is not None and if we have exhausted it.
+            if self.config.max_steps and step >= self.config.max_steps:
+                break
+
+        # Propagate any extra cookies necessary for downstream verification. The service's
+        # own cookies are its private session and deliberately stay out of the Gym side.
+        for k, v in resources_server_cookies.items():
+            response.set_cookie(k, v)
+
+        agent_response.output = new_outputs
+        agent_response.usage = usage
+        return agent_response
+
+    async def _post_agent_responses(
+        self, new_body: NeMoGymResponseCreateParamsNonStreaming, cookies: Optional[Dict[str, str]]
+    ) -> Tuple[NeMoGymResponse, Dict[str, str]]:
+        """One hardened POST to the remote service. Returns (validated response, its cookies)."""
+        remote_url = f"{self.config.agent_base_url}/v1/responses"
+        client = get_global_aiohttp_client()
+        # exclude_unset keeps the wire payload to the fields the dataset row (and the loop)
+        # actually set, never materialized None defaults.
+        data = orjson.dumps(new_body.model_dump(exclude_unset=True))
+        headers = {"Content-Type": "application/json"}
+        timeout = ClientTimeout(total=self.config.remote_responses_timeout_secs)
+
+        response = None
+        last_connect_error: Optional[BaseException] = None
+        for num_try in range(1, _REMOTE_MAX_TRIES + 1):
+            try:
+                # Never follow redirects: aiohttp re-issues 301/302/303 as a body-less GET and
+                # re-sends 307/308 to an address the user never configured; fail with the 3xx.
+                response = await client.request(
+                    "POST",
+                    remote_url,
+                    data=data,
+                    headers=headers,
+                    cookies=cookies or {},
+                    timeout=timeout,
+                    allow_redirects=False,
+                )
+                break
+            except (ClientOSError, ServerDisconnectedError) as e:
+                # Refused/reset (ClientOSError) and keepalive races (ServerDisconnectedError)
+                # are transient connection noise; everything else fails fast.
+                last_connect_error = e
+                if num_try < _REMOTE_MAX_TRIES:
+                    await asyncio.sleep(_REMOTE_RETRY_SLEEP_SECS)
+            except asyncio.TimeoutError:
+                raise RemoteAgentError(
+                    f"remote /v1/responses timed out after {self.config.remote_responses_timeout_secs}s "
+                    "(remote_responses_timeout_secs; raise it if agent calls legitimately run longer)"
+                ) from None
+            except Exception as e:
+                if is_global_aiohttp_client_request_debug_enabled():
+                    print_exc()
+                raise RemoteAgentError(f"{type(e).__name__}: {e}") from e
+        if response is None:
+            raise RemoteAgentError(
+                f"could not reach the remote service after {_REMOTE_MAX_TRIES} tries "
+                f"({type(last_connect_error).__name__}: {last_connect_error}). "
+                f"Is your service running at {self.config.agent_base_url}?"
+            )
+
+        # client.request() returns once headers arrive; the body read can still raise
+        # (mid-body disconnect, deadline) and must honor the same never-raise contract.
+        try:
+            content = await response.read()
+        except Exception as e:
+            if is_global_aiohttp_client_request_debug_enabled():
+                print_exc()
+            raise RemoteAgentError(f"reading the response body failed: {type(e).__name__}: {e}") from e
+        # response.ok is `status < 400`; reject 3xx explicitly (redirects are not followed).
+        if not response.ok or response.status >= 300:
+            if is_global_aiohttp_client_request_debug_enabled():
+                print(
+                    f"[remote_agent] full HTTP {response.status} body: {content.decode(errors='replace')}", flush=True
+                )
+            location = response.headers.get("Location", "")
+            raise RemoteAgentError(
+                f"HTTP {response.status}"
+                + (f" (redirect to {location}; fix agent_base_url to point at the final address)" if location else "")
+                + f": {content[:500].decode(errors='replace')}"
+            )
+        try:
+            result = orjson.loads(content)
+        except orjson.JSONDecodeError as e:
+            raise RemoteAgentError(f"response is not valid JSON: {e}") from e
+        if not isinstance(result, dict):
+            raise RemoteAgentError(f"expected a JSON object from /v1/responses, got {type(result).__name__}")
+
+        try:
+            validated = NeMoGymResponse.model_validate(result)
+        except PydanticValidationError as e:
+            if is_global_aiohttp_client_request_debug_enabled():
+                print(f"[remote_agent] full validation error: {e}", flush=True)
+            # A shape error will not fix itself on retry.
+            raise RemoteAgentTerminalError(
+                f"remote service returned an invalid Responses API object: {str(e)[:500]}"
+            ) from e
+
+        merged_cookies = dict(cookies or {})
+        merged_cookies.update({k: morsel.value for k, morsel in response.cookies.items()})
+        return validated, merged_cookies
 
     async def run(self, request: Request, body: RemoteAgentRunRequest = Body()) -> RemoteAgentVerifyResponse:
         record = self._sanitized_record(body)
@@ -183,7 +366,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 return self._failure_response(
                     record,
                     f"/run exceeded run_timeout_secs={self.config.run_timeout_secs}s "
-                    "(seed + remote /v1/responses + verify)",
+                    "(seed + agent/tool loop + verify)",
                 )
             except Exception as e:  # noqa: BLE001 -- never 500; one task must not abort the whole collection
                 return self._failure_response(record, f"unexpected error: {type(e).__name__}: {e}")
@@ -200,12 +383,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         # body and record are two views of the same row: `record` (sanitized dict, computed
         # before run()'s try so failure rows can be built in ANY error state) feeds the Gym
         # hops; `body` (typed model) is kept solely because exclude_unset information — which
-        # fields the dataset actually set — exists only on the model, and the remote wire
-        # payload must not carry materialized None defaults.
-        guard_error = self._tools_guard_error(record)
-        if guard_error:
-            return self._failure_response(record, guard_error, terminal=True)
-
+        # fields the dataset actually set — exists only on the model.
         if record.get(SKILLS_REF_KEY_NAME):
             self._throttled_warn(
                 "skills_ref",
@@ -229,32 +407,34 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 record, f"/seed_session on the resources server failed: {type(e).__name__}: {e}"
             )
 
-        # 2. One POST to the remote service: create-params in, finished trajectory out.
-        # exclude_unset keeps the wire payload to exactly what the dataset row carried.
-        remote_params = body.responses_create_params.model_dump(exclude_unset=True)
-        remote_result, remote_error, terminal = await self._post_remote_responses(remote_params, cookies)
-        if remote_error is not None:
-            return self._failure_response(record, remote_error, terminal=terminal)
-
+        # 2. Self-post to our own /v1/responses, which drives the agent/tool loop.
         try:
-            response = NeMoGymResponse.model_validate(remote_result)
-        except PydanticValidationError as e:
-            if is_global_aiohttp_client_request_debug_enabled():
-                print(f"[remote_agent] full validation error: {e}", flush=True)
-            # A shape error will not fix itself on retry.
-            return self._failure_response(
-                record,
-                f"remote service returned an invalid Responses API object: {str(e)[:500]}",
-                terminal=True,
+            loop_response = await self.server_client.post(
+                server_name=self.config.name,
+                url_path=self.url_path_for_run("/v1/responses", body),
+                json=body.responses_create_params,
+                cookies=cookies,
             )
-        self._warn_on_response_quality(response)
+            await raise_for_status(loop_response)
+            response_json = await get_response_json(loop_response)
+            cookies = loop_response.cookies
+        except Exception as e:
+            content = getattr(e, "response_content", b"")
+            text = content.decode(errors="replace") if isinstance(content, (bytes, bytearray)) else str(content)
+            # Terminal classification crosses the HTTP self-post boundary by exception NAME:
+            # the middleware serialized the raised RemoteAgentTerminalError into the 500 body.
+            terminal = "RemoteAgentTerminalError" in text
+            detail = text or f"{type(e).__name__}: {e}"
+            return self._failure_response(record, f"agent loop failed: {detail[:500]}", terminal=terminal)
+
+        self._warn_on_response_quality(response_json)
 
         # 3. Verify on the SAME session; the verify response (reward included) is /run's result.
         try:
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=record | {"response": response.model_dump(mode="json")},
+                json=record | {"response": response_json},
                 cookies=cookies,
             )
             await raise_for_status(verify_response)
@@ -264,117 +444,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
 
         return RemoteAgentVerifyResponse.model_validate(verify_json)
 
-    def _tools_guard_error(self, record: Dict[str, Any]) -> Optional[str]:
-        """Refuse tool-declaring tasks the remote service cannot serve, instead of scoring silent zeros.
-
-        A dataset that declares tools expects them to be called during the rollout. Without
-        forward_session the remote service has no session cookie, so any per-session state
-        those tools mutate stays untouched and verify() scores 0 on every row.
-        """
-        declared_tools = (record.get("responses_create_params") or {}).get("tools")
-        if declared_tools and self.config.tools_mode == "refuse":
-            return (
-                'the task declares tools but tools_mode="refuse" (the default). Set '
-                'tools_mode="forward" so the remote service can call Gym-hosted tools with the '
-                'session cookie, or tools_mode="remote" if the service implements the declared '
-                "tools itself."
-            )
-        return None
-
-    async def _post_remote_responses(
-        self, remote_params: Dict[str, Any], cookies: Any
-    ) -> Tuple[Optional[Dict], Optional[str], bool]:
-        """POST create-params to the remote /v1/responses. Returns (result, error, terminal)."""
-        remote_url = f"{self.config.agent_base_url}/v1/responses"
-        client = get_global_aiohttp_client()
-        data = orjson.dumps(remote_params)
-        headers = {"Content-Type": "application/json"}
-        if self.config.tools_mode == "forward":
-            resources_url = self.config.advertised_resources_url or get_server_url(self.config.resources_server.name)
-            advertised_host = urlparse(resources_url).hostname or ""
-            remote_host = urlparse(self.config.agent_base_url).hostname or ""
-            # 0.0.0.0 is a bind address, not a routable one: from the remote machine it
-            # resolves to that machine's own loopback, exactly like 127.0.0.1 would.
-            local_only_hosts = ("127.0.0.1", "localhost", "0.0.0.0")
-            if advertised_host in local_only_hosts and remote_host not in local_only_hosts:
-                self._throttled_warn(
-                    "loopback_resources_url",
-                    f"WARNING: forwarding resources-server URL {resources_url} (an address other machines "
-                    f"cannot reach) to the off-host remote service at {self.config.agent_base_url}. Its tool "
-                    "calls will not reach Gym; set advertised_resources_url to an externally reachable URL.",
-                )
-            headers[RESOURCES_URL_HEADER] = resources_url
-            session_cookie = cookie_header_value(cookies)
-            if session_cookie:
-                headers[SESSION_COOKIE_HEADER] = session_cookie
-        timeout = ClientTimeout(total=self.config.remote_responses_timeout_secs)
-
-        response = None
-        last_connect_error: Optional[BaseException] = None
-        for num_try in range(1, _REMOTE_MAX_TRIES + 1):
-            try:
-                # Never follow redirects: aiohttp re-issues 301/302/303 as a body-less GET and
-                # re-sends 307/308 to an address the user never configured; fail with the 3xx.
-                response = await client.request(
-                    "POST", remote_url, data=data, headers=headers, timeout=timeout, allow_redirects=False
-                )
-                break
-            except (ClientOSError, ServerDisconnectedError) as e:
-                # Refused/reset (ClientOSError) and keepalive races (ServerDisconnectedError)
-                # are transient connection noise; everything else fails fast.
-                last_connect_error = e
-                if num_try < _REMOTE_MAX_TRIES:
-                    await asyncio.sleep(_REMOTE_RETRY_SLEEP_SECS)
-            except asyncio.TimeoutError:
-                return (
-                    None,
-                    f"remote /v1/responses timed out after {self.config.remote_responses_timeout_secs}s "
-                    "(remote_responses_timeout_secs; raise it if rollouts legitimately run longer)",
-                    False,
-                )
-            except Exception as e:
-                if is_global_aiohttp_client_request_debug_enabled():
-                    print_exc()
-                return None, f"{type(e).__name__}: {e}", False
-        if response is None:
-            return (
-                None,
-                f"could not reach the remote service after {_REMOTE_MAX_TRIES} tries "
-                f"({type(last_connect_error).__name__}: {last_connect_error}). "
-                f"Is your service running at {self.config.agent_base_url}?",
-                False,
-            )
-
-        # client.request() returns once headers arrive; the body read can still raise
-        # (mid-body disconnect, deadline) and must honor the same never-raise contract.
-        try:
-            content = await response.read()
-        except Exception as e:
-            if is_global_aiohttp_client_request_debug_enabled():
-                print_exc()
-            return None, f"reading the response body failed: {type(e).__name__}: {e}", False
-        # response.ok is `status < 400`; reject 3xx explicitly (redirects are not followed).
-        if not response.ok or response.status >= 300:
-            if is_global_aiohttp_client_request_debug_enabled():
-                print(
-                    f"[remote_agent] full HTTP {response.status} body: {content.decode(errors='replace')}", flush=True
-                )
-            location = response.headers.get("Location", "")
-            return (
-                None,
-                f"HTTP {response.status}"
-                + (f" (redirect to {location}; fix agent_base_url to point at the final address)" if location else "")
-                + f": {content[:500].decode(errors='replace')}",
-                False,
-            )
-        try:
-            result = orjson.loads(content)
-        except orjson.JSONDecodeError as e:
-            return None, f"response is not valid JSON: {e}", False
-        if not isinstance(result, dict):
-            return None, f"expected a JSON object from /v1/responses, got {type(result).__name__}", False
-        return result, None, False
-
     def _throttled_warn(self, key: str, message: str) -> None:
         """Per-key sampled warning: the first few occurrences, then every 100th. At production
         concurrency an unthrottled per-rollout print garbles the collector's progress bar."""
@@ -383,8 +452,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         if n <= _FAILURE_PRINT_HEAD or n % _FAILURE_PRINT_INTERVAL == 0:
             print(f"{message} (occurrence #{n})", flush=True)
 
-    def _warn_on_response_quality(self, response: NeMoGymResponse) -> None:
-        if response.usage is None:
+    def _warn_on_response_quality(self, response_json: Dict[str, Any]) -> None:
+        if not response_json.get("usage"):
             self._throttled_warn(
                 "missing_usage",
                 "WARNING: the remote response carries no usage; token metrics for this agent will be "
