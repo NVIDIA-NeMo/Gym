@@ -15,6 +15,7 @@
 """Provider-neutral public sandbox API."""
 
 import asyncio
+import contextvars
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Mapping
@@ -255,12 +256,35 @@ class _AsyncLoopRunner:
         return self._wait_for_result(operation, future)
 
     def run(self, operation: str, awaitable_factory: Callable[[], Awaitable[T]]) -> T:
+        # Capture the calling thread's context so ContextVars (e.g. the observability
+        # recorder) are visible inside the coroutine running on the background event loop.
         self._ensure_can_block(operation)
-        future = asyncio.run_coroutine_threadsafe(awaitable_factory(), self._loop)
+        ctx = contextvars.copy_context()
+        result_future: Future[T] = Future()
+        # Mutable container so the timeout handler can reach the task for cancellation.
+        scheduled_task: list[asyncio.Task[T]] = []
+
+        def schedule() -> None:
+            task = self._loop.create_task(awaitable_factory(), context=ctx)
+            scheduled_task.append(task)
+
+            def on_done(t: asyncio.Task[T]) -> None:
+                if result_future.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    result_future.set_exception(exc)
+                else:
+                    result_future.set_result(t.result())
+
+            task.add_done_callback(on_done)
+
+        self._loop.call_soon_threadsafe(schedule)
         try:
-            return future.result(timeout=self._wait_timeout_s)
-        except FutureTimeoutError as e:
-            future.cancel()
+            return self._wait_for_result(operation, result_future)
+        except TimeoutError as e:
+            if scheduled_task:
+                self._loop.call_soon_threadsafe(scheduled_task[0].cancel)
             raise TimeoutError(
                 f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
             ) from e

@@ -47,3 +47,14 @@ mini_swe_agent_2:
       eval_timeout: 1800
       skip_if_exists: false
       step_limit: 250
+
+# OTel / NeMo Lens live trace export (e.g. to Honeycomb).
+# Enable at runtime: ++observability.otel.enabled=true ++observability.otel.api_key=<your-key>
+observability:
+  otel:
+    enabled: false
+    service_name: nemo-gym-swebench
+    endpoint: https://api.honeycomb.io
+    api_key: null
+    dataset: nemo-gym
+    headers: {}

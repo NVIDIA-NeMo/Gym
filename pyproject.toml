@@ -254,18 +254,21 @@ sandbox = [
 ]
 
 observability = [
-    # opentelemetry-sdk: TracerProvider, BatchSpanProcessor, and in-process span wiring.
-    # When installed alongside opentelemetry-api (core dep), OTel spans emitted by
-    # nemo_gym.observability can be exported to any OTLP backend.
-    # NeMo Lens (https://github.com/NVIDIA-NeMo/Lens) is the recommended TracerProvider
-    # for distributed rollouts; install it separately on Python >=3.13:
-    #   pip install "nemo-lens[sdk]"
+    # nemo-lens: NVIDIA OTel wrapper for distributed rollouts. Initialises a TracerProvider
+    # and wires up rank-aware OTLP export to Honeycomb, Grafana Tempo, W&B Weave, etc.
+    # Activated via NEMO_LENS_ENABLED=1 + OTEL_EXPORTER_OTLP_ENDPOINT env vars.
+    # Requires Python >=3.13; silently absent on 3.12 (OTel API calls remain no-ops).
+    # Updated: Mon Jul 28, 2026 with nemo-lens[sdk]>=0.1.0
+    # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Lens
+    "nemo-lens[sdk]>=0.1.0; python_version >= '3.13'",
+
+    # opentelemetry-sdk: TracerProvider + exporters for Python 3.12 (nemo-lens not available).
+    # On Python 3.13+, nemo-lens[sdk] pulls this in transitively.
     # Updated: Mon Jul 28, 2026 with opentelemetry-sdk>=1.20.0
     # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python/blob/main/LICENSE
     "opentelemetry-sdk>=1.20.0",
 
     # opentelemetry-exporter-otlp-proto-http: OTLP/HTTP span + metric exporter.
-    # Sends traces to Honeycomb, Grafana Tempo, Jaeger, W&B Weave, etc.
     # Updated: Mon Jul 28, 2026 with opentelemetry-exporter-otlp-proto-http>=1.20.0
     # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python/blob/main/LICENSE
     "opentelemetry-exporter-otlp-proto-http>=1.20.0",

@@ -685,6 +685,12 @@ repr(e): {repr(e)}"""
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
         global_config_dict = get_global_config_dict()
 
+        # Apply YAML-configured OTel settings into env BEFORE initialize_ray() so the
+        # raylet and all Ray workers it spawns inherit NEMO_LENS_ENABLED + OTEL_* vars.
+        from nemo_gym.observability.recorder import apply_otel_config_to_env
+
+        apply_otel_config_to_env((global_config_dict.get("observability") or {}).get("otel"))
+
         initialize_ray()
 
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
@@ -700,6 +706,37 @@ repr(e): {repr(e)}"""
             return
 
         app = server.setup_webserver()
+
+        # Initialise NeMo Lens once per server process so OTel spans emitted by
+        # nemo_gym.observability (sandbox ops, etc.) flow to the configured OTLP backend.
+        # Shutdown is wired into the FastAPI lifespan so the BatchSpanProcessor is
+        # flushed before uvicorn kills the process, guaranteeing no spans are lost.
+        # No-op when NEMO_LENS_ENABLED is unset or nemo-lens is not installed.
+        if is_main_fastapi_proc:
+            try:
+                import os
+
+                if os.environ.get("NEMO_LENS_ENABLED") == "1":
+                    from contextlib import asynccontextmanager as _acm
+
+                    from nemo.lens import NemoLensConfig, setup_telemetry
+
+                    _lens_handle = setup_telemetry(NemoLensConfig.from_env())
+                    _base_lifespan = app.router.lifespan_context
+
+                    @_acm
+                    async def _lens_lifespan(app):
+                        async with _base_lifespan(app) as state:
+                            yield state
+                        try:
+                            _lens_handle.shutdown()
+                        except Exception:
+                            pass
+
+                    app.router.lifespan_context = _lens_lifespan
+            except (ImportError, Exception) as e:
+                print(f"[nemo-gym] NeMo Lens init failed ({type(e).__name__}): {e}", flush=True)
+
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):

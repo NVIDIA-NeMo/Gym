@@ -550,6 +550,10 @@ class RolloutCollectionHelper(BaseModel):
         if obs_recorder is not None:
             print(f"Observability recording enabled → {obs_recorder.output_dir}")
 
+        from nemo_gym.observability.recorder import apply_otel_config_to_env
+
+        apply_otel_config_to_env((global_cfg.get("observability") or {}).get("otel"))
+
         _lens_handle = None
         try:
             from nemo.lens import NemoLensConfig, setup_telemetry

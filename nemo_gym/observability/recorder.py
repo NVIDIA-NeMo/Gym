@@ -66,20 +66,97 @@ G_SPAN_STACK: ContextVar[tuple[dict[str, str], ...]] = ContextVar(
 G_ENV_RECORDER: SandboxEventRecorder | None = None
 G_ENV_RECORDER_LOCK = threading.Lock()
 _METRIC_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_NEMO_LENS_INIT_LOCK = threading.Lock()
+_NEMO_LENS_INITIALIZED = False
+
+
+def _setenv(key: str, value: str) -> None:
+    """Set an env var only if not already explicitly set in the shell environment."""
+    if key not in os.environ:
+        os.environ[key] = value
+
+
+def apply_otel_config_to_env(otel_cfg: dict | None) -> None:
+    """Bridge Gym YAML ``observability.otel`` config → OTEL_* env vars.
+
+    Reads the ``observability.otel`` sub-dict from the Gym config and sets
+    the standard OTel env vars that ``NemoLensConfig.from_env()`` reads.
+    Shell exports set before ``gym env start`` always take precedence.
+    """
+    if not otel_cfg or not otel_cfg.get("enabled"):
+        return
+    _setenv("NEMO_LENS_ENABLED", "1")
+    if svc := otel_cfg.get("service_name"):
+        _setenv("OTEL_SERVICE_NAME", str(svc))
+    if ep := otel_cfg.get("endpoint"):
+        _setenv("OTEL_EXPORTER_OTLP_ENDPOINT", str(ep))
+    hdrs: dict[str, str] = {}
+    if k := otel_cfg.get("api_key"):
+        hdrs["x-honeycomb-team"] = str(k)
+    if ds := otel_cfg.get("dataset"):
+        hdrs["x-honeycomb-dataset"] = str(ds)
+    hdrs.update({str(k): str(v) for k, v in (otel_cfg.get("headers") or {}).items() if v})
+    if hdrs:
+        _setenv("OTEL_EXPORTER_OTLP_HEADERS", ",".join(f"{k}={v}" for k, v in hdrs.items()))
+
+
+def _try_init_nemo_lens() -> None:
+    """Lazily initialise NeMo Lens in Ray workers and other subprocesses.
+
+    Ray spawns fresh worker processes that don't inherit in-memory state like
+    the OTel TracerProvider.  Reads the Gym config dict (propagated via
+    NEMO_GYM_CONFIG_DICT env var) to apply YAML-based OTel config before
+    checking whether NeMo Lens should be initialised.
+    """
+    global _NEMO_LENS_INITIALIZED
+    if _NEMO_LENS_INITIALIZED:
+        return
+    with _NEMO_LENS_INIT_LOCK:
+        if _NEMO_LENS_INITIALIZED:
+            return
+        try:
+            # Read NEMO_GYM_CONFIG_DICT directly instead of calling get_global_config_dict(),
+            # which falls through to Hydra CLI parsing in processes where sys.argv contains
+            # non-Hydra arguments (e.g. Ray workers running default_worker.py --node-ip-address=...).
+            config_dict_str = os.environ.get("NEMO_GYM_CONFIG_DICT")
+            if config_dict_str:
+                from omegaconf import OmegaConf
+
+                cfg = OmegaConf.create(config_dict_str)
+                apply_otel_config_to_env((cfg.get("observability") or {}).get("otel"))
+        except Exception:
+            pass
+        if os.environ.get("NEMO_LENS_ENABLED") != "1":
+            _NEMO_LENS_INITIALIZED = True  # don't retry; config won't change mid-run
+            return
+        try:
+            from nemo.lens import NemoLensConfig, setup_telemetry
+
+            setup_telemetry(NemoLensConfig.from_env())
+            _NEMO_LENS_INITIALIZED = True
+        except (ImportError, Exception):
+            _NEMO_LENS_INITIALIZED = True  # don't retry on failure
 
 
 @contextmanager
 def _otel_span_cm(name: str, attributes: dict[str, Any]) -> Iterator[None]:
     """Emit a best-effort OTel trace span alongside JSONL recording.
 
-    No-op if opentelemetry-api is not installed or no TracerProvider is configured
-    (e.g. NeMo Lens has not been initialised via setup_telemetry()).
+    No-op if opentelemetry-api is not installed or no TracerProvider is configured.
+    Auto-initialises NeMo Lens when NEMO_LENS_ENABLED=1 so Ray workers and other
+    subprocess agents get spans without explicit setup_telemetry() calls.
     """
     try:
         import opentelemetry.trace as _ot
     except ImportError:
         yield
         return
+
+    # Lazy-init: Ray workers and subprocess agents inherit env vars but not the
+    # in-memory TracerProvider.  If the provider is still the no-op proxy, try
+    # to initialise NeMo Lens now before creating any spans.
+    if isinstance(_ot.get_tracer_provider(), _ot.ProxyTracerProvider):
+        _try_init_nemo_lens()
 
     otel_attrs: dict[str, Any] = {}
     for k, v in attributes.items():
@@ -1416,10 +1493,18 @@ async def observability_span(
     phase: str | None = None,
     attributes: dict[str, Any] | None = None,
 ) -> Iterator[None]:
-    """Record an async span on the current recorder (JSONL + OTel trace)."""
-    recorder = _active_recorder()
-    if recorder is None or observability_suppressed():
+    """Record an async span: JSONL + OTel trace when a recorder is active;
+    OTel trace only when a TracerProvider is configured but no recorder is active.
+    """
+    if observability_suppressed():
         yield
+        return
+    recorder = _active_recorder()
+    if recorder is None:
+        # No JSONL recorder, but still emit an OTel span if a TracerProvider is
+        # configured (e.g. NeMo Lens initialised in a server process via NEMO_LENS_ENABLED=1).
+        with _otel_span_cm(name, {**(attributes or {}), **({"phase": phase} if phase else {})}):
+            yield
         return
     async with recorder.span(name, phase=phase, attributes=attributes):
         yield
@@ -1432,10 +1517,16 @@ def observability_sync_span(
     phase: str | None = None,
     attributes: dict[str, Any] | None = None,
 ) -> Iterator[None]:
-    """Record a sync span on the current recorder (JSONL + OTel trace)."""
-    recorder = _active_recorder()
-    if recorder is None or observability_suppressed():
+    """Record a sync span: JSONL + OTel trace when a recorder is active;
+    OTel trace only when a TracerProvider is configured but no recorder is active.
+    """
+    if observability_suppressed():
         yield
+        return
+    recorder = _active_recorder()
+    if recorder is None:
+        with _otel_span_cm(name, {**(attributes or {}), **({"phase": phase} if phase else {})}):
+            yield
         return
     with recorder.sync_span(name, phase=phase, attributes=attributes):
         yield
