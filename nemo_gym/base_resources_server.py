@@ -87,6 +87,22 @@ class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
 
+class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
+    """Base verify response for environments with multiple reward objectives.
+
+    Subclass this response instead of declaring ``reward_components`` on an
+    environment-specific ``BaseVerifyResponse`` subclass. The mapping is required, and
+    its objective keys should remain consistent across every task in the environment.
+
+    Set the inherited ``reward`` to the scalar aggregate expected by single-reward
+    consumers. To include individual objectives in aggregate metrics, also expose them
+    as top-level numeric fields because metrics do not descend into this mapping. See
+    ``resources_servers/example_tool_call_multireward`` for a complete example.
+    """
+
+    reward_components: dict[str, float]
+
+
 class BaseSeedSessionRequest(BaseModel):
     pass
 
