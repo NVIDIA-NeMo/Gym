@@ -1,5 +1,5 @@
 diff --git a/scripts/lib_agent.py b/scripts/lib_agent.py
-index 6207029..9257b30 100644
+index 6207029..2fe4e1d 100644
 --- a/scripts/lib_agent.py
 +++ b/scripts/lib_agent.py
 @@ -222,6 +222,8 @@ def ensure_agent_exists(
@@ -111,7 +111,7 @@ index 6207029..9257b30 100644
  
      # Configure models.json for the bench agent
      bench_agent_dir = _get_agent_store_dir(agent_id) / "agent"
-@@ -312,16 +322,34 @@ def ensure_agent_exists(
+@@ -312,33 +322,107 @@ def ensure_agent_exists(
      if base_url:
          # Custom OpenAI-compatible endpoint — build a provider entry
          data: dict[str, Any] = {}
@@ -140,7 +140,6 @@ index 6207029..9257b30 100644
 +        ).strip()
 +        context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "524288"))
 +        max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "131072"))
-+        provider_timeout = int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "14400"))
 +        runtime_params = {
 +            "temperature": 1,
 +            "maxTokens": max_tokens,
@@ -152,7 +151,8 @@ index 6207029..9257b30 100644
              "baseUrl": base_url,
              "apiKey": key_ref,
              "api": "openai-completions",
-@@ -329,16 +357,74 @@ def ensure_agent_exists(
++            "timeoutSeconds": int(os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS", "14400")),
+             "models": [
                  {
                      "id": model_id,
                      "name": model_id,
@@ -170,8 +170,6 @@ index 6207029..9257b30 100644
                  }
              ],
          }
-+        if provider_timeout > 0:
-+            custom_provider["timeoutSeconds"] = provider_timeout
 +        providers = data.setdefault("providers", {})
 +        data["mode"] = "merge"
 +        providers["custom"] = custom_provider
@@ -230,7 +228,7 @@ index 6207029..9257b30 100644
          logger.info(
              "Configured custom provider (%s) with model %s for agent %s",
              base_url,
-@@ -377,7 +462,7 @@ def ensure_agent_exists(
+@@ -377,7 +461,7 @@ def ensure_agent_exists(
          except OSError as exc:
              logger.warning("Failed to delete sessions.json: %s", exc)
  
@@ -239,7 +237,7 @@ index 6207029..9257b30 100644
  
  
  def cleanup_agent_sessions(agent_id: str) -> None:
-@@ -579,9 +664,9 @@ def _find_recent_session_path(agent_dir: Path, started_at: float) -> Path | None
+@@ -579,9 +663,9 @@ def _find_recent_session_path(agent_dir: Path, started_at: float) -> Path | None
      if not sessions_dir.exists():
          return None
      candidates = [
@@ -252,7 +250,7 @@ index 6207029..9257b30 100644
      ]
  
      if not candidates:
-@@ -615,6 +700,7 @@ def _load_transcript(
+@@ -615,6 +699,7 @@ def _load_transcript(
              for candidate in (
                  session_dir / f"{resolved_session_id}.jsonl",
                  session_dir / f"{resolved_session_id}.ndjson",
@@ -260,7 +258,7 @@ index 6207029..9257b30 100644
                  session_dir / resolved_session_id / "transcript.jsonl",
                  session_dir / resolved_session_id / "events.jsonl",
              ):
-@@ -1184,6 +1270,7 @@ def call_judge_api(
+@@ -1184,6 +1269,7 @@ def call_judge_api(
      """Call a judge model directly via API, bypassing OpenClaw.
  
      Dispatches based on model prefix:
@@ -268,7 +266,7 @@ index 6207029..9257b30 100644
        - openrouter/* -> OpenRouter chat completions API
        - anthropic/*  -> Anthropic Messages API
        - openai/*     -> OpenAI chat completions API
-@@ -1191,6 +1278,17 @@ def call_judge_api(
+@@ -1191,6 +1277,17 @@ def call_judge_api(
  
      Returns {"status": str, "text": str, "error"?: str}.
      """
