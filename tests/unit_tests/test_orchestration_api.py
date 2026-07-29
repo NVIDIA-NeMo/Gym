@@ -25,7 +25,7 @@ COMPUTE_TWO = {
 }
 
 SERVICE = {"container": "gym:latest", "type": "vllm", "model": "org/model"}
-DRIVER = {"container": "gym:latest", "benchmarks": [{"name": "gsm8k"}]}
+DRIVER = {"container": "gym:latest", "benchmarks": {"gsm8k": {}}}
 JOB = {"output_path": "/tmp/gym-jobs"}
 
 
@@ -70,12 +70,12 @@ def test_no_policy_model():
 
 def test_policy_model_injects_run_args():
     config = SubmitConfig.model_validate(_config(driver={**DRIVER, "policy_model": "svc"}))
-    benchmark = config.driver.benchmarks[0]
+    benchmark = config.driver.benchmarks["gsm8k"]
     assert benchmark.run["policy_base_url"] == "http://localhost:8000/v1"
     assert benchmark.run["policy_model_name"] == "org/model"
 
 
 def test_policy_model_conflict_raises():
-    driver = {**DRIVER, "policy_model": "svc", "benchmarks": [{"name": "gsm8k", "run": {"policy_base_url": "http://other"}}]}
+    driver = {**DRIVER, "policy_model": "svc", "benchmarks": {"gsm8k": {"run": {"policy_base_url": "http://other"}}}}
     with pytest.raises(ValidationError, match="already sets"):
         SubmitConfig.model_validate(_config(driver=driver))

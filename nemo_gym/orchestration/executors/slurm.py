@@ -35,33 +35,32 @@ class SlurmExecutor(BaseExecutor):
         with get_connection(compute.hostname) as conn:
             conn.copy(staging, remote_run_dir)
             output = conn.run([
-                f"sbatch {shlex.quote(str(remote_run_dir / b.name / 'job.sh'))}"
-                for b in config.driver.benchmarks
+                f"sbatch {shlex.quote(str(remote_run_dir / name / 'job.sh'))}"
+                for name in config.driver.benchmarks
             ])
 
-        benchmarks = [b.name for b in config.driver.benchmarks]
+        benchmark_names = list(config.driver.benchmarks)
         job_ids = _SBATCH_JOB_ID_RE.findall(output)
-        for benchmark, job_id in zip(benchmarks, job_ids):
-            rich.print(f"[green]submitted[/green] {benchmark} → Slurm job [bold]{job_id}[/bold]")
-        unmatched = benchmarks[len(job_ids):]
-        for benchmark in unmatched:
-            rich.print(f"[green]submitted[/green] {benchmark} (job ID unavailable)")
+        for name, job_id in zip(benchmark_names, job_ids):
+            rich.print(f"[green]submitted[/green] {name} → Slurm job [bold]{job_id}[/bold]")
+        for name in benchmark_names[len(job_ids):]:
+            rich.print(f"[green]submitted[/green] {name} (job ID unavailable)")
 
     def _dry_run(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> None:
         print(f"[dry-run] remote run dir: {remote_run_dir}")
-        for benchmark in config.driver.benchmarks:
-            script = build_sbatch_script(config, benchmark, compute, remote_run_dir / benchmark.name)
+        for name, benchmark in config.driver.benchmarks.items():
+            script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
             print(f"\n{'='*60}")
-            print(f"[dry-run] sbatch script for benchmark: {benchmark.name}")
+            print(f"[dry-run] sbatch script for benchmark: {name}")
             print(f"{'='*60}")
             print(script)
 
     def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> Path:
         staging = Path(tempfile.mkdtemp(prefix="gym-submit-"))
-        for benchmark in config.driver.benchmarks:
-            bench_dir = staging / benchmark.name
+        for name, benchmark in config.driver.benchmarks.items():
+            bench_dir = staging / name
             bench_dir.mkdir()
             (bench_dir / "logs").mkdir()
-            script = build_sbatch_script(config, benchmark, compute, remote_run_dir / benchmark.name)
+            script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
             (bench_dir / "job.sh").write_text(script)
         return staging

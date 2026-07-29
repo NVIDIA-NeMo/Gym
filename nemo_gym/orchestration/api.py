@@ -9,7 +9,7 @@ class _StrictModel(BaseModel):
 
 class HealthCheckConfig(_StrictModel):
     path: str = "/health"
-    port: int
+    port: int | None = None
     timeout_seconds: int = 60
 
 
@@ -36,6 +36,8 @@ class VllmServiceConfig(BaseModelServiceConfig):
     def _default_health_check(self) -> "VllmServiceConfig":
         if self.health_check is None:
             self.health_check = HealthCheckConfig(port=self.port)
+        elif self.health_check.port is None:
+            self.health_check.port = self.port
         return self
 
 
@@ -77,7 +79,6 @@ ComputeConfig = Annotated[
 
 
 class BenchmarkRunConfig(_StrictModel):
-    name: str
     run: dict[str, Any] = {}
 
 
@@ -90,7 +91,7 @@ class DriverConfig(_StrictModel):
     container: str = "python:3.12"
     gym_install: GymInstallConfig | None = None
     policy_model: str | None = None
-    benchmarks: list[BenchmarkRunConfig]
+    benchmarks: dict[str, BenchmarkRunConfig]
 
 
 class JobConfig(_StrictModel):
@@ -131,11 +132,11 @@ class SubmitConfig(_StrictModel):
                 )
             service = self.services[self.driver.policy_model]
             if isinstance(service, BaseModelServiceConfig):
-                for benchmark in self.driver.benchmarks:
+                for bench_name, benchmark in self.driver.benchmarks.items():
                     conflicts = [k for k in ("policy_base_url", "policy_model_name") if k in benchmark.run]
                     if conflicts:
                         raise ValueError(
-                            f"Benchmark '{benchmark.name}' run config already sets {conflicts} "
+                            f"Benchmark '{bench_name}' run config already sets {conflicts} "
                             f"but driver.policy_model is also set. Remove one."
                         )
                     benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"

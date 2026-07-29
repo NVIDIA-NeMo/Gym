@@ -55,7 +55,7 @@ def _render_service_command(name: str, container: str, command: str) -> str:
     var = bash_var(name)
     return (
         f"# service: {name}\n"
-        f"srun --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"srun --overlap --no-container-mount-home --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -79,11 +79,12 @@ _BUILDERS = {
 
 def build_sbatch_script(
     config: SubmitConfig,
+    benchmark_name: str,
     benchmark: BenchmarkRunConfig,
     compute: SlurmComputeConfig,
     remote_bench_dir: Path,
 ) -> str:
-    directives = _render_directives(compute, remote_bench_dir, benchmark.name)
+    directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     service_commands = "\n\n".join(
         _render_service_command(name, service.container, _BUILDERS[type(service)](service))
@@ -96,12 +97,12 @@ def build_sbatch_script(
         if service.health_check
     )
 
-    gym_cmd = render_gym_cmd(benchmark.name, flatten_run_args(benchmark.run))
+    gym_cmd = render_gym_cmd(benchmark_name, flatten_run_args(benchmark.run))
     gi = config.driver.gym_install
     entrypoint = render_gym_install(gi.repo, gi.ref) if gi else '"${GYM_CMD[@]}"'
     driver_command = (
         f"{gym_cmd}\n"
-        f"srun --container-image={shlex.quote(config.driver.container)} "
+        f"srun --overlap --no-container-mount-home --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
 
