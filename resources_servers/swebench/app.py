@@ -93,10 +93,14 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             env_image_tag=LATEST,
         )
 
+        # TODO @bxyu-nvidia: Spinup a fresh container (need this anyways for running eval)
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            model_patch = None  # TODO
+            # TODO @bxyu-nvidia: pwd in the fresh container (defaults to WORKDIR)
+            # TODO @bxyu-nvidia: cd into WORKDIR in the input container
+            # TODO @bxyu-nvidia: extract the patch via git
+            model_patch = None
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         res = run_instance(
