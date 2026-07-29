@@ -114,6 +114,8 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
+    # Optional OpenClaw provider request timeout in seconds. None keeps OpenClaw's 120s default.
+    openclaw_provider_timeout_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
     # Where per-task transcripts are archived (kept on disk for inspection, like
     # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
@@ -195,6 +197,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         # it never hits the shared-workspace WorkspaceVanishedError cliff). The client
         # in-container picks up the token from this env var.
         env["OPENCLAW_GATEWAY_TOKEN"] = self.config.gateway_token
+        if self.config.openclaw_provider_timeout_seconds:
+            env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
         if self.config.brave_api_key:
             env["BRAVE_API_KEY"] = self.config.brave_api_key
         if self.config.tavily_api_key:
