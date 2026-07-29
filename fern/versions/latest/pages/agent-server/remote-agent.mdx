@@ -147,9 +147,10 @@ name the failing URL or the timeout knob involved.
 
 ## Gotchas
 
-- **Redirects are rejected, not followed.** A `301/302` from your service fails the rollout with
-  the `Location` shown — point `agent_base_url` at the final address. (Following a redirected
-  POST would silently convert it to a body-less GET.)
+- **Redirects are rejected, not followed.** Any `3xx` from your service fails the rollout with
+  the `Location` shown — point `agent_base_url` at the final address. (Followed, a `301/302/303`
+  would silently re-issue the POST as a body-less GET; a `307/308` would silently re-send the
+  task to an address you never configured.)
 - **Missing `usage` = empty token metrics.** The run succeeds and warns; your cost/token
   accounting is empty. Report real token counts.
 - **Timeouts don't retry inline** — a timed-out rollout goes to the sidecar and is retried on

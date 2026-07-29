@@ -313,7 +313,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         last_connect_error: Optional[BaseException] = None
         for num_try in range(1, _REMOTE_MAX_TRIES + 1):
             try:
-                # aiohttp follows a redirected POST as a body-less GET; fail with the 3xx instead.
+                # Never follow redirects: aiohttp re-issues 301/302/303 as a body-less GET and
+                # re-sends 307/308 to an address the user never configured; fail with the 3xx.
                 response = await client.request(
                     "POST", remote_url, data=data, headers=headers, timeout=timeout, allow_redirects=False
                 )
