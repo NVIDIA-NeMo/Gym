@@ -17,6 +17,7 @@ from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.server_utils
@@ -2494,6 +2495,62 @@ class TestApp:
         ]
         actual_messages = mock_method.call_args.kwargs["messages"]
         assert expected_messages == actual_messages
+
+    @mark.parametrize(
+        "reasoning_field,expected_keys",
+        [
+            ("both", {"reasoning_content", "reasoning"}),
+            ("reasoning_content", {"reasoning_content"}),
+            ("reasoning", {"reasoning"}),
+        ],
+    )
+    def test_reasoning_field_controls_emitted_keys(
+        self, monkeypatch: MonkeyPatch, reasoning_field: str, expected_keys: set
+    ):
+        """`reasoning_field` selects which alias(es) reach the server.
+
+        Sending both is right for vLLM (each version ignores the key it does not
+        know) but fatal for servers that alias them -- Kimi-K3's Rust frontend
+        answers `400 duplicate field 'reasoning'`.
+        """
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = True
+        server.config.reasoning_field = reasoning_field
+        server._converter.uses_reasoning_parser = True
+
+        body_dict = {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "Answer.<think>Some reasoning.</think>"},
+            ]
+        }
+        result = server._preprocess_chat_completion_create_params(MagicMock(), body_dict)
+
+        assistant = result["messages"][1]
+        assert {k for k in ("reasoning_content", "reasoning") if k in assistant} == expected_keys
+        for key in expected_keys:
+            assert assistant[key] == "Some reasoning."
+        # the reasoning markup is always stripped out of the content itself
+        assert assistant["content"] == "Answer."
+
+    def test_reasoning_field_defaults_to_both(self, monkeypatch: MonkeyPatch):
+        """Default must stay `both` so existing deployments are unaffected."""
+        assert self._setup_server(monkeypatch).config.reasoning_field == "both"
+
+    def test_reasoning_field_rejects_unknown_value(self, monkeypatch: MonkeyPatch):
+        with raises(ValidationError):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=False,
+                uses_reasoning_parser=True,
+                reasoning_field="reasoning_contents",
+            )
 
     def test_responses_sequential_reasoning_allowed_False(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
