@@ -56,15 +56,19 @@ from nemo_gym.observability import (
     reset_current_recorder,
     set_current_recorder,
 )
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+
+
+_failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
-    GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
-    is_global_aiohttp_client_setup,
     raise_for_status,
-    set_global_aiohttp_client,
+)
+from nemo_gym.server_utils import (
+    setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
 
@@ -119,11 +123,6 @@ def _get_max_rollout_attempts() -> int:
             flush=True,
         )
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
-
-
-def _failures_path_for(output_fpath: Path) -> Path:
-    """Sidecar path used by the dispatcher and ``_load_from_cache``."""
-    return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
 
 
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
@@ -435,7 +434,7 @@ class RolloutCollectionHelper(BaseModel):
 
         # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
-        failures_fpath = _failures_path_for(Path(config.output_jsonl_fpath))
+        failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
         if failures_fpath.exists():
@@ -525,7 +524,7 @@ class RolloutCollectionHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
-        failures_fpath = _failures_path_for(output_fpath)
+        failures_fpath = failures_path_for(output_fpath)
 
         # Resolve global config once; used for capture dirs and observability below.
         global_cfg = get_global_config_dict()
@@ -697,7 +696,17 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             # Strip heavyweight fields before sending, but preserve response.usage
             stripped = []
             for r in agent_result_list:
-                entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+                entry = {
+                    k: v
+                    for k, v in r.items()
+                    if k
+                    not in (
+                        "response",
+                        "responses_create_params",
+                        "ng_agent_observations",
+                        "ng_model_call_capture",
+                    )
+                }
                 usage = (r.get("response") or {}).get("usage")
                 if usage:
                     entry["response"] = {"usage": usage}
@@ -803,15 +812,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
     def setup_server_client(
         self, head_server_config: Optional[BaseServerConfig] = None
     ) -> ServerClient:  # pragma: no cover
-        server_client = ServerClient.load_from_global_config(head_server_config)
-
-        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
-
-        return server_client
+        return setup_server_client_utils(head_server_config)
 
 
 class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
