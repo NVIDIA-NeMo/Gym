@@ -66,7 +66,7 @@ jobs:
 
       - name: Smoke test — vLLM and FlashInfer installed
         run: |
-          docker run --rm "${{ needs.build.outputs.container-uri }}" python -c "
+          docker run --rm --entrypoint python "${{ needs.build.outputs.container-uri }}" -c "
           from importlib.metadata import version
           print('vllm=='+version('vllm'))
           print('flashinfer-python=='+version('flashinfer-python'))
