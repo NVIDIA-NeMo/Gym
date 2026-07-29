@@ -1,0 +1,87 @@
+# E2B sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `e2b` selects the provider class and its value is passed to the
+# provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping providers is
+# swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/e2b/configs/e2b.yaml, $MODEL]"
+#
+# Requires the SDK: `pip install 'e2b>=2.25.0'`.
+#
+# Works against e2b.dev and against any e2b-compatible gateway -- point
+# `connection.api_url`/`connection.sandbox_url` at the gateway.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: e2b
+  e2b:
+    connection:
+      # Leave unset to use the SDK's own env vars: E2B_API_KEY, E2B_API_URL,
+      # E2B_SANDBOX_URL, E2B_DOMAIN, E2B_ACCESS_TOKEN.
+      api_key: ${oc.env:E2B_API_KEY,null}
+      # Self-hosted / e2b-compatible gateway. Both are usually the same host.
+      api_url: ${oc.env:E2B_API_URL,null}
+      sandbox_url: ${oc.env:E2B_SANDBOX_URL,null}
+      # Per-HTTP-request timeout. Keep well below `exec.default_timeout_s`, which
+      # bounds the command itself rather than a single request.
+      request_timeout_s: 120.0
+    create:
+      # E2B starts sandboxes from a pre-built TEMPLATE ALIAS, not a registry
+      # reference: aliases allow only letters, digits, '-' and '_'.
+      #
+      # Resolution order for each sandbox:
+      #   1. SandboxSpec.provider_options.template
+      #   2. this template_map, keyed by SandboxSpec.image
+      #   3. SandboxSpec.image itself, when it is already a valid alias
+      #   4. this `template` fallback
+      #
+      # Map image references that are not valid aliases, e.g.:
+      #   template_map:
+      #     "ghcr.io/acme/task:1.0": acme-task-1-0
+      #
+      # Building templates from OCI images is provisioning, not part of
+      # starting a sandbox, so it lives outside this provider in
+      # nemo_gym/sandbox/providers/e2b/build.py. It emits exactly this mapping:
+      #   python -m nemo_gym.sandbox.providers.e2b.build \
+      #       --image ghcr.io/acme/task:1.0 --cpu-count 8 --memory-mb 16384 \
+      #       --output template_map.yaml
+      template: null
+      template_map: {}
+
+    exec:
+      # Applied when a caller passes no timeout. The SDK's own default is 60s,
+      # which silently truncates builds and test suites; verifiers in particular
+      # often run for many minutes.
+      default_timeout_s: 1800.0
+      user: null
+      # Per-HTTP-request timeout for the command. Leave null to derive it from
+      # the command timeout: the SDK applies this to the whole streaming RPC
+      # carrying the command's output, so a value below the command timeout
+      # tears the stream down mid-command.
+      request_timeout_s: null
+      # Start commands detached and reattach by pid if the output stream drops.
+      # The command keeps running inside the sandbox when the stream dies, so a
+      # gateway rollout or proxy restart mid-command no longer fails it.
+      #
+      # On by default, matching Harbor's own e2b environment, which dispatches
+      # every command with background=True.
+      #
+      # Reattaching is lossy, so it is a fallback rather than the happy path:
+      # the stream is live rather than replayed, so stdout/stderr cover only
+      # from the reattach onwards (exit codes are unaffected), and a command
+      # that finishes while disconnected cannot be recovered at all.
+      background: true
+      reconnect_attempts: 2
+    operations:
+      # Retries for transient transport/5xx failures. Deterministic errors
+      # (not-found, auth, invalid-argument, timeout) are never retried.
+      retries: 2
+      retry_delay_s: 0.5
+      retry_max_delay_s: 8.0

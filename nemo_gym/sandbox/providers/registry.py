@@ -161,9 +161,16 @@ def _load_ecs_fargate_provider() -> ProviderClass:
     return EcsFargateProvider
 
 
+def _load_e2b_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.e2b import E2BProvider
+
+    return E2BProvider
+
+
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
+_BUILTIN_PROVIDER_LOADERS["e2b"] = _load_e2b_provider
 _BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
 _BUILTIN_PROVIDER_LOADERS["enroot"] = _load_enroot_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider

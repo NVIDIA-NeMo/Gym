@@ -1,0 +1,570 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Sandbox provider backed by the E2B Python SDK.
+
+Works against e2b.dev itself and against any e2b-compatible gateway (point
+``connection.api_url``/``connection.sandbox_url`` at it).
+
+Two E2B concepts differ from the provider-neutral :class:`SandboxSpec` and are
+handled explicitly rather than silently:
+
+**Templates, not images.** E2B starts sandboxes from a pre-built *template*
+alias, not from an arbitrary registry reference, and rejects anything outside
+``[A-Za-z0-9_-]``. ``SandboxSpec.image`` is therefore resolved to a template
+via :meth:`E2BProvider._resolve_template`; supply ``create.template_map`` when
+your image references are not already valid aliases.
+
+**Resources are fixed at template build time.** ``cpu_count``/``memory_mb`` are
+arguments to the template *build*, so a per-sandbox
+``SandboxSpec.resources`` cannot be honoured at create time. Requests are
+reported once per provider instance (or raise, with ``create.strict_resources``)
+instead of being dropped quietly.
+"""
+
+import asyncio
+import logging
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Any, Awaitable, Callable, TypeVar
+
+from nemo_gym.sandbox.providers.base import (
+    SandboxCreateError,
+    SandboxExecResult,
+    SandboxHandle,
+    SandboxSpec,
+    SandboxStatus,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# E2B template aliases accept ASCII letters, digits, hyphens and underscores.
+_TEMPLATE_ALIAS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# The SDK reads 0 as "no request timeout"; None would fall back to the
+# connection's, which is sized for short control-plane calls.
+_NO_REQUEST_TIMEOUT = 0.0
+
+# Head-room over a command's own timeout, so the sandbox-side timeout fires
+# first and the stream is never cut mid-command.
+_EXEC_REQUEST_TIMEOUT_MARGIN_S = 60.0
+
+# Passed straight through to the SDK (``ApiParams``) on every call.
+_API_PARAM_KEYS = (
+    "api_key",
+    "access_token",
+    "api_url",
+    "sandbox_url",
+    "domain",
+    "debug",
+    "validate_api_key",
+    "headers",
+    "api_headers",
+    "proxy",
+)
+
+
+class E2BCreateError(SandboxCreateError):
+    """Raised when a sandbox cannot be created."""
+
+
+def _require_e2b_sdk() -> Any:
+    """Import the optional ``e2b`` dependency with an actionable error."""
+    try:
+        import e2b
+    except ImportError as exc:  # pragma: no cover - exercised via monkeypatch in tests
+        raise ImportError(
+            "The e2b sandbox provider requires the 'e2b' package. Install it with `pip install 'e2b>=2.25.0'`."
+        ) from exc
+    return e2b
+
+
+def _config_from_mapping(cls: type[T], value: Any) -> T:
+    """Build a config dataclass from a mapping, rejecting unknown keys."""
+    if value is None:
+        return cls()
+    if isinstance(value, cls):
+        return value
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{cls.__name__} expects a mapping, got {type(value).__name__}")
+    allowed = {f.name for f in fields(cls)}
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(
+            f"Unknown {cls.__name__} keys: {', '.join(sorted(unknown))}. Expected: {', '.join(sorted(allowed))}"
+        )
+    return cls(**dict(value))
+
+
+@dataclass(frozen=True)
+class E2BConnectionConfig:
+    """Connection settings forwarded to the SDK.
+
+    Any field left ``None`` falls back to the SDK's own environment variables
+    (``E2B_API_KEY``, ``E2B_API_URL``, ``E2B_SANDBOX_URL``, ``E2B_DOMAIN``, ...).
+    """
+
+    api_key: str | None = None
+    access_token: str | None = None
+    api_url: str | None = None
+    sandbox_url: str | None = None
+    domain: str | None = None
+    debug: bool | None = None
+    validate_api_key: bool | None = None
+    headers: dict[str, str] | None = None
+    api_headers: dict[str, str] | None = None
+    proxy: str | None = None
+    request_timeout_s: float | None = None
+
+
+@dataclass(frozen=True)
+class E2BCreateConfig:
+    """Sandbox creation settings."""
+
+    # Template alias used when the spec does not resolve to one.
+    template: str | None = None
+    # Explicit ``SandboxSpec.image`` -> template alias mapping. Needed whenever
+    # image references are not themselves valid aliases (registry refs contain
+    # '/' and ':', which E2B rejects).
+    template_map: dict[str, str] = field(default_factory=dict)
+    # Sandbox lifetime in seconds; E2B kills the sandbox when it elapses.
+    # ``SandboxSpec.ttl_s`` overrides it per sandbox.
+    timeout_s: float = 3600.0
+    allow_internet_access: bool = True
+    secure: bool = True
+    # Raise instead of warning when a spec requests resources E2B cannot apply
+    # per sandbox (they are fixed when the template is built).
+    strict_resources: bool = False
+
+
+@dataclass(frozen=True)
+class E2BExecConfig:
+    """Command execution settings."""
+
+    # Applied when the caller passes no ``timeout_s``. E2B's own default is 60s,
+    # which silently truncates long-running commands (builds, test suites).
+    default_timeout_s: float | None = 1800.0
+    user: str | None = None
+    request_timeout_s: float | None = None
+    # Start commands detached and reattach by pid if the output stream drops.
+    # The command keeps running inside the sandbox when the stream dies, so its
+    # exit code survives a control-plane restart that would otherwise fail the
+    # command outright.
+    #
+    # On by default, matching Harbor's own e2b environment, which dispatches
+    # every command with ``background=True``. Set False to have the SDK block
+    # on the stream instead; note that reattaching is lossy (see
+    # :meth:`_run_background`).
+    background: bool = True
+    # How many times to reattach before giving up.
+    reconnect_attempts: int = 2
+
+
+@dataclass(frozen=True)
+class E2BOperationConfig:
+    """Retry policy for transient SDK/transport failures."""
+
+    retries: int = 2
+    retry_delay_s: float = 0.5
+    retry_max_delay_s: float = 8.0
+
+
+class E2BProvider:
+    """Provider backed by the E2B Python SDK."""
+
+    name = "e2b"
+
+    def __init__(
+        self,
+        *,
+        connection: E2BConnectionConfig | Mapping[str, Any] | None = None,
+        create: E2BCreateConfig | Mapping[str, Any] | None = None,
+        exec: E2BExecConfig | Mapping[str, Any] | None = None,
+        operations: E2BOperationConfig | Mapping[str, Any] | None = None,
+    ) -> None:
+        self._connection = _config_from_mapping(E2BConnectionConfig, connection)
+        self._create = _config_from_mapping(E2BCreateConfig, create)
+        self._exec = _config_from_mapping(E2BExecConfig, exec)
+        self._operations = _config_from_mapping(E2BOperationConfig, operations)
+        self._warned_resource_specs: set[str] = set()
+
+    # ---------------------------------------------------------------- helpers
+
+    def _api_params(self) -> dict[str, Any]:
+        """SDK ``ApiParams`` for connection-scoped calls; omitted keys fall back to env.
+
+        Only ``create``/``connect``/``kill`` open a connection and accept these.
+        Everything else runs against an already-connected sandbox -- see
+        :meth:`_request_params`.
+        """
+        params = {key: getattr(self._connection, key) for key in _API_PARAM_KEYS}
+        params = {key: value for key, value in params.items() if value is not None}
+        if self._connection.request_timeout_s is not None:
+            params["request_timeout"] = self._connection.request_timeout_s
+        return params
+
+    def _request_params(self) -> dict[str, Any]:
+        """Per-request options for calls on an existing sandbox object.
+
+        ``commands.run``, ``files.*`` and ``is_running`` take ``request_timeout``
+        only -- the sandbox already carries the connection config, and handing
+        them the full ``ApiParams`` raises ``TypeError: unexpected keyword
+        argument 'api_key'``.
+        """
+        if self._connection.request_timeout_s is None:
+            return {}
+        return {"request_timeout": self._connection.request_timeout_s}
+
+    def _exec_request_timeout(self, command_timeout_s: float | None) -> float:
+        """Per-request timeout for ``commands.run``.
+
+        The SDK applies ``request_timeout`` to the whole streaming RPC that
+        carries the command's output, not just to starting it, so any value
+        below the command timeout tears the stream down mid-command::
+
+            httpcore.RemoteProtocolError: peer closed connection without
+            sending complete message body (incomplete chunked read)
+
+        ``connection.request_timeout_s`` is sized for short control-plane calls
+        and must not be inherited here. Absent an explicit override, derive the
+        value from the command timeout plus head-room, so the sandbox-side
+        timeout fires first and the caller gets a clean ``TimeoutError``.
+        """
+        if self._exec.request_timeout_s is not None:
+            return self._exec.request_timeout_s
+        if command_timeout_s is None:
+            # SDK sentinel: 0 means "no request timeout" (None would inherit
+            # the connection's).
+            return _NO_REQUEST_TIMEOUT
+        return float(command_timeout_s) + _EXEC_REQUEST_TIMEOUT_MARGIN_S
+
+    def _resolve_template(self, spec: SandboxSpec) -> str:
+        """Map a spec onto an E2B template alias.
+
+        Precedence: ``provider_options.template`` -> ``create.template_map`` ->
+        ``spec.image`` when it is already a valid alias -> ``create.template``.
+
+        Building a template from an image is provisioning, not part of starting
+        a sandbox, so it lives in :mod:`nemo_gym.sandbox.providers.e2b.build`
+        and never runs on this path.
+        """
+        option = (spec.provider_options or {}).get("template")
+        if option:
+            return str(option)
+
+        if spec.image:
+            mapped = self._create.template_map.get(spec.image)
+            if mapped:
+                return str(mapped)
+            if _TEMPLATE_ALIAS_RE.match(spec.image):
+                return spec.image
+            raise E2BCreateError(
+                f"E2B starts sandboxes from a template alias, but SandboxSpec.image={spec.image!r} is not a valid "
+                "alias (allowed: letters, digits, '-', '_'). Map it with create.template_map, set "
+                "provider_options.template, or build a template first with "
+                "nemo_gym.sandbox.providers.e2b.build (its output is a ready-made template_map)."
+            )
+
+        if self._create.template:
+            return self._create.template
+
+        raise E2BCreateError(
+            "No E2B template to start from: set SandboxSpec.image, provider_options.template, or create.template."
+        )
+
+    def _check_resources(self, spec: SandboxSpec, template: str) -> None:
+        """Surface resource requests E2B cannot honour per sandbox."""
+        resources = spec.resources
+        requested = {
+            name: getattr(resources, name)
+            for name in ("cpu", "memory_mib", "disk_gib", "gpu")
+            if getattr(resources, name, None)
+        }
+        if not requested:
+            return
+        detail = ", ".join(f"{key}={value}" for key, value in sorted(requested.items()))
+        message = (
+            f"E2B fixes sandbox resources when the template is built, so {detail} requested for template "
+            f"{template!r} cannot be applied at create time. Build a template with the desired "
+            "cpu_count/memory_mb instead."
+        )
+        if self._create.strict_resources:
+            raise E2BCreateError(message)
+        if template not in self._warned_resource_specs:
+            self._warned_resource_specs.add(template)
+            LOGGER.warning("%s", message)
+
+    async def _with_retries(self, factory: Callable[[], Awaitable[T]], *, operation: str) -> T:
+        """Retry transient failures with exponential backoff."""
+        e2b = _require_e2b_sdk()
+        # Never retry these: they are deterministic and retrying only adds latency.
+        non_retryable = tuple(
+            exc
+            for exc in (
+                getattr(e2b, "NotFoundException", None),
+                getattr(e2b, "SandboxNotFoundException", None),
+                getattr(e2b, "AuthenticationException", None),
+                getattr(e2b, "InvalidArgumentException", None),
+                getattr(e2b, "TimeoutException", None),
+            )
+            if isinstance(exc, type)
+        )
+        attempts = max(0, self._operations.retries) + 1
+        delay = self._operations.retry_delay_s
+        last_exc: BaseException | None = None
+        for attempt in range(attempts):
+            try:
+                return await factory()
+            except non_retryable:
+                raise
+            except Exception as exc:  # noqa: BLE001 - transport/5xx errors are provider-specific
+                last_exc = exc
+                if attempt == attempts - 1:
+                    break
+                LOGGER.debug("e2b %s failed (attempt %d/%d): %s", operation, attempt + 1, attempts, exc)
+                await asyncio.sleep(min(delay, self._operations.retry_max_delay_s))
+                delay *= 2
+        assert last_exc is not None
+        raise last_exc
+
+    @staticmethod
+    def _sandbox(handle: SandboxHandle) -> Any:
+        sandbox = handle.raw
+        if sandbox is None:
+            raise RuntimeError(f"Sandbox handle {handle.sandbox_id} carries no e2b sandbox object")
+        return sandbox
+
+    # ------------------------------------------------------------- lifecycle
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        e2b = _require_e2b_sdk()
+        template = self._resolve_template(spec)
+        self._check_resources(spec, template)
+
+        timeout_s = spec.ttl_s if spec.ttl_s is not None else self._create.timeout_s
+        kwargs: dict[str, Any] = {
+            "template": template,
+            "timeout": int(timeout_s) if timeout_s is not None else None,
+            "allow_internet_access": self._create.allow_internet_access,
+            "secure": self._create.secure,
+            **self._api_params(),
+        }
+        if spec.env:
+            kwargs["envs"] = {str(k): str(v) for k, v in spec.env.items()}
+        if spec.metadata:
+            kwargs["metadata"] = {str(k): str(v) for k, v in spec.metadata.items()}
+
+        try:
+            sandbox = await self._with_retries(
+                lambda: e2b.AsyncSandbox.create(**kwargs),
+                operation="create",
+            )
+        except Exception as exc:
+            raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
+
+        handle = SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+        if spec.files:
+            for target_path, contents in spec.files.items():
+                await self.write_file(handle, target_path, contents)
+        return handle
+
+    async def connect(self, sandbox_id: str) -> SandboxHandle:
+        """Attach to an already-running sandbox."""
+        e2b = _require_e2b_sdk()
+        sandbox = await self._with_retries(
+            lambda: e2b.AsyncSandbox.connect(sandbox_id, **self._api_params()),
+            operation="connect",
+        )
+        return SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw=sandbox)
+
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        e2b = _require_e2b_sdk()
+        sandbox = self._sandbox(handle)
+        not_found = tuple(
+            exc
+            for exc in (getattr(e2b, "SandboxNotFoundException", None), getattr(e2b, "NotFoundException", None))
+            if isinstance(exc, type)
+        )
+        try:
+            running = await sandbox.is_running(**self._request_params())
+        except not_found:
+            return SandboxStatus.STOPPED
+        except Exception:  # noqa: BLE001 - status must not raise for transient issues
+            return SandboxStatus.UNKNOWN
+        return SandboxStatus.RUNNING if running else SandboxStatus.STOPPED
+
+    async def close(self, handle: SandboxHandle) -> None:
+        e2b = _require_e2b_sdk()
+        sandbox = handle.raw
+        if sandbox is None:
+            return
+        not_found = tuple(
+            exc
+            for exc in (getattr(e2b, "SandboxNotFoundException", None), getattr(e2b, "NotFoundException", None))
+            if isinstance(exc, type)
+        )
+        try:
+            await sandbox.kill(**self._api_params())
+        except not_found:
+            # Already gone (expired TTL or killed elsewhere) - closing is idempotent.
+            LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
+        finally:
+            handle.raw = None
+
+    async def aclose(self) -> None:
+        """No provider-scoped client to close; sandboxes own their connections."""
+        return None
+
+    # -------------------------------------------------------------- commands
+
+    async def _run_background(self, sandbox: Any, kwargs: dict[str, Any]) -> Any:
+        """Run a command detached, reattaching by pid if the stream drops.
+
+        ``commands.run(background=True)`` returns as soon as the process has
+        started, handing back its pid. The command then keeps running inside
+        the sandbox independently of the stream carrying its output, so losing
+        that stream -- a gateway rollout, a proxy restart, a network blip --
+        no longer destroys the command: reattach with ``commands.connect(pid)``
+        and the real exit code still arrives.
+
+        Two limits are inherent to reattaching, which is why this is opt-in:
+
+        * **Output before the reattach is lost.** The stream is live, not
+          replayed, so ``stdout``/``stderr`` cover only from the reattach on.
+          Exit codes are unaffected.
+        * **The process must still be running.** ``connect`` raises
+          not-found once it has exited, so a command that finishes during the
+          gap cannot be recovered.
+        """
+        e2b = _require_e2b_sdk()
+        handle = await sandbox.commands.run(**kwargs, background=True)
+        pid = getattr(handle, "pid", None)
+
+        # Never swallow these while reattaching: a non-zero exit and a command
+        # timeout are real outcomes, not transport failures.
+        terminal = tuple(
+            exc
+            for exc in (getattr(e2b, "CommandExitException", None), getattr(e2b, "TimeoutException", None))
+            if isinstance(exc, type)
+        )
+
+        for attempt in range(self._exec.reconnect_attempts + 1):
+            try:
+                return await handle.wait()
+            except terminal:
+                raise
+            except Exception as exc:  # noqa: BLE001 - transport failure; try to reattach
+                if pid is None or attempt >= self._exec.reconnect_attempts:
+                    raise
+                LOGGER.warning(
+                    "e2b command stream lost (pid=%s, attempt %d/%d): %s; reattaching",
+                    pid,
+                    attempt + 1,
+                    self._exec.reconnect_attempts,
+                    exc,
+                )
+                try:
+                    handle = await sandbox.commands.connect(pid, timeout=kwargs.get("timeout"))
+                except Exception as reconnect_exc:
+                    # Typically not-found: the command finished while we were
+                    # disconnected, so its result is gone. Report the original
+                    # transport failure, which explains what actually happened.
+                    raise exc from reconnect_exc
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        e2b = _require_e2b_sdk()
+        sandbox = self._sandbox(handle)
+
+        effective_timeout = timeout_s if timeout_s is not None else self._exec.default_timeout_s
+        effective_user = user if user is not None else self._exec.user
+        kwargs: dict[str, Any] = {"cmd": command}
+        if cwd is not None:
+            kwargs["cwd"] = cwd
+        if env:
+            kwargs["envs"] = {str(k): str(v) for k, v in env.items()}
+        if effective_user is not None:
+            kwargs["user"] = str(effective_user)
+        # E2B treats ``timeout`` as "no timeout" when falsy; keep None explicit.
+        kwargs["timeout"] = float(effective_timeout) if effective_timeout is not None else None
+        kwargs["request_timeout"] = self._exec_request_timeout(effective_timeout)
+
+        timeout_exc = getattr(e2b, "TimeoutException", None)
+        exit_exc = getattr(e2b, "CommandExitException", None)
+        try:
+            if self._exec.background:
+                result = await self._run_background(sandbox, kwargs)
+            else:
+                result = await sandbox.commands.run(**kwargs)
+        except Exception as exc:
+            # A non-zero exit is a normal outcome, not a provider failure.
+            if isinstance(exit_exc, type) and isinstance(exc, exit_exc):
+                return SandboxExecResult(
+                    stdout=getattr(exc, "stdout", None),
+                    stderr=getattr(exc, "stderr", None),
+                    return_code=int(getattr(exc, "exit_code", 1) or 1),
+                )
+            # Surface timeouts as TimeoutError so callers can treat a wedged
+            # command as a command timeout rather than an infra error.
+            if isinstance(timeout_exc, type) and isinstance(exc, timeout_exc):
+                raise TimeoutError(f"e2b command timed out after {effective_timeout}s: {exc}") from exc
+            raise
+
+        return SandboxExecResult(
+            stdout=getattr(result, "stdout", None),
+            stderr=getattr(result, "stderr", None),
+            return_code=int(getattr(result, "exit_code", 0) or 0),
+        )
+
+    # ----------------------------------------------------------------- files
+
+    async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
+        sandbox = self._sandbox(handle)
+        await self._with_retries(
+            lambda: sandbox.files.write(target_path, data, **self._request_params()),
+            operation="write_file",
+        )
+
+    async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
+        sandbox = self._sandbox(handle)
+        data = await self._with_retries(
+            lambda: sandbox.files.read(source_path, format="bytes", **self._request_params()),
+            operation="read_file",
+        )
+        return data if isinstance(data, bytes) else bytes(data)
+
+    async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+        source = Path(source_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Source file not found: {source}")
+        await self.write_file(handle, target_path, source.read_bytes())
+
+    async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(await self.read_file(handle, source_path))
