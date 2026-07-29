@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from pytest import approx, fixture
 
@@ -98,6 +98,23 @@ class TestVerify:
         assert out.reward == approx(1.0)
         assert out.weight is None
         assert out.language is None
+
+    async def test_verify_records_judge_failure(self, server) -> None:
+        # Wrong answer -> library misses -> judge consulted -> judge call errors.
+        server.server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}])
+        body = PolyMathVerifyRequest(
+            responses_create_params=params,
+            response=_make_response("The answer is \\boxed{5}."),
+            question="What is 2+2?",
+            expected_answer="4",
+            weight=1.0,
+            language="en",
+        )
+        out = await server.verify(body)
+        assert out.reward == approx(0.0)
+        assert out.judge_failed is True
+        assert "judge timeout" in out.judge_failure_reason
 
 
 # ──────────────────────────────────────────────────────────

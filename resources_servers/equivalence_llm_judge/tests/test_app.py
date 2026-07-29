@@ -132,6 +132,33 @@ class TestApp:
         assert res2.reward == approx(1.0)
         assert len(res2.judge_evaluations) == 2
 
+    async def test_verify_judge_failure_recorded(self, config: LLMJudgeResourcesServerConfig) -> None:
+        # A judge call that errors is recorded, not crashed or scored as wrong.
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
+
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "Q: 1+1?"}]
+            ),
+            response=NeMoGymResponse(
+                id="resp",
+                created_at=0.0,
+                model="m",
+                object="response",
+                output=[self._msg("It is 2.")],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ),
+            expected_answer="2",
+        )
+        res = await rs.verify(req)
+        assert res.reward == approx(0.0)
+        assert res.judge_failed is True
+        assert "judge timeout" in res.judge_failure_reason
+
     async def test_verify_not_equal_first(self, config: LLMJudgeResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)

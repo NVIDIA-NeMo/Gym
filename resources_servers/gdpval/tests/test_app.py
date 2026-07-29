@@ -940,13 +940,16 @@ class TestMultiReference:
         assert resp.judge_response["reference_count"] == 1
 
     @pytest.mark.asyncio
-    async def test_verify_all_references_fail_raises(self, tmp_path) -> None:
-        """When every matchup fails the rollout is genuinely unjudgeable and
-        verify raises (surfacing as a failure) rather than faking a reward."""
+    async def test_verify_all_references_fail_records_judge_failure(self, tmp_path) -> None:
+        """When every matchup fails the rollout is genuinely unjudgeable: verify
+        records a distinct judge failure (reward 0, judge_failed) rather than
+        crashing the sample or faking a reward."""
+        from pytest import approx
+
         server, body = self._two_ref_server_and_body(tmp_path)
 
         def always_fail(**_kwargs):
-            raise RuntimeError("500 Internal Server Error")
+            raise RuntimeError("judge timeout")
 
         with (
             patch("resources_servers.gdpval.comparison.run_trials", side_effect=always_fail),
@@ -954,8 +957,12 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            with pytest.raises(RuntimeError, match="all .* judge matchup"):
-                await server.verify(body)
+            resp = await server.verify(body)
+
+        assert resp.reward == approx(0.0)
+        assert resp.judge_failed is True
+        assert "judge timeout" in resp.judge_failure_reason
+        assert resp.verify_mode == "comparison"
 
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest

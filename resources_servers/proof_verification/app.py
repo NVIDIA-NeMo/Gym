@@ -21,6 +21,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -172,6 +173,10 @@ class ProofVerificationVerifyRequest(BaseVerifyRequest):
     ground_truth_verify_score: float
 
 
+class ProofVerificationVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
+    pass
+
+
 class ProofVerificationResourcesServer(SimpleResourcesServer):
     config: ProofVerificationResourcesServerConfig
 
@@ -181,22 +186,37 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
     _ext_init_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
     _log_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
 
-    async def verify(self, body: ProofVerificationVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: ProofVerificationVerifyRequest) -> ProofVerificationVerifyResponse:
         problem = body.problem
         proof = body.proof
         ground_truth_judgement = body.ground_truth_judgement
         ground_truth_verify_score = body.ground_truth_verify_score
         full_response = self._extract_assistant_text(body.response)
         if not full_response:
-            return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+            return ProofVerificationVerifyResponse(**body.model_dump(), reward=0.0)
 
-        reward, details = await self._judge_single(
-            problem=problem,
-            proof=proof,
-            ground_truth_judgement=ground_truth_judgement,
-            ground_truth_verify_score=ground_truth_verify_score,
-            full_response=full_response,
+        # A judge call that errors (auth, rate limit, timeout, HTTP error,
+        # malformed response) is a distinct outcome, not a wrong answer: record
+        # it instead of scoring the verification as incorrect. Only the judge
+        # HTTP path in `_judge_single` raises; format/parse failures return a
+        # normal (reward, details) tuple.
+        result, judge_failure = await run_judge(
+            self._judge_single(
+                problem=problem,
+                proof=proof,
+                ground_truth_judgement=ground_truth_judgement,
+                ground_truth_verify_score=ground_truth_verify_score,
+                full_response=full_response,
+            )
         )
+        if judge_failure is not None:
+            return ProofVerificationVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                judge_failed=True,
+                judge_failure_reason=judge_failure,
+            )
+        reward, details = result
         if LOG_JSONL_PATH:
             await self._append_log_jsonl(
                 log_path=LOG_JSONL_PATH,
@@ -205,7 +225,10 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
                 reward=reward,
                 details=details,
             )
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        return ProofVerificationVerifyResponse(**body.model_dump(), reward=reward)
+
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
 
     async def _append_log_jsonl(
         self,

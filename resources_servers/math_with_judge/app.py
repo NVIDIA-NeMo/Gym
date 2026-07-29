@@ -34,6 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -65,7 +66,7 @@ class JudgeEvaluation(BaseModel):
     response: NeMoGymResponse
 
 
-class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
+class LibraryJudgeMathVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     expected_answer: str
     extracted_answer: Optional[str]
     library_reward: float
@@ -184,12 +185,23 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        (
-            reward,
-            extracted_answer,
-            library_reward,
-            judge_evaluations,
-        ) = await self._verify_answer(body.question, body.expected_answer, combined_response)
+        # A judge transport failure (auth, rate limit, timeout, endpoint error)
+        # is a distinct outcome, not a wrong answer. The library verifier never
+        # raises (it returns 0.0 on failure), so an exception here is the judge.
+        result, judge_failure = await run_judge(
+            self._verify_answer(body.question, body.expected_answer, combined_response)
+        )
+        if judge_failure is not None:
+            return LibraryJudgeMathVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                extracted_answer=None,
+                library_reward=0.0,
+                judge_evaluations=None,
+                judge_failed=True,
+                judge_failure_reason=judge_failure,
+            )
+        reward, extracted_answer, library_reward, judge_evaluations = result
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -398,11 +410,13 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Compute math-specific metrics: pass@k, majority@k, per-sample statistics."""
-        return compute_pass_majority_metrics(
+        metrics = compute_pass_majority_metrics(
             tasks,
             score_fn=self._math_score_fn,
             answer_key="extracted_answer",
         )[0]
+        metrics.update(judge_failure_metrics(tasks))
+        return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Select headline metrics for this math benchmark."""
@@ -415,6 +429,10 @@ Example output: "My final verdict is different [[A!=B]]"."""
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", exclude_names=["no_answer"]))
         key.update(highest_k_metrics(agent_metrics, "majority@{k}", exclude_names=["no_answer"]))
+
+        for name in ("judge_failures", "mean/judge_failed", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
 
         return key
 

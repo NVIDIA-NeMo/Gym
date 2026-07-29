@@ -1129,6 +1129,27 @@ class TestVerifyWithRubricsV4JudgeResponse:
         assert response.judge_passed is None  # None because judge didn't return meaningful result
         assert response.judge_evaluations[0].verdict_label is None
 
+    @pytest.mark.asyncio
+    async def test_verify_judge_call_failure_records_standard_fields(
+        self, resources_server: TerminusJudgeResourcesServer
+    ):
+        """A failed judge CALL is a distinct outcome, recorded via the standard
+        judge-failure fields — not silently scored as a wrong answer."""
+        from pytest import approx
+
+        expected_answer = create_terminus_1_response([{"keystrokes": "ls\n"}])
+        pred_answer = create_terminus_1_response([{"keystrokes": "pwd\n"}])
+        model_output = json.dumps(pred_answer)
+        request = self._create_verify_request(model_output, expected_answer, "terminus_1")
+
+        resources_server.server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+
+        response = await resources_server.verify(request)
+
+        assert response.judge_failed is True
+        assert "judge timeout" in response.judge_failure_reason
+        assert response.reward == approx(0.0)
+
 
 class TestVerifyAdditionalScenarios:
     """Additional test scenarios for full coverage."""

@@ -448,6 +448,30 @@ class TestServer:
         assert result.judge_points == 0
 
     @pytest.mark.asyncio
+    async def test_verify_judge_failure_recorded(self, chat_config):
+        """A judge transport error is recorded as judge_failed, not a wrong answer."""
+        server_mock = MagicMock(spec=ServerClient)
+        server = ImoProofBenchJudgeServer(config=chat_config, server_client=server_mock)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+
+        # Boxed answer that isn't symbolically/literally equal to expected ⇒ judge is called.
+        model_response = _make_response("</think>attempt \\boxed{42}")
+        request = ImoProofBenchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=model_response,
+            problem="P",
+            reference_solution="S",
+            rubric="R",
+            expected_answer="180",
+        )
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
+        assert result.judge_points is None
+        assert result.any_correct == approx(0.0)
+
+    @pytest.mark.asyncio
     async def test_verify_judgement_yes_format(self, chat_config):
         """Format 1: `Judgement: Yes` — the highest-priority parser path
         (matches Skills' `is_correct_judgement`). Used when the judge emits

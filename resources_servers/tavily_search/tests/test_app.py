@@ -304,6 +304,25 @@ class TestApp:
         assert res.extracted_final_answer == "yes"
         assert server_client.post.call_count == 1
 
+    async def test_verify_judge_failure(self, config: TavilySearchResourcesServerConfig) -> None:
+        """A failed judge call is recorded as a distinct outcome, not a wrong answer."""
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        server = TavilySearchResourcesServer(config=config, server_client=server_client)
+
+        req = TavilySearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("The capital of France is Paris."),
+            ground_truth="Paris",
+            question="What is the capital of France?",
+        )
+
+        res = await server.verify(self._create_dummy_request(), req)
+
+        assert res.reward == approx(0.0)
+        assert res.judge_failed is True
+        assert "judge timeout" in res.judge_failure_reason
+
     async def test_verify_incorrect_answer(self, config: TavilySearchResourcesServerConfig) -> None:
         """Test verify endpoint when judge determines answer is incorrect."""
         server_client = MagicMock(spec=ServerClient)

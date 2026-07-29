@@ -40,6 +40,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -86,7 +87,7 @@ class JudgeEvaluation(BaseModel):
     verdict_label: Optional[str] = None
 
 
-class LabbenchVLMVerifyResponse(BaseVerifyResponse):
+class LabbenchVLMVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     verifier_metadata: Optional[dict[str, Any]] = None
@@ -166,15 +167,28 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
         is_protocol = tag.startswith("protocolqa2")
         reference_passage = str(meta.get("reference_passage", ""))
 
-        is_equal, evaluation = await self._judge(
-            question=question,
-            expected_answer=ideal,
-            generated_answer=generated,
-            prompt_template=self._judge_prompt_protocol if is_protocol else self._judge_prompt,
-            include_reference_passage=is_protocol,
-            reference_passage=reference_passage,
+        # A judge call that errors (auth, rate limit, timeout, endpoint error) is a
+        # distinct outcome, not a wrong answer: record it instead of crashing.
+        judge_out, judge_failure = await run_judge(
+            self._judge(
+                question=question,
+                expected_answer=ideal,
+                generated_answer=generated,
+                prompt_template=self._judge_prompt_protocol if is_protocol else self._judge_prompt,
+                include_reference_passage=is_protocol,
+                reference_passage=reference_passage,
+            )
         )
+        if judge_failure is not None:
+            return LabbenchVLMVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                judge_evaluations=[],
+                judge_failed=True,
+                judge_failure_reason=judge_failure,
+            )
 
+        is_equal, evaluation = judge_out
         reward = 1.0 if is_equal else 0.0
         return LabbenchVLMVerifyResponse(
             **body.model_dump(),
@@ -278,6 +292,7 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
                     continue
                 metrics[f"{tag}/{key}"] = value
 
+        metrics.update(judge_failure_metrics(tasks))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -287,6 +302,9 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
                 key[name] = agent_metrics[name]
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
+        for name in ("judge_failures", "mean/judge_failed", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
         return key
 
 

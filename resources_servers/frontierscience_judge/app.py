@@ -47,6 +47,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -221,7 +222,7 @@ class FrontierScienceJudgeVerifyRequest(FrontierScienceJudgeRunRequest, BaseVeri
     pass
 
 
-class FrontierScienceJudgeVerifyResponse(BaseVerifyResponse):
+class FrontierScienceJudgeVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     extracted_answer: Optional[str] = None
@@ -270,18 +271,61 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             answer_key="extracted_answer",
         )
         metrics.update(subset_metrics)
+        metrics.update(judge_failure_metrics(tasks))
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict) -> dict:
         """Select headline metrics for frontierscience-olympiad."""
         key: dict = {}
-        for name in ("mean/input_tokens", "mean/output_tokens"):
+        for name in ("mean/input_tokens", "mean/output_tokens", "mean/judge_failed"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", exclude_names=["no_answer"]))
         key.update(highest_k_metrics(agent_metrics, "majority@{k}", exclude_names=["no_answer"]))
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
         return key
+
+    async def _call_judge(self, judge_prompt: str) -> str:
+        """Call the judge model and return its extracted text. Raises on any transport error."""
+        if self.config.use_chat_completions_for_judge:
+            chat_params_kwargs = {
+                "messages": [{"role": "user", "content": judge_prompt}],
+                "max_tokens": self.config.judge_responses_create_params.max_output_tokens or 2048,
+            }
+            if self.config.judge_responses_create_params.temperature is not None:
+                chat_params_kwargs["temperature"] = self.config.judge_responses_create_params.temperature
+            elif self.config.judge_mode == "olympiad":
+                chat_params_kwargs["temperature"] = 0.0
+            if self.config.judge_responses_create_params.top_p is not None:
+                chat_params_kwargs["top_p"] = self.config.judge_responses_create_params.top_p
+            elif self.config.judge_mode == "olympiad":
+                chat_params_kwargs["top_p"] = 1.0
+            chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(**chat_params_kwargs)
+            response_obj = await self.server_client.post(
+                server_name=self.config.judge_model_server.name,
+                url_path="/v1/chat/completions",
+                json=chat_params,
+            )
+            chat_response = NeMoGymChatCompletion.model_validate(await response_obj.json())
+            content = chat_response.choices[0].message.content if chat_response.choices else None
+            return content.strip() if content else ""
+
+        msgs: List[NeMoGymEasyInputMessage] = [
+            NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+        ]
+        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
+        request_params.input = msgs
+
+        response_obj = await self.server_client.post(
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=request_params,
+        )
+        judge_response = NeMoGymResponse.model_validate(await response_obj.json())
+        return extract_text_from_response(judge_response)
 
     async def verify(self, body: FrontierScienceJudgeVerifyRequest) -> FrontierScienceJudgeVerifyResponse:
         # Skills' parse_reasoning=True: when </think> is missing but the
@@ -308,42 +352,24 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             generation=generation,
         )
 
-        if self.config.use_chat_completions_for_judge:
-            chat_params_kwargs = {
-                "messages": [{"role": "user", "content": judge_prompt}],
-                "max_tokens": self.config.judge_responses_create_params.max_output_tokens or 2048,
-            }
-            if self.config.judge_responses_create_params.temperature is not None:
-                chat_params_kwargs["temperature"] = self.config.judge_responses_create_params.temperature
-            elif self.config.judge_mode == "olympiad":
-                chat_params_kwargs["temperature"] = 0.0
-            if self.config.judge_responses_create_params.top_p is not None:
-                chat_params_kwargs["top_p"] = self.config.judge_responses_create_params.top_p
-            elif self.config.judge_mode == "olympiad":
-                chat_params_kwargs["top_p"] = 1.0
-            chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(**chat_params_kwargs)
-            response_obj = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/chat/completions",
-                json=chat_params,
+        # A judge call that errors (auth, rate limit, timeout, endpoint/HTTP
+        # error, malformed response) is a distinct outcome, not a wrong answer:
+        # record it instead of scoring the attempt as incorrect.
+        judge_text, judge_failure = await run_judge(self._call_judge(judge_prompt))
+        if judge_failure is not None:
+            return FrontierScienceJudgeVerifyResponse(
+                **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
+                reward=0.0,
+                extracted_answer=generation if generation else None,
+                expected_answer=expected_answer,
+                verdict=None,
+                judge_output=None,
+                rubric_score=None,
+                rubric_score_normalized=None,
+                invalid_judge_response=False,
+                judge_failed=True,
+                judge_failure_reason=judge_failure,
             )
-            chat_response = NeMoGymChatCompletion.model_validate(await response_obj.json())
-            content = chat_response.choices[0].message.content if chat_response.choices else None
-            judge_text = content.strip() if content else ""
-        else:
-            msgs: List[NeMoGymEasyInputMessage] = [
-                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
-            ]
-            request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-            request_params.input = msgs
-
-            response_obj = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=request_params,
-            )
-            judge_response = NeMoGymResponse.model_validate(await response_obj.json())
-            judge_text = extract_text_from_response(judge_response)
 
         verdict = parse_judgement(judge_text)
         rubric_score = None

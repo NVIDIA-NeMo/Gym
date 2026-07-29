@@ -32,6 +32,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -223,7 +224,7 @@ class JudgeEvaluation(BaseModel):
     verdict_label: Optional[str] = None
 
 
-class TerminusJudgeVerifyResponse(BaseVerifyResponse):
+class TerminusJudgeVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     uuid: Optional[str | int] = None
     expected_answer: str
     model_output: str
@@ -266,6 +267,16 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
+    def compute_metrics(self, tasks: List[List[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict) -> dict:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "mean/judge_failed", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
+
     async def verify(self, body: TerminusJudgeVerifyRequest) -> TerminusJudgeVerifyResponse:
         # Initialize response fields
         reward = 0.0
@@ -277,6 +288,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         similarity_score = None
         parsed_output = None
         judge_evaluations = []
+        judge_failed = False
+        judge_failure_reason = None
 
         # Helper to build response
         def _build_response(expected_str: str, model_output_str: str) -> TerminusJudgeVerifyResponse:
@@ -308,6 +321,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 judge_evaluations=[_sanitize_pydantic_model(j) for j in judge_evaluations],
                 metadata=_sanitize_for_json(body.metadata),
                 threshold=body.threshold,
+                judge_failed=judge_failed,
+                judge_failure_reason=judge_failure_reason,
             )
 
         # Extract expected answer (ground truth)
@@ -431,9 +446,18 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
             # Step 2: LLM judge evaluation (if needed and enabled)
             if need_judge:
-                first_equal, first_eval = await self._generate_judge_evaluation(
-                    expected_answer=expected, generated_answer=text
+                # A failed judge CALL (auth, rate limit, timeout, HTTP error) is a
+                # distinct outcome, not a wrong answer — flag it via judge_failed
+                # instead of losing it to the broad except below.
+                first, judge_failure = await run_judge(
+                    self._generate_judge_evaluation(expected_answer=expected, generated_answer=text)
                 )
+                if judge_failure is not None:
+                    judge_failed = True
+                    judge_failure_reason = judge_failure
+                    reward = 0.0
+                    return _build_response(expected_str=expected, model_output_str=text)
+                first_equal, first_eval = first
                 judge_evaluations.append(first_eval)
                 logger.info(
                     f"terminus_judge verify | uuid={body.uuid} "
@@ -447,9 +471,15 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                     reward = 0.0
                 elif first_equal:
                     if self.config.check_twice_swap:
-                        second_equal, second_eval = await self._generate_judge_evaluation(
-                            expected_answer=text, generated_answer=expected
+                        second, judge_failure = await run_judge(
+                            self._generate_judge_evaluation(expected_answer=text, generated_answer=expected)
                         )
+                        if judge_failure is not None:
+                            judge_failed = True
+                            judge_failure_reason = judge_failure
+                            reward = 0.0
+                            return _build_response(expected_str=expected, model_output_str=text)
+                        second_equal, second_eval = second
                         judge_evaluations.append(second_eval)
                         logger.info(
                             f"terminus_judge verify | uuid={body.uuid} "

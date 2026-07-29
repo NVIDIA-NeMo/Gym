@@ -18,6 +18,8 @@ import pytest
 from resources_servers.inverse_if.app import (
     AggregationMode,
     InverseIFConfig,
+    InverseIFServer,
+    InverseIFVerifyRequest,
     RubricEvaluation,
     _extract_verdict,
 )
@@ -187,6 +189,74 @@ class TestRubricNormalisation:
 # ---------------------------------------------------------------------------
 # Score aggregation tests
 # ---------------------------------------------------------------------------
+
+
+class TestJudgeFailure:
+    """A judge call that raises is recorded as a distinct outcome, not a wrong answer."""
+
+    @staticmethod
+    def _make_config() -> InverseIFConfig:
+        from nemo_gym.config_types import ModelServerRef
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        return InverseIFConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="test",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="test"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            default_judge_prompt_template="{prompt}{model_response}{standard_response}{criteria}",
+            default_judge_system_prompt="",
+        )
+
+    @pytest.mark.asyncio
+    async def test_judge_raises_is_recorded(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nemo_gym.openai_utils import (
+            NeMoGymEasyInputMessage,
+            NeMoGymResponse,
+            NeMoGymResponseCreateParamsNonStreaming,
+            NeMoGymResponseOutputMessage,
+            NeMoGymResponseOutputText,
+        )
+        from nemo_gym.server_utils import ServerClient
+
+        server = InverseIFServer.model_construct(
+            config=self._make_config(), server_client=MagicMock(spec=ServerClient)
+        )
+        server.server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+
+        response = NeMoGymResponse(
+            id="r",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg_1", content=[NeMoGymResponseOutputText(annotations=[], text="an answer")]
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        body = InverseIFVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="do X")]
+            ),
+            response=response,
+            prompt="do X",
+            reference_response="ref",
+            rubric=[{"id": "C1", "criteria": "crit"}],
+        )
+
+        result = await server.verify(body)
+
+        assert result.reward == pytest.approx(0.0)
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
 
 
 class TestAggregation:

@@ -320,6 +320,10 @@ class TestArenaJudgeServer:
         assert result.reward == approx(0.0)
         assert result.invalid_gen_base is True
         assert result.invalid_base_gen is True
+        # A failed judge CALL is recorded as a distinct outcome via the
+        # standard judge-failure fields, not silently scored as a loss.
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
 
     @pytest.mark.asyncio
     async def test_unknown_category_falls_back_to_default(self, config: ArenaJudgeConfig) -> None:

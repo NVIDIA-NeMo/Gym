@@ -370,6 +370,18 @@ class TestVerify:
 
         assert result.reward == approx(0.0)
 
+    async def test_judge_failure_recorded(self, server: LabbenchVLMResourcesServer) -> None:
+        """A judge call that raises is recorded as a distinct outcome, not a wrong answer."""
+        server.server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        req = _verify_request(question="What is the fold change?", ideal="3.5", vlm_answer="3.50")
+
+        result = await server.verify(req)
+
+        assert result.reward == approx(0.0)
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
+        assert result.judge_evaluations == []
+
     async def test_judge_reasoning_item_defaults_to_reward_0(self, server: LabbenchVLMResourcesServer) -> None:
         """Judge returns a reasoning item instead of a message — must not crash, reward 0."""
         reasoning_item = NeMoGymResponseReasoningItem(id="r1", summary=[], type="reasoning")

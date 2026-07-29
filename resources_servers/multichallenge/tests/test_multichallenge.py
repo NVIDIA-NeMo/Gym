@@ -92,6 +92,64 @@ class TestAggregation:
             for i, s in enumerate(scores)
         ]
 
+    async def test_verify_judge_failure_recorded(self):
+        """A judge call that errors is recorded, not crashed or scored as wrong."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from nemo_gym.config_types import ModelServerRef
+        from nemo_gym.openai_utils import (
+            NeMoGymResponse,
+            NeMoGymResponseCreateParamsNonStreaming,
+            NeMoGymResponseOutputMessage,
+            NeMoGymResponseOutputText,
+        )
+        from nemo_gym.server_utils import ServerClient
+        from resources_servers.multichallenge.app import (
+            MultiChallengeServer,
+            MultiChallengeVerifyRequest,
+        )
+
+        config = MultiChallengeConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="test",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="test"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        )
+        mock_client = MagicMock(spec=ServerClient)
+        mock_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        server = MultiChallengeServer.model_construct(config=config, server_client=mock_client)
+
+        response = NeMoGymResponse(
+            id="resp",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg",
+                    content=[NeMoGymResponseOutputText(annotations=[], text="my answer", type="output_text")],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        req = MultiChallengeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            context="ctx",
+            rubric=[{"question": "Is it correct?", "pass_criteria": "YES", "weight": 1.0}],
+        )
+        result = await server.verify(req)
+        assert result.reward == 0.0
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
+
     def test_aggregation_modes(self):
         """Test various aggregation modes."""
         from unittest.mock import MagicMock

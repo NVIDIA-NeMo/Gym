@@ -432,6 +432,24 @@ class TestTextToSqlResourcesServerVerify:
             await resources_server.verify(request)
 
     @pytest.mark.asyncio
+    async def test_verify_judge_failure_recorded(self, resources_server: TextToSqlResourcesServer):
+        """A judge call that raises is recorded as a distinct outcome, not a wrong answer."""
+        from pytest import approx
+
+        request = self._create_verify_request(
+            model_output="```sql\nSELECT * FROM users;\n```",
+            sql="SELECT * FROM users;",
+        )
+        resources_server.server_client.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+
+        response = await resources_server.verify(request)
+
+        assert response.reward == approx(0.0)
+        assert response.judge_failed is True
+        assert "judge timeout" in response.judge_failure_reason
+        assert response.failure_reason == FailureCode.UNKNOWN_ERROR
+
+    @pytest.mark.asyncio
     async def test_verify_with_empty_sql_context(self, resources_server: TextToSqlResourcesServer):
         """Test verify works with empty sql_context."""
         resources_server.config.check_twice_swap = False

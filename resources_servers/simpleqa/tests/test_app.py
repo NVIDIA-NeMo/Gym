@@ -251,6 +251,25 @@ class TestSimpleQAServer:
         assert result.verdict == "not_attempted"
         assert result.is_not_attempted == approx(1.0)
 
+    async def test_verify_judge_failure_recorded(self, config: SimpleQAConfig) -> None:
+        # A judge call that errors is a distinct outcome, not a wrong answer.
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
+        server = SimpleQAServer(config=config, server_client=server_mock)
+
+        request = SimpleQAVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_make_response("Pancreas"),
+            question="What organ in the human body produces insulin?",
+            expected_answer="Pancreas",
+        )
+
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.judge_failed is True
+        assert "judge timeout" in result.judge_failure_reason
+        assert result.verdict is None
+
     async def test_verify_passes_message_content_verbatim(self, config: SimpleQAConfig) -> None:
         """The model-server's --reasoning-parser strips <think> blocks
         before they reach the resource server, so verify() forwards the

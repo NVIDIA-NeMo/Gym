@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -250,7 +251,7 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     reference_ids: Optional[List[str]] = None
 
 
-class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
+class GDPValVerifyResponse(JudgeFailureMixin, GDPValVerifyRequest, BaseVerifyResponse):
     verify_mode: Literal["rubric", "comparison"] = "rubric"
     judge_response: Optional[Dict[str, Any]] = None
     invalid_judge_response: Optional[bool] = None
@@ -358,9 +359,32 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
         return judges
 
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
+
     async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if self.config.reward_mode == "comparison":
-            return await self._verify_comparison(body)
+            # A judge call that fails for every reference (timeout, upstream 5xx,
+            # oversize payload) is a distinct outcome, not a wrong answer: record
+            # it instead of crashing the sample.
+            result, judge_failure = await run_judge(self._verify_comparison(body))
+            if judge_failure is not None:
+                return GDPValVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verify_mode="comparison",
+                    judge_response={"error": "judge_failed"},
+                    judge_failed=True,
+                    judge_failure_reason=judge_failure,
+                )
+            return result
 
         return await self._verify_rubric(body)
 
@@ -454,12 +478,17 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
+        # A None judge result means the judge output was empty or unusable — a
+        # distinct judge failure, not a legitimately low score.
+        judge_failed = judge_result is None
         return GDPValVerifyResponse(
             **body.model_dump(),
             reward=float(reward),
             verify_mode="rubric",
             judge_response=judge_result,
-            invalid_judge_response=(judge_result is None),
+            invalid_judge_response=judge_failed,
+            judge_failed=judge_failed,
+            judge_failure_reason="empty or unusable judge response" if judge_failed else None,
         )
 
     async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:

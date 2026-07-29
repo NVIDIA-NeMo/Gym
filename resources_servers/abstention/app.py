@@ -44,6 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeFailureMixin, judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -274,7 +275,7 @@ class AbstentionVerifyRequest(AbstentionRunRequest, BaseVerifyRequest):
     pass
 
 
-class AbstentionVerifyResponse(BaseVerifyResponse):
+class AbstentionVerifyResponse(JudgeFailureMixin, BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     extracted_answer: Optional[str] = None
@@ -299,6 +300,31 @@ class AbstentionServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
+    def compute_metrics(self, tasks: List[List[dict]]) -> dict:
+        return judge_failure_metrics(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict) -> dict:
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for name in ("judge_failures", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
+        return key
+
+    async def _call_judge(self, judge_prompt: str) -> str:
+        msgs: List[NeMoGymEasyInputMessage] = [
+            NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+        ]
+        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
+        request_params.input = msgs
+
+        response_obj = await self.server_client.post(
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=request_params,
+        )
+        judge_response = NeMoGymResponse.model_validate(await response_obj.json())
+        return extract_text_from_response(judge_response)
+
     async def verify(self, body: AbstentionVerifyRequest) -> AbstentionVerifyResponse:
         policy_output = extract_text_from_response(body.response)
 
@@ -321,19 +347,21 @@ class AbstentionServer(SimpleResourcesServer):
                 predicted_answer=extracted,
             )
 
-            msgs: List[NeMoGymEasyInputMessage] = [
-                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
-            ]
-            request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-            request_params.input = msgs
+            judge_text, judge_failure = await run_judge(self._call_judge(judge_prompt))
 
-            response_obj = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=request_params,
-            )
-            judge_response = NeMoGymResponse.model_validate(await response_obj.json())
-            judge_text = extract_text_from_response(judge_response)
+            # A failed or empty judge call is a distinct outcome, not a wrong answer:
+            # reward stays 0.0 but judge_failed flags it out of the accuracy denominator.
+            if judge_failure is not None or not judge_text:
+                return AbstentionVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    extracted_answer=extracted,
+                    ground_truth=ground_truth,
+                    verdict=None,
+                    judge_output=judge_text or "",
+                    judge_failed=True,
+                    judge_failure_reason=judge_failure or "empty judge response",
+                )
 
             grade = parse_judge_grade(judge_text)
             if grade == "A":

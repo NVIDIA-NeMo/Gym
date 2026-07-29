@@ -53,6 +53,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from pydantic import ConfigDict, Field
 
+from nemo_gym.judge import judge_failure_metrics, run_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -192,12 +193,29 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
                 assistant_responses.append(content_item.text)
         combined_response = "".join(assistant_responses)
 
-        reward, extracted_answer, library_reward, judge_evaluations, verdict = await self._verify_answer(
-            question=body.question,
-            expected_answer=body.expected_answer,
-            generated_answer=combined_response,
-            solution=body.solution,
+        # A judge transport failure is a distinct outcome, not a wrong answer.
+        # The library verifier never raises (returns 0.0), so an exception here
+        # is the judge call.
+        result, judge_failure = await run_judge(
+            self._verify_answer(
+                question=body.question,
+                expected_answer=body.expected_answer,
+                generated_answer=combined_response,
+                solution=body.solution,
+            )
         )
+        if judge_failure is not None:
+            return UGPhysicsJudgeVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                extracted_answer=None,
+                library_reward=0.0,
+                judge_evaluations=None,
+                extracted_verdict=None,
+                judge_failed=True,
+                judge_failure_reason=judge_failure,
+            )
+        reward, extracted_answer, library_reward, judge_evaluations, verdict = result
         return UGPhysicsJudgeVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -408,6 +426,7 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
             answer_key="extracted_verdict",
         )
         metrics.update(subset_metrics)
+        metrics.update(judge_failure_metrics(tasks))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -418,6 +437,9 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", exclude_names=["no_answer"]))
         key.update(highest_k_metrics(agent_metrics, "majority@{k}", exclude_names=["no_answer"]))
+        for name in ("judge_failures", "mean/judge_failed", "reward[judge_ok_only]"):
+            if name in agent_metrics:
+                key[name] = agent_metrics[name]
         return key
 
 
