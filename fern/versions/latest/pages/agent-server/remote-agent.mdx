@@ -28,7 +28,7 @@ Implement `POST {agent_base_url}/v1/responses`:
 |---|---|
 | **Request body** | The task's `responses_create_params` — the input messages and any declared tool schemas. Never `verifier_metadata` (the answer key stays inside Gym). |
 | **Request headers** (only with `tools_mode: forward`) | `X-NeMo-Gym-Resources-Server-Url` and `X-NeMo-Gym-Session-Cookie` — see [Gym-hosted tools](#gym-hosted-tools-tools_mode). |
-| **Response** | One **finished** Responses API object: run your whole loop (any number of model turns and tool calls) and return the merged trajectory, ending with an assistant message. Populate `usage` (`input_tokens`, `output_tokens`, `total_tokens`) — without it your token metrics are silently empty. |
+| **Response** | One **finished** Responses API object: run your whole loop (any number of model turns and tool calls) and return the merged trajectory, ending with an assistant message. Populate the full `usage` object — `input_tokens`, `output_tokens`, `total_tokens`, `input_tokens_details: {cached_tokens}`, `output_tokens_details: {reasoning_tokens}` — or omit `usage` entirely (allowed; token metrics are then empty). A partial `usage` object fails validation. |
 
 <Note>
 The response is validated strictly against the Responses API schema. An invalid object is
@@ -56,7 +56,11 @@ async def responses(request: Request):
             "content": [{"type": "output_text", "text": answer, "annotations": []}],
         }],
         "parallel_tool_calls": False, "tools": [], "tool_choice": "auto",
-        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "usage": {
+            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
     }
 ```
 
@@ -70,7 +74,7 @@ remote_agent:
       agent_base_url: http://localhost:9000     # your service
       resources_server:
         type: resources_servers
-        name: my_env_resources_server            # which environment verifies
+        name: my_env_resources_server            # the top-level key of that environment's config
       tools_mode: refuse
 ```
 
@@ -87,7 +91,7 @@ gym eval run --no-serve +agent_name=remote_agent \
 | `agent_base_url` | required | Your service's base URL. Validated: `http(s)` only, no query string or fragment, no embedded credentials. |
 | `resources_server` | required | The environment that seeds and verifies each rollout. Swap benchmarks by changing this ref — your service doesn't change. |
 | `tools_mode` | `refuse` | Who serves the tools a dataset declares — see below. |
-| `concurrency` | `32` | Maximum rollouts in flight against your service, enforced server-side. This is the *owner's* bound: it caps total pressure no matter how many collection runs call in. |
+| `concurrency` | `32` | Maximum rollouts in flight against your service, enforced server-side. This is the *owner's* bound: it caps total pressure from every collection run calling into this agent process. (A second, independently started Gym stack has its own bound.) |
 | `remote_responses_timeout_secs` | `1800` | Wallclock bound on one `/v1/responses` call. Raise it if your rollouts legitimately run longer than 30 minutes. |
 | `run_timeout_secs` | `2100` | Bound on a whole `/run` (seed + your service + verify), started after the concurrency slot is acquired — queue wait doesn't count. |
 | `advertised_resources_url` | unset | With `tools_mode: forward`: the resources-server URL told to your service. The default advertises the bind address (typically `127.0.0.1`), which another machine cannot reach — set this when your service runs off-host. It changes only the header string; making the address route to Gym is your infrastructure's job. |
@@ -103,6 +107,13 @@ gym eval run --no-serve +agent_name=remote_agent \
   servers random ports on every start; the cookie is minted per rollout.
 - **`remote`** — your service implements the declared tools itself; nothing is forwarded.
 
+<Note>
+`forward` covers environments whose tools are plain HTTP routes on the resources server (the
+session cookie is the only credential involved). Environments that expose their tools **over MCP**
+mint additional per-session token headers that are not forwarded in this version — MCP-based
+environments need a metadata-forwarding follow-up.
+</Note>
+
 ### Running your service off-host with `tools_mode: forward`
 
 The advertised URL must be reachable *from your service's machine*:
@@ -115,9 +126,10 @@ The advertised URL must be reachable *from your service's machine*:
    reachability is only testable from your side.
 
 <Warning>
-Forgetting step 4 on an off-host deployment is the classic mistake: your service receives a
-loopback address, every tool call misses Gym, and rewards are silently zero. The agent logs a
-warning when it detects this combination, but it cannot verify reachability for you.
+Forgetting step 4 on an off-host deployment is the classic mistake: your service receives an
+unroutable bind address (`127.0.0.1` or `0.0.0.0`), every tool call misses Gym, and rewards are
+silently zero. The agent logs a warning when it detects this combination, but it cannot verify
+reachability for you.
 </Warning>
 
 ## Failure handling and resume
@@ -125,8 +137,9 @@ warning when it detects this combination, but it cannot verify reachability for 
 Failures never crash a collection run. A down service (bounded connect retries), a timeout, a
 malformed reply, or a verifier error becomes a reward-0 row with `_ng_failure_class:
 "remote_agent_error"` in the failures sidecar (`<output>_failures.jsonl`) — the main rollouts
-file stays clean, and `+resume_from_cache=true` retries failed tasks up to the attempt cap. Error
-messages name the URL and the timeout knob involved.
+file stays clean, and `+resume_from_cache=true` retries failed tasks up to the attempt cap
+(`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3; terminal failures are not retried). Error messages
+name the failing URL or the timeout knob involved.
 
 ## Gotchas
 
@@ -143,3 +156,8 @@ messages name the URL and the timeout knob involved.
   keys from previous runs are sanitized before processing.
 - **`num_samples_in_parallel` and `concurrency` stack safely**: the collector bounds one run's
   politeness, the agent bounds your service's total load; the tighter one wins.
+- **Exposing your service on the public internet needs network-level trust.** Gym sends no
+  credential on the `/v1/responses` call (`agent_base_url` rejects embedded credentials), so an
+  internet-exposed service should sit behind a VPN, private network, IP allowlist, or
+  authenticating tunnel. Corporate egress proxies are not honored either — Gym's HTTP client
+  ignores `HTTP_PROXY` environment variables.

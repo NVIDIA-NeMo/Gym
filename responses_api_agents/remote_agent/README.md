@@ -15,9 +15,13 @@ through a Gym model server) token-id capture for training.
 
 - `POST {agent_base_url}/v1/responses` with the row's `responses_create_params` as the JSON body.
 - Return a single finished Responses API object: the last output item is an assistant message,
-  no dangling tool calls, `usage` populated (`{input_tokens, output_tokens, total_tokens}`).
+  no dangling tool calls, `usage` populated with the full shape — `{input_tokens, output_tokens,
+  total_tokens, input_tokens_details: {cached_tokens}, output_tokens_details: {reasoning_tokens}}`.
+  (Omitting `usage` entirely is allowed and only warns; a partial `usage` object fails validation.)
 - Failures on Gym's side never crash a collection run: they are recorded as reward-0 rows in
-  the failures sidecar and retried on resume.
+  the failures sidecar and retried on resume up to the attempt cap
+  (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3). Failures marked terminal — an invalid response
+  shape, or the tools guard — are not retried.
 
 ## Gym-hosted tools (optional)
 
@@ -43,7 +47,7 @@ tells your service where they are; making that address route to Gym is on you:
    header string; the default advertises the bind address, which is typically a loopback address
    other machines cannot reach (you'll see a warning for that combination).
 5. Recommended: have your service probe the advertised URL on its first request and fail loudly —
-   reachability is only testable from your side (see the self-check in the docs example).
+   reachability is only testable from your side.
 
 ## Run
 

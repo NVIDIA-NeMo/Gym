@@ -28,6 +28,7 @@ sidecar and retries on resume.
 """
 
 import asyncio
+from traceback import print_exc
 from typing import Any, Dict, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -48,7 +49,13 @@ from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import get_global_aiohttp_client, get_response_json, get_server_url, raise_for_status
+from nemo_gym.server_utils import (
+    get_global_aiohttp_client,
+    get_response_json,
+    get_server_url,
+    is_global_aiohttp_client_request_debug_enabled,
+    raise_for_status,
+)
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"
@@ -232,6 +239,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         try:
             response = NeMoGymResponse.model_validate(remote_result)
         except PydanticValidationError as e:
+            if is_global_aiohttp_client_request_debug_enabled():
+                print(f"[remote_agent] full validation error: {e}", flush=True)
             # A shape error will not fix itself on retry.
             return self._failure_response(
                 record,
@@ -284,12 +293,15 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             resources_url = self.config.advertised_resources_url or get_server_url(self.config.resources_server.name)
             advertised_host = urlparse(resources_url).hostname or ""
             remote_host = urlparse(self.config.agent_base_url).hostname or ""
-            if advertised_host in ("127.0.0.1", "localhost") and remote_host not in ("127.0.0.1", "localhost"):
+            # 0.0.0.0 is a bind address, not a routable one: from the remote machine it
+            # resolves to that machine's own loopback, exactly like 127.0.0.1 would.
+            local_only_hosts = ("127.0.0.1", "localhost", "0.0.0.0")
+            if advertised_host in local_only_hosts and remote_host not in local_only_hosts:
                 self._throttled_warn(
                     "loopback_resources_url",
-                    f"WARNING: forwarding resources-server URL {resources_url} (a loopback address) to the "
-                    f"off-host remote service at {self.config.agent_base_url}. Its tool calls will not reach "
-                    "Gym; set advertised_resources_url to an externally reachable URL.",
+                    f"WARNING: forwarding resources-server URL {resources_url} (an address other machines "
+                    f"cannot reach) to the off-host remote service at {self.config.agent_base_url}. Its tool "
+                    "calls will not reach Gym; set advertised_resources_url to an externally reachable URL.",
                 )
             headers[RESOURCES_URL_HEADER] = resources_url
             session_cookie = cookie_header_value(cookies)
@@ -320,6 +332,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                     False,
                 )
             except Exception as e:
+                if is_global_aiohttp_client_request_debug_enabled():
+                    print_exc()
                 return None, f"{type(e).__name__}: {e}", False
         if response is None:
             return (
@@ -335,9 +349,13 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         try:
             content = await response.read()
         except Exception as e:
+            if is_global_aiohttp_client_request_debug_enabled():
+                print_exc()
             return None, f"reading the response body failed: {type(e).__name__}: {e}", False
         # response.ok is `status < 400`; reject 3xx explicitly (redirects are not followed).
         if not response.ok or response.status >= 300:
+            if is_global_aiohttp_client_request_debug_enabled():
+                print(f"[remote_agent] full HTTP {response.status} body: {content.decode(errors='replace')}", flush=True)
             location = response.headers.get("Location", "")
             return (
                 None,
@@ -367,7 +385,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             self._throttled_warn(
                 "missing_usage",
                 "WARNING: the remote response carries no usage; token metrics for this agent will be "
-                "empty. Have your service report usage {input_tokens, output_tokens, total_tokens}.",
+                "empty. Have your service report the full usage object: {input_tokens, output_tokens, "
+                "total_tokens, input_tokens_details: {cached_tokens}, output_tokens_details: "
+                "{reasoning_tokens}}.",
             )
 
     def _failure_response(

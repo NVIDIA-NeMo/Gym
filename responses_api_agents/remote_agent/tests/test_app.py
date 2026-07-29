@@ -814,6 +814,23 @@ class TestReviewFindingPins:
 
         assert "advertised_resources_url" in capsys.readouterr().out
 
+    async def test_tools_mode_forward_warns_on_unroutable_bind_address_too(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # host: 0.0.0.0 makes get_server_url advertise 0.0.0.0 — from the remote machine that
+        # resolves to ITS OWN loopback, the same silent-zero failure as advertising 127.0.0.1.
+        mock_remote(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))))
+        monkeypatch.setattr(remote_agent_app, "get_server_url", lambda name: "http://0.0.0.0:15022")
+        agent = make_agent(
+            server_client=seed_verify_server_client(),
+            tools_mode="forward",
+            agent_base_url="http://gpu-node-7:9000",
+        )
+
+        await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
+
+        assert "advertised_resources_url" in capsys.readouterr().out
+
     async def test_advertised_resources_url_overrides_header_and_silences_warning(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
