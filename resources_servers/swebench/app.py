@@ -102,6 +102,10 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             # TODO @bxyu-nvidia: extract the patch via git
             model_patch = None
 
+        # TODO @bxyu-nvidia: Patch build_container. Container: start() and id
+        # TODO @bxyu-nvidia: Patch copy_to_container. Container: exec_run() and put_archive()
+        # TODO @bxyu-nvidia: Patch cleanup_container. Container: stop()
+
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         res = run_instance(
             test_spec=test_spec,
@@ -111,7 +115,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             },
             rm_image=False,
             force_rebuild=False,
-            client=None,  # TODO
+            client=None,  # This is supposed to be DockerClient, but since we patch the create method, we set this to None.
             run_id=request.session[SESSION_ID_KEY],
             timeout=self.config.evaluation_timeout,
             rewrite_reports=False,
