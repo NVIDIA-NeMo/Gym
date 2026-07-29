@@ -84,7 +84,32 @@ def test_task_env_gateway_mode():
     assert env["BRAVE_API_KEY"] == "brave-key"
 
 
-def test_task_env_observability_prefixes_model_base_url_before_v1():
+def _rollout_body() -> PinchBenchRunRequest:
+    return PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": []},
+            "verifier_metadata": {"task_id": "task_x"},
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+        }
+    )
+
+
+def test_task_env_observability_prefixes_configured_model_server_before_v1():
+    agent = make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
+    agent.server_client.global_config_dict = {
+        "observability_enabled": True,
+        "policy_model": {"responses_api_models": {"vllm_model": {"host": "127.0.0.1", "port": 9001}}},
+    }
+    agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+    env = agent._task_env("task_x", _rollout_body())
+
+    assert env["MODEL_BASE_URL"] == "http://127.0.0.1:9001/ng-rollout/12-3/v1"
+    assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
+
+
+def test_task_env_observability_does_not_prefix_direct_endpoint():
     agent = make_agent()
     agent.server_client.global_config_dict = {"observability_enabled": True}
     body = PinchBenchRunRequest.model_validate(
@@ -98,7 +123,7 @@ def test_task_env_observability_prefixes_model_base_url_before_v1():
 
     env = agent._task_env("task_x", body)
 
-    assert env["MODEL_BASE_URL"] == "http://endpoint/ng-rollout/12-3/v1"
+    assert env["MODEL_BASE_URL"] == "http://endpoint/v1"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
 
 

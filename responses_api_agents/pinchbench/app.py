@@ -54,6 +54,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -68,7 +69,6 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.server_utils import rollout_path_prefix
 
 
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
@@ -77,6 +77,9 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     model_base_url: str
     model_api_key: str
     model_name: str
+    # Route through a Gym model wrapper when available. The wrapper strips/captures
+    # /ng-rollout/<id> before forwarding to the raw model endpoint.
+    model_server: Optional[ModelServerRef] = None
 
     # Judge for hybrid / llm_judge tasks (OpenAI-compatible endpoint).
     judge_model: str
@@ -176,18 +179,10 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError("PinchBench is an external benchmark; use /run.")
 
     # --- task env ----------------------------------------------------------
-    @staticmethod
-    def _model_base_url_with_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
-        if not rollout_id:
-            return base_url
-        trimmed = base_url.rstrip("/")
-        prefix = rollout_path_prefix(rollout_id)
-        if trimmed.endswith("/v1"):
-            return f"{trimmed[:-3]}{prefix}/v1"
-        return f"{trimmed}{prefix}"
-
     def _model_base_url_for_run(self, body: Any | None = None) -> str:
-        return self._model_base_url_with_rollout_prefix(self.config.model_base_url, self.rollout_id_from_run(body))
+        if self.config.model_server:
+            return self.resolve_model_base_url(self.config.model_server.name, self.rollout_id_from_run(body))
+        return self.config.model_base_url
 
     def _task_env(self, task_id: str, body: Any | None = None) -> dict:
         env = {
