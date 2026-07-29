@@ -283,6 +283,15 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         if not self.config.kilo_config:
             return
         config = self._deep_merge({}, copy.deepcopy(self.config.kilo_config))
+        # Kilo resolves `-m <provider>/<name>` against that provider's `models` map and fails the run
+        # with "Model not found" if the name is absent. Register it here so `model` is the only place a
+        # config names the model; without this, every config has to repeat it under
+        # kilo_config.provider.<provider>.models, which downstream overrides cannot add to (the config
+        # merge is struct-mode, so a new model key is rejected).
+        provider_id, _, model_name = self.config.model.partition("/")
+        provider = (config.get("provider") or {}).get(provider_id)
+        if model_name and isinstance(provider, dict):
+            provider.setdefault("models", {}).setdefault(model_name, {})
         (work_dir / "kilo.json").write_text(json.dumps(config, indent=2))
 
     def _env(self, data_home: str, config_home: str) -> dict[str, str]:

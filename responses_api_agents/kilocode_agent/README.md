@@ -10,7 +10,8 @@ it does not use a Gym model server yet.
 ## Quick start
 
 Kilo must be on PATH (auto-installed on first start, or `npm install -g @kilocode/cli`). Set
-`policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
+`policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml` — Kilo calls that endpoint
+directly, so the config needs nothing else to pick up your model.
 
 ```bash
 gym env start \
@@ -18,8 +19,8 @@ gym env start \
   --model-type openai_model
 
 gym eval run --no-serve --agent math_with_judge_kilocode_agent \
-  --input responses_api_agents/kilocode_agent/data/example.jsonl \
-  --output kilocode_rollout.jsonl --limit 5
+  --input resources_servers/math_with_judge/data/example.jsonl \
+  --output kilocode_rollout.jsonl
 ```
 
 Per request the agent writes `kilo.json` into an isolated run dir and runs one `kilo run --auto
@@ -32,22 +33,27 @@ supplies the provider and permissions.
 
 ## Model id
 
-`model` is `<provider>/<model-name>`. To bypass the Kilo Gateway and use a custom OpenAI-compatible
-endpoint (e.g. a Gym-served vLLM), define the provider in `kilo_config` (written to `kilo.json`) and
-reference it here:
+`model` is `<provider>/<model-name>`, where the provider is a label defined in `kilo_config` (written
+to `kilo.json`) rather than a service. The shipped config declares one generic OpenAI-compatible
+provider called `policy` aimed at `env.yaml`, so `policy/gpt-4.1` and `policy/Qwen/Qwen3-8B` both work
+against whatever `policy_base_url` points at — OpenAI, an NVIDIA endpoint, or a Gym-served vLLM. This
+bypasses the Kilo Gateway, so no Kilo account is needed.
 
 ```yaml
-model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+model: policy/${policy_model_name}
 kilo_config:
   provider:
-    nvinf:
+    policy:
       npm: "@ai-sdk/openai-compatible"
       options:
         baseURL: ${policy_base_url}
         apiKey: ${policy_api_key}
-      models:
-        nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
 ```
+
+Kilo rejects a model that is not listed in its provider's `models` map (`Model not found: …`), so the
+agent registers `model` there when it writes `kilo.json`. Only add `models` entries by hand if you need
+per-model options; note that the config merge is struct-mode, so a config that uses `_inherit_from`
+cannot add new keys to `models`.
 
 ## Config fields
 

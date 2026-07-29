@@ -226,11 +226,11 @@ class TestEnv:
 
 class TestBuildCommand:
     def test_command_shape(self) -> None:
-        agent = _make_agent(model="nvinf/some-model")
+        agent = _make_agent(model="policy/some-model")
         cmd = agent._build_command(Path("/tmp/ws"), "solve it")
         assert cmd[:4] == ["kilo", "run", "--auto", "--pure"]
         assert "--format" in cmd and cmd[cmd.index("--format") + 1] == "json"
-        assert cmd[cmd.index("-m") + 1] == "nvinf/some-model"
+        assert cmd[cmd.index("-m") + 1] == "policy/some-model"
         assert cmd[cmd.index("--dir") + 1] == "/tmp/ws"
         # prompt is passed after `--` so a leading-dash prompt is safe
         assert cmd[-2:] == ["--", "solve it"]
@@ -254,6 +254,33 @@ class TestWriteConfig:
         agent._write_kilo_config(tmp_path)
         assert not (tmp_path / "kilo.json").exists()
 
+    def test_model_registered_under_its_provider(self, tmp_path) -> None:
+        # Kilo fails with "Model not found" unless the name appears in the provider's models map, so
+        # the model is registered from `model` rather than repeated in every config.
+        agent = _make_agent(
+            model="policy/nvidia/qwen/qwen3-next-80b-a3b-instruct",
+            kilo_config={"provider": {"policy": {"npm": "@ai-sdk/openai-compatible"}}},
+        )
+        agent._write_kilo_config(tmp_path)
+        written = json.loads((tmp_path / "kilo.json").read_text())
+        assert written["provider"]["policy"]["models"] == {"nvidia/qwen/qwen3-next-80b-a3b-instruct": {}}
+
+    def test_existing_model_entry_preserved(self, tmp_path) -> None:
+        agent = _make_agent(
+            model="policy/m",
+            kilo_config={"provider": {"policy": {"models": {"m": {"name": "custom"}, "other": {}}}}},
+        )
+        agent._write_kilo_config(tmp_path)
+        written = json.loads((tmp_path / "kilo.json").read_text())
+        assert written["provider"]["policy"]["models"] == {"m": {"name": "custom"}, "other": {}}
+
+    def test_unknown_provider_left_alone(self, tmp_path) -> None:
+        # A model on a provider kilo resolves itself (e.g. the gateway) must not fabricate a provider.
+        agent = _make_agent(model="anthropic/claude", kilo_config={"provider": {"policy": {}}})
+        agent._write_kilo_config(tmp_path)
+        written = json.loads((tmp_path / "kilo.json").read_text())
+        assert written["provider"] == {"policy": {}}
+
 
 class TestConfigYaml:
     def test_module_parses(self) -> None:
@@ -268,3 +295,5 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
         assert inner["command"] == "kilo"
+        # kilo resolves `model` as <provider>/<name>, so the prefix has to name a declared provider.
+        assert inner["model"].split("/")[0] in inner["kilo_config"]["provider"]
