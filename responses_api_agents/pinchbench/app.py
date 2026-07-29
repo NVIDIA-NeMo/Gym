@@ -68,6 +68,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.server_utils import rollout_path_prefix
 
 
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
@@ -175,11 +176,24 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError("PinchBench is an external benchmark; use /run.")
 
     # --- task env ----------------------------------------------------------
-    def _task_env(self, task_id: str) -> dict:
+    @staticmethod
+    def _model_base_url_with_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
+        if not rollout_id:
+            return base_url
+        trimmed = base_url.rstrip("/")
+        prefix = rollout_path_prefix(rollout_id)
+        if trimmed.endswith("/v1"):
+            return f"{trimmed[:-3]}{prefix}/v1"
+        return f"{trimmed}{prefix}"
+
+    def _model_base_url_for_run(self, body: Any | None = None) -> str:
+        return self._model_base_url_with_rollout_prefix(self.config.model_base_url, self.rollout_id_from_run(body))
+
+    def _task_env(self, task_id: str, body: Any | None = None) -> dict:
         env = {
             "TASK_ID": task_id,
             "MODEL_NAME": self.config.model_name,
-            "MODEL_BASE_URL": self.config.model_base_url,
+            "MODEL_BASE_URL": self._model_base_url_for_run(body),
             "MODEL_API_KEY": self.config.model_api_key,
             "JUDGE_MODEL": self.config.judge_model,
             "JUDGE_BASE_URL": self.config.judge_base_url,
@@ -204,7 +218,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         return env
 
     # --- per-task sandbox (Gym Sandbox API; provider-neutral) ---------------
-    def _build_spec(self, task_id: str) -> SandboxSpec:
+    def _build_spec(self, task_id: str, body: Any | None = None) -> SandboxSpec:
         cfg = dict(self.config.sandbox_spec)
         return SandboxSpec(
             image=cfg.get("image"),
@@ -213,16 +227,16 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             workdir=cfg.get("workdir"),
             resources=SandboxResources.from_mapping(cfg.get("resources", {})),
             provider_options=cfg.get("provider_options", {}),
-            env=self._task_env(task_id),
+            env=self._task_env(task_id, body),
             metadata={"task_id": task_id},
         )
 
-    async def _run_in_sandbox(self, task_id: str, out_dir: Path) -> None:
+    async def _run_in_sandbox(self, task_id: str, out_dir: Path, body: Any | None = None) -> None:
         """Run one PinchBench task and pull its /out archive back."""
         provider = self.config.sandbox_provider or {}
         apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
         if isinstance(apptainer_cfg, dict) and apptainer_cfg.get("direct_exec"):
-            await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg)
+            await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg, body)
             return
 
         if not self.config.sandbox_provider:
@@ -230,7 +244,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         archive = f"{self.config.sandbox_work_base.rstrip('/')}/out/out.tgz"
         sb = AsyncSandbox(self.config.sandbox_provider)
         try:
-            await sb.start(self._build_spec(task_id))
+            await sb.start(self._build_spec(task_id, body))
             await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
             await sb.download(archive, out_dir / "out.tgz")
         finally:
@@ -339,7 +353,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         wrapper_path.chmod(0o755)
         return wrapper_path
 
-    async def _run_in_apptainer_direct(self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any]) -> None:
+    async def _run_in_apptainer_direct(
+        self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any], body: Any | None = None
+    ) -> None:
         image = self.config.sandbox_spec.get("image")
         if not image:
             raise ValueError("pinchbench sandbox_spec.image is required for direct Apptainer exec")
@@ -359,7 +375,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         elif isinstance(direct_args, str):
             direct_args = direct_args.split()
 
-        task_env = self._task_env(task_id)
+        task_env = self._task_env(task_id, body)
         argv = ["apptainer", "exec", *[str(arg) for arg in direct_args]]
         argv += ["--bind", f"{staging_dir}:{work_base}"]
         for key, value in task_env.items():
@@ -839,7 +855,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         failure_exc: BaseException | None = None
         try:
             async with self._sem:
-                await self._run_in_sandbox(task_id, out_dir)  # one sandbox per task
+                await self._run_in_sandbox(task_id, out_dir, body)  # one sandbox per task
             result = self._parse_result(task_id, out_dir)
             response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)

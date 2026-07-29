@@ -24,6 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pinchbench.app import (
     NG_FAILURE_CLASS_KEY,
@@ -77,8 +78,19 @@ def test_task_env_gateway_mode():
     assert env["OPENCLAW_GATEWAY_TOKEN"]  # gateway daemon mode
     assert "PINCHBENCH_FORCE_LOCAL" not in env
     assert env["MODEL_NAME"] == "vendor/model"
+    assert env["MODEL_BASE_URL"] == "http://endpoint/v1"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
     assert env["BRAVE_API_KEY"] == "brave-key"
+
+
+def test_task_env_observability_prefixes_model_base_url_before_v1():
+    agent = make_agent()
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+
+    env = agent._task_env("task_x", {TASK_INDEX_KEY_NAME: 12, ROLLOUT_INDEX_KEY_NAME: 3})
+
+    assert env["MODEL_BASE_URL"] == "http://endpoint/ng-rollout/12-3/v1"
+    assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
 
 
 def test_build_spec_from_config():
@@ -233,7 +245,7 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     otherwise ng_collect_rollouts (fail-fast) aborts the whole collection."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, body=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -258,7 +270,7 @@ async def test_debug_artifacts_preserved_on_failure(tmp_path, monkeypatch):
         preserve_debug_artifacts=True,
     )
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, body=None):
         sandbox_out = out_dir / "sandbox" / "out"
         sandbox_out.mkdir(parents=True)
         (out_dir / "sandbox" / "apptainer.stdout.log").write_text("apptainer stdout")
@@ -289,7 +301,7 @@ async def test_debug_artifacts_preserved_for_success_without_transcript(tmp_path
         preserve_debug_artifacts=True,
     )
 
-    async def ok_without_transcript(task_id, out_dir):
+    async def ok_without_transcript(task_id, out_dir, body=None):
         _write_result(out_dir, task_id, 0.5, "automated", {"ok": True}, "graded without transcript")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", ok_without_transcript)
@@ -337,7 +349,7 @@ async def test_signal_killed_sandbox_is_kill_shaped_and_unpersisted(tmp_path, mo
     """Walltime SIGTERM shape: no row anywhere; resume's set-difference re-dispatches."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def killed(task_id, out_dir):
+    async def killed(task_id, out_dir, body=None):
         raise SandboxKilledError("direct apptainer exec killed (rc=-15) for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", killed)
@@ -352,7 +364,7 @@ async def test_task_timeout_is_terminal_sidecar(tmp_path, monkeypatch):
     """Per-task timeout consumed its budget: one sidecar row, never retried."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def slow(task_id, out_dir):
+    async def slow(task_id, out_dir, body=None):
         raise TimeoutError("direct apptainer exec timed out for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", slow)
@@ -368,7 +380,7 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
     """Scored rollouts must keep landing in the main jsonl (no sentinel keys)."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def ok(task_id, out_dir):
+    async def ok(task_id, out_dir, body=None):
         return None
 
     monkeypatch.setattr(agent, "_run_in_sandbox", ok)
