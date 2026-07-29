@@ -167,6 +167,30 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     chat_template_kwargs: Optional[Dict[str, Any]] = None
 
+    # Sampling params to put on every outbound request to the engine, replacing whatever the client
+    # sent. On-policy RL requires generation to match the sampling distribution the policy is
+    # optimized under, and nothing else in the request path supplies those values.
+    #
+    # The usual case is an absent parameter, not a conflicting one. An external harness need not send
+    # sampling params at all -- across captured runs the Claude Code CLI sends only max_tokens and
+    # stream -- and the converters forward a field only when the caller set it, so the outbound body
+    # carries no temperature or top_p and the engine falls back to its own schema default. That
+    # default has no relationship to the trainer's config: NeMo-RL's worker asserts
+    # request.temperature == generation_config["temperature"] and fails the call outright. top_k is
+    # worth pinning for the same reason and is not mapped by the Anthropic converter at all.
+    #
+    # A harness that does send sampling params would equally win over the trainer's config, so these
+    # replace rather than only fill in.
+    #
+    # The integrating training framework sets these to its generation sampling params; Gym only
+    # enforces them and holds no knowledge of any specific framework. Unset means no override.
+    #
+    # Read from config only, never from a request. The point is that the server, not the caller,
+    # decides these; sourcing any part of them from the request would let the caller defeat the
+    # guarantee. Applied on every path that reaches the engine, so the pin does not depend on which
+    # endpoint a harness happens to use.
+    sampling_overrides: Optional[Dict[str, Any]] = None
+
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
@@ -301,6 +325,19 @@ class VLLMModel(SimpleResponsesAPIModel):
             responses_create_params=body, chat_completion=chat_completion_response
         )
 
+    def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Force ``config.sampling_overrides`` onto an outbound body, in place.
+
+        Applied last at every site that builds a request for the engine, so the pinned values win
+        over both what the client sent and anything ``extra_body`` merged in, and are present when
+        the client sent nothing. Every path has to call this: a harness picks its own endpoint, and
+        a pin that covers only one of them yields off-policy generation while reporting that
+        sampling is pinned.
+        """
+        if self.config.sampling_overrides:
+            body_dict.update(self.config.sampling_overrides)
+        return body_dict
+
     async def _responses_native(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
@@ -322,6 +359,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
         if self.config.extra_body:
             body_dict = self.config.extra_body | body_dict
+        self._apply_sampling_overrides(body_dict)
 
         client = self._resolve_client(request)
         response_dict = await client.create_response(**body_dict)
@@ -552,7 +590,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
-        return body_dict
+        return self._apply_sampling_overrides(body_dict)
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -1000,7 +1038,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             out["return_token_ids"] = True
             out["return_tokens_as_token_ids"] = True
 
-        return out
+        # This path never runs _preprocess_chat_completion_create_params -- chat_completions()
+        # branches here before preprocessing -- so the pin has to be applied again. vLLM accepts
+        # the same sampling field names on /v1/completions, and the body is forwarded as raw JSON,
+        # so params without a first-class OpenAI completion field (top_k, min_p) pass through.
+        return self._apply_sampling_overrides(out)
 
     def _completion_dict_to_chat_completion(self, completion_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
         """Wrap a /v1/completions response as a NeMoGymChatCompletion.
