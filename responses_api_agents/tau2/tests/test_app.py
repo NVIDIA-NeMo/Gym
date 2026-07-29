@@ -183,3 +183,25 @@ class TestApp:
             "messages_with_incomplete_reasoning/pct": 0.0,
         }
         assert expected_key_aggregate_metrics == actual_aggregate_metrics.key_metrics
+
+    async def test_compute_metrics_tolerates_soft_failed_rows(self) -> None:
+        example_rollouts_fpath = Path(__file__).parent.parent / "data" / "example_rollouts.jsonl"
+        with example_rollouts_fpath.open() as f:
+            rollouts = list(map(json.loads, f))
+
+        soft_failed_row = {
+            "config": {"domain": "retail"},
+            "reward": 0.0,
+            "_ng_soft_failed": True,
+            "_ng_soft_failure_stage": "agent_run",
+            "response": {"output": [], "usage": None, "error": {"message": "boom"}},
+        }
+        rollouts.append(soft_failed_row)
+
+        _, server = self._dummy_server()
+        actual_metrics = server.compute_metrics([rollouts])
+
+        assert actual_metrics["trajectory_termination_reason/soft_failed/count"] == 1
+        assert actual_metrics["retail/trajectory_termination_reason/soft_failed/count"] == 1
+        assert actual_metrics["retail/num_samples_total"] == 2
+        assert actual_metrics["retail/reward"] == 0.5
