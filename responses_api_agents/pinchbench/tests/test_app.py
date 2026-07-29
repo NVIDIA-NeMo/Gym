@@ -32,6 +32,7 @@ from responses_api_agents.pinchbench.app import (
     NG_TERMINAL_KEY,
     PinchBenchAgent,
     PinchBenchAgentConfig,
+    PinchBenchRunRequest,
     SandboxKilledError,
     _classify_task_failure,
 )
@@ -86,8 +87,16 @@ def test_task_env_gateway_mode():
 def test_task_env_observability_prefixes_model_base_url_before_v1():
     agent = make_agent()
     agent.server_client.global_config_dict = {"observability_enabled": True}
+    body = PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": []},
+            "verifier_metadata": {"task_id": "task_x"},
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+        }
+    )
 
-    env = agent._task_env("task_x", {TASK_INDEX_KEY_NAME: 12, ROLLOUT_INDEX_KEY_NAME: 3})
+    env = agent._task_env("task_x", body)
 
     assert env["MODEL_BASE_URL"] == "http://endpoint/ng-rollout/12-3/v1"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
