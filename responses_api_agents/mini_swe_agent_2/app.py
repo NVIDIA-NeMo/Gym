@@ -140,7 +140,9 @@ def _responses_create_params_to_model_kwargs(
     tool_choice = default_tool_choice if default_tool_choice is not None else params.get("tool_choice")
     if tool_choice == "bash":
         model_kwargs["tool_choice"] = _bash_tool_choice()
-    elif tool_choice is not None:
+    elif tool_choice is not None and tool_choice != "auto":
+        # Don't propagate "auto" — it would overwrite a more specific default
+        # in the mini-swe-agent base config (e.g. swebench.yaml: tool_choice: required).
         model_kwargs["tool_choice"] = tool_choice
 
     return model_kwargs
@@ -714,7 +716,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             split = body.split
             workers = 1
             run_golden = self.config.run_golden
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+            base_url = f"{self.base_url_for_run(base_url, body)}/v1"
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
@@ -736,7 +739,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             top_p = (
                 body.responses_create_params.top_p
                 if body.responses_create_params.top_p is not None
-                else default_model_kwargs["top_p"]
+                else default_model_kwargs.get("top_p", None)
             )
             model_kwargs = _responses_create_params_to_model_kwargs(
                 responses_create_params_dict,

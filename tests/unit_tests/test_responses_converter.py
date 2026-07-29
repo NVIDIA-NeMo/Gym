@@ -168,6 +168,44 @@ def test_responses_to_chat_completion_all_message_roles(converter: ResponsesConv
     assert params.messages[-1]["content"] == "assistant content"
 
 
+def test_responses_to_chat_completion_instructions_become_leading_system_message(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            instructions="you are a coding agent",
+            input=[NeMoGymEasyInputMessage(role="user", content="usr", type="message")],
+        )
+    )
+    # instructions are inserted before any input-derived messages (Responses API semantics)
+    assert params.messages[0] == {"role": "system", "content": "you are a coding agent"}
+    assert [m["role"] for m in params.messages] == ["system", "user"]
+
+
+def test_responses_to_chat_completion_instructions_fold_leading_system_and_developer(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            instructions="you are a coding agent",
+            input=[
+                NeMoGymEasyInputMessage(role="system", content="sys", type="message"),
+                NeMoGymEasyInputMessage(role="developer", content="dev", type="message"),
+                NeMoGymEasyInputMessage(role="user", content="usr", type="message"),
+            ],
+        )
+    )
+    # chat backends commonly admit a single system message at position 0, so the leading run of
+    # system/developer messages is folded into the instructions message
+    assert params.messages[0] == {"role": "system", "content": "you are a coding agent\n\nsys\n\ndev"}
+    assert [m["role"] for m in params.messages] == ["system", "user"]
+
+
+def test_responses_to_chat_completion_no_instructions_adds_no_message(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(role="user", content="usr", type="message")]
+        )
+    )
+    assert [m["role"] for m in params.messages] == ["user"]
+
+
 def test_responses_to_chat_completion_input_image_part(converter: ResponsesConverter):
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
@@ -286,6 +324,62 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
     assert params.max_tokens == 128
     assert params.tools[0]["type"] == "function"
     assert params.tools[0]["function"]["name"] == "get_weather"
+
+
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+def test_responses_to_chat_completion_no_tools_drops_tool_choice(converter: ResponsesConverter, tools_kwargs: dict):
+    # vLLM rejects tool_choice without tools ("When using `tool_choice`, `tools` must be set."),
+    # so requests with absent or empty tools must not carry tool_choice / parallel_tool_calls.
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            model="my-model",
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            **tools_kwargs,
+        )
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert "tools" not in dumped
+    assert "tool_choice" not in dumped
+    assert "parallel_tool_calls" not in dumped
+
+
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+def test_responses_to_chat_completion_no_tools_rejects_required_tool_choice(
+    converter: ResponsesConverter, tools_kwargs: dict
+):
+    with pytest.raises(ValueError, match="requires at least one tool"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="hi",
+                model="my-model",
+                tool_choice="required",
+                **tools_kwargs,
+            )
+        )
+
+
+def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            model="my-model",
+            tool_choice="auto",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": True,
+                }
+            ],
+        )
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert dumped["tool_choice"] == "auto"
+    assert len(params.tools) == 1
 
 
 def test_responses_to_chat_completion_token_id_information_path():

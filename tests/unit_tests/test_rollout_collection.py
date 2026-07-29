@@ -30,15 +30,25 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _expand_input_glob,
+    _failures_path_for,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
+
+
+@pytest.fixture
+def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    get_global_config_dict = MagicMock(return_value={})
+    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+    return get_global_config_dict
 
 
 class TestLoadsJsonlLine:
@@ -108,9 +118,9 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self, *args, **kwargs):
-                return mock_server_client
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
 
         async def fail_raise_for_status(_response):
             raise RuntimeError("boom")
@@ -123,7 +133,7 @@ class TestRolloutCollection:
         )
 
         with pytest.raises(RuntimeError, match="boom"):
-            await next(MockHelper().run_examples([row]))
+            await next(RolloutCollectionHelper().run_examples([row]))
 
         captured = capsys.readouterr()
         if request_debug_enabled:
@@ -530,7 +540,13 @@ class TestRolloutCollection:
             rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert len(rows) == 2
 
-    async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
+    async def test_run_from_config_sanity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        clear_captures = MagicMock()
+        merge_capture = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -575,6 +591,9 @@ class TestRolloutCollection:
                 return metrics_fpath
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+        empty_global_config.assert_called_once_with()
+        clear_captures.assert_not_called()
+        merge_capture.assert_not_called()
 
         expected_results = [
             {
@@ -644,7 +663,57 @@ class TestRolloutCollection:
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
-    async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("resume_from_cache", [False, True])
+    async def test_run_from_config_replaces_stale_capture_before_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        row = {**source_row, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        input_fpath = tmp_path / "input.jsonl"
+        output_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=resume_from_cache,
+            disable_aggregation=True,
+        )
+        if resume_from_cache:
+            output_fpath.touch()
+            config.materialized_jsonl_fpath.write_bytes(orjson.dumps(row) + b"\n")
+        else:
+            input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+
+        store = CaptureStore(capture_dir)
+        store.record("0-0", {"model_call_id": "stale", "dialect": "responses", "request": {}, "response": {}})
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                assert example[TASK_INDEX_KEY_NAME] == 0 and example[ROLLOUT_INDEX_KEY_NAME] == 0
+                assert store.read("0-0") == []
+                store.record(
+                    "0-0",
+                    {"model_call_id": "fresh", "dialect": "responses", "request": {}, "response": {}},
+                )
+                future = Future()
+                future.set_result((example, {"response": {"usage": {}}}))
+                return [future]
+
+        results = await Helper().run_from_config(config)
+
+        assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["fresh"]
+        assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["fresh"]
+
+    async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -725,6 +794,120 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
+    async def test_run_from_config_aggregate_metrics_excludes_non_persisted_rows(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(3)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            limit=3,
+            num_repeats=1,
+        )
+
+        captured: dict[str, list[dict]] = {}
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(
+                self,
+                examples: list[dict],
+                *args,
+                **kwargs,
+            ):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    result = {
+                        "response": {"usage": {"abc usage": example["x"] + 1}},
+                        "case": f"case-{example['x']}",
+                    }
+                    if example["x"] == 1:
+                        result[NG_FAILURE_CLASS_KEY] = "verify_failed"
+                    elif example["x"] == 2:
+                        result[NG_NO_PERSIST_KEY] = True
+                    future.set_result((example, result))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                captured["results"] = results
+                captured["rows"] = rows
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_text("[]")
+                return metrics_fpath
+
+        actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert [result["case"] for result in actual_returned_results] == ["case-0", "case-1", "case-2"]
+        assert [result["case"] for result in captured["results"]] == ["case-0"]
+        assert [row["x"] for row in captured["rows"]] == [0]
+
+        with output_jsonl_fpath.open() as f:
+            actual_written_results = [json.loads(line) for line in f]
+        assert [result["case"] for result in actual_written_results] == ["case-0"]
+
+        failures_fpath = _failures_path_for(output_jsonl_fpath)
+        with failures_fpath.open() as f:
+            actual_failure_results = [json.loads(line) for line in f]
+        assert [result["case"] for result in actual_failure_results] == ["case-1"]
+        assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
+
+    async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+        )
+
+        materialized_rows = [
+            {
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                AGENT_REF_KEY_NAME: {"name": "my agent name"},
+                "x": task_index,
+            }
+            for task_index in (0, 1)
+        ]
+        config.materialized_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps(row) for row in materialized_rows) + b"\n")
+        cached_result = {
+            TASK_INDEX_KEY_NAME: 1,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            AGENT_REF_KEY_NAME: {"name": "my agent name"},
+            "case": "cached",
+        }
+        output_jsonl_fpath.write_bytes(orjson.dumps(cached_result) + b"\n")
+
+        captured: dict[str, list[dict]] = {}
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result((example, {"case": "new"}))
+                return [future]
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                captured["results"] = results
+                captured["rows"] = rows
+                return None
+
+        actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert [result["case"] for result in actual_returned_results] == ["new", "cached"]
+        assert [result["case"] for result in captured["results"]] == ["new", "cached"]
+        assert [row["x"] for row in captured["rows"]] == [0, 1]
+
     def test_load_from_cache(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         materialized_inputs_jsonl_fpath = tmp_path / "output_materialized_inputs.jsonl"
@@ -781,7 +964,7 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
-    async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
+    async def test_call_aggregate_metrics(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
 
         agg = AggregateMetrics(
@@ -798,11 +981,10 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=mock_response)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self):
-                return mock_server_client
-
-        helper = MockHelper()
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
 
         rows = [
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
@@ -811,7 +993,14 @@ class TestRolloutCollection:
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1},
         ]
         results = [
-            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 10}}},
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "response": {"usage": {"tokens": 10}},
+                "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
+                "ng_model_call_capture": {"calls": [{"request": "large"}]},
+            },
             {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 12}}},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 8}}},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 15}}},
@@ -840,9 +1029,13 @@ class TestRolloutCollection:
         )
         for item in sent_data:
             assert "responses_create_params" not in item
+            assert "ng_agent_observations" not in item
+            assert "ng_model_call_capture" not in item
             assert "usage" in item["response"]
 
-    async def test_call_aggregate_metrics_multiple_agents(self, tmp_path: Path) -> None:
+    async def test_call_aggregate_metrics_multiple_agents(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """Test _call_aggregate_metrics with multiple agents runs concurrently via as_completed."""
 
         agg_a = AggregateMetrics(
@@ -868,11 +1061,10 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(side_effect=mock_post)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self):
-                return mock_server_client
-
-        helper = MockHelper()
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
 
         rows = [
             {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
@@ -983,7 +1175,9 @@ class TestDisableAggregationAndCallerTaskIndex:
     the existing default-on aggregation + auto-numbering behaviour.
     """
 
-    async def test_run_from_config_disable_aggregation_skips_call(self, tmp_path: Path) -> None:
+    async def test_run_from_config_disable_aggregation_skips_call(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
         """When disable_aggregation=True, _call_aggregate_metrics MUST NOT run.
 
         Shows up in chunked-rollouts flows where the aggregation pass is deferred

@@ -52,8 +52,9 @@ from responses_api_agents.swe_agents.app import (
     _extract_instance_dict,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
+    file_lock,
     runner_ray_remote,
-    update_metrics,
+    update_and_read_metrics,
 )
 
 
@@ -376,9 +377,7 @@ class TestUpdateMetrics:
             fpath = Path(tmpdir) / "metrics.json"
             fpath.write_text(json.dumps({"a": 1, "b": 2}))
 
-            update_metrics(fpath, {"b": 3, "c": 4})
-
-            result = json.loads(fpath.read_text())
+            result = update_and_read_metrics(fpath, {"b": 3, "c": 4})
             assert result == {"a": 1, "b": 3, "c": 4}
 
     def test_none_values_filtered(self) -> None:
@@ -386,9 +385,8 @@ class TestUpdateMetrics:
             fpath = Path(tmpdir) / "metrics.json"
             fpath.write_text(json.dumps({"a": 1, "b": None}))
 
-            update_metrics(fpath, {"c": None, "d": 5})
+            result = update_and_read_metrics(fpath, {"c": None, "d": 5})
 
-            result = json.loads(fpath.read_text())
             assert result == {"a": 1, "d": 5}
             assert "b" not in result
             assert "c" not in result
@@ -440,20 +438,16 @@ class TestBaseDatasetHarnessProcessor:
         with pytest.raises(AssertionError, match="Command failed"):
             processor._run_setup_command("false")
 
-    def test_setup_directory_lock(self) -> None:
-        config = _minimal_server_config()
-        processor = BaseDatasetHarnessProcessor(config=config)
+    def test_file_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             setup_dir = Path(tmpdir) / "target"
             setup_dir.mkdir()
             lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
-            with processor._setup_directory_lock(setup_dir, "test"):
+            with file_lock(setup_dir, "test"):
                 assert lock_path.exists()
             assert not lock_path.exists()
 
-    def test_setup_directory_lock_stale_lock(self) -> None:
-        config = _minimal_server_config()
-        processor = BaseDatasetHarnessProcessor(config=config)
+    def test_file_lock_stale_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             setup_dir = Path(tmpdir) / "target"
             setup_dir.mkdir()
@@ -465,7 +459,7 @@ class TestBaseDatasetHarnessProcessor:
             old_time = time.time() - 7200  # 2 hours ago
             os.utime(lock_path, (old_time, old_time))
 
-            with processor._setup_directory_lock(setup_dir, "test"):
+            with file_lock(setup_dir, "test"):
                 pass  # should break the stale lock
 
 
