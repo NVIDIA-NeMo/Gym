@@ -1,0 +1,10 @@
+conversational_tool_use_scenario_generation:
+  responses_api_agents:
+    conversational_tool_use/scenario_generation:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: scenario_generation_model
+
+scenario_generation_model:
+  _copy: policy_model

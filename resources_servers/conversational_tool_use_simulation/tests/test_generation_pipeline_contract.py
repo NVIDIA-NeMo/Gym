@@ -15,12 +15,12 @@
 
 from pathlib import Path
 
-from responses_api_agents.conversational_tool_use_agent.app import ConversationalToolUseAgentRunRequest
-from responses_api_agents.conversational_tool_use_domain_generation.materialize import materialize_policy_tool_rows
-from responses_api_agents.conversational_tool_use_policy_tool_generation.materialize import (
+from responses_api_agents.conversational_tool_use.domain_generation.materialize import materialize_policy_tool_rows
+from responses_api_agents.conversational_tool_use.policy_tool_generation.materialize import (
     scenario_input_from_rollout,
 )
-from responses_api_agents.conversational_tool_use_scenario_generation.materialize import _materialized_rows
+from responses_api_agents.conversational_tool_use.scenario_generation.materialize import _materialized_rows
+from responses_api_agents.conversational_tool_use.simulation.app import ConversationalToolUseAgentRunRequest
 
 
 def test_generation_materializers_preserve_profile_lineage_and_runtime_contract(tmp_path: Path) -> None:

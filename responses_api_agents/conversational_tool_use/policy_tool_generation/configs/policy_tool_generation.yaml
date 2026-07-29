@@ -1,0 +1,17 @@
+conversational_tool_use_policy_tool_generation:
+  responses_api_agents:
+    conversational_tool_use/policy_tool_generation:
+      entrypoint: app.py
+      policy_model_server:
+        type: responses_api_models
+        name: policy_generation_model
+      judge_model_server:
+        type: responses_api_models
+        name: policy_tool_judge_model
+      max_retries: 20
+
+policy_generation_model:
+  _copy: policy_model
+
+policy_tool_judge_model:
+  _copy: policy_model

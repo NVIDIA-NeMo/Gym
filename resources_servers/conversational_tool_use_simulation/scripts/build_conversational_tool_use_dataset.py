@@ -37,7 +37,7 @@ from resources_servers.conversational_tool_use_simulation.scripts.quality import
     detect_leak,
     validate_tool_schema,
 )
-from responses_api_agents.conversational_tool_use_agent.prompt import (
+from responses_api_agents.conversational_tool_use.simulation.prompt import (
     agent_system_message,
     responses_api_tools,
 )

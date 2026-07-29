@@ -7,7 +7,7 @@ One rollout joins a generated policy, tool set, and customer scenario with four 
 - the tool simulator produces results for generated tool schemas
 - the judge model scores completed trajectories
 
-The policy loop runs in `responses_api_agents/conversational_tool_use_agent`. Session state, simulation, validation, and
+The policy loop runs in `responses_api_agents/conversational_tool_use/simulation`. Session state, simulation, validation, and
 verification run in `resources_servers/conversational_tool_use_simulation`.
 
 ## Session Setup

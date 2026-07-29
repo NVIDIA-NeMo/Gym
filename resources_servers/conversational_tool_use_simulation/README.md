@@ -8,10 +8,10 @@ scenario artifacts are produced by independent Responses API agents.
 | Component | Implementation | Responsibility |
 | --- | --- | --- |
 | Rollout simulation | `app.py` | Simulate users and tools, maintain session state, and verify trajectories |
-| Domain generation | `responses_api_agents/conversational_tool_use_domain_generation` | Generate domain candidates |
-| Policy/tool generation | `responses_api_agents/conversational_tool_use_policy_tool_generation` | Generate, refine, validate, and judge policies and tools |
-| Scenario generation | `responses_api_agents/conversational_tool_use_scenario_generation` | Generate customer scenarios |
-| Policy agent | `responses_api_agents/conversational_tool_use_agent` | Run the policy-model conversation loop |
+| Domain generation | `responses_api_agents/conversational_tool_use/domain_generation` | Generate domain candidates |
+| Policy/tool generation | `responses_api_agents/conversational_tool_use/policy_tool_generation` | Generate, refine, validate, and judge policies and tools |
+| Scenario generation | `responses_api_agents/conversational_tool_use/scenario_generation` | Generate customer scenarios |
+| Policy agent | `responses_api_agents/conversational_tool_use/simulation` | Run the policy-model conversation loop |
 
 The generation agents are connected through standard Gym rollout JSONL and explicit materialization steps:
 
@@ -103,7 +103,7 @@ matching the policy-visible transcript. The items retain their shared `response_
 When Gym observability is enabled, the policy, user-simulator, tool-simulator, and judge calls all inherit the rollout
 correlation prefix. Standard model-call captures therefore remain attached to the rollout that caused them.
 
-This is intended to be used with `responses_api_agents/conversational_tool_use_agent`.
+This is intended to be used with `responses_api_agents/conversational_tool_use/simulation`.
 
 The rollout cap is owned by that agent as `max_agent_steps` and counts policy-model responses. The resource server no
 longer applies a competing message-count limit. If the final policy response contains tool calls,

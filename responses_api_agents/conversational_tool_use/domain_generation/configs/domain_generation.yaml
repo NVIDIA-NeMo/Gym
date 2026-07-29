@@ -1,0 +1,10 @@
+conversational_tool_use_domain_generation:
+  responses_api_agents:
+    conversational_tool_use/domain_generation:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: domain_generation_model
+
+domain_generation_model:
+  _copy: policy_model
