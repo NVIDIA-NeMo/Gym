@@ -50,7 +50,6 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -455,15 +454,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_raw_responses=self.config.persist_raw_judge_responses,
             )
 
-        # Empty/unusable judge output is a judge failure, not a low score.
-        if judge_result is None:
-            raise JudgeError("empty or unusable judge response")
         return GDPValVerifyResponse(
             **body.model_dump(),
             reward=float(reward),
             verify_mode="rubric",
             judge_response=judge_result,
-            invalid_judge_response=False,
+            invalid_judge_response=(judge_result is None),
         )
 
     async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:
@@ -670,13 +666,11 @@ class GDPValResourcesServer(SimpleResourcesServer):
         finally:
             clean_up_paths(clean_up_list)
 
-        # Every matchup failed → this rollout is genuinely unjudgeable. Raise
-        # JudgeError so the row goes to the failures sidecar rather than emitting
-        # a fake neutral reward that would pollute the metrics. Individual matchup
-        # failures are already isolated above, so this is the only judge-call
-        # outcome the whole rollout can't survive.
+        # Every matchup failed → this rollout is genuinely unjudgeable. Surface
+        # it as a failure (matches pre-resilience behavior) rather than emitting
+        # a fake neutral reward that would pollute the metrics.
         if attempted_matchups > 0 and not per_reference:
-            raise JudgeError(
+            raise RuntimeError(
                 f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
             )
 
