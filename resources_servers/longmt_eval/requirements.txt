@@ -20,3 +20,4 @@ scipy
 joblib
 langdetect
 sacrebleu[ja,ko]>=2.4
+spacy>=3.8.13
