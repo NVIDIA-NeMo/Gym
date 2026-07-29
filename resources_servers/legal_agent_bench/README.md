@@ -12,7 +12,7 @@ criterion with an OpenAI-compatible judge model.
 
 ## Requirements
 
-- Python 3.12 and [uv](https://docs.astral.sh/uv/)
+- Python 3.13.13 and [uv](https://docs.astral.sh/uv/)
 - Docker with a running daemon (the only supported container backend)
 - An OpenAI-compatible policy endpoint and judge endpoint
 - At least 10 GB of free working space for preparation and the first Docker build
@@ -25,7 +25,7 @@ Docker layers.
 From a fresh clone, create the repository environment:
 
 ```bash
-uv venv --python 3.12
+uv venv --python 3.13.13
 source .venv/bin/activate
 uv sync --extra dev
 docker info >/dev/null

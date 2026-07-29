@@ -119,7 +119,7 @@ gym env resolve --config ...
 ## Code Style
 
 - Line length: 119
-- Python 3.12+, async-first
+- Python 3.13.13+, async-first
 - Ruff for linting and formatting (double quotes, isort)
 - Test coverage must be >= 96%
 - All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)

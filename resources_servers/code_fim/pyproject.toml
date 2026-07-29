@@ -16,7 +16,7 @@
 [project]
 name = "code-fim"
 version = "0.0.0"
-requires-python = ">=3.12"
+requires-python = ">=3.13.13"
 dependencies = [
     "nemo-gym[dev]",
     "human-eval-infilling",
