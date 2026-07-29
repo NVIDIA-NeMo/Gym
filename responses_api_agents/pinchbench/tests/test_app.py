@@ -84,6 +84,20 @@ def test_task_env_gateway_mode():
     assert env["BRAVE_API_KEY"] == "brave-key"
 
 
+def test_task_env_gateway_hardening_knobs():
+    env = make_agent(
+        gateway_ready_timeout_seconds=123,
+        gateway_start_jitter_s=17,
+        gateway_port_low=23000,
+        gateway_port_high=24000,
+    )._task_env("task_x")
+
+    assert env["PINCHBENCH_GATEWAY_READY_TIMEOUT_SECONDS"] == "123"
+    assert env["PINCHBENCH_GATEWAY_START_JITTER_S"] == "17"
+    assert env["PINCHBENCH_GATEWAY_PORT_LOW"] == "23000"
+    assert env["PINCHBENCH_GATEWAY_PORT_HIGH"] == "24000"
+
+
 def _rollout_body() -> PinchBenchRunRequest:
     return PinchBenchRunRequest.model_validate(
         {
@@ -125,6 +139,25 @@ def test_task_env_observability_does_not_prefix_direct_endpoint():
 
     assert env["MODEL_BASE_URL"] == "http://endpoint/v1"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
+
+
+def test_direct_exec_wrapper_stages_checkout_run_task(tmp_path):
+    agent = make_agent()
+    wrapper = agent._write_direct_exec_wrapper(tmp_path)
+    staged_run_task = tmp_path / "run_task_current.sh"
+
+    assert wrapper.exists()
+    assert staged_run_task.exists()
+    assert staged_run_task.stat().st_mode & 0o100
+
+    wrapper_text = wrapper.read_text()
+    staged_text = staged_run_task.read_text()
+
+    assert "run_task_current.sh" in wrapper_text
+    assert "/opt/run_task.sh" not in wrapper_text
+    assert "run_task_patched.sh" not in wrapper_text
+    assert "PINCHBENCH_GATEWAY_READY_TIMEOUT_SECONDS" in staged_text
+    assert "select_gateway_port" in staged_text
 
 
 def test_build_spec_from_config():

@@ -116,6 +116,10 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
+    gateway_ready_timeout_seconds: int = 300
+    gateway_start_jitter_s: int = 0
+    gateway_port_low: int = 20000
+    gateway_port_high: int = 60000
     # Optional OpenClaw provider request timeout in seconds. None keeps OpenClaw's 120s default.
     openclaw_provider_timeout_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
@@ -199,6 +203,10 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             "PINCHBENCH_CONTEXT_WINDOW": str(self.config.context_window),
             "TIMEOUT_MULT": str(self.config.timeout_multiplier),
             "PINCHBENCH_WORK_BASE": self.config.sandbox_work_base,
+            "PINCHBENCH_GATEWAY_READY_TIMEOUT_SECONDS": str(self.config.gateway_ready_timeout_seconds),
+            "PINCHBENCH_GATEWAY_START_JITTER_S": str(self.config.gateway_start_jitter_s),
+            "PINCHBENCH_GATEWAY_PORT_LOW": str(self.config.gateway_port_low),
+            "PINCHBENCH_GATEWAY_PORT_HIGH": str(self.config.gateway_port_high),
         }
         # Each per-task container starts its OWN OpenClaw gateway daemon (per-task, so
         # it never hits the shared-workspace WorkspaceVanishedError cliff). The client
@@ -248,6 +256,10 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
 
     def _write_direct_exec_wrapper(self, staging_dir: Path) -> Path:
+        run_task_path = staging_dir / "run_task_current.sh"
+        shutil.copy2(Path(__file__).with_name("run_task.sh"), run_task_path)
+        run_task_path.chmod(0o755)
+
         wrapper_path = staging_dir / "run_task_efb.sh"
         wrapper = textwrap.dedent(
             """\
@@ -320,25 +332,14 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), "utf-8")
             PYCFG
 
-            PATCHED_RUN_TASK="$BASE/run_task_patched.sh"
-            python3 - <<'PYSCRIPT'
-            import os
-            from pathlib import Path
-
-            base = Path(os.environ.get("PINCHBENCH_WORK_BASE", "/sandbox"))
-            src = Path("/opt/run_task.sh")
-            dst = base / "run_task_patched.sh"
-            text = src.read_text()
-            text = text.replace(
-                "pkill -9 -f openclaw 2>/dev/null || true",
-                'kill -9 "$GW_PID" 2>/dev/null || true',
-            )
-            dst.write_text(text)
-            dst.chmod(0o755)
-            PYSCRIPT
+            RUN_TASK="$BASE/run_task_current.sh"
+            if [ ! -x "$RUN_TASK" ]; then
+                echo "missing staged PinchBench run script: $RUN_TASK" >&2
+                exit 127
+            fi
 
             set +e
-            bash "$PATCHED_RUN_TASK"
+            bash "$RUN_TASK"
             RC=$?
             set -e
             exit "$RC"
