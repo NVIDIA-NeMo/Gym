@@ -99,8 +99,13 @@ gym eval run --no-serve +agent_name=remote_agent \
 ## Gym-hosted tools (`tools_mode`)
 
 - **`refuse`** (default) — tool-declaring tasks are rejected up front with a clear, terminal error.
-  This protects you from the silent failure mode: without session access, tools that mutate
-  per-session state never run, and every rollout scores 0 with no error anywhere.
+  Use this whenever your tasks don't declare Gym-hosted tools — text-only benchmarks, tasks whose
+  tools all live inside your own service — which is the common case. Tool-free rows run completely
+  normally under `refuse`; the guard only fires if a row *declares* tools. Keeping it on also acts
+  as a tripwire while you wire things up: if a tool-declaring dataset shows up before your service
+  echoes the session cookie, you get an immediate, named error instead of the silent failure mode —
+  without session access, tools that mutate per-session state never run, and every rollout scores 0
+  with no error anywhere.
 - **`forward`** — each request to your service carries the resources-server URL and the rollout's
   session cookie as headers. Echo the cookie on every tool call you make against that URL and
   stateful environments work end to end. The URL is re-sent per request because Gym assigns
@@ -110,8 +115,7 @@ gym eval run --no-serve +agent_name=remote_agent \
 <Note>
 `forward` covers environments whose tools are plain HTTP routes on the resources server (the
 session cookie is the only credential involved). Environments that expose their tools **over MCP**
-mint additional per-session token headers that are not forwarded in this version — MCP-based
-environments need a metadata-forwarding follow-up.
+mint additional per-session token headers that are not forwarded in this version.
 </Note>
 
 ### Running your service off-host with `tools_mode: forward`
