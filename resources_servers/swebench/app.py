@@ -47,6 +47,10 @@ class SWEBenchVerifyRequest(BaseVerifyRequest):
     split: str
 
 
+class SWEBenchVerifyResponse(BaseVerifyResponse):
+    pass
+
+
 class SwebenchResourcesServer(SimpleResourcesServer):
     config: SwebenchResourcesServerConfig
 
@@ -58,8 +62,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+    async def verify(self, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
+        return SWEBenchVerifyResponse(**body.model_dump(), reward=1.0)
 
 
 if __name__ == "__main__":
