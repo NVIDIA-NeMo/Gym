@@ -187,12 +187,29 @@ class E2BProvider:
     # ---------------------------------------------------------------- helpers
 
     def _api_params(self) -> dict[str, Any]:
-        """SDK ``ApiParams`` for every call; omitted keys fall back to env."""
+        """SDK ``ApiParams`` for connection-scoped calls; omitted keys fall back to env.
+
+        Only ``create``/``connect``/``kill`` open a connection and accept these.
+        Everything else runs against an already-connected sandbox -- see
+        :meth:`_request_params`.
+        """
         params = {key: getattr(self._connection, key) for key in _API_PARAM_KEYS}
         params = {key: value for key, value in params.items() if value is not None}
         if self._connection.request_timeout_s is not None:
             params["request_timeout"] = self._connection.request_timeout_s
         return params
+
+    def _request_params(self) -> dict[str, Any]:
+        """Per-request options for calls on an existing sandbox object.
+
+        ``commands.run``, ``files.*`` and ``is_running`` take ``request_timeout``
+        only -- the sandbox already carries the connection config, and handing
+        them the full ``ApiParams`` raises ``TypeError: unexpected keyword
+        argument 'api_key'``.
+        """
+        if self._connection.request_timeout_s is None:
+            return {}
+        return {"request_timeout": self._connection.request_timeout_s}
 
     def _resolve_template(self, spec: SandboxSpec) -> str:
         """Map a spec onto an E2B template alias.
@@ -342,7 +359,7 @@ class E2BProvider:
             if isinstance(exc, type)
         )
         try:
-            running = await sandbox.is_running(**self._api_params())
+            running = await sandbox.is_running(**self._request_params())
         except not_found:
             return SandboxStatus.STOPPED
         except Exception:  # noqa: BLE001 - status must not raise for transient issues
@@ -388,7 +405,7 @@ class E2BProvider:
 
         effective_timeout = timeout_s if timeout_s is not None else self._exec.default_timeout_s
         effective_user = user if user is not None else self._exec.user
-        kwargs: dict[str, Any] = {"cmd": command, **self._api_params()}
+        kwargs: dict[str, Any] = {"cmd": command, **self._request_params()}
         if cwd is not None:
             kwargs["cwd"] = cwd
         if env:
@@ -429,14 +446,14 @@ class E2BProvider:
     async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
         sandbox = self._sandbox(handle)
         await self._with_retries(
-            lambda: sandbox.files.write(target_path, data, **self._api_params()),
+            lambda: sandbox.files.write(target_path, data, **self._request_params()),
             operation="write_file",
         )
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
         sandbox = self._sandbox(handle)
         data = await self._with_retries(
-            lambda: sandbox.files.read(source_path, format="bytes", **self._api_params()),
+            lambda: sandbox.files.read(source_path, format="bytes", **self._request_params()),
             operation="read_file",
         )
         return data if isinstance(data, bytes) else bytes(data)

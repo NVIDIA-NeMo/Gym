@@ -22,7 +22,7 @@ import pytest
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
 from nemo_gym.sandbox.providers.base import SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.e2b import provider as e2b_provider
-from nemo_gym.sandbox.providers.e2b.provider import E2BCreateError, E2BProvider
+from nemo_gym.sandbox.providers.e2b.provider import _API_PARAM_KEYS, E2BCreateError, E2BProvider
 from nemo_gym.sandbox.providers.registry import get_provider_class
 
 
@@ -54,11 +54,25 @@ class FakeCommandResult:
         self.exit_code = exit_code
 
 
+# The real SDK's sandbox-scoped methods take `request_timeout` only -- they are
+# bound to an already-connected sandbox. Mirroring that here (rather than a
+# permissive **kwargs) is what catches connection params leaking onto them:
+# the SDK raises `TypeError: unexpected keyword argument 'api_key'`.
+_SANDBOX_SCOPED_ALLOWED = {"request_timeout"}
+
+
+def _reject_connection_params(method: str, kwargs: dict) -> None:
+    leaked = sorted((set(kwargs) & set(_API_PARAM_KEYS)) - _SANDBOX_SCOPED_ALLOWED)
+    if leaked:
+        raise TypeError(f"{method}() got an unexpected keyword argument {leaked[0]!r}")
+
+
 class FakeCommands:
     def __init__(self, sandbox: "FakeSandbox") -> None:
         self._sandbox = sandbox
 
     async def run(self, **kwargs):
+        _reject_connection_params("Commands.run", kwargs)
         self._sandbox.exec_calls.append(kwargs)
         behaviour = self._sandbox.exec_behaviour
         if isinstance(behaviour, Exception):
@@ -71,10 +85,12 @@ class FakeFiles:
         self._sandbox = sandbox
 
     async def write(self, path, data, **kwargs):
+        _reject_connection_params("Filesystem.write", kwargs)
         self._sandbox.files_written[path] = data
         return None
 
     async def read(self, path, **kwargs):
+        _reject_connection_params("Filesystem.read", kwargs)
         if path not in self._sandbox.files_written:
             raise FakeSandboxNotFound(path)
         data = self._sandbox.files_written[path]
@@ -105,6 +121,7 @@ class FakeSandbox:
         return cls(sandbox_id=sandbox_id, **kwargs)
 
     async def is_running(self, **kwargs):
+        _reject_connection_params("Sandbox.is_running", kwargs)
         return self.running
 
     async def kill(self, **kwargs):
@@ -208,6 +225,52 @@ class TestResourceHandling:
         with caplog.at_level("WARNING"):
             await provider.create(_spec())
         assert not [r for r in caplog.records if "fixes sandbox resources" in r.message]
+
+
+# --------------------------------------------------------------------------
+# Connection params are connection-scoped, not per-call
+# --------------------------------------------------------------------------
+
+
+class TestConnectionParamScoping:
+    """Only create/connect/kill open a connection and accept ``ApiParams``.
+
+    ``commands.run``, ``files.*`` and ``is_running`` run against an
+    already-connected sandbox and take ``request_timeout`` only. Passing them
+    the full set raises ``TypeError: Commands.run() got an unexpected keyword
+    argument 'api_key'`` -- which aborted every trial of a benchmark run at the
+    first exec, since the sandbox had already been created successfully.
+    """
+
+    @staticmethod
+    def _provider() -> E2BProvider:
+        return E2BProvider(
+            connection={"api_key": "k", "api_url": "http://gw:8080", "request_timeout_s": 30.0},
+            create={"template": "base"},
+        )
+
+    async def test_exec_passes_only_request_timeout(self) -> None:
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "echo hi")
+        kwargs = handle.raw.exec_calls[0]
+        assert not set(kwargs) & set(_API_PARAM_KEYS), "connection params must not reach commands.run"
+        assert kwargs["request_timeout"] == 30.0
+
+    async def test_file_and_status_calls_do_not_leak_connection_params(self) -> None:
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        # Each of these would raise TypeError from the fake (as the real SDK does).
+        await provider.write_file(handle, "/tmp/f", b"data")
+        assert await provider.read_file(handle, "/tmp/f") == b"data"
+        assert await provider.status(handle) is SandboxStatus.RUNNING
+
+    async def test_create_still_receives_full_connection_params(self) -> None:
+        # The narrowing must not strip params from the call that needs them.
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        assert handle.raw.create_kwargs["api_key"] == "k"
+        assert handle.raw.create_kwargs["api_url"] == "http://gw:8080"
 
 
 # --------------------------------------------------------------------------
