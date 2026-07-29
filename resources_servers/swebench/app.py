@@ -16,6 +16,7 @@
 from typing import Optional
 
 from fastapi import Request
+from pydantic import BaseModel
 from swebench.harness.run_evaluation import make_test_spec, run_instance
 from swebench.harness.test_spec.test_spec import LATEST
 
@@ -58,6 +59,12 @@ class SWEBenchVerifyRequest(BaseVerifyRequest):
 class SWEBenchVerifyResponse(BaseVerifyResponse):
     evaluation_completed: bool
     resolved: bool
+
+
+class DockerContainer(BaseModel):
+    id: str
+
+    # TODO @bxyu-nvidia: start(), exec_run(), put_archive(), stop()
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
