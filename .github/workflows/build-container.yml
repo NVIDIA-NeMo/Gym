@@ -30,6 +30,7 @@ jobs:
       dockerfile: docker/Dockerfile
       target: release
       image-label: nemo-gym
+      runner: linux-amd64-cpu16
       has-azure-credentials: true
       build-contexts: "nemo-gym=${{ github.run_id }}/"
     secrets:
