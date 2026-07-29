@@ -79,6 +79,7 @@ ComputeConfig = Annotated[
 
 
 class BenchmarkRunConfig(_StrictModel):
+    prepare: dict[str, Any] = {}
     run: dict[str, Any] = {}
 
 

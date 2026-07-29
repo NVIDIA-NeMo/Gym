@@ -1,7 +1,7 @@
 import shlex
 from pathlib import Path
 
-from nemo_gym.orchestration.executors.script_templates import bash_var, render_gym_cmd, render_gym_install, render_health_check
+from nemo_gym.orchestration.executors.script_templates import bash_var, render_driver_entrypoint, render_gym_cmd, render_health_check
 from nemo_gym.orchestration.executors.utils import flatten_run_args
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
@@ -19,6 +19,8 @@ _SCRIPT_TEMPLATE = """\
 {service_commands}
 
 {health_checks}
+
+{prepare_command}
 
 {driver_command}
 """
@@ -97,9 +99,24 @@ def build_sbatch_script(
         if service.health_check
     )
 
-    gym_cmd = render_gym_cmd(benchmark_name, flatten_run_args(benchmark.run))
     gi = config.driver.gym_install
-    entrypoint = render_gym_install(gi.repo, gi.ref) if gi else '"${GYM_CMD[@]}"'
+
+    prepare_cmd = None
+    if benchmark.prepare:
+        prepare_args = " ".join(
+            [f"gym eval prepare --benchmark {shlex.quote(benchmark_name)}"]
+            + flatten_run_args(benchmark.prepare)
+        )
+        prepare_cmd = prepare_args
+
+    extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
+    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", benchmark_name, extra_flags + flatten_run_args(benchmark.run))
+    entrypoint = render_driver_entrypoint(
+        repo=gi.repo if gi else None,
+        ref=gi.ref if gi else None,
+        prepare_cmd=prepare_cmd,
+    )
+    prepare_command = ""
     driver_command = (
         f"{gym_cmd}\n"
         f"srun --overlap --no-container-mount-home --container-image={shlex.quote(config.driver.container)} "
@@ -110,5 +127,6 @@ def build_sbatch_script(
         directives=directives,
         service_commands=service_commands,
         health_checks=health_checks,
+        prepare_command=prepare_command,
         driver_command=driver_command,
     )

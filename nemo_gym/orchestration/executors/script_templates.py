@@ -37,20 +37,38 @@ def render_health_check(name: str, port: int, timeout: int) -> str:
     )
 
 
-def render_gym_cmd(benchmark_name: str, run_args: list[str]) -> str:
-    """Render a GYM_CMD bash array with each argument on its own line."""
-    args = ["gym eval run", f"--benchmark {shlex.quote(benchmark_name)}", *run_args]
-    return "GYM_CMD=(\n    " + "\n    ".join(args) + "\n)"
+def render_gym_cmd(subcommand: str, var_name: str, benchmark_name: str, args: list[str]) -> str:
+    """Render a bash array with each argument on its own line."""
+    entries = [f"gym {subcommand}", f"--benchmark {shlex.quote(benchmark_name)}", *args]
+    return f"{var_name}=(\n    " + "\n    ".join(entries) + "\n)"
 
 
-def render_gym_install(repo: str, ref: str) -> str:
-    """Render a bash -c wrapper that installs uv + gym before exec-ing GYM_CMD."""
-    install_cmd = shlex.quote(f"git+{repo}@{ref}")
-    return (
-        "bash -c '\n"
-        "    curl -LsSf https://astral.sh/uv/install.sh | sh\n"
-        '    source "$HOME/.local/bin/env"\n'
-        f"    uv pip install --system {install_cmd}\n"
-        "    exec \"$@\"\n"
-        "' -- \"${GYM_CMD[@]}\""
-    )
+def render_driver_entrypoint(
+    repo: str | None,
+    ref: str | None,
+    prepare_cmd: str | None,
+) -> str:
+    """Render the srun entrypoint for the driver step.
+
+    When either gym_install or prepare is needed, wraps everything in a single
+    bash -c so prepare and run happen in the same srun step and container.
+    """
+    preamble: list[str] = []
+
+    if repo and ref:
+        install_cmd = shlex.quote(f"git+{repo}@{ref}")
+        preamble += [
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            'source "$HOME/.local/bin/env"',
+            f"uv pip install --system {install_cmd}",
+        ]
+
+    if prepare_cmd:
+        preamble.append(prepare_cmd)
+
+    if not preamble:
+        return '"${GYM_CMD[@]}"'
+
+    preamble.append('exec "$@"')
+    body = "\n    ".join(preamble)
+    return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
