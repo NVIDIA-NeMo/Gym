@@ -255,7 +255,9 @@ class TestConnectionParamScoping:
         await provider.exec(handle, "echo hi")
         kwargs = handle.raw.exec_calls[0]
         assert not set(kwargs) & set(_API_PARAM_KEYS), "connection params must not reach commands.run"
-        assert kwargs["request_timeout"] == 30.0
+        # request_timeout is derived from the command timeout, not inherited
+        # from the connection -- see TestExecRequestTimeout.
+        assert kwargs["request_timeout"] > 0
 
     async def test_file_and_status_calls_do_not_leak_connection_params(self) -> None:
         provider = self._provider()
@@ -264,6 +266,43 @@ class TestConnectionParamScoping:
         await provider.write_file(handle, "/tmp/f", b"data")
         assert await provider.read_file(handle, "/tmp/f") == b"data"
         assert await provider.status(handle) is SandboxStatus.RUNNING
+
+    async def test_long_command_is_not_bounded_by_connection_timeout(self) -> None:
+        # The SDK applies request_timeout to the streaming RPC carrying the
+        # command's output. Inheriting the 30s connection timeout would tear
+        # down any command running longer than that.
+        provider = E2BProvider(
+            connection={"api_key": "k", "request_timeout_s": 30.0},
+            create={"template": "base"},
+        )
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "make -j8", timeout_s=1800)
+        kwargs = handle.raw.exec_calls[0]
+        assert kwargs["timeout"] == 1800.0
+        assert kwargs["request_timeout"] > 1800.0, "request timeout must outlast the command"
+
+    async def test_exec_request_timeout_override_is_honoured(self) -> None:
+        provider = E2BProvider(
+            connection={"request_timeout_s": 30.0},
+            create={"template": "base"},
+            exec={"request_timeout_s": 900.0},
+        )
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "sleep 1", timeout_s=60)
+        assert handle.raw.exec_calls[0]["request_timeout"] == 900.0
+
+    async def test_untimed_command_disables_the_request_timeout(self) -> None:
+        provider = E2BProvider(
+            connection={"request_timeout_s": 30.0},
+            create={"template": "base"},
+            exec={"default_timeout_s": None},
+        )
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "sleep forever")
+        kwargs = handle.raw.exec_calls[0]
+        assert kwargs["timeout"] is None
+        # 0 is the SDK's "no request timeout"; None would inherit the 30s.
+        assert kwargs["request_timeout"] == 0.0
 
     async def test_create_still_receives_full_connection_params(self) -> None:
         # The narrowing must not strip params from the call that needs them.

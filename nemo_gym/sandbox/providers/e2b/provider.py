@@ -57,6 +57,14 @@ T = TypeVar("T")
 # E2B template aliases accept ASCII letters, digits, hyphens and underscores.
 _TEMPLATE_ALIAS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
+# The SDK reads 0 as "no request timeout"; None would fall back to the
+# connection's, which is sized for short control-plane calls.
+_NO_REQUEST_TIMEOUT = 0.0
+
+# Head-room over a command's own timeout, so the sandbox-side timeout fires
+# first and the stream is never cut mid-command.
+_EXEC_REQUEST_TIMEOUT_MARGIN_S = 60.0
+
 # Passed straight through to the SDK (``ApiParams``) on every call.
 _API_PARAM_KEYS = (
     "api_key",
@@ -210,6 +218,29 @@ class E2BProvider:
         if self._connection.request_timeout_s is None:
             return {}
         return {"request_timeout": self._connection.request_timeout_s}
+
+    def _exec_request_timeout(self, command_timeout_s: float | None) -> float:
+        """Per-request timeout for ``commands.run``.
+
+        The SDK applies ``request_timeout`` to the whole streaming RPC that
+        carries the command's output, not just to starting it, so any value
+        below the command timeout tears the stream down mid-command::
+
+            httpcore.RemoteProtocolError: peer closed connection without
+            sending complete message body (incomplete chunked read)
+
+        ``connection.request_timeout_s`` is sized for short control-plane calls
+        and must not be inherited here. Absent an explicit override, derive the
+        value from the command timeout plus head-room, so the sandbox-side
+        timeout fires first and the caller gets a clean ``TimeoutError``.
+        """
+        if self._exec.request_timeout_s is not None:
+            return self._exec.request_timeout_s
+        if command_timeout_s is None:
+            # SDK sentinel: 0 means "no request timeout" (None would inherit
+            # the connection's).
+            return _NO_REQUEST_TIMEOUT
+        return float(command_timeout_s) + _EXEC_REQUEST_TIMEOUT_MARGIN_S
 
     def _resolve_template(self, spec: SandboxSpec) -> str:
         """Map a spec onto an E2B template alias.
@@ -405,7 +436,7 @@ class E2BProvider:
 
         effective_timeout = timeout_s if timeout_s is not None else self._exec.default_timeout_s
         effective_user = user if user is not None else self._exec.user
-        kwargs: dict[str, Any] = {"cmd": command, **self._request_params()}
+        kwargs: dict[str, Any] = {"cmd": command}
         if cwd is not None:
             kwargs["cwd"] = cwd
         if env:
@@ -414,8 +445,7 @@ class E2BProvider:
             kwargs["user"] = str(effective_user)
         # E2B treats ``timeout`` as "no timeout" when falsy; keep None explicit.
         kwargs["timeout"] = float(effective_timeout) if effective_timeout is not None else None
-        if self._exec.request_timeout_s is not None:
-            kwargs["request_timeout"] = self._exec.request_timeout_s
+        kwargs["request_timeout"] = self._exec_request_timeout(effective_timeout)
 
         timeout_exc = getattr(e2b, "TimeoutException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
