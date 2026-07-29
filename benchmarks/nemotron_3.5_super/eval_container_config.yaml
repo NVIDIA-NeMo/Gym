@@ -1,6 +1,7 @@
 config_paths:
 - benchmarks/gpqa/config.yaml
 - benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
+- benchmarks/swebench/verified/config.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
 - env.yaml
 
