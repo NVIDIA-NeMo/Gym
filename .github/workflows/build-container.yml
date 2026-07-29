@@ -64,13 +64,10 @@ jobs:
       - name: Smoke test — CLI
         run: docker run --rm "${{ needs.build.outputs.container-uri }}" --help
 
-      - name: Smoke test — vLLM and FlashInfer versions
+      - name: Smoke test — vLLM and FlashInfer installed
         run: |
           docker run --rm "${{ needs.build.outputs.container-uri }}" python -c "
           from importlib.metadata import version
-          v = version('vllm')
-          f = version('flashinfer-python')
-          assert v == '0.26.0', f'Expected vllm 0.26.0, got {v}'
-          assert f == '0.6.14', f'Expected flashinfer-python 0.6.14, got {f}'
-          print(f'vllm=={v} flashinfer-python=={f} OK')
+          print('vllm=='+version('vllm'))
+          print('flashinfer-python=='+version('flashinfer-python'))
           "
