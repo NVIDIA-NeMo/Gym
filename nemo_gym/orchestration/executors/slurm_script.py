@@ -1,7 +1,7 @@
 import shlex
 from pathlib import Path
-from typing import Any
 
+from nemo_gym.orchestration.executors.utils import flatten_run_args
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
     NodePool,
@@ -75,20 +75,6 @@ def _build_ray_command(_service: RayServiceConfig) -> str:
     return "ray start --head"
 
 
-def _flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
-    args = []
-    for key, value in run.items():
-        full_key = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict):
-            args.extend(_flatten_run_args(value, full_key))
-        elif isinstance(value, list):
-            items = ",".join(str(v) for v in value)
-            args.append(shlex.quote(f"++{full_key}=[{items}]"))
-        else:
-            args.append(shlex.quote(f"++{full_key}={value}"))
-    return args
-
-
 _BUILDERS = {
     VllmServiceConfig: _build_vllm_command,
     RayServiceConfig: _build_ray_command,
@@ -114,7 +100,7 @@ def build_sbatch_script(
         if service.health_check
     )
 
-    run_args = " ".join(_flatten_run_args(benchmark.run))
+    run_args = " ".join(flatten_run_args(benchmark.run))
     driver_command = (
         f"srun --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log "

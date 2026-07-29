@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nemo_gym.orchestration.executors.slurm_script import _flatten_run_args
+from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
 
 
 def test_scalar_values():
