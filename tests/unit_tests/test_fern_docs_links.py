@@ -71,7 +71,7 @@ class TestFernDocsLinks(unittest.TestCase):
                 canonical_links += line.count("/tutorials/evaluation-tutorials")
 
         self.assertEqual([], broken_links)
-        self.assertEqual(5, canonical_links)
+        self.assertEqual(8, canonical_links)
 
     def test_v040_evaluation_tutorial_links_stay_in_the_frozen_version(self):
         pages = REPO_ROOT / "fern/versions/v0.4.0/pages"
