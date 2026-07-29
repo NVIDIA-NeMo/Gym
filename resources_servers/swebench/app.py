@@ -62,7 +62,27 @@ class SwebenchResourcesServer(SimpleResourcesServer):
     config: SwebenchResourcesServerConfig
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
-        # TODO: model_patch, client
+        """
+        Key requirements:
+        1. Extract the model_patch from the input container
+            Proposal
+                1. Spinup a fresh container (need this anyways for running eval)
+                2. pwd in the fresh container (defaults to WORKDIR)
+                3. cd into WORKDIR in the input container
+                4. extract the patch via git
+            Notes
+                1. DeepSWE expects the model to commit. That will go in the DeepSWE resources server and not this one.
+        2. Docker Client - Make a mock client class here that wraps our sandbox client.
+        3. Harnesses like OpenCode open a new terminal rather than reusing the existing one. Grab the environment variables and workdir from the outer terminal first, and then export/cd as appropriate in the new terminal
+            Notes
+                1. This is a harness-specific thing that the harness will handle across benchmarks.
+        4. Interleaved thinking - Verify how is the harness behaving i.e. it has interleaved thinking or not and to force interleaved thinking unconditionally.
+            Proposal
+                1. For seeing what the harness is doing, use model call capture
+                2. For forcing, we can add it in the Responses API model proxy i.e. save all the past requests/responses and populate as necessary.
+        5. Restrict number of turns - same as interleaved thinking, we could add in Responses API model proxy
+        """
+
         test_spec_field_names = set(f.name for f in fields(TestSpec))
         test_spec = TestSpec(**{k: v for k, v in body.model_dump() if k in test_spec_field_names})
 
