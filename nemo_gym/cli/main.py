@@ -271,6 +271,19 @@ def _merge_config_paths(overrides: list[str]) -> list[str]:
     return ([f"+config_paths=[{','.join(paths)}]"] if paths else []) + rest
 
 
+def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
+    from omegaconf import OmegaConf
+    from nemo_gym.orchestration.api import SubmitConfig
+    from nemo_gym.orchestration.submit import submit
+
+    merged = OmegaConf.merge(
+        OmegaConf.load(args.config),
+        OmegaConf.from_dotlist([t.lstrip("+") for t in overrides]) if overrides else OmegaConf.create(),
+    )
+    config = SubmitConfig.model_validate(OmegaConf.to_container(merged, resolve=True))
+    submit(config, dry_run=args.dry_run)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
@@ -538,16 +551,14 @@ COMMANDS = {
         ),
     ),
     "eval submit": Command(
-        target="nemo_gym.orchestration.submit:submit",
+        target=_eval_submit,
         summary="Submit a job.",
         flags=(
             Flag(
-                register=lambda p: p.add_argument("--config", metavar="PATH", help="Config YAML file to load."),
-                translate_to_hydra=lambda args: [f"+_submit_config={args.config}"] if args.config else [],
+                register=lambda p: p.add_argument("--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."),
             ),
             Flag(
                 register=lambda p: p.add_argument("--dry-run", action="store_true", help="Print generated job scripts without submitting."),
-                translate_to_hydra=lambda args: ["+_dry_run=true"] if args.dry_run else [],
             ),
         ),
     ),
