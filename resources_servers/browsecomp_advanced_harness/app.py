@@ -1264,6 +1264,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             f"[judge_exhausted max_attempts={self.JUDGE_MAX_ATTEMPTS} had_response={judge_response is not None}]",
             flush=True,
         )
+        # A judge that answered but never produced a parseable verdict did grade the
+        # rollout — unusably, but it graded it — so that scores 0.0 rather than being
+        # routed to the failures sidecar. Only a judge we never heard back from at all
+        # is a judge failure. (See "Judge Call Failures" in the LLM-as-judge docs.)
         return (
             JudgeEvaluation(
                 judge_response_create_params=judge_create_params,
@@ -1272,7 +1276,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 judge_response=judge_response,
             ),
-            last_error or f"judge exhausted after {self.JUDGE_MAX_ATTEMPTS} attempts",
+            None
+            if judge_response is not None
+            else (last_error or f"judge exhausted after {self.JUDGE_MAX_ATTEMPTS} attempts"),
         )
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:

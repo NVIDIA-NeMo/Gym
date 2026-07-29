@@ -218,13 +218,17 @@ class ArenaJudgeServer(SimpleResourcesServer):
             category = self.config.default_category
 
         # Two judge calls in parallel — A=candidate/B=baseline (gen-base) and swapped (base-gen).
-        (
-            (gen_base_text, gen_base_verdict),
-            (base_gen_text, base_gen_verdict),
-        ) = await asyncio.gather(
+        # ``return_exceptions`` so a JudgeError in one direction doesn't propagate out of
+        # gather while the sibling call is still in flight; both settle, then we surface it.
+        outcomes = await asyncio.gather(
             self._judge_once(category, question, candidate_answer, baseline_answer),
             self._judge_once(category, question, baseline_answer, candidate_answer),
+            return_exceptions=True,
         )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        (gen_base_text, gen_base_verdict), (base_gen_text, base_gen_verdict) = outcomes
 
         # ``body.model_dump()`` already carries ``category`` (declared
         # field). Drop it before spreading so the RESOLVED category

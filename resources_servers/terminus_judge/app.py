@@ -531,12 +531,6 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                     response_model=NeMoGymResponse,
                 )
 
-            except asyncio.TimeoutError:
-                print(
-                    "DEBUG: TerminusJudgeResourcesServer: Judge model server timeout",
-                    flush=True,
-                )
-                raise RuntimeError("Judge model server timeout")
             except Exception as e:
                 print(
                     f"DEBUG: TerminusJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",

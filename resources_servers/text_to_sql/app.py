@@ -381,12 +381,6 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                     response_model=NeMoGymResponse,
                 )
 
-            except asyncio.TimeoutError:
-                print(
-                    "DEBUG: TextToSqlResourcesServer: Judge model server timeout",
-                    flush=True,
-                )
-                raise RuntimeError("Judge model server timeout")
             except Exception as e:
                 print(
                     f"DEBUG: TextToSqlResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",
