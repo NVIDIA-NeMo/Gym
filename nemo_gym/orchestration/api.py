@@ -172,6 +172,6 @@ class SubmitConfig(_StrictModel):
                     benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"
                     benchmark.run["policy_model_name"] = service.model
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
-                    benchmark.run["policy_api_key"] = "dummy"
+                    benchmark.run["policy_api_key"] = "dummy" # pragma: allowlist secret
 
         return self
