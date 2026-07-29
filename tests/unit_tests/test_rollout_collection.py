@@ -964,6 +964,13 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
+        memory_optimized_results = RolloutCollectionHelper()._load_from_cache(
+            config,
+            retain_result_strs=False,
+        )
+        assert memory_optimized_results[:3] == expected_results[:3]
+        assert memory_optimized_results[3] == []
+
     async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
 

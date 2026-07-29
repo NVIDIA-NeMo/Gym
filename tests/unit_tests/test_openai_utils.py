@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from openai.types.responses.response_output_item import (
     McpApprovalRequest,
@@ -20,6 +22,7 @@ from openai.types.responses.response_output_item import (
 )
 from pydantic import ValidationError
 
+import nemo_gym.openai_utils
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
@@ -47,6 +50,27 @@ def _response_with_output(output: list) -> dict:
 class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    async def test_request_combines_default_authorization_and_organization_headers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        response = MagicMock(status=200)
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr(nemo_gym.openai_utils, "request", request)
+
+        client = NeMoGymAsyncOpenAI(
+            api_key="api-key",
+            base_url="https://api.openai.com/v1",
+            organization="org-id",
+            default_headers={"X-Custom": "value", "Authorization": "overridden"},
+        )
+        assert await client._request(method="GET", url="https://api.openai.com/v1/models") is response
+
+        assert request.await_args.kwargs["headers"] == {
+            "X-Custom": "value",
+            "Authorization": "Bearer api-key",
+            "Openai-Organization": "org-id",
+        }
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

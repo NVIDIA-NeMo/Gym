@@ -63,7 +63,13 @@ def _response_data() -> dict:
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
+    def _setup_server(
+        self,
+        max_concurrent_requests=None,
+        drop_input_reasoning_items=False,
+        openai_organization=None,
+        openai_default_headers=None,
+    ):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -74,11 +80,21 @@ class TestApp:
             name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
             drop_input_reasoning_items=drop_input_reasoning_items,
+            openai_organization=openai_organization,
+            openai_default_headers=openai_default_headers or {},
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
         self._setup_server()
+
+    def test_client_preserves_organization_and_default_headers(self) -> None:
+        server = self._setup_server(
+            openai_organization="org-id",
+            openai_default_headers={"X-Custom": "value"},
+        )
+        assert server._client.organization == "org-id"
+        assert server._client.default_headers == {"X-Custom": "value"}
 
     async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()
