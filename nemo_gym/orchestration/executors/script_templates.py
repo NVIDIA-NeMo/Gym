@@ -37,9 +37,9 @@ def render_health_check(name: str, port: int, timeout: int) -> str:
     )
 
 
-def render_gym_cmd(subcommand: str, var_name: str, benchmark_name: str, args: list[str]) -> str:
+def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
     """Render a bash array with each argument on its own line."""
-    entries = [f"gym {subcommand}", f"--benchmark {shlex.quote(benchmark_name)}", *args]
+    entries = [f"gym {subcommand}", *args]
     return f"{var_name}=(\n    " + "\n    ".join(entries) + "\n)"
 
 

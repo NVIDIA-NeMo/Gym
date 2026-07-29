@@ -61,6 +61,7 @@ class SlurmExecutor(BaseExecutor):
             bench_dir = staging / name
             bench_dir.mkdir()
             (bench_dir / "logs").mkdir()
+            (bench_dir / "artifacts").mkdir()
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
             (bench_dir / "job.sh").write_text(script)
         return staging

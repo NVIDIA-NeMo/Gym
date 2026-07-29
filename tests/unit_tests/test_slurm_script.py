@@ -18,21 +18,21 @@ from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_
 
 def test_scalar_values():
     assert _flatten_run_args({"temperature": 0.05, "top_p": 0.9}) == [
-        "++temperature=0.05",
-        "++top_p=0.9",
+        "+temperature=0.05",
+        "+top_p=0.9",
     ]
 
 
 def test_nested_dict():
     assert _flatten_run_args({"responses_create_params": {"max_concurrent": 92, "temperature": 0.05}}) == [
-        "++responses_create_params.max_concurrent=92",
-        "++responses_create_params.temperature=0.05",
+        "+responses_create_params.max_concurrent=92",
+        "+responses_create_params.temperature=0.05",
     ]
 
 
 def test_list_value():
     assert _flatten_run_args({"config_paths": ["benchmarks/gsm8k/config.yaml", "benchmarks/foo/config.yaml"]}) == [
-        "'++config_paths=[benchmarks/gsm8k/config.yaml,benchmarks/foo/config.yaml]'",
+        "'+config_paths=[benchmarks/gsm8k/config.yaml,benchmarks/foo/config.yaml]'",
     ]
 
 
@@ -42,8 +42,8 @@ def test_empty():
 
 def test_value_with_spaces_is_quoted():
     result = _flatten_run_args({"name": "my model"})
-    assert result == ["'++name=my model'"]
+    assert result == ["'+name=my model'"]
 
 
 def test_deeply_nested():
-    assert _flatten_run_args({"a": {"b": {"c": 1}}}) == ["++a.b.c=1"]
+    assert _flatten_run_args({"a": {"b": {"c": 1}}}) == ["+a.b.c=1"]

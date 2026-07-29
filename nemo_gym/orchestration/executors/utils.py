@@ -11,7 +11,7 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
             args.extend(flatten_run_args(value, full_key))
         elif isinstance(value, list):
             items = ",".join(str(v) for v in value)
-            args.append(shlex.quote(f"++{full_key}=[{items}]"))
+            args.append(shlex.quote(f"+{full_key}=[{items}]"))
         else:
-            args.append(shlex.quote(f"++{full_key}={value}"))
+            args.append(shlex.quote(f"+{full_key}={value}"))
     return args
