@@ -2149,16 +2149,35 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     },
     num_cpus=0.1,
 )
-def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
-    # For some reason Ray may not pick up the proper model fields if we don't rebuild the model here. Very strange.
-    SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
-    RunOpenHandsAgent.model_rebuild(force=True)
+def runner_ray_remote(params_dict: dict[str, Any], traceparent: str | None = None) -> Optional[Path]:
+    token = None
+    if traceparent:
+        try:
+            from opentelemetry.context import attach
+            from opentelemetry.propagate import extract
 
-    params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
-    run_oh = RunOpenHandsAgent(config=params)
-    report_file = asyncio.run(run_oh.process_single_datapoint())
+            token = attach(extract({"traceparent": traceparent}))
+        except Exception:
+            pass
+    try:
+        from nemo_gym.observability.recorder import _otel_span_cm
 
-    return report_file
+        with _otel_span_cm("ray.task", {"runner": "RunOpenHandsAgent"}):
+            # For some reason Ray may not pick up the proper model fields if we don't rebuild the model here. Very strange.
+            SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
+            RunOpenHandsAgent.model_rebuild(force=True)
+
+            params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
+            run_oh = RunOpenHandsAgent(config=params)
+            return asyncio.run(run_oh.process_single_datapoint())
+    finally:
+        if token is not None:
+            try:
+                from opentelemetry.context import detach
+
+                detach(token)
+            except Exception:
+                pass
 
 
 def update_and_read_metrics(metrics_fpath: Path, update_dict: Dict[str, Any] | None = None) -> dict:
@@ -3541,7 +3560,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def _inner_responses(
         self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor
     ) -> NeMoGymResponse:
-        maybe_report_file = await runner_ray_remote.remote(params.model_dump())
+        _traceparent = None
+        try:
+            from opentelemetry.propagate import inject as _otel_inject
+
+            _carrier: dict[str, str] = {}
+            _otel_inject(_carrier)
+            _traceparent = _carrier.get("traceparent")
+        except Exception:
+            pass
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        with _otel_span_cm("ray.dispatch", {"runner": "RunOpenHandsAgent"}):
+            maybe_report_file = await runner_ray_remote.remote(params.model_dump(), traceparent=_traceparent)
         metrics_to_update = dict()
 
         if maybe_report_file:

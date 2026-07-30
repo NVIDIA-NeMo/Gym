@@ -80,8 +80,29 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
         "py_executable": sys.executable,
     },
 )
-def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
-    return runner(**params)
+def runner_ray_remote(runner: Callable, params: dict[str, Any], traceparent: str | None = None) -> Any:
+    token = None
+    if traceparent:
+        try:
+            from opentelemetry.context import attach
+            from opentelemetry.propagate import extract
+
+            token = attach(extract({"traceparent": traceparent}))
+        except Exception:
+            pass
+    try:
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        with _otel_span_cm("ray.task", {"runner": runner.__name__}):
+            return runner(**params)
+    finally:
+        if token is not None:
+            try:
+                from opentelemetry.context import detach
+
+                detach(token)
+            except Exception:
+                pass
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
@@ -188,8 +209,20 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     step_limit=step_limit,
                     collapse_limit=collapse_limit,
                 )
-                future = runner_ray_remote.remote(run_swegym, params)
-                result = await asyncio.to_thread(ray.get, future)
+                _traceparent = None
+                try:
+                    from opentelemetry.propagate import inject as _otel_inject
+
+                    _carrier: dict[str, str] = {}
+                    _otel_inject(_carrier)
+                    _traceparent = _carrier.get("traceparent")
+                except Exception:
+                    pass
+                from nemo_gym.observability.recorder import _otel_span_cm
+
+                with _otel_span_cm("ray.dispatch", {"runner": "run_swegym"}):
+                    future = runner_ray_remote.remote(run_swegym, params, traceparent=_traceparent)
+                    result = await asyncio.to_thread(ray.get, future)
                 result = result[instance_id]
                 messages = result["messages"]
                 responses = result["responses"]

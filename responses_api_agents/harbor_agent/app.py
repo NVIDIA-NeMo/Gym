@@ -204,8 +204,29 @@ def _run_harbor_job_sync(job_config_dict: dict) -> str:
         "py_executable": sys.executable,
     },
 )
-def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
-    return runner(**params)
+def runner_ray_remote(runner: Callable, params: dict[str, Any], traceparent: str | None = None) -> Any:
+    token = None
+    if traceparent:
+        try:
+            from opentelemetry.context import attach
+            from opentelemetry.propagate import extract
+
+            token = attach(extract({"traceparent": traceparent}))
+        except Exception:
+            pass
+    try:
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        with _otel_span_cm("ray.task", {"runner": runner.__name__}):
+            return runner(**params)
+    finally:
+        if token is not None:
+            try:
+                from opentelemetry.context import detach
+
+                detach(token)
+            except Exception:
+                pass
 
 
 class HarborAgent(SimpleResponsesAPIAgent):
@@ -266,8 +287,20 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 params = dict(
                     job_config_dict=job_config_dict,
                 )
-                future = runner_ray_remote.remote(_run_harbor_job_sync, params)
-                trial_dir_path = await asyncio.to_thread(ray.get, future)
+                _traceparent = None
+                try:
+                    from opentelemetry.propagate import inject as _otel_inject
+
+                    _carrier: dict[str, str] = {}
+                    _otel_inject(_carrier)
+                    _traceparent = _carrier.get("traceparent")
+                except Exception:
+                    pass
+                from nemo_gym.observability.recorder import _otel_span_cm
+
+                with _otel_span_cm("ray.dispatch", {"runner": "_run_harbor_job_sync"}):
+                    future = runner_ray_remote.remote(_run_harbor_job_sync, params, traceparent=_traceparent)
+                    trial_dir_path = await asyncio.to_thread(ray.get, future)
                 trial_dir = Path(trial_dir_path)
 
                 # Read the trial result (summary: reward, agent_result, verifier_result)

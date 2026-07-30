@@ -94,8 +94,29 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
         "py_executable": sys.executable,
     },
 )
-def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
-    return runner(**params)
+def runner_ray_remote(runner: Callable, params: dict[str, Any], traceparent: str | None = None) -> Any:
+    token = None
+    if traceparent:
+        try:
+            from opentelemetry.context import attach
+            from opentelemetry.propagate import extract
+
+            token = attach(extract({"traceparent": traceparent}))
+        except Exception:
+            pass
+    try:
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        with _otel_span_cm("ray.task", {"runner": runner.__name__}):
+            return runner(**params)
+    finally:
+        if token is not None:
+            try:
+                from opentelemetry.context import detach
+
+                detach(token)
+            except Exception:
+                pass
 
 
 def _json_dict_from_metadata(value: Any, *, field_name: str) -> dict[str, Any]:
@@ -806,8 +827,20 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 runtime_env = _sandbox_runtime_env(resolved_sandbox_provider)
                 if runtime_env.get("env_vars"):
                     runner = runner.options(runtime_env=runtime_env)
-                future = runner.remote(run_mini_swe_with_sandbox, params)
-                result = await asyncio.to_thread(ray.get, future)
+                _traceparent = None
+                try:
+                    from opentelemetry.propagate import inject as _otel_inject
+
+                    _carrier: dict[str, str] = {}
+                    _otel_inject(_carrier)
+                    _traceparent = _carrier.get("traceparent")
+                except Exception:
+                    pass
+                from nemo_gym.observability.recorder import _otel_span_cm
+
+                with _otel_span_cm("ray.dispatch", {"runner": "run_mini_swe_with_sandbox"}):
+                    future = runner.remote(run_mini_swe_with_sandbox, params, traceparent=_traceparent)
+                    result = await asyncio.to_thread(ray.get, future)
                 result = result[instance_id]
                 input_messages = result["input_messages"]
                 response_output = result["response_output"]
