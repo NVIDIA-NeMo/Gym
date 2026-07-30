@@ -21,6 +21,11 @@ from collections import defaultdict
 
 import pytest
 
+from nemo_gym.global_config import (
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import NeMoGymChatCompletion
 from responses_api_agents.conversational_tool_use.policy_tool_generation.assets import load_assets
 from responses_api_agents.conversational_tool_use.policy_tool_generation.compat import (
@@ -198,6 +203,135 @@ async def test_proactive_refinement_omits_references_after_consuming_shuffle() -
         policy="draft policy",
     )
     assert "<policy_0>" not in caller.calls[2][1]
+
+
+@pytest.mark.asyncio
+async def test_refinement_and_judges_can_be_disabled() -> None:
+    caller = RecordingCaller()
+    result, generation_trace, final_completion = await PolicyToolGenerator(
+        max_retries=0,
+        use_refinement=False,
+        initial_reference_count=2,
+        minimum_tool_count=1,
+        cohesion_judge_count=0,
+        golden_reference_count=0,
+    ).generate(run_request(), caller)
+
+    assert [call[2] for call in caller.calls] == ["policy_v1", "tools_v1"]
+    assert result.policy_md == "draft policy"
+    assert result.tools[0]["name"] == "draft"
+    assert final_completion.id == "tools_v1-1-0"
+    assert generation_trace.use_refinement is False
+    assert generation_trace.initial_reference_count == 2
+    assert generation_trace.cohesion_judge_count == 0
+    assert generation_trace.golden_reference_count == 0
+    attempt = generation_trace.attempts[0]
+    assert attempt.policy_reference_order == []
+    assert attempt.unused_tools_reference_order == []
+    assert attempt.cohesion_failure_fraction is None
+    assert attempt.golden_failure_fraction is None
+
+
+@pytest.mark.asyncio
+async def test_custom_judge_counts_and_concurrency_are_applied() -> None:
+    caller = RecordingCaller()
+    _, generation_trace, _ = await PolicyToolGenerator(
+        max_retries=0,
+        cohesion_judge_count=5,
+        golden_reference_count=3,
+        max_judge_concurrency=2,
+    ).generate(run_request(), caller)
+
+    phases = [call[2] for call in caller.calls]
+    assert phases.count("cohesion_judge") == 5
+    assert phases.count("golden_judge") == 6
+    assert caller.max_active["cohesion_judge"] == 2
+    assert caller.max_active["golden_judge"] == 2
+    assert generation_trace.cohesion_judge_count == 5
+    assert generation_trace.golden_reference_count == 3
+    assert generation_trace.max_judge_concurrency == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_judge_batch_cancels_siblings_before_retry() -> None:
+    successful_caller = RecordingCaller()
+    never_complete = asyncio.Event()
+    active_failed_calls = 0
+    cancelled_siblings = 0
+
+    async def caller(
+        role: ModelRole,
+        prompt: str,
+        phase: CallPhase,
+        attempt: int,
+        ordinal: int,
+    ) -> NeMoGymChatCompletion:
+        nonlocal active_failed_calls, cancelled_siblings
+        if phase != "cohesion_judge" or attempt != 1:
+            return await successful_caller(role, prompt, phase, attempt, ordinal)
+
+        active_failed_calls += 1
+        try:
+            if ordinal == 0:
+                await asyncio.sleep(0.01)
+                raise RuntimeError("judge provider failed")
+            await never_complete.wait()
+            raise AssertionError("cancelled sibling unexpectedly resumed")
+        except asyncio.CancelledError:
+            cancelled_siblings += 1
+            raise
+        finally:
+            active_failed_calls -= 1
+
+    result, trace, _ = await PolicyToolGenerator(
+        max_retries=1,
+        max_judge_concurrency=3,
+    ).generate(run_request(), caller)
+
+    assert result.attempt_count == 2
+    assert trace.attempts[0].failure_stage == "cohesion_judge"
+    assert cancelled_siblings == 2
+    assert active_failed_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_custom_cohesion_threshold_changes_acceptance() -> None:
+    caller = RecordingCaller(reject_first_cohesion=True)
+    result, generation_trace, _ = await PolicyToolGenerator(
+        max_retries=0,
+        cohesion_max_failure_fraction=0.7,
+    ).generate(run_request(), caller)
+
+    assert result.attempt_count == 1
+    assert generation_trace.attempts[0].cohesion_failure_fraction == pytest.approx(2 / 3)
+    assert generation_trace.cohesion_max_failure_fraction == 0.7
+
+
+@pytest.mark.asyncio
+async def test_seeded_randomness_is_repeatable_without_global_seeding() -> None:
+    traces = []
+    base_request = run_request()
+    for attempt_index in (0, 99):
+        request = PolicyToolGenerationRunRequest.model_validate(
+            base_request.model_dump()
+            | {
+                TASK_INDEX_KEY_NAME: 4,
+                ROLLOUT_INDEX_KEY_NAME: 2,
+                ATTEMPT_INDEX_KEY_NAME: attempt_index,
+            }
+        )
+        _, generation_trace, _ = await PolicyToolGenerator(
+            max_retries=0,
+            cohesion_judge_count=0,
+            golden_reference_count=0,
+            random_seed=17,
+        ).generate(request, RecordingCaller())
+        traces.append(generation_trace.attempts[0])
+
+    assert traces[0].timestamp == traces[1].timestamp
+    assert traces[0].policy_tool_reference_order == traces[1].policy_tool_reference_order
+    assert traces[0].policy_reference_order == traces[1].policy_reference_order
+    assert traces[0].unused_tools_reference_order == traces[1].unused_tools_reference_order
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Request, Response
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
@@ -41,9 +41,21 @@ from responses_api_agents.conversational_tool_use.policy_tool_generation.models 
 
 
 class PolicyToolGenerationAgentConfig(BaseResponsesAPIAgentConfig):
+    model_config = ConfigDict(extra="forbid")
+
     policy_model_server: ModelServerRef
     judge_model_server: ModelServerRef
-    max_retries: int = Field(default=20, ge=0, le=20)
+    max_retries: int = Field(default=20, ge=0)
+    use_refinement: bool = True
+    initial_reference_count: int = Field(default=8, ge=0, le=8)
+    policy_refine_reference_count: int = Field(default=8, ge=0, le=8)
+    minimum_tool_count: int = Field(default=0, ge=0)
+    cohesion_judge_count: int = Field(default=3, ge=0)
+    cohesion_max_failure_fraction: float = Field(default=0.5, ge=0.0, le=1.0)
+    golden_reference_count: int = Field(default=2, ge=0, le=8)
+    golden_max_failure_fraction: float = Field(default=0.5, ge=0.0, le=1.0)
+    max_judge_concurrency: int | None = Field(default=None, ge=1)
+    random_seed: int | None = None
 
 
 def message_only_payload(prompt: str) -> dict[str, Any]:
@@ -96,7 +108,17 @@ class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
             return NeMoGymChatCompletion.model_validate(await get_response_json(model_response))
 
         result, generation_trace, final_completion = await PolicyToolGenerator(
-            max_retries=self.config.max_retries
+            max_retries=self.config.max_retries,
+            use_refinement=self.config.use_refinement,
+            initial_reference_count=self.config.initial_reference_count,
+            policy_refine_reference_count=self.config.policy_refine_reference_count,
+            minimum_tool_count=self.config.minimum_tool_count,
+            cohesion_judge_count=self.config.cohesion_judge_count,
+            cohesion_max_failure_fraction=self.config.cohesion_max_failure_fraction,
+            golden_reference_count=self.config.golden_reference_count,
+            golden_max_failure_fraction=self.config.golden_max_failure_fraction,
+            max_judge_concurrency=self.config.max_judge_concurrency,
+            random_seed=self.config.random_seed,
         ).generate(body, caller)
         response_params = body.responses_create_params.model_copy(update={"model": final_completion.model})
         final_response = ResponsesConverter(return_token_id_information=False).chat_completion_to_response(

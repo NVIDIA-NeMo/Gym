@@ -98,7 +98,12 @@ class QueueClient:
         return FakeHTTPResponse(self.payloads.pop(0))
 
 
-def agent(client: QueueClient, *, max_retries: int = 0) -> PolicyToolGenerationAgent:
+def agent(
+    client: QueueClient,
+    *,
+    max_retries: int = 0,
+    **config_overrides: Any,
+) -> PolicyToolGenerationAgent:
     config = PolicyToolGenerationAgentConfig(
         host="0.0.0.0",
         port=8000,
@@ -113,6 +118,7 @@ def agent(client: QueueClient, *, max_retries: int = 0) -> PolicyToolGenerationA
             name="policy_tool_judge_model",
         ),
         max_retries=max_retries,
+        **config_overrides,
     )
     return PolicyToolGenerationAgent.model_construct(config=config, server_client=client)
 
@@ -210,6 +216,16 @@ def test_config_example_and_routes() -> None:
         }
     )
     assert config.max_retries == 20
+    assert config.use_refinement is True
+    assert config.initial_reference_count == 8
+    assert config.policy_refine_reference_count == 8
+    assert config.minimum_tool_count == 0
+    assert config.cohesion_judge_count == 3
+    assert config.cohesion_max_failure_fraction == 0.5
+    assert config.golden_reference_count == 2
+    assert config.golden_max_failure_fraction == 0.5
+    assert config.max_judge_concurrency is None
+    assert config.random_seed is None
     assert config.policy_model_server.name == "policy_generation_model"
     assert config.judge_model_server.name == "policy_tool_judge_model"
 
@@ -220,3 +236,38 @@ def test_config_example_and_routes() -> None:
 
     routes = {route.path for route in agent(QueueClient([])).setup_webserver().routes}
     assert {"/run", "/v1/responses", "/aggregate_metrics"}.issubset(routes)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_retries", -1),
+        ("initial_reference_count", 9),
+        ("policy_refine_reference_count", -1),
+        ("minimum_tool_count", -1),
+        ("cohesion_judge_count", -1),
+        ("cohesion_max_failure_fraction", 1.1),
+        ("golden_reference_count", 9),
+        ("golden_max_failure_fraction", -0.1),
+        ("max_judge_concurrency", 0),
+        ("cohesion_jduge_count", 3),
+    ],
+)
+def test_generation_config_rejects_invalid_bounds(field: str, value: Any) -> None:
+    config = {
+        "host": "0.0.0.0",
+        "port": 8000,
+        "entrypoint": "app.py",
+        "name": "conversational_tool_use_policy_tool_generation",
+        "policy_model_server": {
+            "type": "responses_api_models",
+            "name": "policy_generation_model",
+        },
+        "judge_model_server": {
+            "type": "responses_api_models",
+            "name": "policy_tool_judge_model",
+        },
+        field: value,
+    }
+    with pytest.raises(ValueError):
+        PolicyToolGenerationAgentConfig.model_validate(config)

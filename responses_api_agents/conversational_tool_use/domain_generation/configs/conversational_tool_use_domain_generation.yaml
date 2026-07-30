@@ -5,6 +5,7 @@ conversational_tool_use_domain_generation:
       model_server:
         type: responses_api_models
         name: domain_generation_model
+      followup_count: 1
 
 domain_generation_model:
   _copy: policy_model

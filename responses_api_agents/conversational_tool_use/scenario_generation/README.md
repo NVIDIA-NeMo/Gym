@@ -1,9 +1,10 @@
 # Conversational Tool-Use Scenario Generation Agent
 
-This `SimpleResponsesAPIAgent` runs one customer-service domain per Gym rollout. The `/run` coordinator:
+This `SimpleResponsesAPIAgent` runs one customer-service domain per Gym rollout. With the checked-in defaults, the
+`/run` coordinator:
 
-- assigns 20 independent outside-policy-scope values with unseeded `random() < 0.1`
-- launches exactly 20 concurrent `/v1/chat/completions` calls
+- assigns 20 independent outside-policy-scope values with `random() < 0.1`
+- launches 20 `/v1/chat/completions` calls with at most 20 in flight
 - asks for 80 scenarios in every call using package-owned prompt and schema assets
 - sends only `messages` in each child request
 - performs fence removal and Pydantic JSON parsing without semantic retries
@@ -18,7 +19,7 @@ successful completion that produced scenarios; an empty valid Responses object i
 failures are not converted into successful results.
 
 `POST /v1/responses` is a direct model-server bridge and preserves all caller-supplied Responses parameters. This route
-is separate from `/run`, whose 20 child Chat Completions requests contain only `messages`.
+is separate from `/run`, whose configured child Chat Completions requests contain only `messages`.
 
 ## Input
 
@@ -31,6 +32,25 @@ domain policy, and raw simulator tools.
 The config creates `scenario_generation_model` as an independent copy of Gym's standard `policy_model`. Sampling is
 owned by that model server. The agent does not send model, temperature, top-p, token-limit, or seed fields in child
 requests.
+
+Agent controls:
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `model_server` | `scenario_generation_model` | Model-server instance used for child chat completions |
+| `request_count` | `20` | Number of scenario-generation calls made for one input domain |
+| `max_concurrency` | `20` | Maximum child calls in flight within one rollout |
+| `scenarios_per_request` | `80` | Scenario count requested in each prompt; returned count is not enforced |
+| `outside_policy_scope_fraction` | `0.1` | Independent probability that one call requests outside-policy scenarios |
+| `random_seed` | `null` | Optional base seed for the rollout-local outside-policy schedule |
+
+When `random_seed` is an integer, the schedule is derived from the seed and stable row identity: ID, task and rollout
+indices, profile, and domain. Infrastructure retry indices and unrelated metadata do not change the sequence. With
+`null`, the existing module-global random behavior is retained.
+
+Model sampling and global provider concurrency remain model-server settings. `gym eval run --concurrency` controls how
+many domain rollouts run concurrently in addition to each rollout's `max_concurrency`. Unknown agent settings are
+rejected so misspelled controls cannot silently fall back to defaults.
 
 Start the agent and its model server:
 
@@ -55,7 +75,7 @@ gym eval run --no-serve \
   --concurrency 1
 ```
 
-One scenario-generation rollout makes 20 concurrent upstream model requests.
+With the checked-in defaults, one scenario-generation rollout makes 20 upstream model requests.
 
 ## Materialization
 

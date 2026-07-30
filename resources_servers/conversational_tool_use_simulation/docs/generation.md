@@ -60,6 +60,17 @@ should use a different model. For example, add these arguments to `gym env start
 
 Override a copy's `openai_base_url` and `openai_api_key` too when it uses another provider.
 
+The three layers of generation configuration are separate:
+
+- Each generation agent's checked-in YAML controls its orchestration, including follow-up rounds, reference and judge
+  counts, retry budget, scenario workload size, and per-rollout concurrency.
+- The copied model-server instances own model sampling, output limits, provider transport behavior, and global endpoint
+  concurrency. For `openai_model`, request defaults can be supplied through the model server's `extra_body`.
+- `gym eval run --num-repeats` and `--concurrency` control dataset repetition and the number of independent Gym
+  rollouts in flight.
+
+Each generation agent README lists every supported agent setting and its checked-in default.
+
 ## 1. Generate Domains
 
 ```bash
@@ -108,7 +119,8 @@ python -m responses_api_agents.conversational_tool_use.policy_tool_generation.ma
 
 ## 5. Generate Scenarios
 
-One input domain launches 20 concurrent upstream requests and asks each request for 80 scenarios.
+By default, one input domain launches 20 upstream requests, allows all 20 in flight, and asks each request for 80
+scenarios. These values are `request_count`, `max_concurrency`, and `scenarios_per_request` in the scenario-agent YAML.
 
 ```bash
 gym eval run --no-serve \

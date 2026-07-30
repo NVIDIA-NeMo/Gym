@@ -46,7 +46,8 @@ def format_domain_name(name: str) -> str:
     return name.replace("(", "").replace(")", "").replace("/", "-").replace(" ", "_").replace("&", "")
 
 
-def sample_timestamp() -> str:
+def sample_timestamp(rng: random.Random | None = None) -> str:
+    random_source = rng if rng is not None else random
     timezones = [
         ("America/New_York", 0.47),
         ("America/Chicago", 0.33),
@@ -58,8 +59,8 @@ def sample_timestamp() -> str:
     ]
     start = datetime(2025, 1, 1, 0, 0, 0)
     end = datetime(2025, 12, 31, 23, 59, 59)
-    random_naive = start + timedelta(seconds=random.randint(0, int((end - start).total_seconds())))
-    timezone_name = random.choices(
+    random_naive = start + timedelta(seconds=random_source.randint(0, int((end - start).total_seconds())))
+    timezone_name = random_source.choices(
         [name for name, _ in timezones],
         weights=[weight for _, weight in timezones],
         k=1,
@@ -67,9 +68,9 @@ def sample_timestamp() -> str:
     return random_naive.replace(tzinfo=ZoneInfo(timezone_name)).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def shuffled_pairs(pairs: tuple[GoldenPair, ...]) -> list[GoldenPair]:
+def shuffled_pairs(pairs: tuple[GoldenPair, ...], rng: random.Random | None = None) -> list[GoldenPair]:
     shuffled = list(pairs)
-    random.shuffle(shuffled)
+    (rng if rng is not None else random).shuffle(shuffled)
     return shuffled
 
 

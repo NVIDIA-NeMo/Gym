@@ -39,9 +39,9 @@ def rollout(*candidates: dict) -> dict:
 def test_materializer_preserves_objects_and_uses_casefold_only_first_wins(tmp_path: Path) -> None:
     source = tmp_path / "domains.jsonl"
     original = [
-        {"name": "Retail", "applications": [{"function": "Order status"}], "extra": {"keep": 1}},
-        {"name": "RETAIL", "applications": [{"function": "Duplicate"}]},
-        {"name": " Retail ", "applications": [{"function": "Whitespace is significant"}]},
+        {"name": "Home Services", "applications": [{"function": "Schedule a visit"}], "extra": {"keep": 1}},
+        {"name": "HOME SERVICES", "applications": [{"function": "Duplicate"}]},
+        {"name": " Home Services ", "applications": [{"function": "Whitespace is significant"}]},
         {"name": "A-B", "applications": []},
         {"name": "a b", "applications": []},
     ]
@@ -61,7 +61,7 @@ def test_materializer_preserves_objects_and_uses_casefold_only_first_wins(tmp_pa
 
 def test_materializer_preserves_parent_lineage_without_paths(tmp_path: Path) -> None:
     source = tmp_path / "domains.jsonl"
-    domain_rollout = rollout({"name": "Retail"})
+    domain_rollout = rollout({"name": "Home Services"})
     domain_rollout.update(
         {
             "id": "domain-run",
@@ -112,9 +112,9 @@ def test_cli_requires_named_paths_and_writes_jsonl(tmp_path: Path) -> None:
     input_path = tmp_path / "domain-rollouts.jsonl"
     output_path = tmp_path / "policy-inputs.jsonl"
     candidates = [
-        {"name": "Retail", "nested": {"preserved": [1, 2]}},
-        {"name": "retail", "nested": {"dropped": True}},
-        {"name": "Travel", "nested": {"preserved": [3]}},
+        {"name": "Home Services", "nested": {"preserved": [1, 2]}},
+        {"name": "home services", "nested": {"dropped": True}},
+        {"name": "Event Support", "nested": {"preserved": [3]}},
     ]
     input_path.write_text(json.dumps(rollout(*candidates)) + "\n", encoding="utf-8")
 
@@ -174,7 +174,7 @@ def test_materializer_rejects_duplicate_output_ids(tmp_path: Path) -> None:
 
 def test_cli_rejects_same_input_and_output_path(tmp_path: Path) -> None:
     path = tmp_path / "domains.jsonl"
-    path.write_text(json.dumps(rollout({"name": "Retail"})) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(rollout({"name": "Home Services"})) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="must differ"):
         main(

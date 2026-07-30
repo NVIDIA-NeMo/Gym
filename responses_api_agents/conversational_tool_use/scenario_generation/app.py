@@ -18,10 +18,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
-from random import random
+from random import Random, random
 from time import time
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import Body, Request
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
@@ -30,6 +31,7 @@ from pydantic.json_schema import SkipJsonSchema
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
@@ -124,8 +126,27 @@ def parse_scenarios(text: str) -> list[CustomerScenario]:
     return CustomerScenarioCollection.model_validate_json(canonical_text).scenarios
 
 
+def rollout_seed_material(body: ScenarioGenerationRunRequest) -> str:
+    request_values = body.model_dump()
+    identity = {
+        "id": body.id,
+        "task_index": request_values.get(TASK_INDEX_KEY_NAME),
+        "rollout_index": request_values.get(ROLLOUT_INDEX_KEY_NAME),
+        "profile": body.profile,
+        "domain_name": body.domain_name,
+    }
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"))
+
+
 class ScenarioGenerationAgentConfig(BaseResponsesAPIAgentConfig):
+    model_config = ConfigDict(extra="forbid")
+
     model_server: ModelServerRef
+    request_count: int = Field(default=20, ge=1)
+    max_concurrency: int = Field(default=20, ge=1)
+    scenarios_per_request: int = Field(default=80, ge=1)
+    outside_policy_scope_fraction: float = Field(default=0.1, ge=0.0, le=1.0)
+    random_seed: int | None = None
 
 
 class ScenarioGenerationRunRequest(BaseRunRequest):
@@ -162,8 +183,10 @@ class ScenarioGenerationResult(BaseModel):
 
 class ScenarioGenerationTrace(BaseModel):
     request_count: int
+    max_concurrency: int = Field(default=20, ge=1)
     scenarios_per_request: int
     outside_policy_scope_fraction: float
+    random_seed: int | None = None
     successful_call_count: int
     failed_call_count: int
     calls: list[ScenarioCallTrace]
@@ -181,10 +204,6 @@ class _CallOutcome:
 
 
 class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
-    REQUEST_COUNT: ClassVar[int] = 20
-    SCENARIOS_PER_REQUEST: ClassVar[int] = 80
-    OUTSIDE_POLICY_SCOPE_FRACTION: ClassVar[float] = 0.1
-
     config: ScenarioGenerationAgentConfig
 
     async def responses(
@@ -201,17 +220,28 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse.model_validate(await get_response_json(model_response))
 
     async def run(self, body: ScenarioGenerationRunRequest) -> ScenarioGenerationVerifyResponse:
-        outside_scope_schedule = [random() < self.OUTSIDE_POLICY_SCOPE_FRACTION for _ in range(self.REQUEST_COUNT)]
+        random_value = (
+            Random(f"{self.config.random_seed}:{rollout_seed_material(body)}").random
+            if self.config.random_seed is not None
+            else random
+        )
+        outside_scope_schedule = [
+            random_value() < self.config.outside_policy_scope_fraction for _ in range(self.config.request_count)
+        ]
         assets = load_assets()
-        tasks = [
-            asyncio.create_task(
-                self._generate_one(
+        semaphore = asyncio.Semaphore(self.config.max_concurrency)
+
+        async def generate_one(request_index: int, outside_policy_scope: bool) -> _CallOutcome:
+            async with semaphore:
+                return await self._generate_one(
                     body=body,
                     request_index=request_index,
                     outside_policy_scope=outside_policy_scope,
                     assets=assets,
                 )
-            )
+
+        tasks = [
+            asyncio.create_task(generate_one(request_index, outside_policy_scope))
             for request_index, outside_policy_scope in enumerate(outside_scope_schedule)
         ]
 
@@ -244,9 +274,11 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
 
         result = ScenarioGenerationResult(domain_name=body.domain_name, scenarios=accepted)
         generation_trace = ScenarioGenerationTrace(
-            request_count=self.REQUEST_COUNT,
-            scenarios_per_request=self.SCENARIOS_PER_REQUEST,
-            outside_policy_scope_fraction=self.OUTSIDE_POLICY_SCOPE_FRACTION,
+            request_count=self.config.request_count,
+            max_concurrency=self.config.max_concurrency,
+            scenarios_per_request=self.config.scenarios_per_request,
+            outside_policy_scope_fraction=self.config.outside_policy_scope_fraction,
+            random_seed=self.config.random_seed,
             successful_call_count=sum(call.status == "success" for call in calls),
             failed_call_count=sum(call.status == "failed" for call in calls),
             calls=calls,
@@ -279,7 +311,7 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
             policy_scope_instruction=("does not cover" if outside_policy_scope else "covers"),
         )
         user_message = assets.user_prompt.format(
-            scenario_count=self.SCENARIOS_PER_REQUEST,
+            scenario_count=self.config.scenarios_per_request,
             scenarios_schema=assets.schema,
         )
         messages = [

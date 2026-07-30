@@ -21,7 +21,7 @@ import json
 from typing import Any, Literal
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
@@ -38,11 +38,15 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 PROTOCOL_VERSION = "domain-generation/v1"
+VARIABLE_FOLLOWUP_PROTOCOL_VERSION = "domain-generation/v2"
 FOLLOWUP_INSTRUCTION = "Do not repeat these domains. Try looking for other domains or find specific sub-domains."
 
 
 class DomainGenerationAgentConfig(BaseResponsesAPIAgentConfig):
+    model_config = ConfigDict(extra="forbid")
+
     model_server: ModelServerRef
+    followup_count: int = Field(default=1, ge=0)
 
 
 class DomainGenerationRunRequest(BaseRunRequest):
@@ -58,9 +62,10 @@ class DomainGenerationPhaseTrace(BaseModel):
 
 
 class DomainGenerationTrace(BaseModel):
-    protocol_version: Literal["domain-generation/v1"] = PROTOCOL_VERSION
+    protocol_version: Literal["domain-generation/v1", "domain-generation/v2"] = PROTOCOL_VERSION
     request_index: int | None = None
-    phases: tuple[DomainGenerationPhaseTrace, DomainGenerationPhaseTrace]
+    followup_count: int = Field(default=1, ge=0)
+    phases: list[DomainGenerationPhaseTrace] = Field(min_length=1)
 
 
 class DomainGenerationResult(BaseModel):
@@ -137,43 +142,49 @@ class DomainGenerationAgent(SimpleResponsesAPIAgent):
 
     async def run(self, body: DomainGenerationRunRequest = Body()) -> DomainGenerationRunResponse:
         initial_prompt = _initial_prompt(body)
-
-        initial_request, initial_response = await self._chat_completion(body, initial_prompt)
-        initial_results, initial_error = parse_domain_response(initial_response)
-
         candidates: list[Any] = []
-        candidates.extend(initial_results)
-        known_domain_names = [candidate["name"] for candidate in candidates]
+        phases: list[DomainGenerationPhaseTrace] = []
+        prompt = initial_prompt
+        final_response: NeMoGymChatCompletion | None = None
 
-        rendered_followup = followup_prompt(initial_prompt, known_domain_names)
-        followup_request, followup_response = await self._chat_completion(body, rendered_followup)
-        followup_results, followup_error = parse_domain_response(followup_response)
-        candidates.extend(followup_results)
+        for phase_index in range(self.config.followup_count + 1):
+            request, response = await self._chat_completion(body, prompt)
+            parsed_value, parse_error = parse_domain_response(response)
+            candidates.extend(parsed_value)
+            phases.append(
+                DomainGenerationPhaseTrace(
+                    phase="initial" if phase_index == 0 else "followup",
+                    request=request,
+                    response=response,
+                    parsed_value=parsed_value,
+                    parse_error=parse_error,
+                )
+            )
+            final_response = response
+
+            if phase_index < self.config.followup_count:
+                known_domain_names = [
+                    candidate["name"]
+                    for candidate in candidates
+                    if isinstance(candidate, dict) and "name" in candidate
+                ]
+                prompt = followup_prompt(initial_prompt, known_domain_names)
+
+        assert final_response is not None
 
         trace = DomainGenerationTrace(
-            request_index=body.model_dump().get(TASK_INDEX_KEY_NAME),
-            phases=(
-                DomainGenerationPhaseTrace(
-                    phase="initial",
-                    request=initial_request,
-                    response=initial_response,
-                    parsed_value=initial_results,
-                    parse_error=initial_error,
-                ),
-                DomainGenerationPhaseTrace(
-                    phase="followup",
-                    request=followup_request,
-                    response=followup_response,
-                    parsed_value=followup_results,
-                    parse_error=followup_error,
-                ),
+            protocol_version=(
+                PROTOCOL_VERSION if self.config.followup_count == 1 else VARIABLE_FOLLOWUP_PROTOCOL_VERSION
             ),
+            request_index=body.model_dump().get(TASK_INDEX_KEY_NAME),
+            followup_count=self.config.followup_count,
+            phases=phases,
         )
 
-        response_params = body.responses_create_params.model_copy(update={"model": followup_response.model})
+        response_params = body.responses_create_params.model_copy(update={"model": final_response.model})
         response = ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
             response_params,
-            followup_response,
+            final_response,
         )
         response_payload = body.model_dump()
         response_payload.update(

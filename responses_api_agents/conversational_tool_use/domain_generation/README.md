@@ -1,15 +1,19 @@
 # Conversational Tool-Use Domain Generation
 
-This package exposes domain sampling as a Gym `SimpleResponsesAPIAgent`. One `/run` request is one sampler:
+This package exposes domain sampling as a Gym `SimpleResponsesAPIAgent`. With the default `followup_count: 1`, one
+`/run` request:
 
 1. send the input prompt as one user message to `/v1/chat/completions`;
 2. parse the response with the package's non-validating JSON parser;
 3. append the first response's domain names to the follow-up prompt;
-4. make the second chat completion and return both candidate batches.
+4. make one follow-up completion and return both candidate batches.
 
-The two chat requests contain only `messages`; response sampling fields are not forwarded. Model-server transport errors
-remain rollout failures. JSON parsing errors become an empty batch, the follow-up still runs, and a normal return has
-reward `1.0`. Candidate values are not normalized or schema-validated.
+Additional follow-ups use the original prompt plus all names collected so far. Set `followup_count: 0` to make only the
+initial call.
+
+Internal chat requests contain only `messages`; response sampling fields are not forwarded. Model-server transport
+errors remain rollout failures. JSON parsing errors become an empty batch, later configured follow-ups still run, and a
+normal return has reward `1.0`. Candidate values are not normalized or schema-validated.
 
 ## Input and result
 
@@ -36,6 +40,7 @@ The result extends Gym's normal verify response with:
 result.candidates
 generation_trace.protocol_version
 generation_trace.request_index
+generation_trace.followup_count
 generation_trace.phases[initial|followup].request
 generation_trace.phases[initial|followup].response
 generation_trace.phases[initial|followup].parsed_value
@@ -44,6 +49,9 @@ generation_trace.phases[initial|followup].parse_error
 
 The model calls use Gym's rollout-prefixed URL when observability is enabled, so the standard model-call capture is
 correlated with the sampler rollout.
+
+The default one-follow-up trace retains `domain-generation/v1`. Configurations with zero or multiple follow-ups emit
+`domain-generation/v2`; the trace model accepts both versions.
 
 ## Prompts
 
@@ -76,6 +84,18 @@ gym eval run --no-serve \
 
 The config creates `domain_generation_model` as an independent copy of Gym's standard `policy_model` instance supplied
 by `--model-type`. Override that copy when domain sampling should use a different model from later stages.
+
+Agent controls:
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `model_server` | `domain_generation_model` | Model-server instance used for internal chat completions |
+| `followup_count` | `1` | Number of sequential follow-up calls after the initial call; `0` disables follow-ups |
+
+The input row owns the initial prompt. The copied model server owns model and sampling defaults such as temperature,
+top-p, output tokens, and provider-level concurrency. `gym eval run --num-repeats` controls the number of independent
+samplers, while `--concurrency` controls how many sampler rollouts run concurrently. Unknown agent settings are rejected
+so misspelled controls cannot silently fall back to defaults.
 
 ## Policy/tool materialization
 

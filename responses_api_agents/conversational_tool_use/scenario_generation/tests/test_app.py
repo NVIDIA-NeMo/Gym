@@ -26,6 +26,11 @@ from fastapi import Request
 from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import (
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.conversational_tool_use.scenario_generation import app
 from responses_api_agents.conversational_tool_use.scenario_generation.app import (
@@ -103,10 +108,11 @@ class FakeHTTPResponse:
 
 
 class BlockingClient:
-    def __init__(self) -> None:
+    def __init__(self, expected_active: int = 20) -> None:
         self.calls: list[dict[str, Any]] = []
         self.active = 0
         self.max_active = 0
+        self.expected_active = expected_active
         self.all_started = asyncio.Event()
         self.release = asyncio.Event()
 
@@ -115,7 +121,7 @@ class BlockingClient:
         self.calls.append(kwargs)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
-        if self.active == 20:
+        if self.active == self.expected_active:
             self.all_started.set()
         await self.release.wait()
         self.active -= 1
@@ -137,7 +143,10 @@ class RecordingClient:
         return FakeHTTPResponse(self.response_payload)
 
 
-def agent(client: Any) -> ConversationalToolUseScenarioGenerationAgent:
+def agent(
+    client: Any,
+    **config_overrides: Any,
+) -> ConversationalToolUseScenarioGenerationAgent:
     config = ScenarioGenerationAgentConfig(
         host="0.0.0.0",
         port=8000,
@@ -147,6 +156,7 @@ def agent(client: Any) -> ConversationalToolUseScenarioGenerationAgent:
             type="responses_api_models",
             name="scenario_generation_model",
         ),
+        **config_overrides,
     )
     return ConversationalToolUseScenarioGenerationAgent.model_construct(
         config=config,
@@ -210,6 +220,11 @@ def test_config_and_example_data_contract() -> None:
     )
     assert parsed_config.entrypoint == "app.py"
     assert parsed_config.model_server.name == "scenario_generation_model"
+    assert parsed_config.request_count == 20
+    assert parsed_config.max_concurrency == 20
+    assert parsed_config.scenarios_per_request == 80
+    assert parsed_config.outside_policy_scope_fraction == 0.1
+    assert parsed_config.random_seed is None
 
     example = json.loads((PACKAGE_DIR / "data" / "example.jsonl").read_text(encoding="utf-8"))
     assert set(example) == {
@@ -305,6 +320,121 @@ async def test_run_launches_exactly_twenty_message_only_calls(
     assert result.generation_trace.failed_call_count == 0
     assert len(result.result.scenarios) == 20
     assert set(result.result.model_dump()) == {"domain_name", "scenarios"}
+
+
+@pytest.mark.asyncio
+async def test_configurable_request_size_and_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app, "random", lambda: 0.5)
+    client = BlockingClient(expected_active=2)
+    server = agent(
+        client,
+        request_count=4,
+        max_concurrency=2,
+        scenarios_per_request=3,
+        outside_policy_scope_fraction=0.0,
+    )
+
+    run_task = asyncio.create_task(server.run(run_request()))
+    await asyncio.wait_for(client.all_started.wait(), timeout=2)
+    assert len(client.calls) == 2
+    assert client.max_active == 2
+
+    client.release.set()
+    result = await run_task
+
+    assert len(client.calls) == 4
+    assert client.max_active == 2
+    assert all(
+        "Please create 3 different customer scenarios" in call["json"]["messages"][1]["content"]
+        for call in client.calls
+    )
+    assert result.generation_trace.request_count == 4
+    assert result.generation_trace.max_concurrency == 2
+    assert result.generation_trace.scenarios_per_request == 3
+    assert result.generation_trace.outside_policy_scope_fraction == 0.0
+    assert not any(call.outside_policy_scope for call in result.generation_trace.calls)
+
+
+@pytest.mark.asyncio
+async def test_random_seed_produces_a_rollout_local_repeatable_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_global_random() -> float:
+        raise AssertionError("seeded schedule should not use module-global random")
+
+    monkeypatch.setattr(app, "random", fail_global_random)
+    server = agent(
+        object(),
+        request_count=12,
+        max_concurrency=3,
+        outside_policy_scope_fraction=0.5,
+        random_seed=17,
+    )
+    schedules: list[list[bool]] = []
+    current_schedule: list[bool] = []
+
+    async def capture_one(**kwargs: Any) -> app._CallOutcome:
+        current_schedule.append(kwargs["outside_policy_scope"])
+        return app._CallOutcome(
+            trace=app.ScenarioCallTrace(
+                request_index=kwargs["request_index"],
+                completion_index=-1,
+                outside_policy_scope=kwargs["outside_policy_scope"],
+                messages=[],
+                status="failed",
+                error_type="SyntheticFailure",
+                error_message="capture only",
+            ),
+            chat_completion=None,
+        )
+
+    monkeypatch.setattr(server, "_generate_one", capture_one)
+    base_request = run_request()
+    for attempt_index in (0, 99):
+        request = ScenarioGenerationRunRequest.model_validate(
+            base_request.model_dump()
+            | {
+                TASK_INDEX_KEY_NAME: 4,
+                ROLLOUT_INDEX_KEY_NAME: 2,
+                ATTEMPT_INDEX_KEY_NAME: attempt_index,
+            }
+        )
+        await server.run(request)
+        schedules.append(current_schedule.copy())
+        current_schedule.clear()
+
+    assert schedules[0] == schedules[1]
+    assert any(schedules[0])
+    assert not all(schedules[0])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("request_count", 0),
+        ("max_concurrency", 0),
+        ("scenarios_per_request", 0),
+        ("outside_policy_scope_fraction", -0.1),
+        ("outside_policy_scope_fraction", 1.1),
+        ("request_cout", 4),
+    ],
+)
+def test_generation_config_rejects_invalid_bounds(field: str, value: Any) -> None:
+    config = {
+        "host": "0.0.0.0",
+        "port": 8000,
+        "entrypoint": "app.py",
+        "name": "conversational_tool_use_scenario_generation",
+        "model_server": {
+            "type": "responses_api_models",
+            "name": "scenario_generation_model",
+        },
+        field: value,
+    }
+    with pytest.raises(ValueError):
+        ScenarioGenerationAgentConfig.model_validate(config)
 
 
 @pytest.mark.asyncio

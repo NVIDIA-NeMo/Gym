@@ -89,6 +89,16 @@ class PolicyToolGenerationTrace(BaseModel):
     profile: PolicyToolProfile
     domain_name: str
     max_attempts: int = Field(ge=1)
+    use_refinement: bool = True
+    initial_reference_count: int = Field(default=8, ge=0)
+    policy_refine_reference_count: int = Field(default=8, ge=0)
+    minimum_tool_count: int = Field(default=0, ge=0)
+    cohesion_judge_count: int = Field(default=3, ge=0)
+    cohesion_max_failure_fraction: float = Field(default=0.5, ge=0.0, le=1.0)
+    golden_reference_count: int = Field(default=2, ge=0)
+    golden_max_failure_fraction: float = Field(default=0.5, ge=0.0, le=1.0)
+    max_judge_concurrency: int | None = Field(default=None, ge=1)
+    random_seed: int | None = None
     attempts: list[AttemptTrace] = Field(default_factory=list)
 
 

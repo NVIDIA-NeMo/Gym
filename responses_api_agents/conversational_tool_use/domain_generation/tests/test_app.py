@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import Request
+from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -40,6 +42,7 @@ from responses_api_agents.conversational_tool_use.domain_generation.assets impor
 
 
 INITIAL_PROMPT = "Generate domains."
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
 
 class FakeHttpResponse:
@@ -84,13 +87,18 @@ def responses_payload() -> dict:
     }
 
 
-def make_agent(*responses: dict, observability: bool = True) -> DomainGenerationAgent:
+def make_agent(
+    *responses: dict,
+    observability: bool = True,
+    followup_count: int = 1,
+) -> DomainGenerationAgent:
     config = DomainGenerationAgentConfig(
         host="",
         port=0,
         entrypoint="app.py",
         name="domain_generation_agent",
         model_server=ModelServerRef(type="responses_api_models", name="domain_model"),
+        followup_count=followup_count,
     )
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {"observability_enabled": observability}
@@ -141,12 +149,12 @@ async def test_responses_is_one_call_bridge_preserving_caller_parameters() -> No
 async def test_run_makes_exactly_two_message_only_chat_completions() -> None:
     first_candidates = [
         {
-            "name": "Retail",
-            "applications": [{"function": "Track an order"}],
+            "name": "Home Services",
+            "applications": [{"function": "Schedule a visit"}],
             "unvalidated_extra": {"preserved": True},
         }
     ]
-    second_candidates = [{"name": "Airlines", "applications": []}]
+    second_candidates = [{"name": "Event Support", "applications": []}]
     agent = make_agent(
         chat_completion(json.dumps(first_candidates), suffix="initial"),
         chat_completion(f"```json\n{json.dumps(second_candidates)}\n```", suffix="followup"),
@@ -170,15 +178,67 @@ async def test_run_makes_exactly_two_message_only_chat_completions() -> None:
     first_request = calls[0].kwargs["json"]
     second_request = calls[1].kwargs["json"]
     assert first_request.model_dump(exclude_unset=True) == {"messages": [{"role": "user", "content": INITIAL_PROMPT}]}
-    expected_followup = INITIAL_PROMPT + "\n\nPreviously brainstormed domains: ['Retail'].\n" + FOLLOWUP_INSTRUCTION
+    expected_followup = (
+        INITIAL_PROMPT + "\n\nPreviously brainstormed domains: ['Home Services'].\n" + FOLLOWUP_INSTRUCTION
+    )
     assert second_request.model_dump(exclude_unset=True) == {
         "messages": [{"role": "user", "content": expected_followup}]
     }
 
 
 @pytest.mark.asyncio
+async def test_followup_count_controls_rounds_and_uses_all_prior_names() -> None:
+    batches = [
+        [{"name": "Home Services"}],
+        [{"description": "kept without a name"}, {"name": "Event Support"}],
+        [{"name": "Property Management"}],
+    ]
+    agent = make_agent(
+        *(chat_completion(json.dumps(batch), suffix=str(index)) for index, batch in enumerate(batches)),
+        followup_count=2,
+    )
+
+    result = await agent.run(run_request())
+
+    assert result.result.candidates == [candidate for batch in batches for candidate in batch]
+    assert result.generation_trace.protocol_version == "domain-generation/v2"
+    assert result.generation_trace.followup_count == 2
+    assert [phase.phase for phase in result.generation_trace.phases] == [
+        "initial",
+        "followup",
+        "followup",
+    ]
+    calls = agent.server_client.post.await_args_list
+    assert len(calls) == 3
+    assert "Previously brainstormed domains: ['Home Services']" in calls[1].kwargs["json"].messages[0]["content"]
+    assert (
+        "Previously brainstormed domains: ['Home Services', 'Event Support']"
+        in calls[2].kwargs["json"].messages[0]["content"]
+    )
+    assert result.response.output[0].content[0].text == json.dumps(batches[-1])
+
+
+@pytest.mark.asyncio
+async def test_zero_followups_returns_the_initial_completion() -> None:
+    candidates = [{"name": "Home Services"}]
+    agent = make_agent(
+        chat_completion(json.dumps(candidates), suffix="initial"),
+        followup_count=0,
+    )
+
+    result = await agent.run(run_request())
+
+    assert result.result.candidates == candidates
+    assert result.generation_trace.followup_count == 0
+    assert result.generation_trace.protocol_version == "domain-generation/v2"
+    assert [phase.phase for phase in result.generation_trace.phases] == ["initial"]
+    assert len(agent.server_client.post.await_args_list) == 1
+    assert result.response.output[0].content[0].text == json.dumps(candidates)
+
+
+@pytest.mark.asyncio
 async def test_parse_failure_returns_empty_batch_and_still_runs_followup() -> None:
-    followup_candidates = [{"name": "Telecom", "arbitrary": ["raw", "object"]}]
+    followup_candidates = [{"name": "Property Management", "arbitrary": ["raw", "object"]}]
     agent = make_agent(
         chat_completion("not json", suffix="initial"),
         chat_completion(json.dumps(followup_candidates), suffix="followup"),
@@ -204,6 +264,30 @@ def test_agent_routes_are_registered() -> None:
     agent = make_agent()
     routes = {route.path for route in agent.setup_webserver().routes}
     assert {"/run", "/v1/responses", "/aggregate_metrics"}.issubset(routes)
+
+
+def test_checked_in_config_exposes_default_followup_count() -> None:
+    raw_config = OmegaConf.load(PACKAGE_DIR / "configs" / "conversational_tool_use_domain_generation.yaml")
+    inner = OmegaConf.to_container(
+        raw_config["conversational_tool_use_domain_generation"]["responses_api_agents"][
+            "conversational_tool_use/domain_generation"
+        ],
+        resolve=True,
+    )
+    parsed = DomainGenerationAgentConfig.model_validate(
+        inner
+        | {
+            "host": "0.0.0.0",
+            "port": 8000,
+            "name": "conversational_tool_use_domain_generation",
+        }
+    )
+
+    assert parsed.followup_count == 1
+    with pytest.raises(ValueError):
+        DomainGenerationAgentConfig.model_validate(parsed.model_dump() | {"followup_count": -1})
+    with pytest.raises(ValueError):
+        DomainGenerationAgentConfig.model_validate(parsed.model_dump() | {"followup_cout": 2})
 
 
 def test_prompt_assets_are_complete_and_whitespace_free() -> None:
