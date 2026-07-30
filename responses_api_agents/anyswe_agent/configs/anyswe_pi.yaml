@@ -10,7 +10,7 @@ anyswe_pi:
       agent_server_class: PiAgent
       agent_config_class: PiAgentConfig
       agent_kwargs:
-        model: nemo/model
+        model: model
         workspace_root: /tmp/pi-agent
         thinking: high
         timeout: 3600

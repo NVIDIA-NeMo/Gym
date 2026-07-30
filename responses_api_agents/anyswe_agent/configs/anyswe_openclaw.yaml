@@ -10,7 +10,8 @@ anyswe_openclaw:
       agent_server_class: OpenClawAgent
       agent_config_class: OpenClawAgentConfig
       agent_kwargs:
-        model: nvinf/nvidia/qwen/qwen3.6-35b-a3b
+        model: model
+        openclaw_version: 2026.6.11
         timeout: 1800
         setup_timeout: 300
         thinking: "off"

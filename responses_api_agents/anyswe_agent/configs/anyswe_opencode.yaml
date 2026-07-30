@@ -10,7 +10,7 @@ anyswe_opencode:
       agent_server_class: OpenCodeAgent
       agent_config_class: OpenCodeAgentConfig
       agent_kwargs:
-        model: nemo/model
+        model: model
         openai_api_key: EMPTY  # pragma: allowlist secret
         workspace_root: /tmp/opencode
         repo_dir: /testbed

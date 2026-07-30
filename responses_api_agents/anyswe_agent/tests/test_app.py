@@ -74,6 +74,7 @@ class TestAgentRunner:
         assert "**sampling," in source
         assert "**{**agent_kwargs, **config_sampling}" in source
         assert "config_class.model_fields" in source
+        assert 'agent_kwargs["model"] = model_name' not in source
 
 
 class TestSandboxAPI:

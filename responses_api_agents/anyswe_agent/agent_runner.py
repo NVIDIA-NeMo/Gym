@@ -20,12 +20,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from fastapi import Request
+
 
 sys.path.insert(0, "/nemo_gym_mount")
 agent_deps_dir = os.environ.get("NGSWE_AGENT_DEPS_DIR", "/agent_deps_mount")
 os.environ["PATH"] = f"{agent_deps_dir}/bin:" + os.environ.get("PATH", "")
-if sandbox_root := os.environ.get("NGSWE_SANDBOX_ROOT"):
-    os.environ.update({"HOME": f"{sandbox_root}/home", "TMPDIR": f"{sandbox_root}/tmp"})
 
 
 def _json_env(name: str) -> dict:
@@ -58,8 +58,6 @@ def main() -> None:
     client._build_server_base_url = lambda config: model_url
     config_sampling = {key: value for key, value in sampling.items() if key in config_class.model_fields}
     model_server = ModelServerRef(name=server_name, type="responses_api_models") if model_url else None
-    if model_server and "model" in config_class.model_fields:
-        agent_kwargs["model"] = model_name
     config = config_class(
         host="0.0.0.0",
         port=0,
@@ -76,7 +74,8 @@ def main() -> None:
         model=model_name,
         **sampling,
     )
-    response = asyncio.run(agent.responses(request=None, body=body))
+    request = Request({"type": "http", "path_params": {}})
+    response = asyncio.run(agent.responses(request=request, body=body))
     Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
     print(f"agent finished: {len(response.output)} output items", flush=True)
 

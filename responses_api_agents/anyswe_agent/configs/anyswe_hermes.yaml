@@ -10,6 +10,7 @@ anyswe_hermes:
       agent_server_class: HermesAgent
       agent_config_class: HermesAgentConfig
       agent_kwargs:
+        model: model
         max_turns: 30
         temperature: 1.0
         terminal_backend: local

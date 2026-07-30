@@ -506,9 +506,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             runtime_dir = "/sandbox/agent_deps_runtime" if external_runtime else "/agent_deps_mount"
             agent_env = self._sandbox_agent_env(params)
             agent_env["NGSWE_AGENT_DEPS_DIR"] = runtime_dir
-            if external_runtime:
-                agent_env["NGSWE_SANDBOX_ROOT"] = "/sandbox"
-            command = f"{runtime_dir}/bin/python /trajectories_mount/agent_runner.py"
+            command = (
+                f"HOME=/sandbox/home TMPDIR=/sandbox/tmp {runtime_dir}/bin/python /trajectories_mount/agent_runner.py"
+            )
             result = await sandbox.exec(
                 command,
                 cwd="/testbed",
