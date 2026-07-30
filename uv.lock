@@ -1749,6 +1749,7 @@ all = [
     { name = "daytona" },
     { name = "mypy" },
     { name = "opensandbox" },
+    { name = "openshell" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1773,6 +1774,7 @@ sandbox = [
     { name = "boto3" },
     { name = "daytona" },
     { name = "opensandbox" },
+    { name = "openshell" },
     { name = "tenacity" },
 ]
 
@@ -1799,6 +1801,7 @@ requires-dist = [
     { name = "omegaconf" },
     { name = "openai", specifier = "<=2.7.2" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.9" },
+    { name = "openshell", marker = "extra == 'sandbox'", specifier = ">=0.0.92,<0.1" },
     { name = "orjson" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "psutil" },
@@ -2014,6 +2017,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5a/2a/ab3cc141e041f71a373c97fcda8749dba9328f1b9bf80401378c0611556f/opensandbox-0.1.9.tar.gz", hash = "sha256:670fbf292c498f8467963d21e91ade9ea8b8f63f4ef18d18fff9581e0952ec03", size = 160034, upload-time = "2026-05-12T12:27:20.692Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4e/9b/553f8d7a30eddb12785711b2a1c682386878e2bb95450acd806f9fa62930/opensandbox-0.1.9-py3-none-any.whl", hash = "sha256:17faed35b60a982fee5a643fed8e4e12f041e5432d5ea0665d2828d1f2082759", size = 360945, upload-time = "2026-05-12T12:27:19.465Z" },
+]
+
+[[package]]
+name = "openshell"
+version = "0.0.92"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cloudpickle" },
+    { name = "grpcio" },
+    { name = "httpx" },
+    { name = "protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/e3/be7c389ae1b12312b302da847b82734475d2689188d2a19645ac8c1223c8/openshell-0.0.92-py3-none-macosx_13_0_arm64.whl", hash = "sha256:3d673a98e66520eabd4b06fbff126d55718fb92c868fbfeb994adb34970a4796", size = 8470512, upload-time = "2026-07-27T15:32:55.574Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/ca/604e9a4b9701f11c51ca4129699ca3a548aad734254431bdfcda48f17e15/openshell-0.0.92-py3-none-manylinux_2_39_aarch64.whl", hash = "sha256:036fa76cd89dd49375405edde55ee35f72c0a3bd22f990942a336f4ededf15ef", size = 8532736, upload-time = "2026-07-27T15:33:16.548Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/fc/24a15a862925d19b1d318be2796aa996233dc30b1b9e3c4862ec1039c6f4/openshell-0.0.92-py3-none-manylinux_2_39_x86_64.whl", hash = "sha256:8a20fea53ffff0c6127ca3f6841fb4b268ced1ccb03917cdbf278e419c1e9fdf", size = 9018946, upload-time = "2026-07-27T15:33:37.985Z" },
 ]
 
 [[package]]
