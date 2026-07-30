@@ -105,6 +105,7 @@ def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
     assert 'custom_provider["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'defaults["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'agent["timeoutSeconds"] = provider_timeout_s' in wrapper_text
+    assert 'diagnostics["stuckSessionAbortMs"] = provider_timeout_s * 1000' in wrapper_text
 
 
 def test_build_spec_from_config():
