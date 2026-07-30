@@ -149,6 +149,8 @@ index 6207029..2fe4e1d 100644
 +        }
 +        provider_timeout_env = os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS")
 +        provider_timeout_s = int(provider_timeout_env) if provider_timeout_env else 120
++        stuck_session_abort_env = os.environ.get("PINCHBENCH_STUCK_SESSION_ABORT_SECONDS")
++        stuck_session_abort_s = int(stuck_session_abort_env) if stuck_session_abort_env else None
 +        custom_provider = {
              "baseUrl": base_url,
              "apiKey": key_ref,
@@ -194,9 +196,9 @@ index 6207029..2fe4e1d 100644
 +                    "params": runtime_params
 +                }
 +                agents_cfg.setdefault("defaults", {})["timeoutSeconds"] = provider_timeout_s
-+                if provider_timeout_env:
++                if stuck_session_abort_s is not None:
 +                    cfg.setdefault("diagnostics", {})["stuckSessionAbortMs"] = (
-+                        provider_timeout_s * 1000
++                        stuck_session_abort_s * 1000
 +                    )
 +                plugin_entries = cfg.setdefault("plugins", {}).setdefault("entries", {})
 +                plugin_entries.setdefault("brave", {}).update(

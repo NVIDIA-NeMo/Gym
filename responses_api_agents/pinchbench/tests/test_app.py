@@ -105,7 +105,18 @@ def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
     assert 'custom_provider["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'defaults["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'agent["timeoutSeconds"] = provider_timeout_s' in wrapper_text
-    assert 'diagnostics["stuckSessionAbortMs"] = provider_timeout_s * 1000' in wrapper_text
+    assert 'diagnostics["stuckSessionAbortMs"] = provider_timeout_s * 1000' not in wrapper_text
+
+
+def test_direct_exec_wrapper_sets_stuck_session_abort_threshold(tmp_path):
+    agent = make_agent(openclaw_stuck_session_abort_seconds=7200)
+    env = agent._task_env("task_x")
+    wrapper = agent._write_direct_exec_wrapper(tmp_path)
+    wrapper_text = wrapper.read_text()
+
+    assert env["PINCHBENCH_STUCK_SESSION_ABORT_SECONDS"] == "7200"
+    assert "PINCHBENCH_STUCK_SESSION_ABORT_SECONDS" in wrapper_text
+    assert 'diagnostics["stuckSessionAbortMs"] = stuck_session_abort_s * 1000' in wrapper_text
 
 
 def test_build_spec_from_config():
