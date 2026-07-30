@@ -269,6 +269,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             api_key = os.environ.get("MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
             max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "65536"))
             context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "131072"))
+            provider_timeout_s = int(os.environ["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"]) if os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS") else None
             runtime_params = {
                 "temperature": 1,
                 "top_p": 0.95,
@@ -302,6 +303,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                     }
                 ],
             }
+            if provider_timeout_s is not None:
+                custom_provider["timeoutSeconds"] = provider_timeout_s
             models = cfg.setdefault("models", {})
             models["mode"] = "merge"
             models.setdefault("providers", {})["custom"] = custom_provider
@@ -310,6 +313,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             agent_model = f"custom/{model_id}"
             defaults.setdefault("models", {})[agent_model] = {"params": runtime_params}
             defaults.setdefault("model", {})["primary"] = agent_model
+            if provider_timeout_s is not None:
+                defaults["timeoutSeconds"] = provider_timeout_s
+                for agent in agents.get("list", []):
+                    if isinstance(agent, dict):
+                        agent["timeoutSeconds"] = provider_timeout_s
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), "utf-8")
             PYCFG
 
