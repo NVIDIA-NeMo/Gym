@@ -35,9 +35,12 @@ sandbox:
       max_keepalive_connections: 20
       max_connections: 100
       connect_retries: 2
-      # aiohttp-backed pool via httpx-aiohttp; auto-falls back to the plain
-      # httpx transport when httpx-aiohttp is not installed.
-      transport_backend: aiohttp
+      # HTTP transport handed to the SDK. "httpx" (default) uses httpx's own
+      # pooled transport. "aiohttp" is opt-in: it routes through an aiohttp
+      # ClientSession/TCPConnector pool via the third-party httpx-aiohttp
+      # bridge (pre-1.0; install it explicitly to use this mode) and falls
+      # back to httpx with a warning when the package is missing.
+      transport_backend: httpx
     create:
       request_timeout_s: 1200
       # timeout_s must exceed the sandbox spec's ready_timeout_s: with health
