@@ -236,9 +236,11 @@ def test_prepare_deduplicates_target_languages_without_changing_order(monkeypatc
         (prepare_module.HF_REPO_ID, "en-es_MX"),
         (prepare_module.HF_REPO_ID, "en-de_DE"),
     ]
-    assert [
-        json.loads(line)["target_language"] for line in output_path.read_text().splitlines()
-    ] == ["fr_FR", "es_MX", "de_DE"]
+    assert [json.loads(line)["target_language"] for line in output_path.read_text().splitlines()] == [
+        "fr_FR",
+        "es_MX",
+        "de_DE",
+    ]
 
 
 def test_prepare_does_not_publish_output_when_prefetch_fails(monkeypatch, tmp_path) -> None:

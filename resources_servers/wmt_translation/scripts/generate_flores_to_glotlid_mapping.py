@@ -43,10 +43,10 @@ for flores_config in sorted(get_dataset_config_names(FLORES_REPO_ID)):
     if flores_config == "default":
         continue
 
-    flores_code = "_".join(flores_config.split("_")[:2]) # drop optional dialect
+    flores_code = "_".join(flores_config.split("_")[:2])  # drop optional dialect
     label_counts = counts_by_flores_code.setdefault(flores_code, Counter())
     splits = load_dataset(FLORES_REPO_ID, flores_config)
-    dataset = splits["devtest" if "devtest" in splits else "dev"] # naming is inconsistent
+    dataset = splits["devtest" if "devtest" in splits else "dev"]  # naming is inconsistent
 
     for text in dataset["text"]:
         text = " ".join(text.split())
@@ -65,7 +65,7 @@ for flores_code, label_counts in sorted(counts_by_flores_code.items()):
         if cumulative_count / label_counts.total() > MASS_THRESHOLD:
             break
 
-    if top_codes != [flores_code]: # only track exceptions
+    if top_codes != [flores_code]:  # only track exceptions
         exceptions[flores_code] = top_codes
 
 pprint(exceptions, sort_dicts=True)
