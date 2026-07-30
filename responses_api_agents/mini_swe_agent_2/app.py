@@ -506,6 +506,8 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
     model_kwargs = model_config.setdefault("model_kwargs", {})
     model_kwargs["api_key"] = params["api_key"]
     model_kwargs["base_url"] = params["base_url"]
+    # TODO @bxyu-nvidia: plumb this through
+    model_kwargs["num_retries"] = 900
     model_kwargs.pop("api_base", None)
     max_output_tokens = model_kwargs.pop("max_output_tokens", None)
     if max_output_tokens is not None and "max_tokens" not in model_kwargs:
