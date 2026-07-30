@@ -116,38 +116,32 @@ policy-visible tool message.
 
 ## Configuration Reference
 
-Two runnable configs are checked in:
+[`conversational_tool_use_simulation.yaml`](configs/conversational_tool_use_simulation.yaml) is the canonical runnable
+stack. User simulation, tool simulation, and judging share `simulator_model`. Requests for all three roles use
+temperature `1.0`, top-p `1.0`, at most `8192` output tokens, and no parallel tool calls. The policy runtime owns
+policy sampling and context length. Deterministic transfer-ground-truth enforcement is enabled.
 
-- [`conversational_tool_use_simulation.yaml`](configs/conversational_tool_use_simulation.yaml) is the general-purpose
-  stack. It copies `policy_model` into separate `simulator_model` and `judge_model` instances, lets those model servers
-  own sampling defaults, and leaves transfer-ground-truth enforcement disabled.
-- [`conversational_tool_use_simulation_for_training.yaml`](configs/conversational_tool_use_simulation_for_training.yaml)
-  provides useful training-oriented parameters for user simulation, tool simulation, and judging: temperature `1.0`,
-  top-p `1.0`, at most `8192` output tokens, and no parallel tool calls. Those roles share `simulator_model`, while the
-  training runtime owns policy sampling and context length. This config also enables deterministic
-  transfer-ground-truth enforcement.
+The verification and retry controls are:
 
-The verification and retry fields used by both configs are:
-
-| Field | Behavior |
-| --- | --- |
-| `generation_attempts` | Maximum semantic attempts for generating a valid user message, valid tool result, or parseable judge decision. It does not retry provider transport failures. |
-| `judge_provider_attempts` | Maximum judge requests after retryable provider or transport failures. Valid semantic reward-zero decisions are never retried. |
-| `judge_provider_retry_initial_backoff_seconds` | Delay before the first judge-provider retry; the delay doubles after each failed attempt. |
-| `judge_provider_retry_max_backoff_seconds` | Upper bound on the exponential judge-provider retry delay. |
-| `enable_llm_judge` | Runs model-based verification when `true`. When `false`, a complete trajectory with no structural or transfer-gate failure receives reward `1.0` without judge calls. |
-| `enable_termination` | In `message` verification, checks user and tool-result messages first and stops later judge stages after a failure. When `false`, every message and the complete agent conversation are judged. It does not affect combined verification. |
-| `verification_type` | `message` performs staged per-message checks followed by an agent-conversation check. `complete_trajectory_combined_evaluation` sends the full trajectory through one combined user/agent/environment evaluation. |
-| `enforce_transfer_ground_truth` | Compares observed transfer behavior with `customer_scenario.outside_policy_scope`. A mismatch deterministically receives reward `0` and skips the LLM judge; a match continues through normal verification. |
+| Field | Canonical value | Behavior |
+| --- | ---: | --- |
+| `generation_attempts` | `3` | Maximum semantic attempts for generating a valid user message, valid tool result, or parseable judge decision. It does not retry provider transport failures. |
+| `judge_provider_attempts` | `3` | Maximum judge requests after retryable provider or transport failures. Valid semantic reward-zero decisions are never retried. |
+| `judge_provider_retry_initial_backoff_seconds` | `0.5` | Delay before the first judge-provider retry; the delay doubles after each failed attempt. |
+| `judge_provider_retry_max_backoff_seconds` | `8.0` | Upper bound on the exponential judge-provider retry delay. |
+| `enable_llm_judge` | `true` | Runs model-based verification. When `false`, a complete trajectory with no structural or transfer-gate failure receives reward `1.0` without judge calls. |
+| `enable_termination` | `true` | In `message` verification, checks user and tool-result messages first and stops later judge stages after a failure. When `false`, every message and the complete agent conversation are judged. It does not affect combined verification. |
+| `verification_type` | `message` | `message` performs staged per-message checks followed by an agent-conversation check. `complete_trajectory_combined_evaluation` sends the full trajectory through one combined user/agent/environment evaluation. |
+| `enforce_transfer_ground_truth` | `true` | Compares observed transfer behavior with `customer_scenario.outside_policy_scope`. A mismatch deterministically receives reward `0` and skips the LLM judge; a match continues through normal verification. |
 
 `user_responses_create_params`, `tool_simulator_responses_create_params`, and `judge_responses_create_params` own the
 sampling parameters sent to those three logical roles. Their model-server references may point to one shared model, as
-in the training config, or to independently configured model instances.
+in the canonical config, or to independently configured model instances.
 
 ## Run the Environment
 
-The config defines `simulator_model` and `judge_model` as independent copies of Gym's standard `policy_model`, so a
-single-model run requires only one model configuration. Start the server stack:
+The config defines `simulator_model` as a copy of Gym's standard `policy_model`. The user simulator, tool simulator,
+and judge share that instance, so a single-model run requires only one model configuration. Start the server stack:
 
 ```bash
 gym env start \
@@ -170,7 +164,7 @@ gym eval run --no-serve \
   --concurrency 1
 ```
 
-Override either copied model instance when starting the stack if simulation or judging should use a different model:
+Override the shared simulator instance when the environment roles should use a different model from the policy:
 
 ```bash
 gym env start \
@@ -179,12 +173,12 @@ gym env start \
   --model-url "$MODEL_BASE_URL" \
   --model "$POLICY_MODEL_NAME" \
   '+policy_api_key=${oc.env:MODEL_API_KEY}' \
-  "++simulator_model.responses_api_models.openai_model.openai_model=$SIMULATOR_MODEL_NAME" \
-  "++judge_model.responses_api_models.openai_model.openai_model=$JUDGE_MODEL_NAME"
+  "++simulator_model.responses_api_models.openai_model.openai_model=$SIMULATOR_MODEL_NAME"
 ```
 
-The copied instances inherit the policy model's endpoint and key. Override their `openai_base_url` and
-`openai_api_key` fields as well when the roles use different providers.
+The copied instance inherits the policy model's endpoint and key. Override its `openai_base_url` and `openai_api_key`
+fields as well when it uses another provider. To use a separate judge, define another model-server instance in a
+derived config and point `judge_model_server` to it.
 
 ## Offline Dataset Preparation
 

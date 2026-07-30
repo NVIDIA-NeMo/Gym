@@ -22,11 +22,37 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_role_models_copy_the_standard_policy_model() -> None:
+def test_simulation_roles_use_the_canonical_shared_model_and_sampling() -> None:
     config = OmegaConf.load(PACKAGE_DIR / "configs" / "conversational_tool_use_simulation.yaml")
+    server_config = config["conversational_tool_use_simulation"]["resources_servers"][
+        "conversational_tool_use_simulation"
+    ]
 
     assert config["simulator_model"]["_copy"] == "policy_model"
-    assert config["judge_model"]["_copy"] == "policy_model"
+    assert "judge_model" not in config
+    for field in (
+        "simulator_model_server",
+        "user_model_server",
+        "tool_simulator_model_server",
+        "judge_model_server",
+    ):
+        assert server_config[field]["name"] == "simulator_model"
+
+    expected_params = {
+        "input": [],
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "max_output_tokens": 8192,
+        "parallel_tool_calls": False,
+    }
+    for field in (
+        "user_responses_create_params",
+        "tool_simulator_responses_create_params",
+        "judge_responses_create_params",
+    ):
+        assert OmegaConf.to_container(server_config[field]) == expected_params
+
+    assert server_config["enforce_transfer_ground_truth"] is True
 
 
 def test_generation_role_models_copy_the_standard_policy_model() -> None:

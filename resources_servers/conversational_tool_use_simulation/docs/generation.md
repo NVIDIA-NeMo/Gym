@@ -33,8 +33,8 @@ gym env start \
 `gym env start` stays in the foreground. Run the remaining commands in a separate terminal. They use `--no-serve`
 because they collect against that running stack and consume explicit JSONL paths.
 
-The conversation policy uses the base `policy_model`. Generation and verification use these independently overridable
-copies:
+The conversation policy uses the base `policy_model`. Generation uses independently overridable copies, while user
+simulation, tool simulation, and conversation judging share `simulator_model`:
 
 ```text
 domain_generation_model
@@ -42,20 +42,19 @@ policy_generation_model
 policy_tool_judge_model
 scenario_generation_model
 simulator_model
-judge_model
 ```
 
 `simulator_model` serves both the logical user-simulator and tool-simulator roles; those roles keep separate prompts
-and parsers. All copies inherit the base endpoint, key, and model by default. Override any copied instance when a role
-should use a different model. For example, add these arguments to `gym env start`:
+and parsers, and also serves the conversation judge. All copies inherit the base endpoint, key, and model by default.
+Override any copied instance when a role should use a different model. For example, add these arguments to
+`gym env start`:
 
 ```bash
 "++domain_generation_model.responses_api_models.openai_model.openai_model=$DOMAIN_MODEL_NAME" \
 "++policy_generation_model.responses_api_models.openai_model.openai_model=$POLICY_GENERATION_MODEL_NAME" \
 "++policy_tool_judge_model.responses_api_models.openai_model.openai_model=$POLICY_TOOL_JUDGE_MODEL_NAME" \
 "++scenario_generation_model.responses_api_models.openai_model.openai_model=$SCENARIO_MODEL_NAME" \
-"++simulator_model.responses_api_models.openai_model.openai_model=$SIMULATOR_MODEL_NAME" \
-"++judge_model.responses_api_models.openai_model.openai_model=$JUDGE_MODEL_NAME"
+"++simulator_model.responses_api_models.openai_model.openai_model=$SIMULATOR_MODEL_NAME"
 ```
 
 Override a copy's `openai_base_url` and `openai_api_key` too when it uses another provider.

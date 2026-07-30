@@ -14,14 +14,22 @@ The complete workflow and shared design documents live with the simulation resou
 
 [`configs/conversational_tool_use_simulation.yaml`](configs/conversational_tool_use_simulation.yaml) registers the
 `conversational_tool_use_agent` instance and expects a resource-server instance named
-`conversational_tool_use_simulation`. For a complete runnable stack, use one of the resource-server configs, which
-registers both instances:
+`conversational_tool_use_simulation`. For a complete runnable stack, use the
+[resource-server configuration](../../../resources_servers/conversational_tool_use_simulation/configs/conversational_tool_use_simulation.yaml),
+which registers both instances.
 
-- [standard configuration](../../../resources_servers/conversational_tool_use_simulation/configs/conversational_tool_use_simulation.yaml)
-- [training configuration](../../../resources_servers/conversational_tool_use_simulation/configs/conversational_tool_use_simulation_for_training.yaml)
+Agent controls in the checked-in config:
 
-`max_agent_steps` caps policy-model responses, not simulator or tool messages. `seed_first_user_message=true` makes the
-resource server generate the first customer turn when the input has no prefilled conversation.
+| Setting | Default | Meaning |
+|---|---:|---|
+| `resources_server` | `conversational_tool_use_simulation` | Resource-server instance used for session state, user and tool simulation, and verification |
+| `model_server` | `policy_model` | Model-server instance used for policy responses |
+| `max_agent_steps` | `50` | Maximum policy-model responses per rollout; simulator and tool messages do not count |
+| `seed_first_user_message` | `true` | Ask the resource server for the first customer turn when no conversation is prefilled |
+
+Policy request controls such as `temperature`, `top_p`, `max_output_tokens`, `tool_choice`, and
+`parallel_tool_calls` belong to each row's `responses_create_params`. Omitted sampling fields defer to the configured
+policy model server; `parallel_tool_calls` defaults to `true`.
 
 ## Initial User Turn and Prefilled History
 

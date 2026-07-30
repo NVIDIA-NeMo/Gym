@@ -1,3 +1,7 @@
+# Policy sampling and context remain owned by the policy runtime. Matching
+# policy settings are temperature=1.0, top_p=1.0, max_new_tokens=8192, and
+# max_model_len=131072.
+
 conversational_tool_use_simulation:
   resources_servers:
     conversational_tool_use_simulation:
@@ -16,7 +20,25 @@ conversational_tool_use_simulation:
         name: simulator_model
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: simulator_model
+      user_responses_create_params:
+        input: []
+        temperature: 1.0
+        top_p: 1.0
+        max_output_tokens: 8192
+        parallel_tool_calls: false
+      tool_simulator_responses_create_params:
+        input: []
+        temperature: 1.0
+        top_p: 1.0
+        max_output_tokens: 8192
+        parallel_tool_calls: false
+      judge_responses_create_params:
+        input: []
+        temperature: 1.0
+        top_p: 1.0
+        max_output_tokens: 8192
+        parallel_tool_calls: false
       generation_attempts: 3
       judge_provider_attempts: 3
       judge_provider_retry_initial_backoff_seconds: 0.5
@@ -24,7 +46,8 @@ conversational_tool_use_simulation:
       enable_llm_judge: true
       enable_termination: true
       verification_type: message
-      enforce_transfer_ground_truth: false
+      enforce_transfer_ground_truth: true
+
 conversational_tool_use_agent:
   responses_api_agents:
     conversational_tool_use/simulation:
@@ -38,13 +61,10 @@ conversational_tool_use_agent:
       max_agent_steps: 50
       seed_first_user_message: true
       datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/conversational_tool_use_simulation/data/example.jsonl
-        license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/conversational_tool_use_simulation/data/example.jsonl
+          license: Apache 2.0
 
 simulator_model:
-  _copy: policy_model
-
-judge_model:
   _copy: policy_model
