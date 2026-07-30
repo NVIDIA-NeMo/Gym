@@ -37,12 +37,12 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -458,18 +458,19 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         async with self._judge_endpoint_max_concurrency:
             try:
-                response = await self.server_client.post(
+                judge_response = await call_judge(
+                    self.server_client,
                     server_name=cfg.judge_model_server.name,
                     url_path="/v1/responses",
                     json=responses_create_params,
+                    response_model=NeMoGymResponse,
                 )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as e:
+            except JudgeError as e:
                 print(
-                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",
+                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {e}",
                     flush=True,
                 )
-                raise e
+                raise
 
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,

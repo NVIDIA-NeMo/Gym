@@ -304,7 +304,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         metadata = body_dict.get("metadata") or {}
 
         # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
-        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs", "{}")
+        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs") or "{}"
         chat_template_kwargs.update(json.loads(metadata_chat_template_kwargs_str))
 
         if chat_template_kwargs:
@@ -315,7 +315,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
 
-        metadata_extra_body_str = metadata.get("extra_body", "{}")
+        metadata_extra_body_str = metadata.get("extra_body") or "{}"
         extra_body.update(json.loads(metadata_extra_body_str))
 
         if self.config.return_token_id_information:
@@ -748,7 +748,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))
         metadata = body_dict.get("metadata") or {}
-        metadata_kwargs_str = metadata.get("chat_template_kwargs", "{}")
+        metadata_kwargs_str = metadata.get("chat_template_kwargs") or "{}"
         chat_template_kwargs.update(json.loads(metadata_kwargs_str))
 
         return self._chat_template_tokenizer.apply_chat_template(
