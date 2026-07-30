@@ -38,8 +38,8 @@ collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──�
 **Your service is responsible for:**
 
 1. Implementing `POST {agent_base_url}/v1/responses` and answering every call with a valid
-   Responses API object (the schema is validated strictly; an invalid object is a terminal,
-   non-retried failure).
+   Responses API object (required fields and types are enforced, unknown extra fields are
+   tolerated; an invalid object is a terminal, non-retried failure).
 2. Deciding what to do next on each call: ask for environment tools, run its own internal
    tools, or finish with an assistant message.
 3. Being callable N times per rollout. Each call carries the full conversation so far, so a
@@ -139,7 +139,9 @@ remote_agent:
   responses_api_agents:
     remote_agent:
       entrypoint: app.py
-      agent_base_url: http://localhost:9000     # your service
+      # Your service's address — typically another machine, a container, or a cloud box.
+      # (For a first try with everything on one machine, http://localhost:9000 works too.)
+      agent_base_url: http://your-agent-host:9000
       resources_server:
         type: resources_servers
         name: example_session_state_mgmt_resources_server   # the top-level key above
@@ -150,7 +152,7 @@ remote_agent:
 Run all three pieces:
 
 ```bash
-uvicorn service:app --port 9000                              # your service
+uvicorn service:app --host 0.0.0.0 --port 9000               # your service, on ITS machine
 gym env start "+config_paths=[counter_remote.yaml]"          # Gym: environment + remote_agent
 gym eval run --no-serve +agent_name=remote_agent \
     +input_jsonl_fpath=resources_servers/example_session_state_mgmt/data/example.jsonl \
@@ -163,7 +165,7 @@ Expected: 5 rollouts, `mean/reward: 1.0`, and each trajectory reads
 <Tip>
 A real service replaces the regex with an actual agent: render the incoming conversation into
 your agent's context, let it decide, and translate its decision into unpaired `function_call`
-items or a final message. The live end-to-end test of this page ran exactly that — a
+items or a final message. A live end-to-end test of this contract ran exactly that — a
 containerized service using the Claude CLI as the brain — against the same counter environment,
 scoring 5/5.
 </Tip>
@@ -183,10 +185,12 @@ scoring 5/5.
 
 Failures never crash a collection run. A down service (3 connection attempts, then fail), a
 timed-out call, a malformed reply, or a verifier error becomes a reward-0 row with
-`_ng_failure_class: "remote_agent_error"` in the failures sidecar (`<output>_failures.jsonl`) —
+`_ng_failure_class: "remote_agent_error"` in the failures sidecar (for
+`results/rollouts.jsonl` the sidecar is `results/rollouts_failures.jsonl`) —
 the main rollouts file stays clean, and `+resume_from_cache=true` retries failed tasks up to the
 attempt cap (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3; terminal failures — an invalid response
-shape — are not retried). Error messages name the failing URL or the timeout knob involved.
+shape — are not retried). Connection failures and timeouts name the failing URL or the timeout
+knob involved.
 
 ## Gotchas
 
