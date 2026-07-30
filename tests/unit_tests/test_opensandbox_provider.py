@@ -191,6 +191,38 @@ async def test_direct_create_passes_platform_to_sdk_create(
     )
 
 
+async def test_direct_create_passes_resource_requests_to_sdk_create(
+    fake_opensandbox_sdk: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.create(
+        SandboxSpec(
+            image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
+            resources={"cpu": 1, "memory_mib": 8192, "disk_gib": 30},
+            provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 2048, "disk_gib": 30}},
+        ),
+    )
+
+    assert FakeSandbox.created_kwargs["resource"] == {"cpu": "1", "memory": "8192Mi", "ephemeral-storage": "30Gi"}
+    assert FakeSandbox.created_kwargs["resource_requests"] == {
+        "cpu": "0.5",
+        "memory": "2048Mi",
+        "ephemeral-storage": "30Gi",
+    }
+
+    with pytest.raises(TypeError, match="'resource_requests' must be a mapping"):
+        opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"resource_requests": "big"})
+
+    with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
+        await provider.create(
+            SandboxSpec(
+                image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
+                provider_options={"resource_requests": {"memory_gib": 2}},
+            ),
+        )
+
+
 async def test_direct_create_passes_image_auth_to_sdk_create(
     fake_opensandbox_sdk: None,
 ) -> None:
