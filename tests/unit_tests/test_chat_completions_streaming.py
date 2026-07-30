@@ -466,9 +466,9 @@ class TestChatStreamHeartbeat:
                 json={"stream": True, "messages": [{"role": "user", "content": "hi"}]},
             )
 
-    def test_failure_after_stream_started_terminates_cleanly(self) -> None:
+    def test_failure_after_stream_started_emits_terminal_error(self) -> None:
         # Past the grace window the response has begun, so the client gets a terminated stream
-        # rather than a hang.
+        # rather than a fake clean completion or a hang.
         async def _drain() -> list[str]:
             async def _boom() -> dict:
                 await asyncio.sleep(0.15)
@@ -479,7 +479,9 @@ class TestChatStreamHeartbeat:
 
         chunks = asyncio.run(_drain())
         assert SSE_HEARTBEAT in chunks
-        assert chunks[-1] == "data: [DONE]\n\n"
+        assert chunks[-1].startswith("event: error\n")
+        assert "late failure" in chunks[-1]
+        assert "data: [DONE]" not in chunks[-1]
 
     def test_bytes_reach_the_wire_before_generation_completes(self) -> None:
         """Regression: the socket must not stay silent for a whole slow generation.

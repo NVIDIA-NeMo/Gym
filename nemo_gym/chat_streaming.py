@@ -89,6 +89,11 @@ def _sse_data(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _sse_error(exc: Exception) -> str:
+    payload = {"error": {"message": str(exc), "type": type(exc).__name__}}
+    return f"event: error\ndata: {json.dumps(payload)}\n\n"
+
+
 def _chunk(completion: dict[str, Any], choices: list[dict[str, Any]], usage: Any = None) -> dict[str, Any]:
     """Build one ``chat.completion.chunk`` object sharing the completion's id/created/model."""
     chunk: dict[str, Any] = {
@@ -179,9 +184,9 @@ async def synthesize_chat_completion_sse_with_heartbeat(
     whole generation without changing what the client ultimately parses.
 
     A failure after the first heartbeat cannot be reported as an HTTP status (the response has
-    already begun), so it is logged and the stream is terminated with ``data: [DONE]`` rather
-    than left hanging. Callers should therefore await a short grace window first, so fast
-    failures still surface with their normal status code.
+    already begun), so it is logged and emitted as a terminal SSE error event. Callers should
+    therefore await a short grace window first, so fast failures still surface with their normal
+    status code.
     """
     while True:
         try:
@@ -189,9 +194,9 @@ async def synthesize_chat_completion_sse_with_heartbeat(
             break
         except asyncio.TimeoutError:
             yield SSE_HEARTBEAT
-        except Exception:
+        except Exception as exc:
             LOG.exception("Chat completion failed after the SSE stream had already started")
-            yield "data: [DONE]\n\n"
+            yield _sse_error(exc)
             return
 
     for chunk in synthesize_chat_completion_sse(completion, include_usage=include_usage):
