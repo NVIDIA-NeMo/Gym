@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -150,6 +151,28 @@ class TestEnv:
         assert env["NVIDIA_API_KEY"] == "k"
         assert env["HOME"] == "/tmp/h"
         assert "EMPTY" not in env
+
+
+class TestModelServer:
+    def test_builds_pi_provider_config(self) -> None:
+        agent = _make_agent(
+            model="Qwen3.6-35B-A3B",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            config = agent._build_models_config()
+
+        provider = config["providers"]["nemo"]
+        assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
+        assert provider["baseUrl"] == "http://model/v1"
+        assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
+        assert provider["models"][0]["maxTokens"] == 131072
+
+    def test_preserves_explicit_provider_without_model_server(self) -> None:
+        config = {"providers": {"custom": {"baseUrl": "https://example.test"}}}
+        agent = _make_agent(models_config=config)
+        assert agent._effective_model() == agent.config.model
+        assert agent._build_models_config() == config
 
 
 class TestConfigYaml:
