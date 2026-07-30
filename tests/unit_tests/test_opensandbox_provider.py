@@ -326,17 +326,12 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
 
 
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Default backend is aiohttp via the httpx-aiohttp bridge (a sandbox-extra
-    # dependency), with the configured keepalive expiry on the pool.
-    aiohttp_transport_cls = pytest.importorskip(
-        "httpx_aiohttp", reason="httpx-aiohttp optional sandbox dependency is not installed"
-    ).AiohttpTransport
+    # Default backend is httpx, with the configured keepalive expiry on the pool.
     provider = opensandbox_provider.OpenSandboxProvider()
     transport = provider._build_transport()
-    assert isinstance(transport, aiohttp_transport_cls)
-    assert transport.limits.keepalive_expiry == 3.0
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
 
-    # Explicit httpx backend, custom pool settings.
+    # Custom pool settings still produce an httpx transport.
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
             "transport_backend": "httpx",
@@ -350,15 +345,26 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     assert isinstance(transport, httpx.AsyncHTTPTransport)
 
     # aiohttp requested but httpx-aiohttp unavailable: falls back to httpx.
-    monkeypatch.setitem(sys.modules, "httpx_aiohttp", None)
-    provider = opensandbox_provider.OpenSandboxProvider()
-    transport = provider._build_transport()
-    assert isinstance(transport, httpx.AsyncHTTPTransport)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(sys.modules, "httpx_aiohttp", None)
+        provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
+        transport = provider._build_transport()
+        assert isinstance(transport, httpx.AsyncHTTPTransport)
 
     # keepalive_expiry_s=null disables transport injection entirely.
     provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None})
     config = provider._connection_config()
     assert "transport" not in config.kwargs
+
+
+def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None) -> None:
+    # Opt-in aiohttp backend via the httpx-aiohttp bridge; the package is not a
+    # declared dependency, so this coverage only runs where it is installed.
+    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
+    transport = provider._build_transport()
+    assert isinstance(transport, httpx_aiohttp.AiohttpTransport)
+    assert transport.limits.keepalive_expiry == 3.0
 
     extensions = provider._resolve_extensions({"imagePullPolicy": "Never"})
     assert extensions["imagePullPolicy"] == "Never"

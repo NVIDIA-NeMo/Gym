@@ -353,10 +353,12 @@ class OpenSandboxConnectionConfig:
     to the SDK's default transport (keepalive_expiry=30s).
 
     ``transport_backend`` selects the HTTP transport handed to the SDK:
-    "aiohttp" uses the httpx-aiohttp bridge (an aiohttp ClientSession +
-    TCPConnector pool under the SDK's httpx surface) and falls back to the
-    plain httpx transport when httpx-aiohttp is not installed; "httpx" forces
-    the httpx transport.
+    "httpx" (default) uses httpx's own pooled transport; "aiohttp" is opt-in
+    and uses the httpx-aiohttp bridge (an aiohttp ClientSession + TCPConnector
+    pool under the SDK's httpx surface) — it requires the third-party
+    ``httpx-aiohttp`` package (not installed by default; pre-1.0, so opt-in
+    only) and falls back to the httpx transport with a warning when the
+    package is missing.
     """
 
     domain: str | None = None
@@ -368,7 +370,7 @@ class OpenSandboxConnectionConfig:
     max_keepalive_connections: int = 20
     max_connections: int = 100
     connect_retries: int = 2
-    transport_backend: str = "aiohttp"
+    transport_backend: str = "httpx"
 
 
 @dataclass(frozen=True)
