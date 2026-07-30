@@ -424,6 +424,7 @@ def test_runner_config_preserves_dynamic_agent_configuration(tmp_path) -> None:
     assert payload["model_connect_timeout_seconds"] == 10
     assert payload["disable_endpoint_metadata_probe"] is True
     assert "inspect.signature(agent.responses)" in (tmp_path / "agent_runner.py").read_text()
+    assert "SimpleNamespace(path_params={})" in (tmp_path / "agent_runner.py").read_text()
     assert "socket.create_connection" in (tmp_path / "agent_runner.py").read_text()
     assert "runner_status.json" in (tmp_path / "agent_runner.py").read_text()
     assert "hermes_model_metadata.fetch_endpoint_model_metadata" in (tmp_path / "agent_runner.py").read_text()
