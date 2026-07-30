@@ -557,6 +557,7 @@ class _OtelSink:
         self._counter = None
         self._memory_histogram = None
         self._cpu_histogram = None
+        self._reward_histogram = None
         if not cfg["enabled"]:
             return
         endpoint = cfg["endpoint"]
@@ -621,6 +622,11 @@ class _OtelSink:
             unit="1",
             description="Sandbox CPU utilization samples.",
         )
+        self._reward_histogram = meter.create_histogram(
+            "nemo_gym.rollout.reward",
+            unit="1",
+            description="Rollout reward distribution.",
+        )
 
     def record_event(self, event: SandboxEvent) -> None:
         attrs = event.get("attributes") or {}
@@ -635,6 +641,10 @@ class _OtelSink:
             phase_histogram = self._phase_duration_histograms.get(phase)
             if phase_histogram is not None:
                 phase_histogram.record(float(duration_s), otel_attrs)
+        if event["name"] == "rollout.outcome" and self._reward_histogram is not None:
+            reward = attrs.get("reward")
+            if isinstance(reward, (int, float)):
+                self._reward_histogram.record(float(reward), otel_attrs)
 
     def record_resource_sample(self, sample: ResourceSample) -> None:
         attrs = _low_cardinality_attrs(sample.get("attributes") or {})

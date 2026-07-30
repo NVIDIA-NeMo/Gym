@@ -506,6 +506,13 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
     from minisweagent.environments import get_environment
     from minisweagent.models import get_model
 
+    from nemo_gym.observability.recorder import _otel_span_cm as _step_span_cm
+
+    class _InstrumentedAgent(DefaultAgent):
+        def step(self) -> list[dict]:
+            with _step_span_cm("agent.step", {"step_index": self.n_calls}):
+                return super().step()
+
     instance = params.get("instance_dict")
     if isinstance(instance, str):
         instance = json.loads(instance)
@@ -559,7 +566,9 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
         print(f"[EVAL]{instance_id} Environment created", flush=True)
 
         model = get_model(config=model_config)
-        agent = DefaultAgent(model, env, **agent_config)
+        agent = _InstrumentedAgent(model, env, **agent_config)
+
+        from nemo_gym.observability.recorder import _otel_span_cm
 
         if params["run_golden"]:
             exit_status = "Gold Patch Applied"
@@ -567,7 +576,8 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
             data = agent.save(None, {"messages": []})
         else:
             print(f"[EVAL]{instance_id} Running mini-swe-agent v2...", flush=True)
-            info = agent.run(instance["problem_statement"])
+            with _otel_span_cm("agent.run", {"instance_id": instance_id}):
+                info = agent.run(instance["problem_statement"])
             exit_status = info.get("exit_status", "")
             model_patch = info.get("submission", "")
             data = agent.save(
@@ -576,15 +586,35 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
             )
 
         print(f"[EVAL]{instance_id} Running eval", flush=True)
-        eval_report = _run_eval_v2(
-            instance=instance,
-            env=env,
-            model_patch=model_patch,
-            instance_dir=instance_dir,
-            run_id=run_id,
-            is_golden=params["run_golden"],
-        )
+        with _otel_span_cm("sandbox.eval", {"instance_id": instance_id}):
+            eval_report = _run_eval_v2(
+                instance=instance,
+                env=env,
+                model_patch=model_patch,
+                instance_dir=instance_dir,
+                run_id=run_id,
+                is_golden=params["run_golden"],
+            )
         print(f"[EVAL]{instance_id} Eval completed", flush=True)
+
+        _instance_report = (eval_report.get("eval_report") or {}).get(instance_id, {})
+        resolved = bool(_instance_report.get("resolved"))
+        _tests = _instance_report.get("tests_status") or {}
+        from nemo_gym.observability.recorder import observability_sync_span
+
+        with observability_sync_span(
+            "rollout.outcome",
+            phase="rollout",
+            attributes={
+                "instance_id": instance_id,
+                "resolved": resolved,
+                "exit_status": exit_status,
+                "reward": 1.0 if resolved else 0.0,
+                "fail_to_pass_count": len((_tests.get("FAIL_TO_PASS") or {}).get("success", [])),
+                "pass_to_pass_count": len((_tests.get("PASS_TO_PASS") or {}).get("success", [])),
+            },
+        ):
+            pass
 
         input_messages, response_output, responses = _split_trajectory_for_responses(data.get("messages", []))
 
@@ -721,7 +751,14 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError
 
     async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
+        import time as _time
+
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        _queue_enter = _time.monotonic()
         async with self.sem:
+            with _otel_span_cm("agent.queue_wait", {"concurrency_limit": self.config.concurrency, "wait_s": _time.monotonic() - _queue_enter}):
+                pass
             model_server_name = self.config.model_server.name
             global_config_dict = ServerClient.load_from_global_config().global_config_dict
 
