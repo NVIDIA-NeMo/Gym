@@ -14,8 +14,9 @@
 # limitations under the License.
 """Agent server that drives a user-hosted remote agent service through Gym's tool loop.
 
-The remote service implements ONE endpoint, ``POST {agent_base_url}/v1/responses``, and is
-called like a model: each call it receives the conversation so far (the row's
+The remote service implements ONE endpoint, ``POST {agent_base_url}/v1/responses``, composing
+with this server as OpenAI Responses-compliant agents: each call it receives the conversation
+so far (the row's
 ``responses_create_params`` with the accumulated output and tool results appended to
 ``input``) and returns a Responses API object. To have Gym execute a tool from the
 environment, it returns a ``function_call`` item WITHOUT a matching

@@ -1,6 +1,6 @@
 ---
 title: "Drive a Remote Agent"
-description: "Evaluate an agent service you host yourself — Gym drives the loop, your service is called like a model"
+description: "Evaluate an agent service you host yourself — a composition of OpenAI Responses-compliant agents, with Gym driving the loop"
 position: 3
 ---
 
@@ -8,9 +8,10 @@ position: 3
 
 The `remote_agent` server lets an agent that runs as **its own HTTP service** — in your repo, on
 your infrastructure — be driven by standard rollout collection. Your service implements an
-endpoint **compliant with the OpenAI `/v1/responses` contract**, called like a model: it receives
-the conversation so far and returns what it wants to do next. Gym runs the loop, executes
-environment tools, holds the session, and verifies.
+endpoint **compliant with the OpenAI `/v1/responses` contract**, and the two servers compose as
+Responses-speaking agents: each call your service receives the conversation so far and returns
+what it wants to do next. Gym runs the loop, executes environment tools, holds the session, and
+verifies.
 Your results land in the standard artifacts (`gym eval profile`, aggregation, and training
 pipelines all work unchanged).
 

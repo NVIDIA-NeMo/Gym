@@ -1,9 +1,10 @@
 # Remote Agent
 
 An agent server that drives an agent service you host yourself — in your own repo, on your own
-infrastructure. Your service implements one endpoint, `POST /v1/responses`, and is **called like
-a model**: each call it receives the conversation so far and returns what it wants to do next.
-Gym runs the loop.
+infrastructure. Your service implements one endpoint **compliant with the OpenAI
+`/v1/responses` contract**, and the two servers compose as Responses-speaking agents: each call
+your service receives the conversation so far and returns what it wants to do next. Gym runs
+the loop.
 
 ## Who does what
 
