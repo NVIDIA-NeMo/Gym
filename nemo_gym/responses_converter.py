@@ -263,7 +263,10 @@ class ResponsesConverter(BaseModel):
         match m["role"]:
             case "assistant":
                 final_content = ""
-                if isinstance(m["content"], list):
+                if m["content"] is None:
+                    # Tool-call only turns have "None" according to the official API spec.
+                    pass
+                elif isinstance(m["content"], list):
                     content_str = "".join([part.get("text", "") for part in m["content"]])
                     final_content += content_str
                 elif isinstance(m["content"], str):
