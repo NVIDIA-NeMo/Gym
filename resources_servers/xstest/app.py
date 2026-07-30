@@ -65,7 +65,6 @@ class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     response: Optional[NeMoGymResponse] = None
     verdict_label: Optional[str] = None
-    error: Optional[str] = None
 
 
 class XSTestVerifyResponse(BaseVerifyResponse):

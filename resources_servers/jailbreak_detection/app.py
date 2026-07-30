@@ -327,6 +327,9 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
                 model_response=response_for_judge,
             )
 
+            if quality_judge_eval.error:
+                raise JudgeError(quality_judge_eval.error)
+
             # Determine quality reward (Reward 2)
             if has_quality is True:
                 reward_quality = cfg.reward_if_quality_high
