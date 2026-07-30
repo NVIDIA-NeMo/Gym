@@ -12,10 +12,12 @@ Gym: seeds a fresh environment session per rollout and holds its cookies (sessio
 against the resources server, appends the results and calls your service again, converts every
 failure into a reward-0 sidecar row (never a crashed run), and verifies the finished trajectory.
 
-Your service: answers each call with a valid Responses API object; decides whether to ask for
-environment tools, run its own internal tools, or finish; tolerates being called N times per
-rollout (each request carries the full conversation; set a cookie if you want per-rollout state —
-Gym echoes your cookies back within the rollout); reports full `usage` or omits it.
+Your service: answers each call with a valid Responses API object. Within a call it can do
+anything — its own model turns, its own tools, sub-agents; there are exactly two reasons to
+return: it needs a Gym-hosted tool executed, or the rollout is finished. It tolerates being
+called N times per rollout (each request carries the full conversation; set a cookie if you want
+per-rollout state — Gym echoes your cookies back within the rollout) and reports full `usage` or
+omits it.
 
 ## The response contract
 

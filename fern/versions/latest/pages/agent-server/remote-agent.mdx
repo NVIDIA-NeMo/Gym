@@ -40,8 +40,10 @@ collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──�
 1. Implementing `POST {agent_base_url}/v1/responses` and answering every call with a valid
    Responses API object (required fields and types are enforced, unknown extra fields are
    tolerated; an invalid object is a terminal, non-retried failure).
-2. Deciding what to do next on each call: ask for environment tools, run its own internal
-   tools, or finish with an assistant message.
+2. Deciding what to do next on each call. Within a call your service can do **anything** —
+   run its own model for any number of turns, execute its own tools, spawn sub-agents. There
+   are exactly two reasons to return: you need a **Gym-hosted tool** executed (return the ask),
+   or the rollout is **finished** (return the answer).
 3. Being callable N times per rollout. Each call carries the full conversation so far, so a
    stateless service needs nothing extra; if you want per-rollout state, set a cookie — Gym
    echoes your cookies back on every subsequent call of the same rollout.
@@ -58,7 +60,11 @@ accumulated in `input`:
    are the only tools you may ask Gym to execute.
 3. Your own cookies from earlier calls of this rollout, echoed back.
 
-**Every response you return** is one Responses API object whose `output` decides the next step:
+**Every response you return** is one Responses API object whose `output` decides the next step.
+Returning does not mean your agent is done thinking — it means one of two things: "I need a Gym
+tool" or "I'm finished." Everything your agent did internally since the last call (its own model
+turns, its own tool executions) either stays private or rides along as paired call+output
+records:
 
 | You return | Gym does |
 |---|---|
@@ -81,45 +87,86 @@ accumulated in `input`:
 
 ## Quickstart
 
-A complete, runnable example against the in-repo stateful counter environment
-(`example_session_state_mgmt`; tasks read "add 1 then add 2 then get the count"). The service
-asks Gym for every increment, then for the value, then answers with it — three loop turns:
+A complete, realistic service against the in-repo stateful counter environment
+(`example_session_state_mgmt`; tasks read "add 1 then add 2 then get the count"). The **agent
+brain is the Claude Code CLI**: each call, the service renders the conversation into a prompt,
+lets Claude decide, and translates the decision into tool asks or a final answer. Requirements
+on the service's machine: `claude` on PATH and authenticated (a logged-in CLI or
+`ANTHROPIC_API_KEY` in the environment); pick the model with `CLAUDE_MODEL` (default `haiku`).
 
 ```python
-# service.py
-import json, re
-from fastapi import FastAPI, Request
+# service.py — the Claude Code CLI as the agent's brain
+import json, os, subprocess
+from fastapi import FastAPI
 
 app = FastAPI()
+MODEL = os.environ.get("CLAUDE_MODEL", "haiku")
+
+PROMPT = """You are an agent solving a task by calling tools. You do not execute tools \
+yourself; you ask for them and the results come back in the conversation.
+
+Task conversation so far:
+{conversation}
+
+Tools you may ask for (JSON schemas):
+{tools}
+
+Reply with ONLY one JSON object, no prose, no code fences:
+- to call tools: {{"tool_calls": [{{"name": "<tool>", "arguments": {{...}}}}]}}
+- to finish:     {{"final": "<answer text>"}}
+Finish once the conversation contains enough tool results to answer; the final answer must be \
+exactly what the task asks for.
+"""
+
+
+def render(items: list) -> str:
+    lines = []
+    for item in items:
+        kind = item.get("type", "message")
+        if kind == "message":
+            content = item.get("content")
+            if isinstance(content, list):
+                content = " ".join(c.get("text", "") for c in content)
+            lines.append(f"[{item.get('role', 'user')}] {content}")
+        elif kind == "function_call":
+            lines.append(f"[you asked for] {item['name']}({item.get('arguments')})")
+        elif kind == "function_call_output":
+            lines.append(f"[tool result] {item.get('output')}")
+    return "\n".join(lines)
+
 
 @app.post("/v1/responses")
-async def responses(request: Request):
-    params = await request.json()
-    task = next(i["content"] for i in params["input"] if i.get("role") == "user")
-    # The "brain" of this toy service: reading what the task wants out of the natural-language
-    # instruction. A real service does this with its model/agent (see the tip below); the tools
-    # field only carries the callable schemas, never the task-specific values.
-    increments = [int(n) for n in re.findall(r"add (\d+)", task)]
-    results = [i for i in params["input"] if i.get("type") == "function_call_output"]
+def responses(params: dict):  # sync handler: FastAPI runs it in a threadpool, so
+    # concurrent rollouts don't block each other on the subprocess below.
+    prompt = PROMPT.format(conversation=render(params["input"]), tools=json.dumps(params.get("tools", [])))
+    proc = subprocess.run(
+        ["claude", "-p", prompt, "--output-format", "json", "--model", MODEL],
+        capture_output=True, timeout=300, check=True,
+    )
+    # The CLI's print mode returns its own JSON envelope (NOT the Anthropic Messages format):
+    # the final text sits in "result". The Responses object Gym expects is built by hand below —
+    # translating whatever your brain speaks into Responses format is the service's job.
+    payload = json.loads(proc.stdout)
+    decision = json.loads(payload["result"].strip().strip("`").removeprefix("json").strip())
+    turn = sum(1 for i in params["input"] if i.get("type") == "function_call_output")
 
-    if not results:                            # turn 1: ask Gym to run every increment
-        output = [{"type": "function_call", "id": f"fc_{k}", "call_id": f"c{k}",
-                   "name": "increment_counter", "arguments": json.dumps({"count": n})}
-                  for k, n in enumerate(increments)]
-    elif len(results) == len(increments):      # turn 2: ask for the final value
-        output = [{"type": "function_call", "id": "fc_get", "call_id": "c_get",
-                   "name": "get_counter_value", "arguments": "{}"}]
-    else:                                      # turn 3: answer with it
-        count = json.loads(results[-1]["output"])["count"]
-        output = [{"type": "message", "role": "assistant", "status": "completed", "id": "msg_1",
-                   "content": [{"type": "output_text", "text": str(count), "annotations": []}]}]
+    if "tool_calls" in decision:  # unpaired asks: Gym executes these and calls us again
+        output = [{"type": "function_call", "id": f"fc_{turn}_{k}", "call_id": f"c_{turn}_{k}",
+                   "name": call["name"], "arguments": json.dumps(call.get("arguments", {}))}
+                  for k, call in enumerate(decision["tool_calls"])]
+    else:  # a final assistant message ends the rollout
+        output = [{"type": "message", "role": "assistant", "status": "completed", "id": f"m_{turn}",
+                   "content": [{"type": "output_text", "text": str(decision["final"]), "annotations": []}]}]
 
+    usage = payload.get("usage") or {}
     return {
-        "id": "my-service", "created_at": 0.0, "model": "my-model", "object": "response",
+        "id": "claude-cli-service", "created_at": 0.0, "model": f"claude-{MODEL}", "object": "response",
         "output": output,
         "parallel_tool_calls": False, "tools": [], "tool_choice": "auto",
         "usage": {
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
             "input_tokens_details": {"cached_tokens": 0},
             "output_tokens_details": {"reasoning_tokens": 0},
         },
@@ -163,14 +210,15 @@ gym eval run --no-serve +agent_name=remote_agent \
 ```
 
 Expected: 5 rollouts, `mean/reward: 1.0`, and each trajectory reads
-`function_call → function_call_output → ... → message`.
+`function_call → function_call_output → ... → message`. A live end-to-end run of exactly this
+setup — the service in a container on its own network, Claude deciding every call — scored 5/5.
 
 <Tip>
-A real service replaces the regex with an actual agent: render the incoming conversation into
-your agent's context, let it decide, and translate its decision into unpaired `function_call`
-items or a final message. A live end-to-end test of this contract ran exactly that — a
-containerized service using the Claude CLI as the brain — against the same counter environment,
-scoring 5/5.
+Nothing here is specific to FastAPI or the Claude CLI: any HTTP stack works (the live run used
+stdlib `http.server`), and any brain works — render the conversation into your agent's context,
+let it decide, translate the decision into unpaired `function_call` items or a final message.
+Errors on your side are safe: a 5xx or timeout becomes a reward-0 row in Gym's failures sidecar,
+never a crashed run.
 </Tip>
 
 ## Configuration knobs
