@@ -326,7 +326,7 @@ async def verify(self, body):
     )
 ```
 
-Note that `reward_if_unclear` covers a judge that answered but did not produce a parseable verdict. A judge call that *failed* — auth, rate limit, timeout, HTTP error — is a different outcome and is handled separately; see [Judge Call Failures](#judge-call-failures) below.
+In this server the `_request_judge` helper handles HTTP errors and JSON parsing gracefully — on failure it returns `(None, error_message)` instead of raising, so `verify()` maps that to `reward_if_unclear` rather than crashing. That folds two different outcomes into one reward: a judge that answered unparseably, and a judge call that never landed. New servers should keep them apart — see [Judge Call Failures](#judge-call-failures) below.
 
 Other servers apply the same pattern with domain-specific variations. For example, [`multichallenge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/multichallenge) runs one judge call **per rubric item** using `asyncio.gather`, and [`equivalence_llm_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_llm_judge) adds an optional **swap pass** to detect positional bias.
 
@@ -351,7 +351,7 @@ judge_response = await call_judge(
 Any failure in that call — transport, timeout, 401, 500, malformed body — raises `JudgeError`. Every `/verify` is wrapped by `judge_failsafe`, which turns a `JudgeError` into a row that is:
 
 - written to `<output>_failures.jsonl` instead of `output.jsonl`
-- excluded from the aggregate, and counted under `failure_counts` in `<output>_aggregate_metrics.json`
+- excluded from the aggregate, which is computed only over the rows in `output.jsonl`
 - retried on resume
 
 Wrap the **call**, not the scoring around it: `reraise_judge_errors` relabels every exception it sees, so covering a whole `verify()` would file ordinary bugs as judge failures.
