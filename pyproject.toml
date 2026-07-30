@@ -235,8 +235,7 @@ sandbox = [
     "tenacity>=9.1.4",
 
     # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
-    # Lower bound 0.1.15: the version exposing separate `resource`/`resource_requests`
-    # on Sandbox.create, which the provider uses for the requests/limits split.
+    # Lower bound 0.1.15: first version exposing separate `resource_requests` on Sandbox.create.
     # Updated: Thu Jul 30, 2026 with opensandbox>=0.1.15
     # License: Apache 2.0
     "opensandbox>=0.1.15",
