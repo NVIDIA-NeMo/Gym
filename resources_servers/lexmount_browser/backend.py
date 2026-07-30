@@ -16,7 +16,7 @@
 
 `BrowserBackend` is the thin contract the resources server depends on. The
 `PlaywrightBackend` is a fully-working open-source reference (headless Chromium).
-To use the **Lexmount** browser instead, implement the same five async methods in
+To use the **Lexmount** browser instead, implement the same async methods in
 `LexmountBackend` and select it via config `backend: lexmount` — nothing else in
 the environment changes.
 """
@@ -24,8 +24,14 @@ the environment changes.
 from __future__ import annotations
 
 import abc
+import asyncio
+import inspect
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,13 +50,16 @@ class Observation:
     url: str
     title: str
     elements: list[Element] = field(default_factory=list)
+    # True when the backend stopped collecting at its element budget, so the
+    # policy knows the element list is incomplete rather than exhaustive.
+    truncated: bool = False
 
     def render(self, max_elements: int = 50) -> str:
         lines = [f"URL: {self.url}", f"TITLE: {self.title}", "ELEMENTS:"]
         for el in self.elements[:max_elements]:
             lines.append(f"  [{el.id}] {el.role}: {el.name}")
-        if len(self.elements) > max_elements:
-            lines.append(f"  ... (+{len(self.elements) - max_elements} more)")
+        if self.truncated or len(self.elements) > max_elements:
+            lines.append(f"  ... (truncated at {max_elements} elements)")
         return "\n".join(lines)
 
 
@@ -74,7 +83,11 @@ class BrowserBackend(abc.ABC):
     async def type(self, element_id: int, text: str) -> None: ...
 
     @abc.abstractmethod
-    async def observe(self) -> Observation: ...
+    async def observe(self, max_elements: int = 50) -> Observation:
+        """Snapshot the page.  Implementations MUST stop collecting elements at
+        `max_elements` (probing every interactive node costs a round-trip each)
+        and set `Observation.truncated` when they do."""
+        ...
 
     @abc.abstractmethod
     async def current_url(self) -> str: ...
@@ -98,7 +111,7 @@ class PlaywrightBackend(BrowserBackend):
 
     Each instance owns its own browser context (cookie/session isolation), so N
     rollouts do not interfere. Element ids are assigned by DOM order at each
-    `observe()` and resolved back to handles for `click`/`type`.
+    `observe()` and bound to element handles for `click`/`type`.
     """
 
     def __init__(self, headless: bool = True):
@@ -124,15 +137,27 @@ class PlaywrightBackend(BrowserBackend):
     async def goto(self, url: str) -> None:
         await self._page.goto(url, wait_until="domcontentloaded")
 
-    async def observe(self) -> Observation:
+    async def observe(self, max_elements: int = 50) -> Observation:
         self._handles.clear()
         locator = self._page.locator(_INTERACTIVE)
         count = await locator.count()
         elements: list[Element] = []
+        truncated = False
         for i in range(count):
-            node = locator.nth(i)
+            if len(elements) >= max_elements:
+                # Each candidate below costs several CDP round-trips, so stop at
+                # the budget instead of probing every node on a large page and
+                # discarding the surplus at render time.
+                truncated = True
+                break
             try:
-                if not await node.is_visible():
+                # Bind an element handle rather than keeping the lazy locator:
+                # `locator.nth(i)` is re-resolved against the *current* DOM at
+                # action time, so a click after any DOM mutation could silently
+                # land on a different element.  A detached handle raises instead,
+                # which is an honest signal for both the policy and the trainer.
+                node = await locator.nth(i).element_handle()
+                if node is None or not await node.is_visible():
                     continue
                 role = (await node.evaluate("e => e.tagName")).lower()
                 name = (await node.inner_text()) or (await node.get_attribute("value")) or ""
@@ -146,6 +171,7 @@ class PlaywrightBackend(BrowserBackend):
             url=self._page.url,
             title=await self._page.title(),
             elements=elements,
+            truncated=truncated,
         )
 
     async def click(self, element_id: int) -> None:
@@ -170,8 +196,10 @@ class PlaywrightBackend(BrowserBackend):
             try:
                 if closer is not None:
                     await closer.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Never silent: an unreported close failure is a leaked browser
+                # process that looks exactly like a clean teardown.
+                LOGGER.warning("Failed to close %s: %r", type(closer).__name__, exc)
         if self._pw is not None:
             await self._pw.stop()
 
@@ -184,7 +212,7 @@ class PlaywrightBackend(BrowserBackend):
 
 
 class LexmountBackend(PlaywrightBackend):
-    """Production backend: an isolated browser session in the Lexmount cloud.
+    """**Experimental** backend: an isolated browser session in the Lexmount cloud.
 
     The browser runs off the training node; we connect to it over CDP and reuse
     PlaywrightBackend's page-driving logic (observe/click/type/goto). Only session
@@ -192,6 +220,23 @@ class LexmountBackend(PlaywrightBackend):
     Lexmount SDK — ``LEXMOUNT_API_KEY`` / ``LEXMOUNT_PROJECT_ID`` /
     ``LEXMOUNT_BASE_URL`` — never from committed config. Select with
     ``backend: lexmount``.
+
+    Known limits — read before running this at training concurrency:
+
+    * **No client-side session cap.** One provider session is created per
+      rollout with no admission control, so N concurrent rollouts bid for N
+      provider sessions. Size the account quota above the rollout concurrency
+      (with headroom for sessions still being torn down), or the run will
+      exhaust the quota and every subsequent create will fail.
+    * **No episode TTL.** A session is released when the rollout is scored or
+      re-seeded (see ``app.py``). A rollout abandoned without either — trainer
+      crash, client disconnect — leaks its cloud session until the provider's
+      own timeout reclaims it.
+    * **Close is best-effort.** A close/delete that fails is logged but not
+      retried, and the provider may still hold the session afterwards.
+
+    The reference ``playwright`` backend has none of these constraints (local
+    processes, no quota) and remains the default.
     """
 
     def __init__(
@@ -221,12 +266,21 @@ class LexmountBackend(PlaywrightBackend):
 
         # One isolated cloud browser session per rollout (browser runs off-node).
         self._client = Lexmount(base_url=self._endpoint) if self._endpoint else Lexmount()
-        try:
-            self._session = self._client.sessions.create(
-                browser_mode=self._browser_mode, poll_timeout_sec=self._poll_timeout_sec
-            )
-        except TypeError:  # older SDK without poll_timeout_sec
-            self._session = self._client.sessions.create(browser_mode=self._browser_mode)
+        create_kwargs: dict = {"browser_mode": self._browser_mode}
+        # Feature-detect instead of retrying on TypeError: a TypeError raised
+        # from *inside* create would make a retry allocate a second provider
+        # session and leak the first one.
+        if "poll_timeout_sec" in inspect.signature(self._client.sessions.create).parameters:
+            create_kwargs["poll_timeout_sec"] = self._poll_timeout_sec
+        # The SDK is synchronous and creation polls until the session is active,
+        # so calling it directly would block the event loop for this whole server
+        # — stalling every other rollout's tool calls, not just this one.  The
+        # thread cannot be cancelled, so `poll_timeout_sec` above (not the
+        # wait_for) is the real bound; wait_for only caps what *we* wait for.
+        self._session = await asyncio.wait_for(
+            asyncio.to_thread(self._client.sessions.create, **create_kwargs),
+            timeout=self._poll_timeout_sec + 15,
+        )
 
         cdp_url = getattr(self._session, "connect_url", None)
         if not cdp_url:
@@ -245,16 +299,35 @@ class LexmountBackend(PlaywrightBackend):
             await super().close()
         finally:
             session_id = getattr(self._session, "session_id", None) or getattr(self._session, "id", None)
-            try:
-                if self._session is not None:
-                    self._session.close()
-            except Exception:
-                pass
-            try:
-                if self._client is not None and session_id:
-                    self._client.sessions.delete(session_id=session_id)
-            except Exception:
-                pass
+            # Both SDK calls are synchronous: run them off the event loop for the
+            # same reason as create, and bound them so a hung provider cannot
+            # pin this rollout's teardown indefinitely.
+            if self._session is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._session.close), timeout=30.0
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Failed to close Lexmount session %s: %r", session_id or "?", exc
+                    )
+            if self._client is not None and session_id:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._client.sessions.delete, session_id=session_id
+                        ),
+                        timeout=30.0,
+                    )
+                except Exception as exc:
+                    # Not retried: the provider may still hold this session, and
+                    # the run has no way to reclaim it.  Say so loudly.
+                    LOGGER.warning(
+                        "Failed to delete Lexmount session %s (it may still be "
+                        "held provider-side): %r",
+                        session_id,
+                        exc,
+                    )
 
 
 def make_backend(name: str, **kwargs) -> BrowserBackend:
@@ -265,5 +338,6 @@ def make_backend(name: str, **kwargs) -> BrowserBackend:
             endpoint=kwargs.get("endpoint"),
             headless=kwargs.get("headless", True),
             browser_mode=kwargs.get("browser_mode", "normal"),
+            poll_timeout_sec=kwargs.get("poll_timeout_sec", 150),
         )
     raise ValueError(f"unknown browser backend: {name!r}")
