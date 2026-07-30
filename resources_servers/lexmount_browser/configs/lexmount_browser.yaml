@@ -6,13 +6,16 @@ lexmount_browser:
       domain: agent
       verified: false
       description: Interactive browser environment — navigate/click/type/observe a live page; pluggable local (Playwright) or Lexmount cloud backend.
-      backend: playwright          # "playwright" (open-source reference, default) | "lexmount" (cloud, production)
+      backend: playwright          # "playwright" (open-source reference, default) | "lexmount" (cloud, experimental)
       headless: true
       endpoint: null               # optional Lexmount base_url override (else LEXMOUNT_BASE_URL from env)
       browser_mode: normal         # Lexmount cloud browser mode (backend: lexmount)
-      max_elements: 50             # interactive elements shown per observation
+      max_elements: 50             # interactive elements collected + shown per observation
+      poll_timeout_sec: 150        # cloud session-create deadline (backend: lexmount)
       # backend: lexmount reads credentials from the environment (never commit them):
       #   LEXMOUNT_API_KEY, LEXMOUNT_PROJECT_ID, LEXMOUNT_BASE_URL
+      # backend: lexmount has no client-side session cap and no episode TTL — size the
+      # account quota above the rollout concurrency.  See README "Session limits".
 
 lexmount_browser_simple_agent:
   responses_api_agents:

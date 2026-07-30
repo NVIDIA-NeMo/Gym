@@ -17,9 +17,11 @@ with one config line; nothing else in the environment changes.
 
 - `backend: playwright` — open-source reference (headless Chromium). Runnable today,
   used for local dev and CI (no proprietary deps). **Default.**
-- `backend: lexmount` — production. Each rollout gets an isolated browser session in
-  the Lexmount cloud (browser runs off the training node); we connect over CDP and
-  reuse the same page-driving logic.
+- `backend: lexmount` — **experimental**. Each rollout gets an isolated browser session
+  in the Lexmount cloud (browser runs off the training node); we connect over CDP and
+  reuse the same page-driving logic. Read
+  [session limits](#session-limits-backend-lexmount) before using it at training
+  concurrency.
 
 ### Using the Lexmount cloud backend
 
@@ -52,6 +54,21 @@ with one config line; nothing else in the environment changes.
    offline `site/` tasks (local `file://` URIs). With `backend: lexmount`, roll
    out on tasks whose `initial_url` is a real `https://` page.
 
+### Session limits (`backend: lexmount`)
+
+The cloud backend maps one provider session to one rollout with no admission
+control of its own. Before running it at training concurrency:
+
+| Limit | What it means for a run |
+| --- | --- |
+| **No client-side session cap** | N concurrent rollouts bid for N provider sessions. Size the account quota **above** the rollout concurrency, with headroom for sessions still being torn down — otherwise the quota is exhausted and every later create fails. |
+| **No episode TTL** | A session is released when the rollout is scored (`verify`) or when the same `session_id` is re-seeded. A rollout abandoned without either (trainer crash, client disconnect) leaks its session until the provider reclaims it. |
+| **Best-effort close** | A failed close/delete is logged, not retried; the provider may still hold the session afterwards. Grep the server log for `Failed to close`/`Failed to delete Lexmount session`. |
+| **Create blocks in a worker thread** | `sessions.create` polls until the session is active (`poll_timeout_sec`, default 150s). It runs off the event loop, but the thread cannot be cancelled — keep `poll_timeout_sec` tight enough for your step budget. |
+
+The default `playwright` backend has none of these constraints: local processes,
+no quota, released with the rollout.
+
 ## Tools & observation
 
 Tools: `browser_navigate(url)`, `browser_click(element_id)`,
@@ -61,11 +78,19 @@ plus URL/title — deliberately token-cheap (raw HTML/pixels are far too expensi
 small policies and for training context length). `element_id`s come from the most
 recent observation.
 
+Element collection stops at `max_elements` (default 50) — probing each interactive
+node costs several browser round-trips, so a large page is truncated rather than
+fully scanned, and the observation says so.
+
 ## Reward
 
 `verify()` scores a per-task success spec in `verifier_metadata`:
 `final_url` / `url_contains` / `dom_contains` / `answer_equals`. Sparse 0/1 outcome
 reward by default (least reward-hackable); extend `_score()` with new keys as needed.
+
+A spec carrying none of those keys **raises** rather than scoring 0 — a misspelled
+key would otherwise give every rollout reward 0, which looks identical to a policy
+that never solves the task.
 
 ## Run
 

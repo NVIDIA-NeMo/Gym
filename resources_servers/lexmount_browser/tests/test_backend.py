@@ -57,6 +57,20 @@ async def test_navigate_observe_click_type_and_score():
 
 
 @pytest.mark.asyncio
+async def test_observe_stops_at_the_element_budget():
+    b = PlaywrightBackend(headless=True)
+    await b.open(_url("index.html"))
+    try:
+        obs = await b.observe(max_elements=1)
+        assert len(obs.elements) == 1
+        assert obs.truncated is True
+        # The policy must be able to see that the list is incomplete.
+        assert "truncated at 1 elements" in obs.render(max_elements=1)
+    finally:
+        await b.close()
+
+
+@pytest.mark.asyncio
 async def test_observation_is_compact_text():
     b = PlaywrightBackend(headless=True)
     await b.open(_url("about.html"))
