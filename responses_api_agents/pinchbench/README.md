@@ -54,7 +54,8 @@ small NVIDIA integration patch:
 | `sandbox_spec` | the per-task sandbox: `image` (`${sandbox_image}` — a `.sif` path or `docker://` ref built from `Dockerfile.benchmark`), `resources`, `ready_timeout_s`, … |
 | `sandbox_work_base` | writable, per-sandbox-isolated working mount (default `/sandbox`); run_task.sh puts the skill copy, `$HOME`, `$TMPDIR` and the benchmark run-root here |
 | `task_timeout_s` | per-task exec timeout |
-| `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to the provider timeout, agent timeout ceiling, and stuck-session diagnostics timeout so values above OpenClaw's defaults are effective |
+| `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to the provider timeout and agent timeout ceiling so slow model-server calls can complete |
+| `openclaw_stuck_session_abort_seconds` | optional OpenClaw stuck-session recovery threshold in seconds; keep lower than the outer task timeout so stale sessions can be reclaimed |
 | `model_server` | optional Gym policy-model reference; preferred over `model_base_url` when set |
 | `model_base_url` / `model_api_key` / `model_name` | direct policy-endpoint fallback and model credentials/name |
 | `judge_model` / `judge_base_url` / `judge_api_key` | judge for hybrid / `llm_judge` tasks |
@@ -108,9 +109,9 @@ OpenClaw aborts a model request if the endpoint produces no tokens inside its st
 window. The default stays at OpenClaw's original 120s. For slow or highly concurrent endpoints, raise
 the provider timeout with `openclaw_provider_timeout_seconds`; the agent passes it as
 `PINCHBENCH_PROVIDER_TIMEOUT_SECONDS`, and the direct-exec wrapper plus baked PinchBench patch write it
-to OpenClaw's `models.providers.custom.timeoutSeconds`, `agents.defaults.timeoutSeconds`, and
-`diagnostics.stuckSessionAbortMs`. The agent timeout ceiling and stuck-session diagnostics timeout must
-both be raised for long model-server calls.
+to OpenClaw's `models.providers.custom.timeoutSeconds` and `agents.defaults.timeoutSeconds`.
+Use `openclaw_stuck_session_abort_seconds` to raise OpenClaw's stale-session recovery threshold
+separately when the default is too low.
 
 ```yaml
 pinchbench_agent:
@@ -118,11 +119,13 @@ pinchbench_agent:
     pinchbench:
       # ... model / sandbox / judge config ...
       openclaw_provider_timeout_seconds: 14400  # 4h
+      openclaw_stuck_session_abort_seconds: 900 # 15m recovery threshold
       task_timeout_s: 14400                     # outer per-task sandbox exec bound
 ```
 
-`task_timeout_s` is separate from OpenClaw's provider timeout. Keep it at least as large as the
-provider timeout when long idle waits are expected.
+`task_timeout_s` is separate from OpenClaw's provider and stuck-session timeouts. Keep it at least as
+large as the provider timeout when long idle waits are expected, but do not set the stuck-session
+threshold equal to the outer task timeout unless you intentionally want to disable early recovery.
 
 ## Validation (parity vs vanilla standalone)
 
