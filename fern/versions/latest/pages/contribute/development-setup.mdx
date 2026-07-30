@@ -62,7 +62,11 @@ All contributions must pass these automated checks:
 
 If the build-docs check fails:
 
-1. **Test documentation locally**: Preview the Fern docs by running `fern docs dev` from the repository root.
+1. **Test documentation locally**: Follow the [Fern docs quickstart](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md).
+   - For local documentation previews, ensure Node.js 22+ is installed.
+   - From the repository root, run `make docs-login` once to provision and authenticate Fern.
+   - From the repository root, run `make docs` to generate the API reference and start the local preview.
+   - After the initial generation, prose-only changes can use `cd fern && npm run dev`.
 
 2. **Common issues**:
    - Missing docstrings in public functions

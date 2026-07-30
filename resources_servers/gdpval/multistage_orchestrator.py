@@ -63,11 +63,11 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 import orjson
 
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
-    _failures_path_for,
     _get_max_rollout_attempts,
 )
 from resources_servers.gdpval.multistage_elo import (
@@ -706,7 +706,7 @@ def load_gated_keys(
         for index, rows in rows_by_stage.items()
     }
 
-    failures_fpath = _failures_path_for(Path(output_fpath))
+    failures_fpath = failures_path_for(Path(output_fpath))
     if not failures_fpath.exists():
         return gated
 
@@ -754,7 +754,7 @@ def route_stage_rows(output_fpath: str | Path, rows: Sequence[Mapping[str, Any]]
         return
     output_fpath = Path(output_fpath)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
-    failures_fpath = _failures_path_for(output_fpath)
+    failures_fpath = failures_path_for(output_fpath)
     with output_fpath.open("ab") as main_handle, failures_fpath.open("ab") as fail_handle:
         for row in rows:
             if row.get(NG_NO_PERSIST_KEY):
@@ -916,7 +916,7 @@ def _prepare_resume(
     if reason is not None:
         print(f"[multistage-elo] starting fresh: {reason}", file=sys.stderr, flush=True)
         output_fpath.unlink(missing_ok=True)
-        _failures_path_for(output_fpath).unlink(missing_ok=True)
+        failures_path_for(output_fpath).unlink(missing_ok=True)
         journal_fpath.unlink(missing_ok=True)
     else:
         print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
