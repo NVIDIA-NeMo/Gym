@@ -25,7 +25,7 @@ Docker layers.
 From a fresh clone, create the repository environment:
 
 ```bash
-uv venv --python 3.13.13
+uv venv
 source .venv/bin/activate
 uv sync --extra dev
 docker info >/dev/null

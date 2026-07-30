@@ -68,7 +68,7 @@ For each GDPVal task, the agent:
 
 1. **Install NeMo Gym** (see the [top-level README](../../README.md)):
    ```bash
-   uv venv --python 3.13.13 && source .venv/bin/activate
+   uv venv && source .venv/bin/activate
    uv sync --extra dev
    ```
 2. **Install document-generation dependencies** (needed for the GDPVal deliverable formats —

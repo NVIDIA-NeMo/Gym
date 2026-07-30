@@ -18,7 +18,7 @@ All commands below should be run from the **NeMo-Gym repository root** (the dire
 
 ```bash
 # Set up the project venv
-uv venv --python 3.13.13 && source .venv/bin/activate
+uv venv && source .venv/bin/activate
 uv sync --extra dev
 ```
 

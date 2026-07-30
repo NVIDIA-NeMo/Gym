@@ -94,7 +94,7 @@ test` build that venv automatically. To set it up manually for development:
 
 ```bash
 cd gym/resources_servers/toolsandbox
-uv venv --seed --python 3.13.13 .venv && source .venv/bin/activate
+uv venv --seed .venv && source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
