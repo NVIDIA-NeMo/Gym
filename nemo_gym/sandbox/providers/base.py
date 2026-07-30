@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 
 class SandboxStatus(str, Enum):
@@ -167,4 +167,26 @@ class SandboxProvider(Protocol):
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+@runtime_checkable
+class ConnectableProvider(Protocol):
+    """Optional capability: rebuild a handle in another process from a descriptor.
+
+    Providers whose sandboxes are reachable by id (external control plane, e.g.
+    OpenSandbox and Fargate, and the sandbox server's remote provider) implement
+    this. A provider that does not implement it can only be shared by fronting it
+    with a sandbox server. Membership is checked with ``isinstance`` because the
+    protocol is ``runtime_checkable``.
+    """
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a JSON-serializable descriptor that ``connect`` can rebuild a
+        handle from. ``scope`` is honored by providers that mint leases (the
+        remote provider) and ignored by the rest."""
+        ...
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Rebuild a live handle in this process from a descriptor."""
         ...
