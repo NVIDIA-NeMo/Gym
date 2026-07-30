@@ -81,6 +81,12 @@ def test_task_env_gateway_mode():
     assert env["MODEL_BASE_URL"] == "http://endpoint/v1"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
     assert env["BRAVE_API_KEY"] == "brave-key"
+    assert env["PINCHBENCH_ENABLE_THINKING"] == "1"
+
+
+def test_task_env_can_disable_openclaw_thinking_mode():
+    env = make_agent(openclaw_enable_thinking=False)._task_env("task_x")
+    assert env["PINCHBENCH_ENABLE_THINKING"] == "0"
 
 
 def test_task_env_resolves_configured_gym_model_server():
@@ -106,6 +112,14 @@ def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
     assert 'defaults["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'agent["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'diagnostics["stuckSessionAbortMs"] = provider_timeout_s * 1000' in wrapper_text
+
+
+def test_direct_exec_wrapper_configures_openclaw_thinking_mode(tmp_path):
+    wrapper = make_agent()._write_direct_exec_wrapper(tmp_path)
+    wrapper_text = wrapper.read_text()
+
+    assert "PINCHBENCH_ENABLE_THINKING" in wrapper_text
+    assert '"chat_template_kwargs": {"enable_thinking": enable_thinking}' in wrapper_text
 
 
 def test_build_spec_from_config():

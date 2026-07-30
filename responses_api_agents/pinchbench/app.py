@@ -114,6 +114,8 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
+    # Controls the model server chat-template thinking mode passed through OpenClaw.
+    openclaw_enable_thinking: bool = True
     # Optional OpenClaw provider request timeout in seconds. None keeps OpenClaw's 120s default.
     openclaw_provider_timeout_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
@@ -190,6 +192,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             "PINCHBENCH_WEB_SEARCH_PROVIDER": self.config.web_search_provider,
             "PINCHBENCH_MAX_TOKENS": str(self.config.max_tokens),
             "PINCHBENCH_CONTEXT_WINDOW": str(self.config.context_window),
+            "PINCHBENCH_ENABLE_THINKING": "1" if self.config.openclaw_enable_thinking else "0",
             "TIMEOUT_MULT": str(self.config.timeout_multiplier),
             "PINCHBENCH_WORK_BASE": self.config.sandbox_work_base,
         }
@@ -269,13 +272,19 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             api_key = os.environ.get("MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
             max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "65536"))
             context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "131072"))
+            enable_thinking = os.environ.get("PINCHBENCH_ENABLE_THINKING", "1").strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
             provider_timeout_s = int(os.environ["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"]) if os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS") else None
             runtime_params = {
                 "temperature": 1,
                 "top_p": 0.95,
                 "seed": 0,
                 "skip_special_tokens": False,
-                "chat_template_kwargs": {"enable_thinking": True},
+                "chat_template_kwargs": {"enable_thinking": enable_thinking},
                 "maxTokens": max_tokens,
                 "max_tokens": max_tokens,
                 "max_completion_tokens": max_tokens,

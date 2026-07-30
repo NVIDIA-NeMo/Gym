@@ -55,6 +55,7 @@ small NVIDIA integration patch:
 | `sandbox_work_base` | writable, per-sandbox-isolated working mount (default `/sandbox`); run_task.sh puts the skill copy, `$HOME`, `$TMPDIR` and the benchmark run-root here |
 | `task_timeout_s` | per-task exec timeout |
 | `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to the provider timeout, agent timeout ceiling, and stuck-session diagnostics timeout so values above OpenClaw's defaults are effective |
+| `openclaw_enable_thinking` | whether OpenClaw passes `chat_template_kwargs.enable_thinking` to the policy model (default `true`) |
 | `model_server` | optional Gym policy-model reference; preferred over `model_base_url` when set |
 | `model_base_url` / `model_api_key` / `model_name` | direct policy-endpoint fallback and model credentials/name |
 | `judge_model` / `judge_base_url` / `judge_api_key` | judge for hybrid / `llm_judge` tasks |
@@ -118,6 +119,7 @@ pinchbench_agent:
     pinchbench:
       # ... model / sandbox / judge config ...
       openclaw_provider_timeout_seconds: 14400  # 4h
+      openclaw_enable_thinking: true            # default; set false for parser/debug ablations
       task_timeout_s: 14400                     # outer per-task sandbox exec bound
 ```
 
