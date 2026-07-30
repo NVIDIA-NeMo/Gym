@@ -30,6 +30,13 @@ class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
 
 
+class LangGraphVerifyResponse(BaseVerifyResponse):
+    # extra="allow" so the verifier's passthrough fields survive — notably the
+    # `_ng_failure_class` routing key, which rollout_collection needs to divert a
+    # judge failure to the sidecar instead of scoring it. Matches the subagents.
+    model_config = ConfigDict(extra="allow")
+
+
 class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
     config: LangGraphAgentConfig
@@ -70,7 +77,7 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
         model_response.output = outputs
         return model_response
 
-    async def run(self, request: Request, body: BaseRunRequest) -> BaseVerifyResponse:
+    async def run(self, request: Request, body: BaseRunRequest) -> LangGraphVerifyResponse:
         cookies = request.cookies
 
         seed = await self.server_client.post(
@@ -96,4 +103,4 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
             cookies=resp.cookies,
         )
         await raise_for_status(verify)
-        return BaseVerifyResponse.model_validate(await get_response_json(verify))
+        return LangGraphVerifyResponse.model_validate(await get_response_json(verify))
