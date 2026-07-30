@@ -63,8 +63,10 @@ sandbox:
       retries: 5
       retry_delay_s: 1.0
       retry_max_delay_s: 45.0
-      # Commands retry only on errors classified retryable (connection drops,
-      # 5xx); command timeouts are never retried, so a long-running command
-      # that timed out is not double-executed.
-      command_retries: 2
+      # Left at 0 deliberately: a retried command that the server already
+      # started would run twice, and agent commands are frequently mutating
+      # (file writes, patch application, test-state changes). The keepalive
+      # bound above removes the stale-connection failures that retries would
+      # otherwise paper over. Raise it only for idempotent workloads.
+      command_retries: 0
       close_timeout_s: 30
