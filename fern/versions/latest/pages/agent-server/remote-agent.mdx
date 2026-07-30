@@ -81,9 +81,13 @@ accumulated in `input`:
 
 ## Quickstart
 
-A minimal service — ask for a tool once, then answer (FastAPI, ~25 lines):
+A complete, runnable example against the in-repo stateful counter environment
+(`example_session_state_mgmt`; tasks read "add 1 then add 2 then get the count"). The service
+asks Gym for every increment, then for the value, then answers with it — three loop turns:
 
 ```python
+# service.py
+import json, re
 from fastapi import FastAPI, Request
 
 app = FastAPI()
@@ -91,14 +95,22 @@ app = FastAPI()
 @app.post("/v1/responses")
 async def responses(request: Request):
     params = await request.json()
-    tool_results = [i for i in params["input"] if i.get("type") == "function_call_output"]
-    if not tool_results:                      # turn 1: ask Gym to run a tool
-        output = [{"type": "function_call", "id": "fc_1", "call_id": "c1",
-                   "name": params["tools"][0]["name"], "arguments": "{}"}]
-    else:                                     # turn 2: answer from the tool result
+    task = next(i["content"] for i in params["input"] if i.get("role") == "user")
+    increments = [int(n) for n in re.findall(r"add (\d+)", task)]
+    results = [i for i in params["input"] if i.get("type") == "function_call_output"]
+
+    if not results:                            # turn 1: ask Gym to run every increment
+        output = [{"type": "function_call", "id": f"fc_{k}", "call_id": f"c{k}",
+                   "name": "increment_counter", "arguments": json.dumps({"count": n})}
+                  for k, n in enumerate(increments)]
+    elif len(results) == len(increments):      # turn 2: ask for the final value
+        output = [{"type": "function_call", "id": "fc_get", "call_id": "c_get",
+                   "name": "get_counter_value", "arguments": "{}"}]
+    else:                                      # turn 3: answer with it
+        count = json.loads(results[-1]["output"])["count"]
         output = [{"type": "message", "role": "assistant", "status": "completed", "id": "msg_1",
-                   "content": [{"type": "output_text", "text": tool_results[-1]["output"],
-                                "annotations": []}]}]
+                   "content": [{"type": "output_text", "text": str(count), "annotations": []}]}]
+
     return {
         "id": "my-service", "created_at": 0.0, "model": "my-model", "object": "response",
         "output": output,
@@ -111,9 +123,18 @@ async def responses(request: Request):
     }
 ```
 
-Wire it into Gym:
+One config file wires the environment and the agent together (this exact shape drove the live
+end-to-end run — the only thing that changes for your own benchmark is the resources-server
+block and the ref name):
 
 ```yaml
+# counter_remote.yaml
+example_session_state_mgmt_resources_server:
+  resources_servers:
+    example_session_state_mgmt:
+      entrypoint: app.py
+      domain: agent
+
 remote_agent:
   responses_api_agents:
     remote_agent:
@@ -121,14 +142,31 @@ remote_agent:
       agent_base_url: http://localhost:9000     # your service
       resources_server:
         type: resources_servers
-        name: my_env_resources_server            # the top-level key of that environment's config
+        name: example_session_state_mgmt_resources_server   # the top-level key above
+      concurrency: 4
+      max_steps: 8
 ```
 
+Run all three pieces:
+
 ```bash
-gym env start --resources-server my_env "+config_paths=[.../remote_agent.yaml]" ...
+uvicorn service:app --port 9000                              # your service
+gym env start "+config_paths=[counter_remote.yaml]"          # Gym: environment + remote_agent
 gym eval run --no-serve +agent_name=remote_agent \
-    +input_jsonl_fpath=data/tasks.jsonl +output_jsonl_fpath=results/rollouts.jsonl
+    +input_jsonl_fpath=resources_servers/example_session_state_mgmt/data/example.jsonl \
+    +output_jsonl_fpath=results/rollouts.jsonl
 ```
+
+Expected: 5 rollouts, `mean/reward: 1.0`, and each trajectory reads
+`function_call → function_call_output → ... → message`.
+
+<Tip>
+A real service replaces the regex with an actual agent: render the incoming conversation into
+your agent's context, let it decide, and translate its decision into unpaired `function_call`
+items or a final message. The live end-to-end test of this page ran exactly that — a
+containerized service using the Claude CLI as the brain — against the same counter environment,
+scoring 5/5.
+</Tip>
 
 ## Configuration knobs
 
