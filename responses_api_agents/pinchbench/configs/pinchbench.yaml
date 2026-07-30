@@ -23,12 +23,11 @@ pinchbench_agent:
           cpu: 4
           memory_mib: 8192
       task_timeout_s: 1800
-      # Policy model OpenClaw runs against. Set model_server to a Gym model-server
-      # reference; when null, model_base_url remains the direct-endpoint fallback.
+      # Policy model OpenClaw runs against (streaming-capable endpoint; secrets
+      # supplied via CLI/env overrides at run time — never committed).
       model_base_url: ${model_base_url}
       model_api_key: ${model_api_key}
       model_name: ${model_name}
-      model_server: null
       # Judge for hybrid / llm_judge tasks (OpenAI-compatible endpoint).
       judge_model: ${judge_model}
       judge_base_url: ${judge_base_url}
