@@ -96,6 +96,9 @@ app = FastAPI()
 async def responses(request: Request):
     params = await request.json()
     task = next(i["content"] for i in params["input"] if i.get("role") == "user")
+    # The "brain" of this toy service: reading what the task wants out of the natural-language
+    # instruction. A real service does this with its model/agent (see the tip below); the tools
+    # field only carries the callable schemas, never the task-specific values.
     increments = [int(n) for n in re.findall(r"add (\d+)", task)]
     results = [i for i in params["input"] if i.get("type") == "function_call_output"]
 
