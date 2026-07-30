@@ -7,9 +7,10 @@ position: 3
 # Drive a Remote Agent
 
 The `remote_agent` server lets an agent that runs as **its own HTTP service** — in your repo, on
-your infrastructure — be driven by standard rollout collection. Your service implements one
-endpoint and is **called like a model**: it receives the conversation so far and returns what it
-wants to do next. Gym runs the loop, executes environment tools, holds the session, and verifies.
+your infrastructure — be driven by standard rollout collection. Your service implements an
+endpoint **compliant with the OpenAI `/v1/responses` contract**, called like a model: it receives
+the conversation so far and returns what it wants to do next. Gym runs the loop, executes
+environment tools, holds the session, and verifies.
 Your results land in the standard artifacts (`gym eval profile`, aggregation, and training
 pipelines all work unchanged).
 
