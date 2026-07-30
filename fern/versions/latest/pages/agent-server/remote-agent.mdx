@@ -14,12 +14,12 @@ Your results land in the standard artifacts (`gym eval profile`, aggregation, an
 pipelines all work unchanged).
 
 ```
-collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──▶ your service
-                        │      ▲                                 (returns tool asks
-                        │      └── tool results appended,         or a final answer)
-                        │          loop repeats
-                        ▼
-                  resources server (seed / tools / verify — never exposed to your service)
+collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──▶ your service ⟲ your model,
+                        │      ▲                                               your own tools
+                        │      └── Gym-tool results appended,     (any number of internal steps,
+                        │          loop repeats                    then: Gym-tool asks
+                        ▼                                          or a final answer)
+                  resources server (seed / Gym tools / verify — never exposed to your service)
 ```
 
 ## Who does what
