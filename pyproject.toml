@@ -168,8 +168,7 @@ dependencies = [
     # Ray: Used for distributed processing
     # Updated Tue Jul 29, 2026 with ray[default]>=2.56.1
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    # TEMPORARY: revert before merge
-    "ray[default]>=2.55.1",
+    "ray[default]>=2.56.1",
 
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
