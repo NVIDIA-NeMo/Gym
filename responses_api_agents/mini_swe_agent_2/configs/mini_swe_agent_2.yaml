@@ -27,13 +27,25 @@ mini_swe_agent_2:
       sandbox_spec:
         ttl_s: 18000
         ready_timeout_s: 1200
+        # `resources` are the pod LIMITS: the ceiling a task may burst to.
+        # SWE-bench work is memory-spiky (dependency builds, full test runs), and
+        # a tight ceiling OOM-kills the pod mid-rollout, which surfaces to the
+        # client as a 502 and costs the whole rollout.
         resources:
-          cpu: 2
+          cpu: 1
           memory_mib: 8192
           # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
           # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
           disk_gib: 30
-        provider_options: {}
+        provider_options:
+          # Scheduling REQUESTS, deliberately well below the limits above so the
+          # cluster packs sandboxes densely instead of reserving each one's peak.
+          # Providers that do not support a separate requests map fall back to
+          # applying the limits as requests=limits, which is still correct.
+          resource_requests:
+            cpu: 0.5
+            memory_mib: 2048
+            disk_gib: 30
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
