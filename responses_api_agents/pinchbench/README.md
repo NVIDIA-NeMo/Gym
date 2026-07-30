@@ -54,7 +54,7 @@ small NVIDIA integration patch:
 | `sandbox_spec` | the per-task sandbox: `image` (`${sandbox_image}` — a `.sif` path or `docker://` ref built from `Dockerfile.benchmark`), `resources`, `ready_timeout_s`, … |
 | `sandbox_work_base` | writable, per-sandbox-isolated working mount (default `/sandbox`); run_task.sh puts the skill copy, `$HOME`, `$TMPDIR` and the benchmark run-root here |
 | `task_timeout_s` | per-task exec timeout |
-| `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to both the provider timeout and agent timeout ceiling so values above OpenClaw's 120s default are effective |
+| `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to provider, agent, and diagnostic stuck-session recovery ceilings so values above OpenClaw's defaults are effective |
 | `model_base_url` / `model_api_key` / `model_name` | policy model OpenClaw runs against |
 | `judge_model` / `judge_base_url` / `judge_api_key` | judge for hybrid / `llm_judge` tasks |
 | `max_tokens`, `context_window`, `max_concurrent`, `timeout_multiplier` | run tuning |
@@ -101,12 +101,13 @@ Each rollout returns `reward` (continuous `[0,1]`), `grading_type`, `grading_bre
 ## OpenClaw LLM idle timeout
 
 OpenClaw aborts a model request if the endpoint produces no tokens inside its stream-idle watchdog
-window. The default stays at OpenClaw's original 120s. For slow or highly concurrent endpoints, raise
-the provider timeout with `openclaw_provider_timeout_seconds`; the agent passes it as
-`PINCHBENCH_PROVIDER_TIMEOUT_SECONDS`, and the direct-exec wrapper plus baked PinchBench patch write it
-to OpenClaw's `models.providers.custom.timeoutSeconds` and `agents.defaults.timeoutSeconds`. Both are
-needed: a provider timeout lower than the default shortens the watchdog, but a provider timeout above
-120s is still capped unless the agent timeout ceiling is raised too.
+window. It can also abort a long active run through diagnostic stuck-session recovery when model-call
+progress stays stale. For slow or highly concurrent endpoints, raise the provider timeout with
+`openclaw_provider_timeout_seconds`; the agent passes it as `PINCHBENCH_PROVIDER_TIMEOUT_SECONDS`, and
+the direct-exec wrapper plus baked PinchBench patch write it to OpenClaw's
+`models.providers.custom.timeoutSeconds`, `agents.defaults.timeoutSeconds`, and
+`diagnostics.stuckSessionAbortMs`. All three are needed when a streaming client routes through a slow
+or buffered model endpoint.
 
 ```yaml
 pinchbench_agent:
@@ -117,8 +118,8 @@ pinchbench_agent:
       task_timeout_s: 14400                     # outer per-task sandbox exec bound
 ```
 
-`task_timeout_s` is separate from OpenClaw's provider timeout. Keep it at least as large as the
-provider timeout when long idle waits are expected.
+`task_timeout_s` is separate from OpenClaw's provider and diagnostic timeouts. Keep it at least as
+large as the provider timeout when long waits are expected.
 
 ## Validation (parity vs vanilla standalone)
 

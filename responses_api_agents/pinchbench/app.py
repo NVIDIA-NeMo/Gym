@@ -337,6 +337,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 for agent in agents.get("list", []):
                     if isinstance(agent, dict):
                         agent["timeoutSeconds"] = provider_timeout_s
+                diagnostics = cfg.setdefault("diagnostics", {})
+                diagnostics["stuckSessionAbortMs"] = provider_timeout_s * 1000
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), "utf-8")
             PYCFG
 
