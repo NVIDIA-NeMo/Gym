@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import base64
+import hashlib
 import json
 import os
 from copy import deepcopy
@@ -43,6 +44,16 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
+from nemo_gym.token_id_capture.gate import (
+    NG_CALL_ID_FIELD,
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
+    NG_ROLLOUT_ID_METADATA_KEY,
+    RolloutCaptureGate,
+    RolloutGateConfig,
+)
+from nemo_gym.token_id_capture.staging.records import CommitCoords
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -74,9 +85,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
 
+    # Gate-authoritative token capture (token-in/token-out): the model server
+    # becomes the custodian of token lineage. Dormant by default.
+    token_capture_gate: RolloutGateConfig = Field(default_factory=RolloutGateConfig)
+
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
+        if self.token_capture_gate.enabled and self.return_token_id_information:
+            # Fail loud at setup: the marker replaces the token-array echo;
+            # running both would double-carry tokens and confuse lineage.
+            raise ValueError(
+                "token_capture_gate.enabled=true is mutually exclusive with "
+                "return_token_id_information=true (the gate replaces the token echo)"
+            )
         return super().model_post_init(context)
 
 
@@ -110,6 +132,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = self.get_converter()
+
+        # Gate-authoritative capture: this server is the gate — lineage
+        # custody, per-rollout token buffers, prefix serving, receipts.
+        self._gate: Optional[RolloutCaptureGate] = None
+        if self.config.token_capture_gate.enabled:
+            self._gate = RolloutCaptureGate(registration_ttl_s=self.config.token_capture_gate.registration_ttl_s)
+
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        if self._gate is not None:
+            install_rollout_control_routes(app, self._gate)
+        return app
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -387,14 +421,32 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
-        client = self._resolve_client(request)
-
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "content_filter"
                 return res
+
+        # Gate-authoritative capture: apply the serving rule and admit the
+        # call. Token-in mode serves the exact committed prefix through the
+        # worker's required_prefix_token_ids splice seam; every mode carries
+        # the call identity for the worker's capture layer. Per-token
+        # logprobs + token-id return are requested so the worker extracts
+        # ids natively in-process; the gate strips them from the response
+        # below, so they never transit to the agent.
+        gate_decision = None
+        gate_rollout_id: Optional[str] = None
+        if self._gate is not None:
+            gate_rollout_id = (body_dict.get("metadata") or {}).get(NG_ROLLOUT_ID_METADATA_KEY)
+        if gate_rollout_id:
+            gate_decision = self._gate.prepare_call(gate_rollout_id, body_dict["messages"])
+            if gate_decision.prefix_ids is not None:
+                body_dict["required_prefix_token_ids"] = gate_decision.prefix_ids
+            body_dict[NG_CAPTURE_FIELD] = gate_decision.capture_context()
+            body_dict |= dict(logprobs=True, top_logprobs=0, return_tokens_as_token_ids=True)
+
+        client = self._resolve_client(request, rollout_id=gate_rollout_id)
 
         try:
             chat_completion_dict = await client.create_chat_completion(**body_dict)
@@ -410,6 +462,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
+            if gate_decision is not None:
+                # No marker is released for a failed call, so no child can
+                # exist; the rollout itself survives (§ 7).
+                self._gate.fail_call(gate_rollout_id, gate_decision.call_id, reason=f"http_{e.status}")
+
             result_content_str = e.response_content.decode()
 
             is_out_of_context_length = e.status == 400 and (
@@ -421,6 +478,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return res
             else:
                 raise e
+        except Exception:
+            if gate_decision is not None:
+                self._gate.fail_call(gate_rollout_id, gate_decision.call_id, reason="backend_error")
+            raise
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
@@ -501,6 +562,38 @@ class VLLMModel(SimpleResponsesAPIModel):
             # chat_completion_dict.pop("prompt_token_ids")
             # choice_dict.pop("token_ids")
 
+        if gate_decision is not None:
+            # Ingesting the coords riding the response IS the authoritative
+            # commit (§ 3.5): the worker staged the delta before responding.
+            # A response without coords means capture did not run for this
+            # call — commit it as capture_failed so the rollout is poisoned
+            # loudly instead of silently missing a call at finalize.
+            coords_dict = chat_completion_dict.pop(NG_COMMIT_COORDS_FIELD, None)
+            if coords_dict is not None:
+                coords = CommitCoords.model_validate(coords_dict)
+            else:
+                coords = CommitCoords(
+                    rollout_id=gate_decision.rollout_id,
+                    call_id=gate_decision.call_id,
+                    parent_call_id=gate_decision.parent_call_id,
+                    delta_len=0,
+                    cum_len=gate_decision.prev_len,
+                    digest="",
+                    staging_key="",
+                    weight_version=0,
+                    disposition="capture_failed",
+                )
+            marker = self._gate.ingest_coords(
+                coords,
+                request_messages=body_dict["messages"],
+                served_message=choice_dict["message"],
+            )
+            # Token ids and logprobs stop at the gate: the staged delta is
+            # the only token store on this path (§ 3.2).
+            choice_dict.pop("logprobs", None)
+            if marker is not None:
+                choice_dict["message"][NG_CALL_ID_FIELD] = marker
+
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
     def _create_empty_chat_completion(self) -> NeMoGymChatCompletion:
@@ -522,7 +615,15 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         )
 
-    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+    def _resolve_client(self, request: Request, rollout_id: Optional[str] = None) -> NeMoGymAsyncOpenAI:
+        if rollout_id is not None:
+            # Gate mode: rollout -> worker affinity by stable hash, so every
+            # call of a rollout lands on the engine holding its KV cache and
+            # its staged prefix splice history. Stateless (no map to leak;
+            # rollouts outlive sessions and vice versa).
+            client_idx = int(hashlib.sha256(rollout_id.encode("utf-8")).hexdigest(), 16) % len(self._clients)
+            return self._clients[client_idx]
+
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # There is probably a better way to select the endpoint for this request. But this will do for now.

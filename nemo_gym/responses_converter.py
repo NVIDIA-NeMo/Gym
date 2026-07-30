@@ -26,10 +26,12 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import (
+    RESPONSES_TO_MARKER,
     RESPONSES_TO_TRAIN,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
+    NeMoGymChatCompletionAssistantMessageWithMarkerParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionMessageParam,
@@ -69,6 +71,10 @@ class ResponsesConverterState(BaseModel):
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
 
     token_information: Optional[TokenIDLogProbMixin] = None
+    # Gate-authoritative capture: the ng_call_id marker riding the buffered
+    # assistant turn (mutually exclusive with token_information in practice —
+    # the marker replaces the token-array echo).
+    call_marker: Optional[str] = None
 
     def flush_assistant(self) -> None:
         if not (self.content_buffer or self.tool_calls_buffer):
@@ -85,6 +91,11 @@ class ResponsesConverterState(BaseModel):
                 **shared_params,
                 **self.token_information.model_dump(exclude_none=True),
             )
+        elif self.call_marker is not None:
+            message = NeMoGymChatCompletionAssistantMessageWithMarkerParam(
+                **shared_params,
+                ng_call_id=self.call_marker,
+            )
         else:
             message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)
 
@@ -92,6 +103,7 @@ class ResponsesConverterState(BaseModel):
 
         self.content_buffer = ""
         self.tool_calls_buffer = []
+        self.call_marker = None
 
 
 class ResponsesConverter(BaseModel):
@@ -163,6 +175,13 @@ class ResponsesConverter(BaseModel):
                     generation_log_probs=m["generation_log_probs"],
                     routed_experts=m.get("routed_experts"),
                 )
+
+            # Gate-authoritative capture: carry the ng_call_id marker onto the
+            # buffered assistant turn so the flushed chat message keeps the
+            # lineage pointer the gate attached at serve time. Markers only
+            # exist when the gate is enabled, so this is a no-op otherwise.
+            if m.get("ng_call_id"):
+                state.call_marker = str(m["ng_call_id"])
 
         state.flush_assistant()
 
@@ -417,6 +436,18 @@ class ResponsesConverter(BaseModel):
                 generation_token_ids=message_dict["generation_token_ids"],
                 generation_log_probs=message_dict["generation_log_probs"],
                 **extra_training_fields,
+            )
+
+        # Gate-authoritative capture: attach the ng_call_id marker to the last
+        # output item — the same carrier the token-array attachment uses above,
+        # ~10 bytes instead of KBs (§ 3.1). Mutually exclusive with the token
+        # echo by config (the gate never runs with return_token_id_information).
+        if message_dict.get("ng_call_id") and response_output:
+            last_response_output_item = response_output[-1]
+            marker_cls = RESPONSES_TO_MARKER[last_response_output_item.__class__]
+            response_output[-1] = marker_cls(
+                **last_response_output_item.model_dump(),
+                ng_call_id=str(message_dict["ng_call_id"]),
             )
 
         return response_output

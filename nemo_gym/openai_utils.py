@@ -123,6 +123,19 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     routed_experts: NotRequired[RoutedExperts]
 
 
+class CallMarkerMixin(BaseModel):
+    """Gate-authoritative capture's ``ng_call_id`` marker (§ 3.1): the ~10-byte
+    lineage pointer that replaces the token-array attachment on assistant
+    output. Agents echo history verbatim, so the next request carries its
+    parent call explicitly."""
+
+    ng_call_id: str
+
+
+class CallMarkerTypedDictMixin(TypedDict):
+    ng_call_id: Required[str]
+
+
 ########################################
 # Responses API inputs
 ########################################
@@ -285,6 +298,38 @@ RESPONSES_TO_TRAIN = {
 }
 
 
+class NeMoGymEasyInputMessageWithMarker(NeMoGymEasyInputMessage, CallMarkerMixin):
+    pass
+
+
+class NeMoGymMessageWithMarker(NeMoGymMessage, CallMarkerMixin):
+    pass
+
+
+class NeMoGymResponseOutputMessageWithMarker(NeMoGymResponseOutputMessage, CallMarkerMixin):
+    pass
+
+
+class NeMoGymResponseFunctionToolCallWithMarker(NeMoGymResponseFunctionToolCall, CallMarkerMixin):
+    pass
+
+
+class NeMoGymResponseReasoningItemWithMarker(NeMoGymResponseReasoningItem, CallMarkerMixin):
+    pass
+
+
+# Gate-authoritative capture: the marker rides the last content-bearing
+# output item of a served completion (same carrier as the token-echo's
+# ForTraining classes, ~10 bytes instead of KBs).
+RESPONSES_TO_MARKER = {
+    NeMoGymEasyInputMessage: NeMoGymEasyInputMessageWithMarker,
+    NeMoGymMessage: NeMoGymMessageWithMarker,
+    NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageWithMarker,
+    NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallWithMarker,
+    NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemWithMarker,
+}
+
+
 NeMoGymResponseInputItem = Union[
     NeMoGymEasyInputMessage,
     NeMoGymMessage,
@@ -301,6 +346,12 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseReasoningItemForTraining,
+    # Gate-authoritative capture markers:
+    NeMoGymEasyInputMessageWithMarker,
+    NeMoGymMessageWithMarker,
+    NeMoGymResponseOutputMessageWithMarker,
+    NeMoGymResponseFunctionToolCallWithMarker,
+    NeMoGymResponseReasoningItemWithMarker,
 ]
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
@@ -388,8 +439,16 @@ class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, Toke
     pass
 
 
+class NeMoGymChatCompletionMessageWithMarker(NeMoGymChatCompletionMessage, CallMarkerMixin):
+    pass
+
+
 class NeMoGymChoice(Choice):
-    message: Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining]
+    message: Union[
+        NeMoGymChatCompletionMessage,
+        NeMoGymChatCompletionMessageForTraining,
+        NeMoGymChatCompletionMessageWithMarker,
+    ]
 
 
 class NeMoGymChatCompletion(ChatCompletion):
@@ -459,6 +518,12 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
     pass
 
 
+class NeMoGymChatCompletionAssistantMessageWithMarkerParam(
+    NeMoGymChatCompletionAssistantMessageParam, CallMarkerTypedDictMixin
+):
+    pass
+
+
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
     # Override the iterable which is annoying to work with.
     content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
@@ -478,6 +543,8 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Union[
     # NeMoGymChatCompletionFunctionMessageParam,
     # Training:
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
+    # Gate-authoritative capture marker:
+    NeMoGymChatCompletionAssistantMessageWithMarkerParam,
 ]
 
 

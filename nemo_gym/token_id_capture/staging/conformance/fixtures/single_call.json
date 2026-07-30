@@ -1,0 +1,72 @@
+{
+  "rollout_id": "g0_r1",
+  "reward": 0.0,
+  "calls": [
+    {
+      "call_id": "a1",
+      "parent_call_id": null,
+      "mode": "text",
+      "prompt_token_ids": [
+        5,
+        6,
+        7,
+        8
+      ],
+      "generation_token_ids": [
+        9
+      ],
+      "generation_log_probs": [
+        -0.25
+      ],
+      "weight_version": 7
+    }
+  ],
+  "expected": {
+    "digests": [
+      "f4cc7cf930dcc821fbc9b87da523f1b487a51cb65adc7cec2eefb97b5cd54884"
+    ],
+    "manifest": [
+      {
+        "call_id": "a1",
+        "parent_call_id": null,
+        "delta_len": 5,
+        "cum_len": 5,
+        "digest": "f4cc7cf930dcc821fbc9b87da523f1b487a51cb65adc7cec2eefb97b5cd54884",
+        "staging_key": "g0_r1/a1",
+        "weight_version": 7,
+        "mode": "text",
+        "chain_hash": null,
+        "cum_hash": null
+      }
+    ],
+    "terminal_call_id": "a1",
+    "capture_poisoned": false,
+    "row": {
+      "token_ids": [
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "token_mask": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "logprobs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -0.25
+      ],
+      "call_ids": [
+        "a1"
+      ],
+      "prompt_len": 4
+    }
+  }
+}

@@ -21,13 +21,39 @@ records a ``TokenEntry`` from its complete response; a trainer reads a rollout's
 entries through a ``TokenSource``.
 """
 
+from typing import Any
+
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
-from nemo_gym.token_id_capture.reader import HttpTokenReader, LocalTokenReader, TokenReader
 from nemo_gym.token_id_capture.records import TOKEN_FIELDS, TokenEntry, extract_token_fields
-from nemo_gym.token_id_capture.routes import install_token_capture_routes, make_token_store
 from nemo_gym.token_id_capture.sink import TokenSink, capture_tokens, reset_token_sink, set_token_sink
-from nemo_gym.token_id_capture.source import CaptureTokenSource, TokenSource
 from nemo_gym.token_id_capture.store import TokenCaptureStore, validate_rollout_id
+
+
+# The reader/route/source exports pull in the server stack (fastapi, the
+# shared aiohttp client) through nemo_gym.server_utils. They are resolved
+# lazily (PEP 562) so the gate-authoritative capture core (the ``staging``
+# subpackage: records, digest, lineage, rebuild, protocols, conformance)
+# stays importable inside any framework's worker process with no serving
+# dependencies (the § 3.0 purity rule, enforced by
+# tests/unit_tests/test_token_capture_gate_primitives.py).
+_LAZY_EXPORTS = {
+    "TokenReader": ("nemo_gym.token_id_capture.reader", "TokenReader"),
+    "LocalTokenReader": ("nemo_gym.token_id_capture.reader", "LocalTokenReader"),
+    "HttpTokenReader": ("nemo_gym.token_id_capture.reader", "HttpTokenReader"),
+    "TokenSource": ("nemo_gym.token_id_capture.source", "TokenSource"),
+    "CaptureTokenSource": ("nemo_gym.token_id_capture.source", "CaptureTokenSource"),
+    "make_token_store": ("nemo_gym.token_id_capture.routes", "make_token_store"),
+    "install_token_capture_routes": ("nemo_gym.token_id_capture.routes", "install_token_capture_routes"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    return getattr(import_module(target[0]), target[1])
 
 
 __all__ = [
