@@ -15,9 +15,15 @@
 """Lexmount interactive-browser resources server for NeMo-Gym.
 
 Stateful environment: each rollout (`session_id`) owns one isolated live browser
-context. The policy drives it via tool calls (navigate/click/type/scroll/observe/
-finish); `verify()` scores task completion against the live browser state. The
-browser itself is pluggable (`backend: playwright | lexmount`) — see `backend.py`.
+context. The policy drives it via tool calls (navigate/click/type/observe/finish);
+`verify()` scores task completion against the live browser state. The browser
+itself is pluggable (`backend: playwright | lexmount`) — see `backend.py`.
+
+Session lifetime: a browser is released when the rollout is scored (`verify`) or
+when the same `session_id` is re-seeded. There is no independent episode TTL, so
+a rollout abandoned without either leaves its browser open until the process
+exits (local Playwright) or the provider reclaims it (`backend: lexmount` — see
+the known limits on `LexmountBackend`).
 """
 
 import re
@@ -43,12 +49,17 @@ except ImportError:  # script/standalone import (python app.py, local tests)
     from backend import BrowserBackend, make_backend
 
 
+# Sparse outcome reward; extend with new spec keys as tasks need them.
+_SCORING_KEYS = ("final_url", "url_contains", "dom_contains", "answer_equals")
+
+
 class LexmountBrowserConfig(BaseResourcesServerConfig):
     backend: str = "playwright"        # "playwright" (reference) | "lexmount"
     headless: bool = True
     endpoint: Optional[str] = None     # optional LEXMOUNT_BASE_URL override (backend: lexmount)
     browser_mode: str = "normal"       # Lexmount cloud browser mode (backend: lexmount)
-    max_elements: int = 50             # elements shown per observation
+    max_elements: int = 50             # elements collected + shown per observation
+    poll_timeout_sec: int = 150        # cloud session-create deadline (backend: lexmount)
 
 
 class LexmountSeedSessionRequest(BaseSeedSessionRequest):
@@ -140,6 +151,7 @@ class LexmountBrowserResourcesServer(SimpleResourcesServer):
             headless=self.config.headless,
             endpoint=self.config.endpoint,
             browser_mode=getattr(self.config, "browser_mode", "normal"),
+            poll_timeout_sec=getattr(self.config, "poll_timeout_sec", 150),
         )
         try:
             await backend.open(initial_url)
@@ -161,7 +173,7 @@ class LexmountBrowserResourcesServer(SimpleResourcesServer):
         return ToolResponse(observation="", error="no active session; seed_session must be called first")
 
     async def _render(self, st: _SessionState) -> str:
-        obs = await st.backend.observe()
+        obs = await st.backend.observe(max_elements=self.config.max_elements)
         return obs.render(max_elements=self.config.max_elements)
 
     # ----- tools (errors returned to model, never raised) ----------------- #
@@ -229,20 +241,27 @@ class LexmountBrowserResourcesServer(SimpleResourcesServer):
 
     async def _score(self, st: _SessionState) -> float:
         gt = st.gt or {}
-        # Sparse outcome reward; extend with new spec keys as tasks need them.
         if "final_url" in gt:
             return float(await st.backend.current_url() == gt["final_url"])
         if "url_contains" in gt:
             return float(gt["url_contains"] in await st.backend.current_url())
         if "dom_contains" in gt:
             # Check title + full visible page text (not just interactive elements),
-            # so non-interactive DOM text (e.g. a <p>) is matched too.
-            obs = await st.backend.observe()
+            # so non-interactive DOM text (e.g. a <p>) is matched too.  Only the
+            # title is used from the observation, so skip the element scan.
+            obs = await st.backend.observe(max_elements=0)
             haystack = (obs.title + " " + await st.backend.text()).lower()
             return float(str(gt["dom_contains"]).lower() in haystack)
         if "answer_equals" in gt:
             return float((st.answer or "").strip() == str(gt["answer_equals"]).strip())
-        return 0.0
+        # Fail loudly rather than scoring 0: a dataset whose verifier_metadata
+        # carries an unsupported (or misspelled) key would otherwise give every
+        # rollout reward 0, which is indistinguishable from a policy that never
+        # solves the task.
+        raise ValueError(
+            f"verifier_metadata has no supported scoring key (got {sorted(gt)}; "
+            f"expected one of {list(_SCORING_KEYS)})"
+        )
 
 
 if __name__ == "__main__":
