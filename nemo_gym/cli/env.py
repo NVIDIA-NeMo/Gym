@@ -162,6 +162,12 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
 
+        # Apply YAML-configured OTel settings into env BEFORE initialize_ray() so the
+        # raylet and all Ray workers it spawns inherit NEMO_LENS_ENABLED + OTEL_* vars.
+        from nemo_gym.observability.recorder import apply_otel_config_to_env
+
+        apply_otel_config_to_env((global_config_dict.get("observability") or {}).get("otel"))
+
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
