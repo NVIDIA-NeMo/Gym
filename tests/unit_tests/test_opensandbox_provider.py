@@ -15,12 +15,14 @@
 
 import asyncio
 import builtins
+import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
@@ -310,6 +312,8 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     )
 
     config = provider._connection_config()
+    transport = config.kwargs.pop("transport")
+    assert isinstance(transport, httpx.AsyncBaseTransport)
     assert config.kwargs == {
         "domain": "sandbox.example",
         "api_key": "key",  # pragma: allowlist secret
@@ -319,6 +323,42 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     }
     short_timeout_config = provider._connection_config(request_timeout_s=3)
     assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
+
+
+def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default backend is aiohttp via the httpx-aiohttp bridge (a sandbox-extra
+    # dependency), with the configured keepalive expiry on the pool.
+    aiohttp_transport_cls = pytest.importorskip(
+        "httpx_aiohttp", reason="httpx-aiohttp optional sandbox dependency is not installed"
+    ).AiohttpTransport
+    provider = opensandbox_provider.OpenSandboxProvider()
+    transport = provider._build_transport()
+    assert isinstance(transport, aiohttp_transport_cls)
+    assert transport.limits.keepalive_expiry == 3.0
+
+    # Explicit httpx backend, custom pool settings.
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "transport_backend": "httpx",
+            "keepalive_expiry_s": 2.5,
+            "max_connections": 7,
+            "max_keepalive_connections": 3,
+            "connect_retries": 1,
+        }
+    )
+    transport = provider._build_transport()
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
+
+    # aiohttp requested but httpx-aiohttp unavailable: falls back to httpx.
+    monkeypatch.setitem(sys.modules, "httpx_aiohttp", None)
+    provider = opensandbox_provider.OpenSandboxProvider()
+    transport = provider._build_transport()
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
+
+    # keepalive_expiry_s=null disables transport injection entirely.
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None})
+    config = provider._connection_config()
+    assert "transport" not in config.kwargs
 
     extensions = provider._resolve_extensions({"imagePullPolicy": "Never"})
     assert extensions["imagePullPolicy"] == "Never"
