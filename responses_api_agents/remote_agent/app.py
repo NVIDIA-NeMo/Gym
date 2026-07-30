@@ -21,8 +21,8 @@ called like a model: each call it receives the conversation so far (the row's
 environment, it returns a ``function_call`` item WITHOUT a matching
 ``function_call_output``; tool calls it already answered itself (its own internal tools)
 ride along as paired call+output items and are passed through untouched. Gym runs the
-loop — copied from simple_agent — executing unpaired calls against the resources server
-and re-posting until the service returns a final assistant message.
+loop: it executes unpaired calls against the resources server and re-posts until the
+service returns a final assistant message.
 
 The resources server is never exposed to the service: tool execution, session cookies,
 and ``verifier_metadata`` all stay inside Gym.
@@ -130,8 +130,7 @@ class RemoteAgentConfig(BaseResponsesAPIAgentConfig):
     # the semaphore is acquired so queue wait does not count against it. The collector's
     # named-agent hop carries no timeout of its own; this is the only whole-rollout bound.
     run_timeout_secs: float = 2100.0
-    # Maximum loop steps (remote calls) per rollout; None leaves run_timeout_secs as the
-    # only bound, matching simple_agent's default.
+    # Maximum loop steps (remote calls) per rollout; None leaves run_timeout_secs as the only bound.
     max_steps: Optional[int] = None
 
     @field_validator("agent_base_url")
@@ -164,9 +163,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        # simple_agent's loop with the model hop swapped for the remote service. The service
-        # is called like a model: conversation in, Responses object out. Divergences from
-        # simple_agent are marked; everything else is kept verbatim.
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -176,13 +172,12 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         agent_server_cookies = None  # the service's own cookies, round-tripped so it can keep per-rollout state
-        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+        resources_server_cookies = request.cookies
 
         while True:
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
 
-            # Divergence: hardened POST to the external service instead of the model server.
             agent_response, agent_server_cookies = await self._post_agent_responses(new_body, agent_server_cookies)
 
             output = agent_response.output
@@ -204,9 +199,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             if agent_response.incomplete_details:
                 break
 
-            # Divergence: execute only UNPAIRED calls. A call the service already answered
-            # itself (matching function_call_output in the same response) is its own internal
-            # tool record — it passes through into the trajectory untouched.
+            # Execute only unpaired calls: a call the service already answered itself (matching
+            # function_call_output in the same response) is its own internal-tool record and
+            # passes through into the trajectory untouched.
             answered_call_ids = {o.call_id for o in output if o.type == "function_call_output"}
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [
                 o for o in output if o.type == "function_call" and o.call_id not in answered_call_ids
@@ -221,15 +216,12 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
                 except (json.JSONDecodeError, TypeError) as e:
-                    # The service produced malformed tool-call arguments. Surface the
-                    # error back as a tool response so the rollout can continue
-                    # (or terminate with a low reward) instead of crashing the
-                    # whole batch on json.loads.
+                    # Malformed arguments go back to the service as a tool error output
+                    # instead of crashing the rollout; repr(e) keeps the exception type
+                    # even when str(e) is empty.
                     tool_response = NeMoGymFunctionCallOutput(
                         type="function_call_output",
                         call_id=output_function_call.call_id,
-                        # Use repr(e) so the exception type name is always
-                        # included even when str(e) would be empty.
                         output=json.dumps({"error": f"Invalid tool call arguments: {e!r}"}),
                     )
                     new_outputs.append(tool_response)
@@ -241,7 +233,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                     json=parsed_arguments,
                     cookies=resources_server_cookies,
                 )
-                # We don't raise for status here since it's a valid return for the API to error e.g. if the service asks for an unknown tool or passes an invalid call.
+                # No raise_for_status: a tool error (unknown tool, invalid call) is a valid
+                # result the service should see and react to.
                 resources_server_cookies = api_response.cookies
 
                 tool_response = NeMoGymFunctionCallOutput(
@@ -251,12 +244,11 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
 
-            # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 break
 
-        # Propagate any extra cookies necessary for downstream verification. The service's
-        # own cookies are its private session and deliberately stay out of the Gym side.
+        # Resources-server cookies propagate for downstream verification; the service's own
+        # cookies are its private session and deliberately stay out.
         for k, v in resources_server_cookies.items():
             response.set_cookie(k, v)
 
@@ -314,8 +306,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 f"Is your service running at {self.config.agent_base_url}?"
             )
 
-        # client.request() returns once headers arrive; the body read can still raise
-        # (mid-body disconnect, deadline) and must honor the same never-raise contract.
+        # client.request() returns once headers arrive; the body read can still fail
+        # (mid-body disconnect, deadline).
         try:
             content = await response.read()
         except Exception as e:
@@ -391,7 +383,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 "remote service; the skills config is ignored.",
             )
 
-        # 1. Seed the session; the cookies key all per-session state on the resources server.
+        # Seed the session; the cookies key all per-session state on the resources server.
         cookies = request.cookies
         try:
             seed_response = await self.server_client.post(
@@ -407,7 +399,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 record, f"/seed_session on the resources server failed: {type(e).__name__}: {e}"
             )
 
-        # 2. Self-post to our own /v1/responses, which drives the agent/tool loop.
         try:
             loop_response = await self.server_client.post(
                 server_name=self.config.name,
@@ -429,7 +420,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
 
         self._warn_on_response_quality(response_json)
 
-        # 3. Verify on the SAME session; the verify response (reward included) is /run's result.
+        # Verify on the SAME session; the verify response (reward included) is /run's result.
         try:
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
