@@ -18,7 +18,7 @@ import json
 import pytest
 import yaml
 
-from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR, _resolve_under_cwd_or_install
 from nemo_gym.prompt import (
     PromptConfig,
     apply_prompt_to_row,
@@ -77,12 +77,14 @@ class TestResolveUnderCwdOrInstall:
         assert _resolve_under_cwd_or_install(str(tmp_path / "x.yaml")) == tmp_path / "x.yaml"
 
     def test_cwd_preferred_over_install_root(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
         monkeypatch.chdir(tmp_path)
         (tmp_path / "rel.yaml").write_text("{}")
         assert _resolve_under_cwd_or_install("rel.yaml") == tmp_path / "rel.yaml"
 
     def test_falls_back_to_install_root(self, tmp_path, monkeypatch):
         # cwd lacks the file; a file present under the install root resolves there.
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
         monkeypatch.chdir(tmp_path)
         rel = "test_resolve_install_fallback.yaml"
         install_file = PARENT_DIR / rel
@@ -92,7 +94,8 @@ class TestResolveUnderCwdOrInstall:
         finally:
             install_file.unlink()
 
-    def test_missing_returns_cwd_candidate(self, tmp_path, monkeypatch):
+    def test_missing_returns_highest_priority_root_candidate(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
         monkeypatch.chdir(tmp_path)
         assert _resolve_under_cwd_or_install("nope.yaml") == tmp_path / "nope.yaml"
 

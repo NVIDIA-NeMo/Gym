@@ -167,9 +167,16 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                         agent.types.append(entry.get("type"))
                         if entry.get("type") == "train":
                             agent.license = entry.get("license")
-                            hf_id = entry.get("huggingface_identifier")
-                            if hf_id and isinstance(hf_id, dict):
-                                agent.huggingface_repo_id = hf_id.get("repo_id")
+                            source = entry.get("source")
+                            if isinstance(source, dict) and source.get("type") == "huggingface":
+                                agent.huggingface_repo_id = source.get("repo_id")
+
+                            # Backward compatibility for configs that still use the
+                            # deprecated parallel identifier fields.
+                            if not agent.huggingface_repo_id:
+                                hf_id = entry.get("huggingface_identifier")
+                                if isinstance(hf_id, dict):
+                                    agent.huggingface_repo_id = hf_id.get("repo_id")
             elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
                 agent.types.append("train")
     return agent
@@ -208,7 +215,8 @@ def extract_config_metadata(yaml_path: Path, from_agent: bool = False) -> Config
                         - name: train
                           type: {example_type_1}
                           license: {example_license_1}
-                          huggingface_identifier:
+                          source:
+                            type: huggingface
                             repo_id: {example_repo_id_1}
                             artifact_fpath: {example_artifact_fpath_1}
                         - name: validation

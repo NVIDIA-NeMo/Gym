@@ -1,0 +1,34 @@
+# overlap_metric_rule options: seq_match, ngram16, lcs (default)
+#   -> which overlap signal becomes reasoning_overlap
+# overlap_grading_rule options: base, multiply (default), minus
+#   -> how answer_score and reasoning_overlap combine into the reward:
+#      base     : reward = answer_score
+#      multiply : reward = answer_score * (1 - reasoning_overlap)
+#      minus    : reward = answer_score - reasoning_overlap
+#   answer_score      : F1 of the final answer's node list vs expected_answer
+#   reasoning_overlap : overlap between the reasoning and the input message (per overlap_metric_rule)
+lc_niah:
+  resources_servers:
+    lc_niah:
+      entrypoint: app.py
+      overlap_metric_rule: lcs
+      overlap_grading_rule: multiply
+      domain: knowledge
+      verified: false
+      description: Answer-correctness reward gated by low reasoning/input overlap
+      value: Reward correct answers while discouraging copying the prompt into reasoning
+
+lc_niah_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: lc_niah
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/lc_niah/data/example.jsonl

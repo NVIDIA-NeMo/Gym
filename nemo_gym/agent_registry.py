@@ -44,9 +44,11 @@ from typing import Dict, Optional, Tuple
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.discovery import discover_components
 
 
-AGENTS_DIR = PARENT_DIR / "responses_api_agents"
+AGENTS_SUBDIR = "responses_api_agents"
+AGENTS_DIR = PARENT_DIR / AGENTS_SUBDIR
 AGENT_CONFIGS_SUBDIR = "configs"
 
 
@@ -129,8 +131,8 @@ def _classify(config_paths: Tuple[Path, ...]) -> Tuple[bool, Optional[str]]:
     return not references_resources_server, description
 
 
-def discover_agents(agents_dir: Path = AGENTS_DIR) -> Dict[str, AgentEntry]:
-    """Map agent name -> :class:`AgentEntry` for every agent dir under ``responses_api_agents/``.
+def _discover_agents_in_dir(agents_dir: Path) -> Dict[str, AgentEntry]:
+    """Map agent name -> :class:`AgentEntry` for every agent dir under one ``responses_api_agents/`` dir.
 
     The name is the directory name. A directory is an agent if it has an ``app.py`` or at least one
     agent config. Returns an empty dict if the directory is missing.
@@ -158,3 +160,12 @@ def discover_agents(agents_dir: Path = AGENTS_DIR) -> Dict[str, AgentEntry]:
         )
 
     return agents
+
+
+def discover_agents() -> Dict[str, AgentEntry]:
+    """Map agent name -> :class:`AgentEntry` for every discoverable agent dir.
+
+    Scans the ``responses_api_agents/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
+    root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user agents shadow same-named built-ins.
+    """
+    return discover_components(AGENTS_SUBDIR, _discover_agents_in_dir)
