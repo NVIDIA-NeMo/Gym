@@ -239,6 +239,13 @@ sandbox = [
     # License: Apache 2.0
     "opensandbox>=0.1.9",
 
+    # httpx-aiohttp: aiohttp-backed httpx transport injected into the OpenSandbox
+    # SDK by the OpenSandbox provider (connection.transport_backend: aiohttp) for
+    # pooled connections with keepalive-expiry control.
+    # Updated: Thu Jul 30, 2026 with httpx-aiohttp==0.2.0
+    # License: BSD 3-Clause https://github.com/karpetrosyan/httpx-aiohttp/blob/master/LICENSE
+    "httpx-aiohttp>=0.2.0",
+
     # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
     # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
     # lifecycle calls. Upper bound <0.1: the SDK is alpha 0.0.x and the provider also relies on

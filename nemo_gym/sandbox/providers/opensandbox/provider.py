@@ -343,13 +343,32 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
 
 @dataclass(frozen=True)
 class OpenSandboxConnectionConfig:
-    """OpenSandbox server connection settings."""
+    """OpenSandbox server connection settings.
+
+    ``keepalive_expiry_s`` bounds how long the SDK's connection pool may keep an
+    idle connection before retiring it. It must stay BELOW the server's own
+    keep-alive idle timeout (uvicorn defaults to 5s): agent workloads idle
+    between commands, and reusing a socket the server already closed fails with
+    "Server disconnected without sending a response". Set to null to fall back
+    to the SDK's default transport (keepalive_expiry=30s).
+
+    ``transport_backend`` selects the HTTP transport handed to the SDK:
+    "aiohttp" uses the httpx-aiohttp bridge (an aiohttp ClientSession +
+    TCPConnector pool under the SDK's httpx surface) and falls back to the
+    plain httpx transport when httpx-aiohttp is not installed; "httpx" forces
+    the httpx transport.
+    """
 
     domain: str | None = None
     api_key: str | None = None
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
+    keepalive_expiry_s: float | None = 3.0
+    max_keepalive_connections: int = 20
+    max_connections: int = 100
+    connect_retries: int = 2
+    transport_backend: str = "aiohttp"
 
 
 @dataclass(frozen=True)
@@ -539,7 +558,32 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+        if self._connection.keepalive_expiry_s is not None:
+            kwargs["transport"] = self._build_transport()
         return ConnectionConfig(**kwargs)
+
+    def _build_transport(self) -> Any:
+        """Build the SDK transport with a keepalive expiry below the server's
+        keep-alive idle timeout, so pooled sockets are never reused after the
+        server has closed them."""
+        import httpx
+
+        limits = httpx.Limits(
+            max_connections=self._connection.max_connections,
+            max_keepalive_connections=self._connection.max_keepalive_connections,
+            keepalive_expiry=self._connection.keepalive_expiry_s,
+        )
+        if self._connection.transport_backend == "aiohttp":
+            try:
+                from httpx_aiohttp import AiohttpTransport
+
+                return AiohttpTransport(limits=limits)
+            except ImportError:
+                LOGGER.warning(
+                    "connection.transport_backend=aiohttp requested but httpx-aiohttp "
+                    "is not installed; falling back to the httpx transport"
+                )
+        return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
 
     async def aclose(self) -> None:
         """Close provider-owned resources."""
