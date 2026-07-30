@@ -204,11 +204,21 @@ remote_agent:
       max_steps: 8
 ```
 
-Run all three pieces:
+Run the three pieces in **separate terminals** — the first two are long-running servers, the
+third is the driver:
 
 ```bash
-uvicorn service:app --host 0.0.0.0 --port 9000               # your service, on ITS machine
-gym env start "+config_paths=[counter_remote.yaml]"          # Gym: environment + remote_agent
+# Terminal 1 — on your service's machine:
+uvicorn service:app --host 0.0.0.0 --port 9000
+```
+
+```bash
+# Terminal 2 — on the Gym machine: environment + remote_agent (leave running):
+gym env start "+config_paths=[counter_remote.yaml]"
+```
+
+```bash
+# Terminal 3 — on the Gym machine, once the servers report ready:
 gym eval run --no-serve +agent_name=remote_agent \
     +input_jsonl_fpath=resources_servers/example_session_state_mgmt/data/example.jsonl \
     +output_jsonl_fpath=results/rollouts.jsonl
