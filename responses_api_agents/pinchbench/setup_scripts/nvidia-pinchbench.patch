@@ -111,7 +111,7 @@ index 6207029..2fe4e1d 100644
  
      # Configure models.json for the bench agent
      bench_agent_dir = _get_agent_store_dir(agent_id) / "agent"
-@@ -312,33 +322,107 @@ def ensure_agent_exists(
+@@ -312,33 +322,110 @@ def ensure_agent_exists(
      if base_url:
          # Custom OpenAI-compatible endpoint — build a provider entry
          data: dict[str, Any] = {}
@@ -231,7 +231,7 @@ index 6207029..2fe4e1d 100644
          logger.info(
              "Configured custom provider (%s) with model %s for agent %s",
              base_url,
-@@ -377,7 +461,7 @@ def ensure_agent_exists(
+@@ -377,7 +464,7 @@ def ensure_agent_exists(
          except OSError as exc:
              logger.warning("Failed to delete sessions.json: %s", exc)
  
@@ -240,7 +240,7 @@ index 6207029..2fe4e1d 100644
  
  
  def cleanup_agent_sessions(agent_id: str) -> None:
-@@ -579,9 +663,9 @@ def _find_recent_session_path(agent_dir: Path, started_at: float) -> Path | None
+@@ -579,9 +666,9 @@ def _find_recent_session_path(agent_dir: Path, started_at: float) -> Path | None
      if not sessions_dir.exists():
          return None
      candidates = [
@@ -253,7 +253,7 @@ index 6207029..2fe4e1d 100644
      ]
  
      if not candidates:
-@@ -615,6 +699,7 @@ def _load_transcript(
+@@ -615,6 +702,7 @@ def _load_transcript(
              for candidate in (
                  session_dir / f"{resolved_session_id}.jsonl",
                  session_dir / f"{resolved_session_id}.ndjson",
@@ -261,7 +261,7 @@ index 6207029..2fe4e1d 100644
                  session_dir / resolved_session_id / "transcript.jsonl",
                  session_dir / resolved_session_id / "events.jsonl",
              ):
-@@ -1184,6 +1269,7 @@ def call_judge_api(
+@@ -1184,6 +1272,7 @@ def call_judge_api(
      """Call a judge model directly via API, bypassing OpenClaw.
  
      Dispatches based on model prefix:
@@ -269,7 +269,7 @@ index 6207029..2fe4e1d 100644
        - openrouter/* -> OpenRouter chat completions API
        - anthropic/*  -> Anthropic Messages API
        - openai/*     -> OpenAI chat completions API
-@@ -1191,6 +1277,17 @@ def call_judge_api(
+@@ -1191,6 +1280,17 @@ def call_judge_api(
  
      Returns {"status": str, "text": str, "error"?: str}.
      """
