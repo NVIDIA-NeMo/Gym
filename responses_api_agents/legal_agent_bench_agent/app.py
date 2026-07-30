@@ -75,6 +75,7 @@ import os
 import socket
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 sys.path.insert(0, "/agent_source_mount")
@@ -162,7 +163,7 @@ try:
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate(runner["responses_create_params"])
     response_kwargs = {"body": body}
     if "request" in inspect.signature(agent.responses).parameters:
-        response_kwargs["request"] = None
+        response_kwargs["request"] = SimpleNamespace(path_params={})
     response = asyncio.run(agent.responses(**response_kwargs))
     Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
 except Exception as exc:
