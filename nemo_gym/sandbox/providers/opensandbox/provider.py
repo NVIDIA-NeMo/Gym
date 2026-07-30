@@ -345,20 +345,11 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
 class OpenSandboxConnectionConfig:
     """OpenSandbox server connection settings.
 
-    ``keepalive_expiry_s`` bounds how long the SDK's connection pool may keep an
-    idle connection before retiring it. It must stay BELOW the server's own
-    keep-alive idle timeout (uvicorn defaults to 5s): agent workloads idle
-    between commands, and reusing a socket the server already closed fails with
-    "Server disconnected without sending a response". Set to null to fall back
-    to the SDK's default transport (keepalive_expiry=30s).
-
-    ``transport_backend`` selects the HTTP transport handed to the SDK:
-    "httpx" (default) uses httpx's own pooled transport; "aiohttp" is opt-in
-    and uses the httpx-aiohttp bridge (an aiohttp ClientSession + TCPConnector
-    pool under the SDK's httpx surface) — it requires the third-party
-    ``httpx-aiohttp`` package (not installed by default; pre-1.0, so opt-in
-    only) and falls back to the httpx transport with a warning when the
-    package is missing.
+    ``keepalive_expiry_s`` must stay below the server's own keep-alive idle
+    timeout (uvicorn defaults to 5s), or pooled sockets are reused after the
+    server has closed them; null falls back to the SDK's default transport.
+    ``transport_backend`` is "httpx" or "aiohttp" (via the optional
+    ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
     """
 
     domain: str | None = None
@@ -463,9 +454,8 @@ class OpenSandboxProviderOptions:
     volumes: tuple[Mapping[str, Any], ...] = ()
     skip_health_check: bool | None = None
     extensions: Mapping[str, str] = field(default_factory=dict)
-    # Kubernetes resource REQUESTS (same keys as SandboxSpec.resources). When
-    # set, SandboxSpec.resources becomes the LIMITS and this map the requests;
-    # when unset, the server applies the single resources map as both.
+    # Scheduling requests (same keys as SandboxSpec.resources, which become the
+    # limits). Unset, the server applies the single resources map as both.
     resource_requests: Mapping[str, Any] | None = None
 
     @classmethod
@@ -573,9 +563,7 @@ class OpenSandboxProvider:
         return ConnectionConfig(**kwargs)
 
     def _build_transport(self) -> Any:
-        """Build the SDK transport with a keepalive expiry below the server's
-        keep-alive idle timeout, so pooled sockets are never reused after the
-        server has closed them."""
+        """Build the SDK transport with the configured pool limits."""
         import httpx
 
         limits = httpx.Limits(
@@ -790,8 +778,6 @@ class OpenSandboxProvider:
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
         if options.resource_requests is not None:
-            # spec.resources are the pod LIMITS; this map is the scheduling
-            # REQUESTS. Without it the server applies `resource` as both.
             kwargs["resource_requests"] = _resource_map(SandboxResources.from_mapping(options.resource_requests))
         if spec.image is not None:
             kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
