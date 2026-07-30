@@ -139,6 +139,11 @@ def render(items: list) -> str:
 def responses(params: dict):  # sync handler: FastAPI runs it in a threadpool, so
     # concurrent rollouts don't block each other on the subprocess below.
     prompt = PROMPT.format(conversation=render(params["input"]), tools=json.dumps(params.get("tools", [])))
+    # `claude -p` runs Claude's full agentic loop in one invocation: read-only file tools
+    # (Read/Glob/Grep) work by default; permission-gated tools (WebSearch, Bash, ...) are
+    # auto-denied headlessly unless pre-approved, e.g. --allowedTools "WebSearch,Bash".
+    # Either way Claude uses its OWN tools multi-step inside this single call — returning
+    # to Gym is only for Gym-hosted tools or the final answer.
     proc = subprocess.run(
         ["claude", "-p", prompt, "--output-format", "json", "--model", MODEL],
         capture_output=True, timeout=300, check=True,
