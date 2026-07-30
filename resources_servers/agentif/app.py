@@ -21,10 +21,10 @@ exec a dataset-provided ``check_following(response)`` in a fresh globals dict.
 
 Two headline metrics follow upstream ``1.evaluation_api.py``:
 
-* **CSR** (Constraint Success Rate) — fraction of scored constraints that passed;
-  returned by ``verify()`` as the per-row reward.
-* **ISR** (Instruction Success Rate) — fraction of rows where every scored
-  constraint passed (all-or-nothing per row).
+* **ISR** (Instruction Success Rate) — 1.0 when every scored constraint in the
+  row passed, else 0.0; returned by ``verify()`` as the per-row reward.
+* **CSR** (Constraint Success Rate) — fraction of scored constraints that
+  passed; reported corpus-wide by ``compute_metrics``.
 
 Per-row dimension (unconditional / conditional / example_driven) and type
 (formatting / semantic / resource) tallies let ``compute_metrics`` reconstruct
@@ -299,10 +299,17 @@ class AgentIFResourcesServer(SimpleResourcesServer):
         isr_counted = 1 if n_scored else 0
         isr_pass = 1 if (n_scored and n_false == 0) else 0
 
-        LOG.info("agentif verify query_id=%s csr=%.3f n_scored=%d", meta.get("query_id"), csr, n_scored)
+        LOG.info(
+            "agentif verify query_id=%s isr=%d csr=%.3f n_scored=%d",
+            meta.get("query_id"),
+            isr_pass,
+            csr,
+            n_scored,
+        )
         return AgentIFVerifyResponse(
             **body.model_dump(),
-            reward=csr,
+            # Per-row reward is ISR (all-or-nothing); CSR is reported by compute_metrics.
+            reward=float(isr_pass),
             n_true=n_true,
             n_false=n_false,
             n_null=n_null,
@@ -351,7 +358,7 @@ class AgentIFResourcesServer(SimpleResourcesServer):
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: agent_metrics[k] for k in ("csr", "isr", "mean_reward") if k in agent_metrics}
+        return {k: agent_metrics[k] for k in ("isr", "csr", "mean_reward") if k in agent_metrics}
 
 
 if __name__ == "__main__":

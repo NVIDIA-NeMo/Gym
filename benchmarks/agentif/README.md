@@ -12,14 +12,15 @@ only supplies data and wiring, chaining to
 
 ## Metrics
 
-- **CSR** (Constraint Success Rate) — fraction of scored constraints that
-  passed; returned per row as the reward.
 - **ISR** (Instruction Success Rate) — fraction of rows where *every* scored
-  constraint passed (all-or-nothing per row).
+  constraint passed (all-or-nothing per row); returned per row as the reward,
+  so the report's final reward is ISR.
+- **CSR** (Constraint Success Rate) — fraction of scored constraints that
+  passed; reported corpus-wide.
 
 Per-dimension (`vanilla` / `condition` / `example`) and per-type (`formatting` /
 `semantic` / `tool`) accuracy breakdowns are computed by the resources server's
-`compute_metrics`; `csr`, `isr`, and `mean_reward` are the headline keys.
+`compute_metrics`; `isr`, `csr`, and `mean_reward` are the headline keys.
 
 ## Prepare data
 

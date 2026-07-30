@@ -261,7 +261,8 @@ def test_verify_multi_constraint_partial() -> None:
     )
     resp = _verify(server, body)
     assert resp.n_true == 1 and resp.n_false == 1
-    assert resp.reward == approx(0.5)
+    # Reward is ISR: one failed constraint means the whole row fails (0.0).
+    assert resp.reward == approx(0.0)
     assert resp.isr_pass == 0 and resp.isr_counted == 1
 
 
