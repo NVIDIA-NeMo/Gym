@@ -60,7 +60,7 @@ def prepare_helper(output_name: str, model: str, length: int, data_format: str =
     output_fpath = DATA_DIR / output_name
 
     run(
-        """uv venv --allow-existing --seed .venv \
+        """uv venv --python 3.13.14 --allow-existing --seed .venv \
 && source .venv/bin/activate \
 && uv pip install pyyaml bs4 scipy wonderwords html2text tenacity nltk transformers""",
         check=True,

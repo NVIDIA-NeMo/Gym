@@ -94,7 +94,7 @@ Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Pytho
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-uv venv && source .venv/bin/activate
+uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync
 ```
 
