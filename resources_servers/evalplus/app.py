@@ -209,15 +209,28 @@ class EvalPlusResourcesServer(SimpleResourcesServer):
 
         async with self._semaphore:
             loop = get_running_loop()
-            future = check_correctness_remote.remote(
-                self.config.dataset,
-                problem,
-                solution,
-                expected_output,
-                self.config.min_time_limit,
-                self.config.gt_time_limit_factor,
-            )
-            result = await loop.run_in_executor(None, ray.get, future)
+            _traceparent = None
+            try:
+                from opentelemetry.propagate import inject as _otel_inject
+
+                _carrier: dict[str, str] = {}
+                _otel_inject(_carrier)
+                _traceparent = _carrier.get("traceparent")
+            except Exception:
+                pass
+            from nemo_gym.observability.recorder import _otel_span_cm
+
+            with _otel_span_cm("ray.dispatch", {"runner": "check_correctness_remote"}):
+                future = check_correctness_remote.remote(
+                    self.config.dataset,
+                    problem,
+                    solution,
+                    expected_output,
+                    self.config.min_time_limit,
+                    self.config.gt_time_limit_factor,
+                    traceparent=_traceparent,
+                )
+                result = await loop.run_in_executor(None, ray.get, future)
 
         is_correct = result.get("base_status") == "pass"
         is_correct_plus = is_correct and result.get("plus_status") == "pass"

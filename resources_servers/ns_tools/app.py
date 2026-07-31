@@ -330,11 +330,18 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             body = await request.json()
 
             # Execute the tool
-            result = await self.tool_manager.execute_tool(
-                raw_name=tool_name,
-                args=body,
-                extra_args={"request_id": session_id},
-            )
+            from nemo_gym.observability.recorder import observability_span
+
+            async with observability_span(
+                "tool.call",
+                phase="execution",
+                attributes={"tool_name": tool_name, "session_id": session_id},
+            ):
+                result = await self.tool_manager.execute_tool(
+                    raw_name=tool_name,
+                    args=body,
+                    extra_args={"request_id": session_id},
+                )
 
             # Check for internal sandbox timeout (process_status == "timeout")
             try:

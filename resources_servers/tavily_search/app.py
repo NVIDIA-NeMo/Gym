@@ -262,12 +262,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         async_tavily_client = self._select_tavily_client()
         start_time = time()
-        results = await async_tavily_client.search(
-            body.query,
-            max_results=self.MAX_RESULTS,
-            exclude_domains=self._exclude_domains,
-            search_depth="advanced",
-        )
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        with _otel_span_cm("http.outbound", {"service": "tavily", "operation": "search"}):
+            results = await async_tavily_client.search(
+                body.query,
+                max_results=self.MAX_RESULTS,
+                exclude_domains=self._exclude_domains,
+                search_depth="advanced",
+            )
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function="search", status="success", start_time=start_time, end_time=time()
@@ -294,10 +297,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         async_tavily_client = self._select_tavily_client()
         start_time = time()
-        results = await async_tavily_client.extract(
-            urls=body.url,
-            query=body.query,
-        )
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        with _otel_span_cm("http.outbound", {"service": "tavily", "operation": "extract"}):
+            results = await async_tavily_client.extract(
+                urls=body.url,
+                query=body.query,
+            )
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function="extract", status="success", start_time=start_time, end_time=time()
@@ -355,9 +361,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
             async_tavily_client = self._select_tavily_client()
             start_time = time()
-            results = await async_tavily_client.extract(
-                urls=body.url,
-            )
+            from nemo_gym.observability.recorder import _otel_span_cm
+
+            with _otel_span_cm("http.outbound", {"service": "tavily", "operation": "extract"}):
+                results = await async_tavily_client.extract(
+                    urls=body.url,
+                )
             metrics.async_tavily_calls.append(
                 TavilySearchSingleAsyncTavilyMetrics(
                     function="extract", status="success", start_time=start_time, end_time=time()

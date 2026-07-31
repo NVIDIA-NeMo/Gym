@@ -203,8 +203,20 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            future = check_correctness_remote.remote(*task_args)
-            result, metadata = await future
+            _traceparent = None
+            try:
+                from opentelemetry.propagate import inject as _otel_inject
+
+                _carrier: dict[str, str] = {}
+                _otel_inject(_carrier)
+                _traceparent = _carrier.get("traceparent")
+            except Exception:
+                pass
+            from nemo_gym.observability.recorder import _otel_span_cm
+
+            with _otel_span_cm("ray.dispatch", {"runner": "check_correctness_remote"}):
+                future = check_correctness_remote.remote(*task_args, traceparent=_traceparent)
+                result, metadata = await future
 
             unit_tests_time_taken = time() - start_time
 

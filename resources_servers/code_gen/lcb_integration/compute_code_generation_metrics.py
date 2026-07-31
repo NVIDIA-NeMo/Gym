@@ -58,9 +58,30 @@ _CODE_GEN_DIR = str(Path(__file__).parent.parent)
         "env_vars": {"PYTHONPATH": _CODE_GEN_DIR},
     },
 )
-def check_correctness_remote(sample, generation, timeout, debug=True):
+def check_correctness_remote(sample, generation, timeout, debug=True, traceparent: str | None = None):
     """Ray wrapper of check_correctness for remote execution."""
-    return check_correctness(sample, generation, timeout, debug)
+    token = None
+    if traceparent:
+        try:
+            from opentelemetry.context import attach
+            from opentelemetry.propagate import extract
+
+            token = attach(extract({"traceparent": traceparent}))
+        except Exception:
+            pass
+    try:
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        with _otel_span_cm("ray.task", {"runner": "check_correctness_remote"}):
+            return check_correctness(sample, generation, timeout, debug)
+    finally:
+        if token is not None:
+            try:
+                from opentelemetry.context import detach
+
+                detach(token)
+            except Exception:
+                pass
 
 
 def check_correctness(sample, generation, timeout, debug=True):

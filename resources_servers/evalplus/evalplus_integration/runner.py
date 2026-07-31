@@ -51,6 +51,7 @@ def check_correctness_remote(
     expected_output: Dict[str, List],
     min_time_limit: float,
     gt_time_limit_factor: float,
+    traceparent: str | None = None,
 ) -> Dict[str, Any]:
     """Run base + plus checks for a single (task, completion) pair.
 
@@ -58,9 +59,22 @@ def check_correctness_remote(
     Returns a dict with `base_status`, `plus_status` (values: "pass" |
     "fail" | "timeout" | other strings from evalplus.eval).
     """
-    from evalplus.evaluate import check_correctness
+    token = None
+    if traceparent:
+        try:
+            from opentelemetry.context import attach
+            from opentelemetry.propagate import extract
 
-    result = check_correctness(
+            token = attach(extract({"traceparent": traceparent}))
+        except Exception:
+            pass
+    try:
+        from nemo_gym.observability.recorder import _otel_span_cm
+
+        with _otel_span_cm("ray.task", {"runner": "check_correctness_remote"}):
+            from evalplus.evaluate import check_correctness
+
+            result = check_correctness(
         dataset=dataset,
         completion_id=0,
         problem=problem,
@@ -72,11 +86,19 @@ def check_correctness_remote(
         min_time_limit=min_time_limit,
         gt_time_limit_factor=gt_time_limit_factor,
     )
-    base_outcome = result.get("base", [None, None])
-    plus_outcome = result.get("plus", [None, None])
-    return {
-        "base_status": base_outcome[0] if base_outcome else None,
-        "plus_status": plus_outcome[0] if plus_outcome else None,
-        "base_details": base_outcome[1] if len(base_outcome) > 1 else None,
-        "plus_details": plus_outcome[1] if len(plus_outcome) > 1 else None,
-    }
+            base_outcome = result.get("base", [None, None])
+            plus_outcome = result.get("plus", [None, None])
+            return {
+                "base_status": base_outcome[0] if base_outcome else None,
+                "plus_status": plus_outcome[0] if plus_outcome else None,
+                "base_details": base_outcome[1] if len(base_outcome) > 1 else None,
+                "plus_details": plus_outcome[1] if len(plus_outcome) > 1 else None,
+            }
+    finally:
+        if token is not None:
+            try:
+                from opentelemetry.context import detach
+
+                detach(token)
+            except Exception:
+                pass
