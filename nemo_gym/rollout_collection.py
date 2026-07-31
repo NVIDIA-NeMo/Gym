@@ -30,6 +30,7 @@ from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
+import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
@@ -146,6 +147,18 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
     if omitted:
         metrics[f"progress/{agent_name}/omitted"] = omitted
     return metrics
+
+
+# Connection-layer failures on /run are retried by re-POSTing, which reruns
+# the rollout server-side from scratch (a fresh sample of the same prompt).
+# HTTP error statuses are NOT retried — those indicate a real request/server
+# bug and must surface immediately.
+RUN_TRANSIENT_RETRIES = 3
+_RUN_TRANSIENT_ERRORS = (
+    aiohttp.ClientPayloadError,  # response body cut off mid-stream
+    aiohttp.ClientConnectionError,  # covers ClientOSError, ServerDisconnectedError, ClientConnectorError
+    ConnectionResetError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1980,9 +1993,36 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                    await raise_for_status(res)
-                    result = await get_response_json(res)
+                    # Connection-layer failures (dropped connection on the POST, or the body cut
+                    # off mid-read) are retried by re-POSTing, which reruns the rollout server-side
+                    # from scratch. HTTP error statuses are NOT retried. Once retries are exhausted
+                    # the last error falls through to the normal failure handling below.
+                    # Only for direct callers (e.g. NeMo-RL), where the error would otherwise kill
+                    # the whole rollout group; with route_failures_to_sidecar the failure is recorded
+                    # as a sidecar row and never resent, since the agent may already have run.
+                    max_transient_retries = 0 if route_failures_to_sidecar else RUN_TRANSIENT_RETRIES
+                    for attempt in range(1 + max_transient_retries):
+                        started_at = time()
+                        res = None
+                        try:
+                            res = await server_client.post(
+                                server_name=row["agent_ref"]["name"], url_path="/run", json=row
+                            )
+                            await raise_for_status(res)
+                            result = await get_response_json(res)
+                            break
+                        except _RUN_TRANSIENT_ERRORS as transient_exc:
+                            if attempt >= max_transient_retries:
+                                raise
+                            if res is not None:
+                                res.release()
+                            print(
+                                "[rollout_collection] /run transient failure for "
+                                f"{row['agent_ref']['name']}; retry {attempt + 1}/{max_transient_retries} "
+                                f"after {transient_exc!r}",
+                                flush=True,
+                            )
+                            await asyncio.sleep(min(5 * 2 ** (attempt + 1), 60))
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time() - started_at) * 1000
