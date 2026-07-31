@@ -346,7 +346,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
         direct_args = apptainer_cfg.get("direct_exec_args")
         if direct_args is None:
-            direct_args = ["--cleanenv", "--no-home"]
+            direct_args = ["--cleanenv", "--no-home", "--pid"]
         elif isinstance(direct_args, str):
             direct_args = direct_args.split()
 
