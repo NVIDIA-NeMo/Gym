@@ -444,3 +444,63 @@ class TestApp:
         }
         assert valid_verify_response.json() == expected_valid_verify_response_json
         assert server_client_post_mock.call_args_list == expected_invalid_verify_response_calls
+
+    async def test_run_skip_verification_uses_configured_reward(self, agent_config: ToolSimulationAgentConfig) -> None:
+        server_client_post_mock = AsyncMock()
+        server_client_mock = MagicMock(spec=ServerClient)
+        server_client_mock.post = server_client_post_mock
+        agent_server = ToolSimulationAgent(
+            config=agent_config.model_copy(
+                update={
+                    "skip_verification": True,
+                    "skip_verification_reward": 0.5,
+                }
+            ),
+            server_client=server_client_mock,
+        )
+        webserver = agent_server.setup_webserver()
+        test_client = TestClient(webserver)
+
+        response_object = {
+            "id": "chat_response_id",
+            "created_at": 1,
+            "model": "response_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        self._set_server_client_post_responses(server_client_post_mock, response_object)
+
+        response = test_client.post(
+            "/run",
+            json={
+                "responses_create_params": {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": "Please answer directly.",
+                        }
+                    ]
+                }
+            },
+        )
+
+        assert response.status_code == 200
+        response_json = response.json()
+        assert response_json["reward"] == 0.5
+        assert response_json["verification_skipped"] is True
+        assert response_json["response"]["id"] == "chat_response_id"
+        server_client_post_mock.assert_called_once_with(
+            server_name="tool_agent",
+            url_path="/v1/responses",
+            json=NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    NeMoGymEasyInputMessage(
+                        role="user",
+                        content="Please answer directly.",
+                    )
+                ],
+            ),
+        )

@@ -14,11 +14,13 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
+from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 
 
@@ -39,3 +41,31 @@ class TestBaseResponsesAPIAgent:
 
         agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
         agent.setup_webserver()
+
+    def test_build_skipped_verify_response_payload(self) -> None:
+        config = BaseResponsesAPIAgentConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="",
+            skip_verification=True,
+            skip_verification_reward=0.75,
+        )
+
+        class TestSimpleResponsesAPIAgent(SimpleResponsesAPIAgent):
+            async def responses(self, body=...):
+                raise NotImplementedError
+
+            async def run(self, body=...):
+                raise NotImplementedError
+
+        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        body = BaseRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]))
+        payload = agent.build_skipped_verify_response_payload(body, {"id": "response_id"})
+
+        assert payload == {
+            "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=[]).model_dump(),
+            "response": {"id": "response_id"},
+            "reward": 0.75,
+            "verification_skipped": True,
+        }
