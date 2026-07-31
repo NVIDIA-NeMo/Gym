@@ -1,0 +1,81 @@
+{
+  "rollout_id": "g3_r2",
+  "reward": 0.5,
+  "calls": [
+    {
+      "call_id": "k1",
+      "parent_call_id": null,
+      "mode": "text",
+      "prompt_token_ids": [
+        100,
+        101
+      ],
+      "generation_token_ids": [
+        102,
+        103,
+        104
+      ],
+      "generation_log_probs": [
+        -0.1,
+        -0.2,
+        -0.3
+      ],
+      "weight_version": 2
+    },
+    {
+      "call_id": "k2",
+      "parent_call_id": "k1",
+      "mode": "token_in",
+      "disposition": "capture_failed",
+      "weight_version": 2
+    }
+  ],
+  "expected": {
+    "digests": [
+      "2ab322ef48188371e488752b02ef1c022a90eea28262efcc3c30e9f4169e8aff"
+    ],
+    "manifest": [
+      {
+        "call_id": "k1",
+        "parent_call_id": null,
+        "delta_len": 5,
+        "cum_len": 5,
+        "digest": "2ab322ef48188371e488752b02ef1c022a90eea28262efcc3c30e9f4169e8aff",
+        "staging_key": "g3_r2/k1",
+        "weight_version": 2,
+        "mode": "text",
+        "chain_hash": null,
+        "cum_hash": null
+      }
+    ],
+    "terminal_call_id": "k1",
+    "capture_poisoned": true,
+    "row": {
+      "token_ids": [
+        100,
+        101,
+        102,
+        103,
+        104
+      ],
+      "token_mask": [
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "logprobs": [
+        0.0,
+        0.0,
+        -0.10000000149011612,
+        -0.20000000298023224,
+        -0.30000001192092896
+      ],
+      "call_ids": [
+        "k1"
+      ],
+      "prompt_len": 2
+    }
+  }
+}

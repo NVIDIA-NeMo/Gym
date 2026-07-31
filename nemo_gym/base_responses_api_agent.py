@@ -28,6 +28,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
+    TOKEN_ID_CAPTURE_ALL_AGENTS_KEY_NAME,
     TOKEN_ID_CAPTURE_ENABLED_KEY_NAME,
     get_first_server_config_dict,
 )
@@ -104,9 +105,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return False
-        token_capture = bool(global_config.get(TOKEN_ID_CAPTURE_ENABLED_KEY_NAME, False)) and bool(
-            getattr(self.config, "token_id_capture", False)
+        agent_opted_in = bool(getattr(self.config, "token_id_capture", False)) or bool(
+            global_config.get(TOKEN_ID_CAPTURE_ALL_AGENTS_KEY_NAME, False)
         )
+        token_capture = bool(global_config.get(TOKEN_ID_CAPTURE_ENABLED_KEY_NAME, False)) and agent_opted_in
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or token_capture)
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:

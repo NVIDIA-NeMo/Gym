@@ -92,6 +92,9 @@ MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 TOKEN_ID_CAPTURE_ENABLED_KEY_NAME = "token_id_capture_enabled"
 # Per-agent opt-in (on an agent's config block) for participating in training token capture.
 TOKEN_ID_CAPTURE_KEY_NAME = "token_id_capture"
+# Run-wide agent opt-in: treat every agent as token_id_capture=true. For training controllers
+# that cannot enumerate the agent servers configured via config_paths.
+TOKEN_ID_CAPTURE_ALL_AGENTS_KEY_NAME = "token_id_capture_all_agents"
 COMPONENT_NAME_KEY_NAME = "component_name"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -126,6 +129,11 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+# Opaque, caller-supplied rollout id. When present on a run body it is used verbatim as the
+# rollout id (correlation URL prefix + capture key) instead of deriving one from the
+# task/rollout indices — an integrating framework can then keep one id across its own data
+# plane and Gym's capture stack.
+ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"

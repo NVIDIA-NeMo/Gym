@@ -1,0 +1,123 @@
+{
+  "rollout_id": "g9_r3",
+  "reward": -1.0,
+  "calls": [
+    {
+      "call_id": "m1",
+      "parent_call_id": null,
+      "mode": "text",
+      "prompt_token_ids": [
+        1,
+        2,
+        3
+      ],
+      "generation_token_ids": [
+        4,
+        5
+      ],
+      "generation_log_probs": [
+        -0.5,
+        -0.5
+      ],
+      "weight_version": 3
+    },
+    {
+      "call_id": "m2",
+      "parent_call_id": "m1",
+      "mode": "token_in",
+      "prompt_token_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "generation_token_ids": [
+        7,
+        8,
+        9
+      ],
+      "generation_log_probs": [
+        -0.75,
+        -1.5,
+        -3.0
+      ],
+      "weight_version": 4
+    }
+  ],
+  "expected": {
+    "digests": [
+      "91210b69993e4582375d3c425b5b90b3693561420ae5b468705fc006c8f5f07f",
+      "a4cab21892f606ba3fca068b74edee96b3148ccc8d96f348f3413d516c9c0516"
+    ],
+    "manifest": [
+      {
+        "call_id": "m1",
+        "parent_call_id": null,
+        "delta_len": 5,
+        "cum_len": 5,
+        "digest": "91210b69993e4582375d3c425b5b90b3693561420ae5b468705fc006c8f5f07f",
+        "staging_key": "g9_r3/m1",
+        "weight_version": 3,
+        "mode": "text",
+        "chain_hash": null,
+        "cum_hash": null
+      },
+      {
+        "call_id": "m2",
+        "parent_call_id": "m1",
+        "delta_len": 4,
+        "cum_len": 9,
+        "digest": "a4cab21892f606ba3fca068b74edee96b3148ccc8d96f348f3413d516c9c0516",
+        "staging_key": "g9_r3/m2",
+        "weight_version": 4,
+        "mode": "token_in",
+        "chain_hash": null,
+        "cum_hash": null
+      }
+    ],
+    "terminal_call_id": "m2",
+    "capture_poisoned": false,
+    "row": {
+      "token_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "token_mask": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "logprobs": [
+        0.0,
+        0.0,
+        0.0,
+        -0.5,
+        -0.5,
+        0.0,
+        -0.75,
+        -1.5,
+        -3.0
+      ],
+      "call_ids": [
+        "m1",
+        "m2"
+      ],
+      "prompt_len": 3
+    }
+  }
+}
