@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import traceback
 from asyncio import Semaphore
@@ -578,7 +579,18 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
         }
     finally:
         if env and hasattr(env, "cleanup"):
-            env.cleanup()
+            # Off the critical path: this finally block runs before the task's
+            # return value becomes fetchable, so an in-band stop() delays every
+            # finished result and, on failure, re-raises over it. Orphans are
+            # covered by the provider's sandbox TTL.
+            threading.Thread(target=_cleanup_env_best_effort, args=(env,), daemon=True).start()
+
+
+def _cleanup_env_best_effort(env: Any) -> None:
+    try:
+        env.cleanup()
+    except Exception as e:
+        print(f"[CLEANUP] best-effort sandbox teardown failed: {e}", flush=True)
 
 
 def run_mini_swe_with_sandbox(**params: Any) -> Any:
