@@ -542,7 +542,17 @@ def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Pop
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     prefix = test_config.entrypoint.replace("/", "\\/")
     resolved_dir = test_config.resolved_dir_path
-    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest"""
+    pytest_args = ""
+    junit_dir_value = os.environ.get("GYM_CI_JUNIT_DIR", "").strip()
+    if junit_dir_value:
+        junit_dir = Path(junit_dir_value).expanduser().resolve()
+        junit_dir.mkdir(parents=True, exist_ok=True)
+        entrypoint = test_config.entrypoint.replace("\\", "/").strip("/")
+        report_name = f"{entrypoint.replace('/', '__')}.xml"
+        junit_path = junit_dir / report_name
+        junit_prefix = entrypoint.replace("/", ".")
+        pytest_args = f" --junitxml={shlex.quote(str(junit_path))} --junit-prefix={shlex.quote(junit_prefix)}"
+    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest{pytest_args}"""
     # Generated server tests import `resources_servers.<name>...`, so the project root (the dir
     # holding the server-type dirs) must be on PYTHONPATH when running from outside a repo checkout.
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
