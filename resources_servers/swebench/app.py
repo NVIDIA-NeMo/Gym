@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import Request
 from pydantic import BaseModel
@@ -26,6 +26,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.sandbox import Sandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -33,6 +34,10 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
 
     evaluation_timeout: Optional[int] = None
+
+    # Sandbox config
+    sandbox_provider: str
+    sandbox_config: Dict[str, Any]
 
 
 class SWEBenchVerifyRequest(BaseVerifyRequest):
@@ -103,13 +108,33 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             env_image_tag=LATEST,
         )
 
-        # TODO @bxyu-nvidia: Spinup a fresh container (need this anyways for running eval)
+        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        eval_sandbox_spec = SandboxSpec(
+            image=test_spec.instance_image_key,
+            ttl_s=self.config.sandbox_config.get("ttl_s", None),
+            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
+            workdir=None,  # Default to container's WORKDIR
+            env=dict(),
+            files=dict(),
+            metadata={
+                **self.config.sandbox_config.get("metadata", {}),
+                "nemo_gym_agent": "mini_swe_agent_2",
+                "instance_id": (self.config.instance_id or "unknown")[:63],
+            },
+            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            entrypoint=None,
+            provider_options=self.config.sandbox_config.get("provider_options", {}),
+        )
+        eval_sandbox = Sandbox(self.config.sandbox_provider).start(eval_sandbox_spec)
+
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
             # TODO @bxyu-nvidia: pwd in the fresh container (defaults to WORKDIR)
             # cd into WORKDIR in the input container
             # extract the patch via git
+            eval_sandbox.exec("pwd")
+
             model_patch = None
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
