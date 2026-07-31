@@ -18,8 +18,12 @@ transcript parsing) without launching a sandbox or invoking the model — so the
 fast and offline.
 """
 
+import asyncio
 import contextlib
 import json
+import os
+import signal
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -379,3 +383,45 @@ async def test_explicit_direct_exec_args_are_honoured(tmp_path):
     )
 
     assert "--pid" not in captured["argv"]
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_launches_in_a_new_session(tmp_path):
+    agent = make_agent(sandbox_spec={"image": "/img.sif"})
+    captured = await _capture_apptainer_launch(agent, tmp_path, {"direct_exec": True})
+
+    assert captured["kwargs"]["start_new_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_new_session_puts_the_child_in_its_own_process_group():
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(30)",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert os.getpgid(proc.pid) == proc.pid
+        assert os.getpgid(proc.pid) != os.getpgid(0)
+    finally:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_without_new_session_the_child_shares_our_process_group():
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(30)",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        assert os.getpgid(proc.pid) == os.getpgid(0)
+    finally:
+        proc.kill()
+        await proc.wait()
