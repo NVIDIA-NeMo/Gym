@@ -348,7 +348,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
         direct_args = apptainer_cfg.get("direct_exec_args")
         if direct_args is None:
-            direct_args = ["--cleanenv", "--no-home"]
+            direct_args = ["--cleanenv", "--no-home", "--pid"]
         elif isinstance(direct_args, str):
             direct_args = direct_args.split()
 
@@ -365,7 +365,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             argv += [str(image), "bash", f"{work_base}/{wrapper_path.name}"]
 
             with stdout_path.open("wb") as stdout_f, stderr_path.open("wb") as stderr_f:
-                proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout_f, stderr=stderr_f)
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, stdout=stdout_f, stderr=stderr_f, start_new_session=True
+                )
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=self.config.task_timeout_s)
                 except asyncio.TimeoutError as exc:
