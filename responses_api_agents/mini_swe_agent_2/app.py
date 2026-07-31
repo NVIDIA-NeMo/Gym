@@ -770,12 +770,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 config.setdefault("model", {}).setdefault("model_kwargs", {}).update(model_kwargs)
 
             output_file_dir = f"{Path.cwd()}/results/{subset}/{policy_model_name}"
-            # Root for the per-instance result JSONs (written below, re-read by
-            # skip_if_exists). NEMO_GYM_LOCAL_RESULTS_DIR can point it at
-            # node-local disk: these artifacts are only consumed on this node,
-            # and shared-filesystem metadata ops are slow under high rollout
-            # concurrency.
-            local_results_root = os.environ.get("NEMO_GYM_LOCAL_RESULTS_DIR") or output_file_dir
             config_path = mini_swe_config_path
             should_write_config = bool(model_kwargs)
             if self.config.sandbox_provider is None:
@@ -809,8 +803,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 await asyncio.to_thread(_dump_config)
 
             if self.config.skip_if_exists:
-                if Path(f"{local_results_root}/{instance_id}/{instance_id}.json").exists():
-                    with open(f"{local_results_root}/{instance_id}/{instance_id}.json", "r") as f:
+                if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
+                    with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "r") as f:
                         print(f"Skipping {instance_id} because it already exists")
                         verify_response = MiniSWEAgentVerifyResponse.model_validate_json(f.read())
                     return verify_response
@@ -880,7 +874,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 metadata=result.get("eval_report", {}) if result else {},
             )
 
-            output_path = Path(local_results_root) / str(instance_id)
+            output_path = Path(f"{output_file_dir}/{instance_id}")
             result_path = output_path / f"{instance_id}.json"
             result_payload = verify_response.model_dump()
 
