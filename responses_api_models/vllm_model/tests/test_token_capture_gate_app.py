@@ -274,6 +274,8 @@ def test_uncorrelated_call_passes_through_untouched(gate_server) -> None:
     response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
     assert response.status_code == 200
     assert "ng_capture" not in worker.requests[0], "uncorrelated traffic must not enter the gate"
+    metrics = client.get("/ng-control/metrics", headers=AUTH).json()
+    assert metrics["unattributed_calls"] == 1
 
 
 def test_control_routes_require_bearer_token(gate_server) -> None:

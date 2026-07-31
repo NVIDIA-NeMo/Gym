@@ -43,6 +43,7 @@ hosting lives in ``control_routes.py`` and the model-server app.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -57,6 +58,9 @@ from nemo_gym.token_id_capture.staging.lineage import (
     UnknownRolloutError,
 )
 from nemo_gym.token_id_capture.staging.records import CommitCoords, RolloutReceipt
+
+
+logger = logging.getLogger(__name__)
 
 
 # The identity carrier the gate attaches to every engine-bound request body and
@@ -158,7 +162,24 @@ class RolloutCaptureGate:
             "sealed": 0,
             "failed_rollouts": 0,
             "expired_rollouts": 0,
+            # Model calls that reached a gate-enabled server with no
+            # /ng-rollout/ correlation at all: served untouched (eval
+            # traffic, pre-registration side calls), but counted -- silent
+            # unattributed traffic on a training server is worth noticing.
+            "unattributed_calls": 0,
         }
+        self._warned_unattributed = False
+
+    def note_unattributed_call(self) -> None:
+        """Count an uncorrelated call passing through a gate-enabled server."""
+        self.metrics["unattributed_calls"] += 1
+        if not self._warned_unattributed:
+            self._warned_unattributed = True
+            logger.warning(
+                "A model call with no /ng-rollout/ correlation reached a gate-enabled server; "
+                "it is served on the legacy path and its tokens are not captured. "
+                "Counted under gate metric unattributed_calls (warning shown once)."
+            )
 
     @classmethod
     def from_config(cls, config: RolloutGateConfig) -> "RolloutCaptureGate":

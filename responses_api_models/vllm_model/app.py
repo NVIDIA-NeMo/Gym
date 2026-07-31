@@ -557,6 +557,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         context = current_capture_context()
         if context is None:
+            self._gate.note_unattributed_call()
             return body_dict
         if not self._gate.is_registered(context.rollout_id):
             raise HTTPException(
