@@ -28,6 +28,30 @@ Refer to the [RL Framework Integration Guide](https://docs.nvidia.com/nemo/gym/l
 
 **Not sure where to start?** Refer to our [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) or create a new issue to discuss your idea.
 
+## Licensing of Contributions
+
+NeMo Gym is licensed under the **Apache License, Version 2.0** (see [`LICENSE`](./LICENSE)).
+We accept contributions **only** under the terms of the Apache-2.0 license. By
+submitting a contribution, you agree that:
+
+- Your contribution is your own original work (or you have the right to submit it),
+  and it is licensed to the project and its users under Apache-2.0.
+- Every new source file you author carries the standard NVIDIA SPDX header:
+
+  ```text
+  # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  # SPDX-License-Identifier: Apache-2.0
+  ```
+
+- Do **not** introduce code under a license incompatible with Apache-2.0
+  (e.g. GPL/LGPL/AGPL or a proprietary/custom source license) into the main tree.
+- If you must vendor third-party code, it has to be under an Apache-2.0-compatible
+  license, its original notices must be preserved, any file you modify must retain
+  the upstream notice and add an NVIDIA `SPDX-License-Identifier: Apache-2.0`
+  modifications block, and the component must be recorded in
+  [`ATTRIBUTIONS.md`](./ATTRIBUTIONS.md). See
+  `resources_servers/toolsandbox/tool_sandbox/VENDORING.md` for a worked example.
+
 ## Development Setup
 
 For complete development setup, CI/CD requirements, commit signing, and troubleshooting, refer to the [Development Setup Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup.html).
