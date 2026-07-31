@@ -130,12 +130,11 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            # TODO @bxyu-nvidia: pwd in the fresh container (defaults to WORKDIR)
-            # cd into WORKDIR in the input container
+            # TODO @bxyu-nvidia: cd into WORKDIR in the input container
             # extract the patch via git
-            eval_sandbox.exec("pwd")
+            original_workdir = eval_sandbox.exec("pwd").stdout.strip()
 
-            model_patch = None
+            model_patch = original_workdir
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         res = run_instance(
