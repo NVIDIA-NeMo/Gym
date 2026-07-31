@@ -34,6 +34,7 @@ from responses_api_agents.pinchbench.app import (
     PinchBenchRunRequest,
     SandboxKilledError,
     _classify_task_failure,
+    _direct_exec_args,
 )
 
 
@@ -104,7 +105,7 @@ def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
 
     assert 'custom_provider["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'defaults["timeoutSeconds"] = provider_timeout_s' in wrapper_text
-    assert 'agent["timeoutSeconds"] = provider_timeout_s' in wrapper_text
+    assert 'agent["timeoutSeconds"] = provider_timeout_s' not in wrapper_text
     assert 'diagnostics["stuckSessionAbortMs"] = provider_timeout_s * 1000' not in wrapper_text
 
 
@@ -117,6 +118,13 @@ def test_direct_exec_wrapper_sets_stuck_session_abort_threshold(tmp_path):
     assert env["PINCHBENCH_STUCK_SESSION_ABORT_SECONDS"] == "7200"
     assert "PINCHBENCH_STUCK_SESSION_ABORT_SECONDS" in wrapper_text
     assert 'diagnostics["stuckSessionAbortMs"] = stuck_session_abort_s * 1000' in wrapper_text
+
+
+def test_direct_exec_args_force_private_pid_namespace():
+    assert _direct_exec_args(None) == ["--cleanenv", "--no-home", "--pid"]
+    assert _direct_exec_args(["--cleanenv", "--no-home"]) == ["--cleanenv", "--no-home", "--pid"]
+    assert _direct_exec_args("--cleanenv --no-home") == ["--cleanenv", "--no-home", "--pid"]
+    assert _direct_exec_args(["--cleanenv", "--no-home", "--pid"]) == ["--cleanenv", "--no-home", "--pid"]
 
 
 def test_build_spec_from_config():

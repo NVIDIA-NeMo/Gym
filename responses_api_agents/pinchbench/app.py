@@ -136,6 +136,23 @@ class SandboxKilledError(RuntimeError):
     """Sandbox process died by signal (walltime SIGTERM / preemption / OOM kill)."""
 
 
+def _direct_exec_args(raw_args: Any) -> list[str]:
+    """Normalize direct Apptainer args and force PID isolation for task sandboxes."""
+    if raw_args is None:
+        args = ["--cleanenv", "--no-home"]
+    elif isinstance(raw_args, str):
+        args = raw_args.split()
+    else:
+        args = [str(arg) for arg in raw_args]
+
+    # PinchBench tasks may run broad cleanup commands such as `pkill -f ...`.
+    # Without a private PID namespace, those commands can see and signal host
+    # model-server/Ray/vLLM processes that share the Slurm allocation.
+    if "--pid" not in args:
+        args.append("--pid")
+    return args
+
+
 def _classify_task_failure(exc: BaseException) -> str:
     """Map a task failure onto the dispatcher's routing classes."""
     if isinstance(exc, SandboxKilledError):
@@ -322,9 +339,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             defaults.setdefault("model", {})["primary"] = agent_model
             if provider_timeout_s is not None:
                 defaults["timeoutSeconds"] = provider_timeout_s
-                for agent in agents.get("list", []):
-                    if isinstance(agent, dict):
-                        agent["timeoutSeconds"] = provider_timeout_s
             if stuck_session_abort_s is not None:
                 diagnostics = cfg.setdefault("diagnostics", {})
                 diagnostics["stuckSessionAbortMs"] = stuck_session_abort_s * 1000
@@ -379,14 +393,10 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         wrapper_path = self._write_direct_exec_wrapper(staging_dir)
         archive = staging_dir / "out" / "out.tgz"
 
-        direct_args = apptainer_cfg.get("direct_exec_args")
-        if direct_args is None:
-            direct_args = ["--cleanenv", "--no-home"]
-        elif isinstance(direct_args, str):
-            direct_args = direct_args.split()
+        direct_args = _direct_exec_args(apptainer_cfg.get("direct_exec_args"))
 
         task_env = self._task_env(task_id, rollout_id)
-        argv = ["apptainer", "exec", *[str(arg) for arg in direct_args]]
+        argv = ["apptainer", "exec", *direct_args]
         argv += ["--bind", f"{staging_dir}:{work_base}"]
         for key, value in task_env.items():
             argv += ["--env", f"{key}={value}"]
