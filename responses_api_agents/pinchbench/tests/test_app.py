@@ -18,8 +18,9 @@ transcript parsing) without launching a sandbox or invoking the model — so the
 fast and offline.
 """
 
+import contextlib
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -343,3 +344,38 @@ def test_classify_task_failure_mapping():
     assert _classify_task_failure(TimeoutError("timed out")) == "timeout_exceeded"
     assert _classify_task_failure(RuntimeError("exec failed")) == "legitimate"
     assert _classify_task_failure(FileNotFoundError("apptainer")) == "legitimate"
+
+
+async def _capture_apptainer_launch(agent, tmp_path, apptainer_cfg):
+    captured = {}
+
+    async def fake_exec(*argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["kwargs"] = kwargs
+        proc = MagicMock()
+        proc.wait = AsyncMock(return_value=0)
+        proc.returncode = 0
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        with contextlib.suppress(Exception):
+            await agent._run_in_apptainer_direct("task_x", tmp_path, apptainer_cfg)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_isolates_the_pid_namespace_by_default(tmp_path):
+    agent = make_agent(sandbox_spec={"image": "/img.sif"})
+    captured = await _capture_apptainer_launch(agent, tmp_path, {"direct_exec": True})
+
+    assert "--pid" in captured["argv"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_direct_exec_args_are_honoured(tmp_path):
+    agent = make_agent(sandbox_spec={"image": "/img.sif"})
+    captured = await _capture_apptainer_launch(
+        agent, tmp_path, {"direct_exec": True, "direct_exec_args": ["--cleanenv"]}
+    )
+
+    assert "--pid" not in captured["argv"]
