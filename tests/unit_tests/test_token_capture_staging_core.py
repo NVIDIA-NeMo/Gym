@@ -33,10 +33,17 @@ from nemo_gym.token_id_capture.staging.digest import (
     encode_token_ids,
     hash_token_ids,
 )
+from nemo_gym.token_id_capture.staging.rebuild import (
+    RebuildError,
+    linearize,
+    snapshots_to_entries,
+)
 from nemo_gym.token_id_capture.staging.records import (
     SCHEMA_VERSION,
+    CallRecord,
     CommitCoords,
     StagedCallRecord,
+    StagedCallSnapshot,
     staging_key,
 )
 
@@ -155,6 +162,156 @@ def test_records_reject_unknown_fields() -> None:
             weight_version=0,
             not_a_field=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# rebuild: inverse property, terminal-aware linearize over run_builder
+# ---------------------------------------------------------------------------
+
+
+def _snapshot(
+    call_id: str, prev_len: int, carry: list[int], gen: list[int], parent: str | None = None, wv: int | None = None
+) -> StagedCallSnapshot:
+    return StagedCallSnapshot(
+        call_id=call_id,
+        prev_len=prev_len,
+        token_ids_delta=carry + gen,
+        token_mask_delta=[0.0] * len(carry) + [1.0] * len(gen),
+        logprobs_delta=[0.0] * len(carry) + [-1.0] * len(gen),
+        parent_call_id=parent,
+        weight_version=wv,
+    )
+
+
+def _manifest_for(rollout_id: str, snapshots: list[StagedCallSnapshot]) -> list[CallRecord]:
+    return [
+        CallRecord(
+            call_id=s.call_id,
+            parent_call_id=s.parent_call_id,
+            delta_len=len(s.token_ids_delta),
+            cum_len=s.prev_len + len(s.token_ids_delta),
+            digest="d-" + s.call_id,
+            staging_key=staging_key(rollout_id, s.call_id),
+            weight_version=s.weight_version or 0,
+        )
+        for s in snapshots
+    ]
+
+
+def test_rebuild_is_inverse_of_build_staging_delta() -> None:
+    prompt = [1, 2, 3, 4, 5]
+    generated = [6, 7]
+    ids, mask, lps = build_staging_delta(
+        prompt_token_ids=prompt, generated_token_ids=generated, generated_logprobs=[-0.5, -2.0], prev_len=0
+    )
+    root = StagedCallSnapshot(call_id="c1", prev_len=0, token_ids_delta=ids, token_mask_delta=mask, logprobs_delta=lps)
+    prompt2 = prompt + generated + [8, 9]
+    ids2, mask2, lps2 = build_staging_delta(
+        prompt_token_ids=prompt2, generated_token_ids=[10], generated_logprobs=[-0.25], prev_len=7
+    )
+    child = StagedCallSnapshot(
+        call_id="c2",
+        prev_len=7,
+        token_ids_delta=ids2,
+        token_mask_delta=mask2,
+        logprobs_delta=lps2,
+        parent_call_id="c1",
+    )
+    entries = snapshots_to_entries("r", [root, child])
+    assert entries[0].prompt_token_ids == prompt
+    assert entries[0].generation_token_ids == generated
+    assert entries[1].prompt_token_ids == prompt2
+    assert entries[1].generation_token_ids == [10]
+    assert entries[1].generation_log_probs == [-0.25]
+
+
+def test_rebuild_error_paths() -> None:
+    # parent precedes it in no snapshot
+    with pytest.raises(RebuildError, match="precedes"):
+        snapshots_to_entries("r", [_snapshot("c2", 5, [1], [2], parent="c1")])
+    # prev_len != parent length
+    ok_root = _snapshot("c1", 0, [1, 2], [3])
+    with pytest.raises(RebuildError, match="parent length"):
+        snapshots_to_entries("r", [ok_root, _snapshot("c2", 2, [4], [5], parent="c1")])
+    # parentless with prev_len > 0
+    with pytest.raises(RebuildError, match="self-contained"):
+        snapshots_to_entries("r", [_snapshot("c1", 3, [1], [2])])
+    # misaligned arrays
+    bad = _snapshot("c1", 0, [1], [2])
+    bad = bad.model_copy(update={"logprobs_delta": [0.0]})
+    with pytest.raises(RebuildError, match="misaligned"):
+        snapshots_to_entries("r", [bad])
+    # non-contiguous mask
+    weird = StagedCallSnapshot(
+        call_id="c1",
+        prev_len=0,
+        token_ids_delta=[1, 2, 3],
+        token_mask_delta=[0.0, 1.0, 0.0],
+        logprobs_delta=[0.0, -1.0, 0.0],
+    )
+    with pytest.raises(RebuildError, match="prompt-carry"):
+        snapshots_to_entries("r", [weird])
+
+
+def test_linearize_two_call_chain() -> None:
+    snapshots = [
+        _snapshot("c1", 0, [10, 11, 12], [13, 14], wv=4),
+        _snapshot("c2", 5, [20, 21, 22], [23, 24], parent="c1", wv=4),
+    ]
+    row = linearize("g7_r0", snapshots, _manifest_for("g7_r0", snapshots), terminal_hint="c2")
+    assert row.call_ids == ["c1", "c2"]
+    assert row.token_ids == [10, 11, 12, 13, 14, 20, 21, 22, 23, 24]
+    assert row.token_mask == [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0]
+    assert row.logprobs == [0.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0, 0.0, -1.0, -1.0]
+    assert row.prompt_len == 3
+    assert row.weight_versions == [4, 4]
+
+
+def test_linearize_terminal_hint_beats_token_mass() -> None:
+    # c3 is a sub-agent fork that out-generates the main conversation; the
+    # base builder's token-mass pick would deliver it. The sealed terminal
+    # call is c2, so the terminal-aware selection must deliver c1 -> c2.
+    snapshots = [
+        _snapshot("c1", 0, [10, 11], [12], wv=1),
+        _snapshot("c2", 3, [20], [21], parent="c1", wv=1),
+        _snapshot("c3", 3, [30], [31, 32, 33, 34, 35], parent="c1", wv=1),
+    ]
+    manifest = _manifest_for("r", snapshots)
+    row = linearize("r", snapshots, manifest, terminal_hint="c2")
+    assert row.call_ids == ["c1", "c2"]
+    # Without the hint the base's main-chain pick wins (and picks the fork).
+    row_mass = linearize("r", snapshots, manifest)
+    assert row_mass.call_ids == ["c1", "c3"]
+
+
+def test_linearize_unresolved_final_retry_raises() -> None:
+    # Two siblings with identical prompts and no children: a final-call retry
+    # no later call can resolve. Training on either would be a guess.
+    snapshots = [
+        _snapshot("c1", 0, [10], [11], wv=1),
+        _snapshot("c2a", 2, [12], [13], parent="c1", wv=1),
+        _snapshot("c2b", 2, [12], [14], parent="c1", wv=1),
+    ]
+    with pytest.raises(RebuildError, match="unresolved retry"):
+        linearize("r", snapshots, _manifest_for("r", snapshots), terminal_hint="c2a")
+
+
+def test_linearize_terminal_missing_from_chains() -> None:
+    snapshots = [_snapshot("c1", 0, [10], [11], wv=1)]
+    with pytest.raises(RebuildError, match="not the leaf"):
+        linearize("r", snapshots, _manifest_for("r", snapshots), terminal_hint="ghost")
+
+
+def test_linearize_snapshot_manifest_mismatch() -> None:
+    snapshots = [
+        _snapshot("c1", 0, [10], [11], wv=1),
+        _snapshot("c2", 2, [12], [13], parent="c1", wv=1),
+    ]
+    manifest = _manifest_for("r", snapshots)
+    with pytest.raises(RebuildError, match="manifest of"):
+        linearize("r", snapshots[:-1], manifest)
+    with pytest.raises(RebuildError, match="diverges"):
+        linearize("r", snapshots, list(reversed(manifest)))
 
 
 # ---------------------------------------------------------------------------
