@@ -111,7 +111,7 @@ class DockerContainer(BaseModel):
         return (test_output, timed_out, time() - start_time)
 
     async def copy(self, src: Path, dest: Path) -> None:
-        pass  # TODO
+        await self._inner_container.upload(local_path=src, remote_path=dest)
 
     async def cleanup(self) -> None:
         await self._inner_container.stop()
