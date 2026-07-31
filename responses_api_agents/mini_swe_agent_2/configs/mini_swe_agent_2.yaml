@@ -23,6 +23,9 @@ mini_swe_agent_2:
       # Declared (empty) so benchmark configs can inherit this server config and
       # fill in their dataset list; the config merge rejects undeclared keys.
       datasets: []
+      # Send model calls straight to the policy model's base URL instead of
+      # the single-process policy-model proxy. Eval-only: skips rollout capture.
+      bypass_policy_proxy: false
       env: sandbox
       # Name of the sandbox to use; include a provider config that defines a
       # `sandbox` block (e.g. nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml).

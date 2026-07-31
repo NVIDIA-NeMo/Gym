@@ -75,6 +75,11 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     step_limit: int = 250
     tool_choice: Optional[str | dict[str, Any]] = None
     sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
+    # Point litellm straight at the policy model's own base URL, skipping the
+    # single-process policy-model proxy, which saturates ahead of the model
+    # under high rollout concurrency. Loses rollout capture, which pure eval
+    # runs do not use.
+    bypass_policy_proxy: bool = False
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -744,12 +749,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             run_golden = self.config.run_golden
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
             base_url = f"{self.base_url_for_run(base_url, body)}/v1"
-            if os.environ.get("NEMO_GYM_BYPASS_POLICY_PROXY") == "1":
-                # Point litellm straight at the policy model's own base URL
-                # (e.g. vLLM fronted by --api-server-count N), skipping the
-                # single-process policy-model proxy, which saturates ahead of
-                # the model under high rollout concurrency. Loses rollout
-                # capture, which pure eval runs do not use.
+            if self.config.bypass_policy_proxy:
                 bypass_base_url = str(global_config_dict.get("policy_base_url") or "").rstrip("/")
                 if bypass_base_url:
                     if not bypass_base_url.endswith("/v1"):
