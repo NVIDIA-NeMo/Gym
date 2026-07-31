@@ -633,7 +633,7 @@ class OpenSandboxProvider:
             try:
                 from httpx_aiohttp import AiohttpTransport
 
-                return AiohttpTransport(limits=limits)
+                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
             except ImportError:
                 LOGGER.warning(
                     "connection.transport_backend=aiohttp requested but httpx-aiohttp "
