@@ -18,11 +18,14 @@ transcript parsing) without launching a sandbox or invoking the model — so the
 fast and offline.
 """
 
+import asyncio
 import json
+import tarfile
 from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pinchbench.app import (
     NG_FAILURE_CLASS_KEY,
@@ -55,6 +58,38 @@ def make_config(**over) -> PinchBenchAgentConfig:
 
 def make_agent(**over) -> PinchBenchAgent:
     return PinchBenchAgent(config=make_config(**over), server_client=MagicMock(spec=ServerClient))
+
+
+class _FakeProcess:
+    def __init__(self, returncode=0, *, block=False):
+        self.returncode = None if block else returncode
+        self._returncode = returncode
+        self._release = asyncio.Event()
+        self.wait_started = asyncio.Event()
+        self.wait_calls = 0
+        self.killed = False
+        if not block:
+            self._release.set()
+
+    async def wait(self):
+        self.wait_calls += 1
+        self.wait_started.set()
+        await self._release.wait()
+        if self.returncode is None:
+            self.returncode = self._returncode
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self._release.set()
+
+
+def _write_empty_direct_archive(out_dir):
+    archive = out_dir / "sandbox" / "out" / "out.tgz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "w:gz"):
+        pass
 
 
 def test_sanity_construct():
@@ -96,6 +131,106 @@ def test_build_spec_from_config():
     # the per-task env (incl the in-sandbox gateway token) is injected into the spec
     assert spec.env["TASK_ID"] == "task_x"
     assert spec.env["OPENCLAW_GATEWAY_TOKEN"]
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_uses_private_env_file(tmp_path, monkeypatch):
+    secret = "spaces '$HOME' $(date) `id` \\\n+unicode=zażółć"
+    agent = make_agent(sandbox_spec={"image": "/sif/pinchbench.sif"})
+    monkeypatch.setattr(agent, "_task_env", lambda _task_id: {"TOKEN": secret})
+    seen = {}
+
+    async def fake_create_subprocess_exec(*argv, stdout, stderr):
+        env_file = argv[argv.index("--env-file") + 1]
+        env_path = tmp_path.__class__(env_file)
+        seen["argv"] = argv
+        seen["env_path"] = env_path
+        seen["env_mode"] = env_path.stat().st_mode & 0o777
+        seen["env_content"] = env_path.read_bytes()
+        _write_empty_direct_archive(tmp_path / "result")
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    await agent._run_in_apptainer_direct(
+        "task_x",
+        tmp_path / "result",
+        {"direct_exec_args": ["--cleanenv", "--no-home"]},
+    )
+
+    argv = seen["argv"]
+    assert argv[:4] == ("apptainer", "exec", "--cleanenv", "--no-home")
+    assert "--env" not in argv
+    assert argv[argv.index("--env-file") - 1] == "--no-eval"
+    assert all(secret not in arg for arg in argv)
+    assert seen["env_path"].name.startswith(".apptainer-env-")
+    assert seen["env_path"].parent == tmp_path / "result" / "sandbox"
+    assert seen["env_mode"] == 0o600
+    assert seen["env_content"] == apptainer_provider._serialize_env_file({"TOKEN": secret})
+    assert not seen["env_path"].exists()
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_removes_env_file_on_command_error(tmp_path, monkeypatch):
+    agent = make_agent(sandbox_spec={"image": "/sif/pinchbench.sif"})
+    seen = {}
+
+    async def fake_create_subprocess_exec(*argv, stdout, stderr):
+        seen["env_path"] = tmp_path.__class__(argv[argv.index("--env-file") + 1])
+        stderr.write(b"direct failure")
+        return _FakeProcess(returncode=1)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="direct failure"):
+        await agent._run_in_apptainer_direct("task_x", tmp_path / "result", {})
+    assert not seen["env_path"].exists()
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_kills_process_and_removes_env_file_on_timeout(tmp_path, monkeypatch):
+    agent = make_agent(sandbox_spec={"image": "/sif/pinchbench.sif"}, task_timeout_s=1)
+    proc = _FakeProcess(block=True)
+    seen = {}
+
+    async def fake_create_subprocess_exec(*argv, stdout, stderr):
+        seen["env_path"] = tmp_path.__class__(argv[argv.index("--env-file") + 1])
+        return proc
+
+    async def fake_wait_for(awaitable, *, timeout):
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        await agent._run_in_apptainer_direct("task_x", tmp_path / "result", {})
+    assert proc.killed
+    assert proc.wait_calls == 1
+    assert not seen["env_path"].exists()
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_kills_process_and_removes_env_file_on_cancellation(tmp_path, monkeypatch):
+    agent = make_agent(sandbox_spec={"image": "/sif/pinchbench.sif"})
+    proc = _FakeProcess(block=True)
+    seen = {}
+
+    async def fake_create_subprocess_exec(*argv, stdout, stderr):
+        seen["env_path"] = tmp_path.__class__(argv[argv.index("--env-file") + 1])
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    task = asyncio.create_task(agent._run_in_apptainer_direct("task_x", tmp_path / "result", {}))
+    await proc.wait_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert proc.killed
+    assert proc.wait_calls == 2
+    assert not seen["env_path"].exists()
 
 
 def _write_result(out_dir, task_id, mean, gtype, breakdown, notes):
