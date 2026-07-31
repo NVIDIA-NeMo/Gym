@@ -20,6 +20,9 @@ mini_swe_agent_2:
         type: responses_api_models
         name: policy_model
       concurrency: 64
+      # Declared (empty) so benchmark configs can inherit this server config and
+      # fill in their dataset list; the config merge rejects undeclared keys.
+      datasets: []
       env: sandbox
       # Name of the sandbox to use; include a provider config that defines a
       # `sandbox` block (e.g. nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml).
