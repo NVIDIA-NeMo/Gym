@@ -37,6 +37,7 @@ pinchbench_agent:
       judge_api_key: ${judge_api_key}
       web_search_provider: brave
       brave_api_key: ${brave_api_key}
+      tavily_api_key: ${tavily_api_key}
       max_concurrent: 2
       max_tokens: 16384
       context_window: 131072
