@@ -55,13 +55,17 @@ small NVIDIA integration patch:
 | `sandbox_work_base` | writable, per-sandbox-isolated working mount (default `/sandbox`); run_task.sh puts the skill copy, `$HOME`, `$TMPDIR` and the benchmark run-root here |
 | `task_timeout_s` | per-task exec timeout |
 | `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to both the provider timeout and agent timeout ceiling so values above OpenClaw's 120s default are effective |
-| `model_base_url` / `model_api_key` / `model_name` | policy model OpenClaw runs against |
+| `model_server` | optional Gym policy-model reference; preferred over `model_base_url` when set |
+| `model_base_url` / `model_api_key` / `model_name` | direct policy-endpoint fallback and model credentials/name |
 | `judge_model` / `judge_base_url` / `judge_api_key` | judge for hybrid / `llm_judge` tasks |
 | `max_tokens`, `context_window`, `max_concurrent`, `timeout_multiplier` | run tuning |
 
-> **Model wiring:** OpenClaw must point at a **streaming-capable** endpoint directly — *not* a Gym
-> model server, which is non-streaming (`stream: Literal[False]`) and would 422 OpenClaw's streamed
-> requests. So the policy/judge endpoints are passed straight through to OpenClaw.
+> **Model wiring:** When `model_server` is configured, `/run` resolves that Gym model server before
+> passing its `/v1` URL to OpenClaw. If global `observability_enabled` is true and the request has
+> `_ng_task_index` plus `_ng_rollout_index`, the resolved URL includes the rollout-correlation
+> prefix; otherwise it remains unprefixed. Gym synthesizes the Chat Completions SSE that OpenClaw
+> requests. With `model_server: null`, `model_base_url` is passed through unchanged for
+> compatibility. The judge endpoint remains configured directly.
 
 ## Setup
 
