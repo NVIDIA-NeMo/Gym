@@ -571,6 +571,10 @@ class OpenSandboxProvider:
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
         self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
+        # Shared injected transport. The SDK never closes transports it did not
+        # create, so the provider owns this one: built once, reused by every
+        # ConnectionConfig, closed in aclose().
+        self._transport: Any | None = None
 
     def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
         """Add the configured default image pull policy to SDK create extensions."""
@@ -607,8 +611,14 @@ class OpenSandboxProvider:
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
         if self._connection.keepalive_expiry_s is not None:
-            kwargs["transport"] = self._build_transport()
+            kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
+
+    def _get_transport(self) -> Any:
+        """Return the provider-owned shared transport, building it on first use."""
+        if self._transport is None:
+            self._transport = self._build_transport()
+        return self._transport
 
     def _build_transport(self) -> Any:
         """Build the SDK transport with the configured pool limits."""
@@ -633,7 +643,9 @@ class OpenSandboxProvider:
 
     async def aclose(self) -> None:
         """Close provider-owned resources."""
-        return None
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            await transport.aclose()
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for reattaching to this sandbox by id.
