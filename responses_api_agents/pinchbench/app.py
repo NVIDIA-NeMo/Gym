@@ -36,6 +36,7 @@ See README.md for design + findings (skill patch, gateway, parity).
 """
 
 import asyncio
+import contextlib
 import glob
 import json
 import shutil
@@ -68,6 +69,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 
 
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
@@ -351,25 +353,31 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             direct_args = direct_args.split()
 
         task_env = self._task_env(task_id)
+        env_file_content = apptainer_provider._serialize_env_file(task_env)
         argv = ["apptainer", "exec", *[str(arg) for arg in direct_args]]
         argv += ["--bind", f"{staging_dir}:{work_base}"]
-        for key, value in task_env.items():
-            argv += ["--env", f"{key}={value}"]
-        argv += [str(image), "bash", f"{work_base}/{wrapper_path.name}"]
 
         stdout_path = staging_dir / "apptainer.stdout.log"
         stderr_path = staging_dir / "apptainer.stderr.log"
-        with stdout_path.open("wb") as stdout_f, stderr_path.open("wb") as stderr_f:
-            proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout_f, stderr=stderr_f)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=self.config.task_timeout_s)
-            except asyncio.TimeoutError as exc:
+        with apptainer_provider._private_env_file(staging_dir, env_file_content) as env_file:
+            if env_file is not None:
+                argv += ["--no-eval", "--env-file", str(env_file)]
+            argv += [str(image), "bash", f"{work_base}/{wrapper_path.name}"]
+
+            with stdout_path.open("wb") as stdout_f, stderr_path.open("wb") as stderr_f:
+                proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout_f, stderr=stderr_f)
                 try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                await proc.wait()
-                raise TimeoutError(f"direct apptainer exec timed out for task {task_id}") from exc
+                    await asyncio.wait_for(proc.wait(), timeout=self.config.task_timeout_s)
+                except asyncio.TimeoutError as exc:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    await proc.wait()
+                    raise TimeoutError(f"direct apptainer exec timed out for task {task_id}") from exc
+                except asyncio.CancelledError:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    await asyncio.shield(proc.wait())
+                    raise
 
         stdout = stdout_path.read_text(errors="replace")[-4000:] if stdout_path.exists() else ""
         stderr = stderr_path.read_text(errors="replace")[-4000:] if stderr_path.exists() else ""
