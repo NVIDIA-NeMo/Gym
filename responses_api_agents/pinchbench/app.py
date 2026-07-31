@@ -360,7 +360,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         stdout_path = staging_dir / "apptainer.stdout.log"
         stderr_path = staging_dir / "apptainer.stderr.log"
         with stdout_path.open("wb") as stdout_f, stderr_path.open("wb") as stderr_f:
-            proc = await asyncio.create_subprocess_exec(*argv, stdout=stdout_f, stderr=stderr_f)
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdout=stdout_f, stderr=stderr_f, start_new_session=True
+            )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=self.config.task_timeout_s)
             except asyncio.TimeoutError as exc:

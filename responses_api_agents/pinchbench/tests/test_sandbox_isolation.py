@@ -14,10 +14,15 @@
 """Isolation of the direct apptainer sandbox from the host process tree.
 
 Tasks run arbitrary shell commands inside the sandbox. Without a private PID
-namespace a pattern-matching kill reaches host processes.
+namespace a pattern-matching kill reaches host processes, and without a new
+session a group-directed signal reaches this server's own process group.
 """
 
+import asyncio
 import contextlib
+import os
+import signal
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -42,6 +47,17 @@ async def _capture_launch(agent, tmp_path, apptainer_cfg):
     return captured
 
 
+async def _sleeping_child(**kwargs):
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(30)",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        **kwargs,
+    )
+
+
 @pytest.mark.asyncio
 async def test_direct_exec_isolates_the_pid_namespace_by_default(tmp_path):
     agent = make_agent(sandbox_spec={"image": "/img.sif"})
@@ -56,3 +72,32 @@ async def test_explicit_direct_exec_args_are_honoured(tmp_path):
     captured = await _capture_launch(agent, tmp_path, {"direct_exec": True, "direct_exec_args": ["--cleanenv"]})
 
     assert "--pid" not in captured["argv"]
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_launches_in_a_new_session(tmp_path):
+    agent = make_agent(sandbox_spec={"image": "/img.sif"})
+    captured = await _capture_launch(agent, tmp_path, {"direct_exec": True})
+
+    assert captured["kwargs"]["start_new_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_new_session_puts_the_child_in_its_own_process_group():
+    proc = await _sleeping_child(start_new_session=True)
+    try:
+        assert os.getpgid(proc.pid) == proc.pid
+        assert os.getpgid(proc.pid) != os.getpgid(0)
+    finally:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_without_new_session_the_child_shares_our_process_group():
+    proc = await _sleeping_child()
+    try:
+        assert os.getpgid(proc.pid) == os.getpgid(0)
+    finally:
+        proc.kill()
+        await proc.wait()
