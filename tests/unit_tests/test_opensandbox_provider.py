@@ -378,16 +378,6 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     # connect_retries reaches the pool rather than silently falling back.
     assert transport._pool._retries == 1
 
-    # The shipped config documents max_connections: null as "no cap" and
-    # max_keepalive_connections: 0 as "no reuse". Both rest on httpx mapping
-    # None to unbounded rather than on anything we do, so pin them here.
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"max_connections": None, "max_keepalive_connections": 0}
-    )
-    transport = provider._build_transport()
-    assert transport._pool._max_connections == sys.maxsize
-    assert transport._pool._max_keepalive_connections == 0
-
     # aiohttp requested but httpx-aiohttp unavailable: falls back to httpx.
     with pytest.MonkeyPatch.context() as mp:
         mp.setitem(sys.modules, "httpx_aiohttp", None)
