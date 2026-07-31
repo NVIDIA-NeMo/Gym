@@ -161,7 +161,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             metadata={
                 **self.config.sandbox_config.get("metadata", {}),
                 "nemo_gym_agent": "mini_swe_agent_2",
-                "instance_id": (self.config.instance_id or "unknown")[:63],
+                "instance_id": test_spec.instance_id[:63],
             },
             resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
             entrypoint=None,
@@ -184,7 +184,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         mock_container._inner_container = AsyncSandbox
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
-        res = run_instance(
+        res = await run_instance(
             test_spec=test_spec,
             pred={
                 "instance_id": test_spec.instance_id,
