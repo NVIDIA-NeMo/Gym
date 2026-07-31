@@ -183,14 +183,7 @@ class FakeObjectRef:
         return _resolve().__await__()
 
 
-def run_to_thread_inline(mock_to_thread) -> None:
-    """The agent only uses asyncio.to_thread to offload blocking file dumps, so
-    run the callable in place and keep the writes the tests assert on."""
-    mock_to_thread.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
-
-
 def setup_run_mini_swe_mock(
-    mock_to_thread,
     mock_runner_ray_remote,
     run_mini_swe_result: Dict[str, Any] = None,
 ):
@@ -202,8 +195,6 @@ def setup_run_mini_swe_mock(
     mock_future = FakeObjectRef(run_mini_swe_result)
     mock_runner_ray_remote.remote.return_value = mock_future
     mock_runner_ray_remote.options.return_value.remote.return_value = mock_future
-
-    run_to_thread_inline(mock_to_thread)
 
 
 def create_run_request(
@@ -723,10 +714,8 @@ class TestApp:
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
     async def test_run_successful_execution(
         self,
-        mock_to_thread,
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
@@ -742,7 +731,7 @@ class TestApp:
 
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
-        setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote)
+        setup_run_mini_swe_mock(mock_runner_ray_remote)
 
         run_request = MiniSWEAgentRunRequest.model_validate(
             create_run_request().model_dump() | {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 1}
@@ -759,10 +748,8 @@ class TestApp:
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
     async def test_run_writes_generation_params_to_config(
         self,
-        mock_to_thread,
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
@@ -786,7 +773,7 @@ class TestApp:
 
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
-        setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote)
+        setup_run_mini_swe_mock(mock_runner_ray_remote)
 
         run_request = create_run_request(
             temperature=0.6,
@@ -824,10 +811,8 @@ class TestApp:
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
     async def test_run_resolves_named_sandbox_provider_reference(
         self,
-        mock_to_thread,
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
@@ -857,7 +842,7 @@ class TestApp:
         mock_load_from_global_config.return_value = mock_server_client_instance
         mock_get_first_server_config_dict.return_value = {"host": "0.0.0.0", "port": 8080}
         setup_config_path_mock(mock_get_config_path)
-        setup_run_mini_swe_mock(mock_to_thread, mock_runner_ray_remote)
+        setup_run_mini_swe_mock(mock_runner_ray_remote)
 
         await server.run(create_run_request())
 
@@ -876,10 +861,8 @@ class TestApp:
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
     async def test_run_failed_execution(
         self,
-        mock_to_thread,
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
@@ -894,7 +877,6 @@ class TestApp:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
-        run_to_thread_inline(mock_to_thread)
 
         # Awaiting the Ray result raises, standing in for a failed rollout task.
         mock_runner_ray_remote.remote.return_value = FakeObjectRef(error=Exception("run_mini_swe failed"))
@@ -917,10 +899,8 @@ class TestApp:
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
-    @patch("asyncio.to_thread")
     async def test_run_mini_swe_not_found(
         self,
-        mock_to_thread,
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
@@ -933,7 +913,6 @@ class TestApp:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
-        run_to_thread_inline(mock_to_thread)
 
         mock_runner_ray_remote.remote.return_value = FakeObjectRef(error=FileNotFoundError("run_mini_swe not found"))
 
