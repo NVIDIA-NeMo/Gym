@@ -90,6 +90,10 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
 
 
 @ray.remote(
+    # Rollout tasks spend nearly all their time waiting on LLM calls and
+    # sandbox I/O; reserving a full CPU per task caps concurrent rollouts at
+    # the Ray cluster's core count long before any real resource limit.
+    num_cpus=0.25,
     scheduling_strategy="SPREAD",
     runtime_env={
         "py_executable": sys.executable,
@@ -510,6 +514,11 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
     model_kwargs = model_config.setdefault("model_kwargs", {})
     model_kwargs["api_key"] = params["api_key"]
     model_kwargs["base_url"] = params["base_url"]
+    # Bounded retries for transient LLM-call failures (disconnects, resets):
+    # without any retry a single failed call kills the whole rollout, while a
+    # large value makes litellm retry silently for so long that the rollout
+    # looks hung. Config-provided model_kwargs take precedence.
+    model_kwargs.setdefault("num_retries", 5)
     model_kwargs.pop("api_base", None)
     max_output_tokens = model_kwargs.pop("max_output_tokens", None)
     if max_output_tokens is not None and "max_tokens" not in model_kwargs:
@@ -591,6 +600,11 @@ def _cleanup_env_best_effort(env: Any) -> None:
         env.cleanup()
     except Exception as e:
         print(f"[CLEANUP] best-effort sandbox teardown failed: {e}", flush=True)
+
+
+# Non-empty once the one-time policy-proxy bypass notice has been printed.
+# Module-level so the pydantic agent model needs no extra field for it.
+_BYPASS_LOGGED: list[bool] = []
 
 
 def run_mini_swe_with_sandbox(**params: Any) -> Any:
@@ -730,6 +744,20 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             run_golden = self.config.run_golden
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
             base_url = f"{self.base_url_for_run(base_url, body)}/v1"
+            if os.environ.get("NEMO_GYM_BYPASS_POLICY_PROXY") == "1":
+                # Point litellm straight at the policy model's own base URL
+                # (e.g. vLLM fronted by --api-server-count N), skipping the
+                # single-process policy-model proxy, which saturates ahead of
+                # the model under high rollout concurrency. Loses rollout
+                # capture, which pure eval runs do not use.
+                bypass_base_url = str(global_config_dict.get("policy_base_url") or "").rstrip("/")
+                if bypass_base_url:
+                    if not bypass_base_url.endswith("/v1"):
+                        bypass_base_url = f"{bypass_base_url}/v1"
+                    base_url = bypass_base_url
+                    if not _BYPASS_LOGGED:
+                        _BYPASS_LOGGED.append(True)
+                        print(f"POLICY-PROXY BYPASS ACTIVE -> {base_url}", flush=True)
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
@@ -761,6 +789,12 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 config.setdefault("model", {}).setdefault("model_kwargs", {}).update(model_kwargs)
 
             output_file_dir = f"{Path.cwd()}/results/{subset}/{policy_model_name}"
+            # Root for the per-instance result JSONs (written below, re-read by
+            # skip_if_exists). NEMO_GYM_LOCAL_RESULTS_DIR can point it at
+            # node-local disk: these artifacts are only consumed on this node,
+            # and shared-filesystem metadata ops are slow under high rollout
+            # concurrency.
+            local_results_root = os.environ.get("NEMO_GYM_LOCAL_RESULTS_DIR") or output_file_dir
             config_path = mini_swe_config_path
             should_write_config = bool(model_kwargs)
             if self.config.sandbox_provider is None:
@@ -782,13 +816,20 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
             if should_write_config:
                 config_output_dir = Path(output_file_dir) / "_configs"
-                config_output_dir.mkdir(parents=True, exist_ok=True)
                 config_path = config_output_dir / f"{instance_id}.sandbox.yaml"
-                config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+                # Off the event loop: this handler serves every concurrent
+                # rollout, and a synchronous shared-filesystem mkdir+write
+                # blocks them all.
+                def _dump_config() -> None:
+                    config_output_dir.mkdir(parents=True, exist_ok=True)
+                    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+                await asyncio.to_thread(_dump_config)
 
             if self.config.skip_if_exists:
-                if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
-                    with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "r") as f:
+                if Path(f"{local_results_root}/{instance_id}/{instance_id}.json").exists():
+                    with open(f"{local_results_root}/{instance_id}/{instance_id}.json", "r") as f:
                         print(f"Skipping {instance_id} because it already exists")
                         verify_response = MiniSWEAgentVerifyResponse.model_validate_json(f.read())
                     return verify_response
@@ -819,7 +860,12 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 if runtime_env.get("env_vars"):
                     runner = runner.options(runtime_env=runtime_env)
                 future = runner.remote(run_mini_swe_with_sandbox, params)
-                result = await asyncio.to_thread(ray.get, future)
+                # Ray ObjectRefs are awaitable: park on the event loop instead
+                # of pinning a thread in asyncio's default executor (capped at
+                # min(32, cpu+4) workers). With the thread-blocking ray.get,
+                # at most ~32 rollouts can be waiting on results at once and
+                # every other finished task queues behind them.
+                result = await future
                 result = result[instance_id]
                 input_messages = result["input_messages"]
                 response_output = result["response_output"]
@@ -853,11 +899,17 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 metadata=result.get("eval_report", {}) if result else {},
             )
 
-            output_path = Path(f"{output_file_dir}/{instance_id}")
-            output_path.mkdir(parents=True, exist_ok=True)
+            output_path = Path(local_results_root) / str(instance_id)
+            result_path = output_path / f"{instance_id}.json"
+            result_payload = verify_response.model_dump()
 
-            with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "w") as f:
-                json.dump(verify_response.model_dump(), f)
+            # Off the event loop for the same reason as the config dump above.
+            def _dump_result() -> None:
+                output_path.mkdir(parents=True, exist_ok=True)
+                with open(result_path, "w") as f:
+                    json.dump(result_payload, f)
+
+            await asyncio.to_thread(_dump_result)
 
             return verify_response
 
