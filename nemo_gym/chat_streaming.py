@@ -25,26 +25,35 @@ its existing non-streaming backend call and re-emitting it as an SSE stream. Thi
 
 - the request-side sanitizer that maps the streaming wire body onto the strict params shape
   (drops ``stream``/``stream_options``, remembers whether usage was requested);
+- the request-side validator that prunes fields newer than the pinned SDK types before validating;
 - the response-side synthesizer that re-emits a complete ``NeMoGymChatCompletion`` as the
   ``chat.completion.chunk`` SSE sequence a streaming client expects, terminated by ``data: [DONE]``.
 
-Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The backend
-call completes before the first byte is emitted, so the model server's retry and
-error-normalization behavior is fully preserved on this path. This path is intended for eval-only
-streaming clients: token ids and logprobs from the backend response are not carried in the
-``chat.completion.chunk`` schema, and a client that does not set ``stream_options.include_usage``
-gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
+Only the SSE envelope is synthesized -- there is no true token-by-token streaming. Because the
+backend call completes before the first byte is emitted, the model server's retry and
+error-normalization behavior is fully preserved on this path, and token-id / logprob capture on
+the backend response is unaffected (those fields simply do not ride in the chunk schema).
 """
 
+import asyncio
 import json
 import logging
 from copy import deepcopy
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Awaitable, Iterator
+
+from pydantic import ValidationError
 
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 
 
 LOG = logging.getLogger(__name__)
+
+# An SSE comment: ignored by every conforming client parser, but still bytes on the wire, so it
+# refreshes read/idle timers while the buffered backend call is still running.
+SSE_HEARTBEAT = ": keepalive\n\n"
+
+# Well under the 120s idle timeout the OpenClaw agent applies to its model endpoint.
+DEFAULT_HEARTBEAT_INTERVAL_S = 15.0
 
 _PARAM_FIELDS = frozenset(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
 
@@ -75,6 +84,42 @@ def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], 
     if dropped:
         LOG.debug("Dropping unsupported fields from a streaming /v1/chat/completions request: %s", dropped)
     return {key: value for key, value in body.items() if key in _PARAM_FIELDS}, include_usage
+
+
+def _delete_loc(body: Any, loc: tuple) -> bool:
+    """Delete the value at a pydantic error loc from a nested dict/list structure."""
+    node = body
+    for part in loc[:-1]:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and isinstance(part, int) and part < len(node):
+            node = node[part]
+        else:
+            return False
+    last = loc[-1]
+    if isinstance(node, dict) and last in node:
+        del node[last]
+        return True
+    return False
+
+
+def validate_streaming_chat_params(body: dict[str, Any]) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+    """Validate a sanitized streaming body, pruning fields newer than the params model."""
+    body = deepcopy(body)
+    while True:
+        try:
+            return NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+        except ValidationError as exc:
+            removed = False
+            for error in exc.errors():
+                if error["type"] == "extra_forbidden" and _delete_loc(body, tuple(error["loc"])):
+                    LOG.warning(
+                        "Dropping unsupported field %s from a streaming /v1/chat/completions request.",
+                        ".".join(str(part) for part in error["loc"]),
+                    )
+                    removed = True
+            if not removed:
+                raise
 
 
 def _sse_data(payload: dict[str, Any]) -> str:
@@ -155,3 +200,36 @@ def synthesize_chat_completion_sse(completion: dict[str, Any], include_usage: bo
         yield _sse_data(_chunk(completion, [], usage=usage))
 
     yield "data: [DONE]\n\n"
+
+
+async def synthesize_chat_completion_sse_with_heartbeat(
+    pending: Awaitable[dict[str, Any]],
+    include_usage: bool = False,
+    interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S,
+) -> AsyncIterator[str]:
+    """Emit SSE heartbeats until ``pending`` resolves, then the synthesized completion stream.
+
+    The backend call is non-streaming, so nothing can be emitted until it returns. On a slow
+    model that silence is indistinguishable from a hung endpoint: the OpenClaw agent aborts the
+    session after 120s of quiet ("LLM idle timeout"), and the rollout is graded as an empty
+    failure even though the model is still working. Heartbeating keeps the socket alive for the
+    whole generation without changing what the client ultimately parses.
+
+    A failure after the first heartbeat cannot be reported as an HTTP status (the response has
+    already begun), so it is logged and the stream is terminated with ``data: [DONE]`` rather
+    than left hanging. Callers should therefore await a short grace window first, so fast
+    failures still surface with their normal status code.
+    """
+    while True:
+        try:
+            completion = await asyncio.wait_for(asyncio.shield(pending), timeout=interval_s)
+            break
+        except asyncio.TimeoutError:
+            yield SSE_HEARTBEAT
+        except Exception:
+            LOG.exception("Chat completion failed after the SSE stream had already started")
+            yield "data: [DONE]\n\n"
+            return
+
+    for chunk in synthesize_chat_completion_sse(completion, include_usage=include_usage):
+        yield chunk

@@ -46,7 +46,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.chat_streaming import (
+    DEFAULT_HEARTBEAT_INTERVAL_S,
+    sanitize_streaming_chat_body,
+    synthesize_chat_completion_sse,
+    synthesize_chat_completion_sse_with_heartbeat,
+    validate_streaming_chat_params,
+)
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -82,6 +88,9 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
 
 class BaseResponsesAPIModel(BaseServer):
     config: BaseResponsesAPIModelConfig
+
+    # Doubles as the grace window before a slow generation switches to a heartbeated stream.
+    chat_stream_heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
@@ -162,11 +171,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ``chat_completions()``, preserving the historical non-streaming behavior (including the
         standard 422 shape). When the client sends ``stream: true`` (blackbox
         Chat-Completions-over-SSE harnesses like the OpenClaw agent always do), the request is
-        sanitized onto that same strict model (drop ``stream``/``stream_options``; see
-        ``nemo_gym.chat_streaming``), validated identically, delegated to the same
-        ``chat_completions()``, and the complete response is buffered and re-emitted as a
-        synthesized ``chat.completion.chunk`` SSE stream. This is buffer-then-replay, not
-        token-by-token streaming.
+        first sanitized from the streaming wire dialect (drop ``stream``/``stream_options``; see
+        ``nemo_gym.chat_streaming``), delegated to the same ``chat_completions()``, and the
+        complete response is buffered and re-emitted as a synthesized ``chat.completion.chunk``
+        SSE stream. This is buffer-then-replay, not token-by-token streaming.
+
+        Because that backend call is non-streaming, a slow generation would otherwise leave the
+        socket completely silent -- no headers, no bytes -- until it finished, which streaming
+        clients read as a hung endpoint (the OpenClaw agent aborts at 120s idle). Generations
+        that outrun a short grace window therefore switch to a heartbeated stream. Anything that
+        completes or fails inside the window keeps the original semantics, so fast failures still
+        surface with their normal status code rather than as a half-written stream.
 
         Only a genuine boolean ``stream: true`` takes the streaming path; any other value
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
@@ -177,9 +192,32 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             return await self._invoke_chat_completions(request, params)
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
-        params = _validate_chat_params(cleaned)
-        completion = await self._invoke_chat_completions(request, params)
-        completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+        try:
+            params = validate_streaming_chat_params(cleaned)
+        except ValidationError as exc:
+            raise RequestValidationError(
+                [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)]
+            )
+
+        async def _completion_json() -> dict:
+            completion = await self._invoke_chat_completions(request, params)
+            return completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+
+        pending = asyncio.ensure_future(_completion_json())
+        try:
+            # shield: a timeout here means "still generating", never "abandon the call".
+            completion_json = await asyncio.wait_for(
+                asyncio.shield(pending), timeout=self.chat_stream_heartbeat_interval_s
+            )
+        except asyncio.TimeoutError:
+            return StreamingResponse(
+                synthesize_chat_completion_sse_with_heartbeat(
+                    pending,
+                    include_usage=include_usage,
+                    interval_s=self.chat_stream_heartbeat_interval_s,
+                ),
+                media_type="text/event-stream",
+            )
         return StreamingResponse(
             synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
             media_type="text/event-stream",
