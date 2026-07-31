@@ -92,6 +92,9 @@ MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 TOKEN_ID_CAPTURE_ENABLED_KEY_NAME = "token_id_capture_enabled"
 # Per-agent opt-in (on an agent's config block) for participating in training token capture.
 TOKEN_ID_CAPTURE_KEY_NAME = "token_id_capture"
+# Run-wide agent opt-in: treat every agent as token_id_capture=true. For training controllers
+# that cannot enumerate the agent servers configured via config_paths.
+TOKEN_ID_CAPTURE_ALL_AGENTS_KEY_NAME = "token_id_capture_all_agents"
 COMPONENT_NAME_KEY_NAME = "component_name"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,

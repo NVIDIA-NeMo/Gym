@@ -72,3 +72,19 @@ class TestBaseResponsesAPIAgent:
         assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
         # The run-level switch is still required: opting in alone does nothing.
         assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
+
+    def test_token_capture_all_agents_opts_in_every_agent(self) -> None:
+        # A training controller cannot enumerate agent servers configured via config_paths;
+        # the run-wide opt-in stands in for the per-agent flag.
+        body = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+        gc = {"token_id_capture_enabled": True, "token_id_capture_all_agents": True}
+        assert self._agent(gc, token_id_capture=False).rollout_id_from_run(body) == "0-0"
+        # The run-level enabled switch is still required.
+        gc_off = {"token_id_capture_all_agents": True}
+        assert self._agent(gc_off, token_id_capture=False).rollout_id_from_run(body) is None
+
+    def test_opaque_rollout_id_rides_the_run_body(self) -> None:
+        body = {"_ng_rollout_id": "3f2a_g1", "_ng_task_index": 0, "_ng_rollout_index": 0}
+        gc = {"token_id_capture_enabled": True, "token_id_capture_all_agents": True}
+        assert self._agent(gc).rollout_id_from_run(body) == "3f2a_g1"
+        assert self._agent(gc).url_path_for_run("/v1/responses", body) == "/ng-rollout/3f2a_g1/v1/responses"
