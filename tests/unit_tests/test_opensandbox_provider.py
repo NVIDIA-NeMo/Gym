@@ -375,6 +375,8 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     )
     transport = provider._build_transport()
     assert isinstance(transport, httpx.AsyncHTTPTransport)
+    # connect_retries reaches the pool rather than silently falling back.
+    assert transport._pool._retries == 1
 
     # aiohttp requested but httpx-aiohttp unavailable: falls back to httpx.
     with pytest.MonkeyPatch.context() as mp:
@@ -419,6 +421,9 @@ def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None)
     transport = provider._build_transport()
     assert isinstance(transport, httpx_aiohttp.AiohttpTransport)
     assert transport.limits.keepalive_expiry == 3.0
+    # Both backends honor connect_retries; the bridge default is 0, so this
+    # would catch the option being dropped on the aiohttp path.
+    assert transport.retries == 2
 
     extensions = provider._resolve_extensions({"imagePullPolicy": "Never"})
     assert extensions["imagePullPolicy"] == "Never"
