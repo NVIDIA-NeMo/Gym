@@ -390,6 +390,15 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     config = provider._connection_config()
     assert "transport" not in config.kwargs
 
+    # max_connections=null uncaps the pool; max_keepalive_connections=0 disables reuse.
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"max_connections": None, "max_keepalive_connections": 0}
+    )
+    transport = provider._build_transport()
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
+    assert transport._pool._max_connections > 2**32
+    assert transport._pool._max_keepalive_connections == 0
+
 
 async def test_connection_transport_is_shared_and_closed_by_provider(fake_opensandbox_sdk: None) -> None:
     # The SDK never closes a transport it did not create, so the provider owns
