@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import hashlib
 import json
 import os
@@ -791,16 +790,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
             if should_write_config:
                 config_output_dir = Path(output_file_dir) / "_configs"
+                config_output_dir.mkdir(parents=True, exist_ok=True)
                 config_path = config_output_dir / f"{instance_id}.sandbox.yaml"
-
-                # Off the event loop: this handler serves every concurrent
-                # rollout, and a synchronous shared-filesystem mkdir+write
-                # blocks them all.
-                def _dump_config() -> None:
-                    config_output_dir.mkdir(parents=True, exist_ok=True)
-                    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
-
-                await asyncio.to_thread(_dump_config)
+                config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
             if self.config.skip_if_exists:
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
@@ -875,16 +867,10 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             )
 
             output_path = Path(f"{output_file_dir}/{instance_id}")
-            result_path = output_path / f"{instance_id}.json"
-            result_payload = verify_response.model_dump()
+            output_path.mkdir(parents=True, exist_ok=True)
 
-            # Off the event loop for the same reason as the config dump above.
-            def _dump_result() -> None:
-                output_path.mkdir(parents=True, exist_ok=True)
-                with open(result_path, "w") as f:
-                    json.dump(result_payload, f)
-
-            await asyncio.to_thread(_dump_result)
+            with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "w") as f:
+                json.dump(verify_response.model_dump(), f)
 
             return verify_response
 
