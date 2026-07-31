@@ -25,6 +25,7 @@ from itertools import repeat
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
+import aiohttp
 import orjson
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -53,6 +54,17 @@ from nemo_gym.server_utils import (
     set_global_aiohttp_client,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+
+# Connection-layer failures on /run are retried by re-POSTing, which reruns
+# the rollout server-side from scratch (a fresh sample of the same prompt).
+# HTTP error statuses are NOT retried — those indicate a real request/server
+# bug and must surface immediately.
+RUN_TRANSIENT_RETRIES = 3
+_RUN_TRANSIENT_ERRORS = (
+    aiohttp.ClientPayloadError,  # response body cut off mid-stream
+    aiohttp.ClientConnectionError,  # covers ClientOSError, ServerDisconnectedError, ClientConnectorError
+    ConnectionResetError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -686,19 +698,38 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                try:
-                    await raise_for_status(res)
-                except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
+                last_exc: Optional[Exception] = None
+                for attempt in range(1 + RUN_TRANSIENT_RETRIES):
+                    if attempt:
                         print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            "[rollout_collection] /run transient failure for "
+                            f"{row['agent_ref']['name']}; retry {attempt}/{RUN_TRANSIENT_RETRIES} "
+                            f"after {last_exc!r}",
                             flush=True,
                         )
-                    raise
-                return row, await get_response_json(res)
+                        await asyncio.sleep(min(5 * 2**attempt, 60))
+                    try:
+                        res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    except _RUN_TRANSIENT_ERRORS as e:
+                        last_exc = e
+                        continue
+                    try:
+                        await raise_for_status(res)
+                    except Exception:
+                        if is_global_aiohttp_client_request_debug_enabled():
+                            print(
+                                "[rollout_collection] /run failed "
+                                f"status={getattr(res, 'status', None)} "
+                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                                flush=True,
+                            )
+                        raise
+                    try:
+                        return row, await get_response_json(res)
+                    except _RUN_TRANSIENT_ERRORS as e:
+                        last_exc = e
+                assert last_exc is not None
+                raise last_exc
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
