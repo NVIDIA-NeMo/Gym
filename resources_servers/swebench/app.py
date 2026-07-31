@@ -29,7 +29,9 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import run_instance
 
@@ -151,6 +153,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         )
 
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        global_config_dict = get_global_config_dict()
+        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+        provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
@@ -158,8 +163,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             workdir=None,  # Default to container's WORKDIR
             env=dict(),
             files=dict(),
-            metadata={
-                **self.config.sandbox_config.get("metadata", {}),
+            metadata=provider_default_metadata
+            | self.config.sandbox_config.get("metadata", {})
+            | {
                 "nemo_gym_agent": "mini_swe_agent_2",
                 "instance_id": test_spec.instance_id[:63],
             },
@@ -167,7 +173,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        eval_sandbox = AsyncSandbox(self.config.sandbox_provider)
+        eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
         if self.config.is_verifying_golden_patch:
