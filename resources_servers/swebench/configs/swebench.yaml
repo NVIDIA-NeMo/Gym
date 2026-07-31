@@ -8,6 +8,21 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
                                                 #   e2e, rlhf, other. Change 'other' to the closest fit.
       verified: false                           # set true once the benchmark has been baselined and reviewed
 
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
+          # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          benchmark: swebench-verified
+          harness: mini-swe-agent
+
 # Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
 # swebench_simple_agent:               # this agent instance's name — pass as --agent to gym eval run
 #   responses_api_agents:
