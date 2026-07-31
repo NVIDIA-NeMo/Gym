@@ -167,6 +167,28 @@ def setup_config_path_mock(mock_get_config_path, config_yaml: str = DEFAULT_CONF
     mock_get_config_path.return_value = mock_config_path
 
 
+class FakeObjectRef:
+    """Stand-in for a Ray ObjectRef, which the agent awaits directly."""
+
+    def __init__(self, result: Any = None, error: BaseException | None = None):
+        self._result = result
+        self._error = error
+
+    def __await__(self):
+        async def _resolve() -> Any:
+            if self._error is not None:
+                raise self._error
+            return self._result
+
+        return _resolve().__await__()
+
+
+def run_to_thread_inline(mock_to_thread) -> None:
+    """The agent only uses asyncio.to_thread to offload blocking file dumps, so
+    run the callable in place and keep the writes the tests assert on."""
+    mock_to_thread.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
+
+
 def setup_run_mini_swe_mock(
     mock_to_thread,
     mock_runner_ray_remote,
@@ -176,13 +198,12 @@ def setup_run_mini_swe_mock(
     if run_mini_swe_result is None:
         run_mini_swe_result = DEFAULT_RUN_MINI_SWE_RESULT
 
-    # Mock the Ray remote function to return a future-like object
-    mock_future = MagicMock()
+    # The Ray remote call returns an awaitable ref that resolves to the result.
+    mock_future = FakeObjectRef(run_mini_swe_result)
     mock_runner_ray_remote.remote.return_value = mock_future
     mock_runner_ray_remote.options.return_value.remote.return_value = mock_future
 
-    # Mock asyncio.to_thread (which calls ray.get) to return the result
-    mock_to_thread.return_value = run_mini_swe_result
+    run_to_thread_inline(mock_to_thread)
 
 
 def create_run_request(
@@ -248,15 +269,16 @@ def assert_run_response(
 
 
 def assert_run_mini_swe_called(
-    mock_to_thread,
+    mock_runner_ray_remote,
     subset: str = "gym",
     split: str = "train",
     instance_id: str = "test_instance_123",
 ):
-    mock_to_thread.assert_called_once()
-    call_args = mock_to_thread.call_args
-    args = call_args[0]
-    assert len(args) >= 1
+    mock_runner_ray_remote.remote.assert_called_once()
+    params = mock_runner_ray_remote.remote.call_args.args[1]
+    assert params["subset"] == subset
+    assert params["split"] == split
+    assert params["instance_id"] == instance_id
 
 
 class TestApp:
@@ -730,7 +752,7 @@ class TestApp:
 
         assert_run_response(response)
 
-        assert_run_mini_swe_called(mock_to_thread)
+        assert_run_mini_swe_called(mock_runner_ray_remote)
         assert mock_runner_ray_remote.remote.call_args.args[1]["base_url"] == ("http://0.0.0.0:8080/ng-rollout/2-1/v1")
 
     @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
@@ -872,12 +894,10 @@ class TestApp:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
-        # Mock Ray remote function
-        mock_future = MagicMock()
-        mock_runner_ray_remote.remote.return_value = mock_future
+        run_to_thread_inline(mock_to_thread)
 
-        # Mock asyncio.to_thread (ray.get) to raise an exception
-        mock_to_thread.side_effect = Exception("run_mini_swe failed")
+        # Awaiting the Ray result raises, standing in for a failed rollout task.
+        mock_runner_ray_remote.remote.return_value = FakeObjectRef(error=Exception("run_mini_swe failed"))
 
         run_request = create_run_request(instance_id="test_instance_456", temperature=0.3, top_p=0.95)
 
@@ -891,7 +911,7 @@ class TestApp:
             expected_input_length=0,
         )
 
-        assert_run_mini_swe_called(mock_to_thread, instance_id="test_instance_456")
+        assert_run_mini_swe_called(mock_runner_ray_remote, instance_id="test_instance_456")
 
     @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
@@ -913,12 +933,9 @@ class TestApp:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
-        # Mock Ray remote function
-        mock_future = MagicMock()
-        mock_runner_ray_remote.remote.return_value = mock_future
+        run_to_thread_inline(mock_to_thread)
 
-        # Mock asyncio.to_thread (ray.get) to raise FileNotFoundError
-        mock_to_thread.side_effect = FileNotFoundError("run_mini_swe not found")
+        mock_runner_ray_remote.remote.return_value = FakeObjectRef(error=FileNotFoundError("run_mini_swe not found"))
 
         run_request = create_run_request(instance_id="test_instance_789", temperature=0.2, top_p=1.0)
 
@@ -932,7 +949,7 @@ class TestApp:
             expected_input_length=0,
         )
 
-        assert_run_mini_swe_called(mock_to_thread, instance_id="test_instance_789")
+        assert_run_mini_swe_called(mock_runner_ray_remote, instance_id="test_instance_789")
 
     async def test_responses_not_implemented(self) -> None:
         config = create_test_config()
