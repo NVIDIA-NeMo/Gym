@@ -39,9 +39,7 @@ class TestBaseResponsesAPIAgent:
             async def run(self, body=...):
                 raise NotImplementedError
 
-        agent = TestSimpleResponsesAPIAgent(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
         agent.setup_webserver()
 
     def test_build_skipped_verify_response_payload(self) -> None:
@@ -61,12 +59,8 @@ class TestBaseResponsesAPIAgent:
             async def run(self, body=...):
                 raise NotImplementedError
 
-        agent = TestSimpleResponsesAPIAgent(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
-        body = BaseRunRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
-        )
+        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        body = BaseRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]))
         payload = agent.build_skipped_verify_response_payload(body, {"id": "response_id"})
 
         assert payload == {

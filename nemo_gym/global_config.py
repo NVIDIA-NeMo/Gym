@@ -375,10 +375,7 @@ Duplicate config paths:
                     disallowed_ports.append(run_server_config_dict["port"])
 
                 if server_instance_config.SERVER_TYPE == "responses_api_agents":
-                    if (
-                        skip_verification is not None
-                        and SKIP_VERIFICATION_KEY_NAME not in run_server_config_dict
-                    ):
+                    if skip_verification is not None and SKIP_VERIFICATION_KEY_NAME not in run_server_config_dict:
                         run_server_config_dict[SKIP_VERIFICATION_KEY_NAME] = skip_verification
                     if (
                         skip_verification_reward is not None

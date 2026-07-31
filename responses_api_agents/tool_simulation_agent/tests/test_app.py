@@ -445,9 +445,7 @@ class TestApp:
         assert valid_verify_response.json() == expected_valid_verify_response_json
         assert server_client_post_mock.call_args_list == expected_invalid_verify_response_calls
 
-    async def test_run_skip_verification_uses_configured_reward(
-        self, agent_config: ToolSimulationAgentConfig
-    ) -> None:
+    async def test_run_skip_verification_uses_configured_reward(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()
         server_client_mock = MagicMock(spec=ServerClient)
         server_client_mock.post = server_client_post_mock

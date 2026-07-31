@@ -222,9 +222,7 @@ class TestGlobalConfig:
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(
-            nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock
-        )
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -255,9 +253,7 @@ class TestGlobalConfig:
             == global_config_dict
         )
 
-    def test_get_global_config_dict_skip_verification_defaults_for_agents(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    def test_get_global_config_dict_skip_verification_defaults_for_agents(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
         find_open_port_mock = MagicMock()
@@ -302,9 +298,7 @@ class TestGlobalConfig:
         assert agent_config["skip_verification"] is True
         assert agent_config["skip_verification_reward"] == -1.5
 
-        explicit_agent_config = global_config_dict["explicit_agent_name"]["responses_api_agents"][
-            "agent_type"
-        ]
+        explicit_agent_config = global_config_dict["explicit_agent_name"]["responses_api_agents"]["agent_type"]
         assert explicit_agent_config["skip_verification"] is False
         assert explicit_agent_config["skip_verification_reward"] == 0.25
 

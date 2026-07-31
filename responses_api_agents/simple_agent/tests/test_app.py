@@ -726,9 +726,7 @@ class TestApp:
         assert response_json["verification_skipped"] is True
         assert response_json["response"]["id"] == "response_id"
 
-        post_call_kwargs = [
-            post_call.kwargs for post_call in server.server_client.post.call_args_list
-        ]
+        post_call_kwargs = [post_call.kwargs for post_call in server.server_client.post.call_args_list]
         assert [kwargs["url_path"] for kwargs in post_call_kwargs] == [
             "/seed_session",
             "/v1/responses",

@@ -200,9 +200,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 self.build_skipped_verify_response_payload(body, response_json)
             )
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": response_json}
-        )
+        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response_json})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
