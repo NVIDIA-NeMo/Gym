@@ -1,4 +1,6 @@
-# The agent process is a thin launcher/parser. It needs nemo-gym + the [sandbox] extra
-# (Gym's provider-neutral Sandbox API, PR #1377). The PinchBench harness + OpenClaw run
+# The agent process is a thin launcher/parser. The PinchBench harness + OpenClaw run
 # INSIDE the per-task sandbox image (built from Dockerfile.benchmark), not in this venv.
--e nemo-gym[dev,sandbox] @ ../../
+#
+# Do not install the broad [sandbox] extra here: the direct Apptainer path uses Gym's
+# in-repo sandbox types/provider code and does not need optional remote-provider SDKs.
+-e nemo-gym[dev] @ ../../
