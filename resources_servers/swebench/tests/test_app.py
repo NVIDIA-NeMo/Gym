@@ -14,6 +14,8 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
+from fastapi.testclient import TestClient
+
 from nemo_gym.server_utils import ServerClient
 from resources_servers.swebench.app import SwebenchResourcesServer, SwebenchResourcesServerConfig
 
@@ -26,4 +28,39 @@ class TestApp:
             entrypoint="",
             name="",
         )
-        SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+
+        client = TestClient(app)
+        res = client.post(
+            "/verify",
+            json={
+                "repo": "my repo",
+                "instance_id": "my instance_id",
+                "base_commit": "my base_commit",
+                "patch": "my patch",
+                "test_patch": "my test_patch",
+                "problem_statement": "my problem_statement",
+                "hints_text": "",
+                "created_at": "my created_at",
+                "version": "my version",
+                "FAIL_TO_PASS": "[]",
+                "PASS_TO_PASS": "[]",
+                "environment_setup_commit": "my environment_setup_commit",
+                "difficulty": "my difficulty",
+                "responses_create_params": {"input": []},
+                "response": {
+                    "output": [],
+                    "id": "",
+                    "created_at": 0,
+                    "model": "",
+                    "object": "response",
+                    "parallel_tool_calls": False,
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+                "subset": "my subset",
+                "split": "my split",
+            },
+        )
+        assert res.status_code == 200
