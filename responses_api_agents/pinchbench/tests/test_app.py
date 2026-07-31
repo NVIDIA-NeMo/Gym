@@ -140,7 +140,8 @@ async def test_direct_exec_uses_private_env_file(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, "_task_env", lambda _task_id: {"TOKEN": secret})
     seen = {}
 
-    async def fake_create_subprocess_exec(*argv, stdout, stderr):
+    async def fake_create_subprocess_exec(*argv, stdout, stderr, start_new_session):
+        assert start_new_session is True
         env_file = argv[argv.index("--env-file") + 1]
         env_path = tmp_path.__class__(env_file)
         seen["argv"] = argv
@@ -175,7 +176,8 @@ async def test_direct_exec_removes_env_file_on_command_error(tmp_path, monkeypat
     agent = make_agent(sandbox_spec={"image": "/sif/pinchbench.sif"})
     seen = {}
 
-    async def fake_create_subprocess_exec(*argv, stdout, stderr):
+    async def fake_create_subprocess_exec(*argv, stdout, stderr, start_new_session):
+        assert start_new_session is True
         seen["env_path"] = tmp_path.__class__(argv[argv.index("--env-file") + 1])
         stderr.write(b"direct failure")
         return _FakeProcess(returncode=1)
@@ -193,7 +195,8 @@ async def test_direct_exec_kills_process_and_removes_env_file_on_timeout(tmp_pat
     proc = _FakeProcess(block=True)
     seen = {}
 
-    async def fake_create_subprocess_exec(*argv, stdout, stderr):
+    async def fake_create_subprocess_exec(*argv, stdout, stderr, start_new_session):
+        assert start_new_session is True
         seen["env_path"] = tmp_path.__class__(argv[argv.index("--env-file") + 1])
         return proc
 
@@ -217,7 +220,8 @@ async def test_direct_exec_kills_process_and_removes_env_file_on_cancellation(tm
     proc = _FakeProcess(block=True)
     seen = {}
 
-    async def fake_create_subprocess_exec(*argv, stdout, stderr):
+    async def fake_create_subprocess_exec(*argv, stdout, stderr, start_new_session):
+        assert start_new_session is True
         seen["env_path"] = tmp_path.__class__(argv[argv.index("--env-file") + 1])
         return proc
 
