@@ -14,8 +14,10 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from time import time
+from typing import Any, Dict, Optional, Tuple
 
+from docker.models.containers import ExecResult
 from fastapi import Request
 from pydantic import BaseModel
 from swebench.harness.run_evaluation import make_test_spec
@@ -73,8 +75,40 @@ class DockerContainer(BaseModel):
 
     _inner_container: AsyncSandbox
 
-    async def exec_run(self) -> None:
-        pass  # TODO
+    async def exec_run(
+        self,
+        command: str,
+        workdir: Optional[str] = None,
+        user: Optional[str] = None,
+    ) -> ExecResult:
+        res = await self._inner_container.exec(
+            command=command,
+            cwd=workdir,
+            user=user,
+        )
+
+        return ExecResult(
+            exit_code=res.return_code,
+            # @bxyu-nvidia: This is not entirely 1:1, but it works for the purposes of this patch.
+            output=(res.stdout + res.stderr).encode(),
+        )
+
+    async def exec_run_with_timeout(self, command: str, timeout: int) -> Tuple[str, bool, float]:
+        # Returns: test_output: str, timed_out: bool, total_runtime: float
+        start_time = time()
+        try:
+            res = await self._inner_container.exec(
+                command=command,
+                timeout=timeout,
+            )
+            timed_out = False
+            test_output = res.stdout + res.stderr
+        except TimeoutError:
+            # Gym Sandbox API will throw a timeout error on actual timeout.
+            timed_out = True
+            test_output = ""
+
+        return (test_output, timed_out, time() - start_time)
 
     async def copy(self, src: Path, dest: Path) -> None:
         pass  # TODO
