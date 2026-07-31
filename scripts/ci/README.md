@@ -9,6 +9,10 @@ NeMo CI adapter. `contract-version` contains the interface version expected by t
 - `server_tests.sh SHARD_INDEX NUM_SHARDS` installs the `dev` extra and runs one zero-based shard
   of the full server suite.
 
+All three entrypoints preserve ANSI result colors in non-interactive CI logs without requiring a
+pseudo-terminal: lint passes `--color=always` to pre-commit, core passes `--color=yes` through
+`PYTEST_ADDOPTS`, and server tests export `PY_COLORS=1` for every nested pytest process.
+
 All scripts can be invoked from any working directory and propagate the underlying command's exit
 status. Contract version 2 is CPU-only: it does not install the `sandbox` extra, run sandbox-marked
 tests, require sandbox credentials, or infer GPU availability. When `GYM_CI_JUNIT_DIR` is set,

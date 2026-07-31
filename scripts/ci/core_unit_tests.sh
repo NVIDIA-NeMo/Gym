@@ -29,7 +29,7 @@ case "${GYM_CI_USE_EXISTING_ENV:-0}" in
         exit 2
         ;;
 esac
-pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0'
+pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0 --color=yes'
 if [[ -n "${GYM_CI_JUNIT_DIR:-}" ]]; then
     mkdir -p "${GYM_CI_JUNIT_DIR}"
     printf -v junit_xml_path '%q' "${GYM_CI_JUNIT_DIR%/}/core.xml"

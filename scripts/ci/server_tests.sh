@@ -32,6 +32,8 @@ fi
 cd "${repo_root}"
 # shellcheck source=scripts/ci/setup_dev.sh
 source "${ci_dir}/setup_dev.sh"
+# Nested pytest processes inherit this through ng_test_all even when Slurm provides no TTY.
+export PY_COLORS=1
 exec ng_test_all \
     +fail_on_total_and_test_mismatch=true \
     +delete_venvs_after_each_test=true \
