@@ -3317,6 +3317,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # Launch Apptainer container and execute the script file
         apptainer_cmd = (
             f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            # --no-mount bind-paths also drops apptainer's default /etc/resolv.conf
+            # bind; on clusters without a node-local resolver (e.g. AWS k8s-slurm)
+            # the sandbox is left with an empty resolv.conf and no working DNS,
+            # even though the shared network namespace is fine — which breaks the
+            # in-container cryptography pip fix, baseline_fix repairs, and any
+            # test-suite downloads. Re-bind the host's resolv.conf read-only so
+            # name resolution inside the sandbox matches the host.
+            f"--mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,ro "
             f"{env_args}"
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"
