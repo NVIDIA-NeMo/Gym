@@ -289,20 +289,68 @@ class TestTruncateOldestExchange:
 
 
 class TestResponses:
-    def test_text_only_response_terminates_loop(self) -> None:
-        """Model returns a text message → loop exits after one step."""
-        agent, client = _make_agent_and_client()
+    def test_text_only_response_injects_continue_until_max_steps(self) -> None:
+        """Text-only assistant responses must inject 'Continue.' and keep
+        looping (mirrors vals-ai/finance-agent ``_before_query`` +
+        ``_should_stop=False``) rather than terminating after one step.
+
+        The historical break-on-text behavior caused training to silently
+        truncate trajectories whenever the model emitted explanatory text
+        between tool calls -- which is exactly what Nemotron-Nano did on
+        its rs0 chunk, masking partial progress as a "completed" rollout.
+        """
+        config = _make_config(max_steps=3)
+        agent, client = _make_agent_and_client(config)
         agent.server_client.post.return_value = _dotjson_mock(_text_response("Hello!"))
 
         res = client.post("/v1/responses", json=_INPUT)
         assert res.status_code == 200
-        data = res.json()
-        assert len(data["output"]) == 1
-        assert data["output"][0]["type"] == "message"
+        output = res.json()["output"]
 
-    def test_tool_call_then_text_terminates(self) -> None:
-        """Model calls a tool, gets result, then responds with text."""
-        agent, client = _make_agent_and_client()
+        assert agent.server_client.post.call_count == 3, (
+            "loop should have run max_steps=3 model calls instead of breaking after first text response"
+        )
+
+        user_continues = [o for o in output if o["type"] == "message" and o["role"] == "user"]
+        assert len(user_continues) >= 1, "no 'Continue.' user message injected"
+        assert any(o["content"] == "Continue." for o in user_continues), (
+            f"Continue. literal missing; got user contents: {[o['content'] for o in user_continues]}"
+        )
+
+    def test_continue_injection_stops_at_submit_final_result(self) -> None:
+        """Continue.-loop must yield as soon as a done-tool fires -- otherwise
+        the agent could keep looping past a legitimate terminal tool call.
+        """
+        config = _make_config(max_steps=5)
+        agent, client = _make_agent_and_client(config)
+
+        text_then_submit_responses = [
+            _text_response("Thinking out loud..."),
+            _tool_call_response("submit_final_result", json.dumps({"final_result": "42"})),
+        ]
+        model_mock = _dotjson_mock(*text_then_submit_responses)
+        rs_mock = _dotjson_mock({"status": "ok"})
+
+        def route_post(**kwargs):
+            if kwargs["server_name"] == _MODEL_SERVER:
+                return model_mock
+            return rs_mock
+
+        agent.server_client.post = AsyncMock(side_effect=route_post)
+
+        res = client.post("/v1/responses", json=_INPUT)
+        assert res.status_code == 200
+        output = res.json()["output"]
+        fn_names = [o.get("name") for o in output if o["type"] == "function_call"]
+        assert "submit_final_result" in fn_names, "done-tool should still terminate after Continue. injection"
+
+    def test_tool_call_then_text_continues_until_max_steps(self) -> None:
+        """Tool call → text response no longer terminates -- under C1 the
+        loop injects ``Continue.`` and keeps going.  Bounded by max_steps
+        here so the test doesn't run forever.
+        """
+        config = _make_config(max_steps=2)
+        agent, client = _make_agent_and_client(config)
 
         tool_call_data = _tool_call_response("sec_filing_search", json.dumps({"ticker": "AAPL"}))
         text_data = _text_response("Here is the data.")
@@ -324,7 +372,11 @@ class TestResponses:
         types = [o["type"] for o in output]
         assert "function_call" in types
         assert "function_call_output" in types
+        # Last item is the injected Continue. user message (would have been
+        # the seed for a step-3 model call if max_steps had allowed it).
         assert output[-1]["type"] == "message"
+        assert output[-1]["role"] == "user"
+        assert output[-1]["content"] == "Continue."
 
     def test_done_tool_terminates_loop(self) -> None:
         """submit_final_result tool call exits the loop immediately."""
@@ -454,14 +506,16 @@ class TestResponses:
         """Context overflow with truncate_on_overflow=True → retries after truncation.
 
         Need >=2 tool-call rounds so _truncate_oldest_exchange can drop one
-        and keep another. Overflow on model call 3, success on model call 4.
+        and keep another. Overflow on model call 3, recovery on model call 4
+        via a done-tool so the loop terminates cleanly (under C1 a text
+        response would keep looping with Continue. injection).
         """
         config = _make_config(truncate_on_overflow=True, max_steps=10)
         agent, client = _make_agent_and_client(config)
 
         tc1 = _tool_call_response("sec_filing_search", json.dumps({"ticker": "AAPL"}), call_id="c1")
         tc2 = _tool_call_response("sec_filing_search", json.dumps({"ticker": "MSFT"}), call_id="c2")
-        text = _text_response("Got it.")
+        submit = _tool_call_response("submit_final_result", json.dumps({"final_result": "Got it."}), call_id="c3")
 
         model_calls = {"n": 0}
 
@@ -473,7 +527,7 @@ class TestResponses:
                     return _dotjson_mock(data)
                 if model_calls["n"] == 3:
                     raise Exception("maximum context length is 8192 tokens")
-                return _dotjson_mock(text)
+                return _dotjson_mock(submit)
             return _dotjson_mock({"result": "filing data"})
 
         agent.server_client.post = AsyncMock(side_effect=route_post)
@@ -481,7 +535,8 @@ class TestResponses:
         res = client.post("/v1/responses", json=_INPUT)
         assert res.status_code == 200
         output = res.json()["output"]
-        assert output[-1]["type"] == "message"
+        fn_names = [o.get("name") for o in output if o["type"] == "function_call"]
+        assert "submit_final_result" in fn_names
         assert model_calls["n"] == 4
 
     def test_context_overflow_without_truncation_breaks(self) -> None:
@@ -530,8 +585,13 @@ class TestResponses:
         assert u["total_tokens"] == 330
 
     def test_string_input_converted_to_message(self) -> None:
-        """String input is automatically wrapped in a user message."""
-        agent, client = _make_agent_and_client()
+        """String input is automatically wrapped in a user message.
+
+        Bounded by max_steps=1 because under C1 a text-only response no
+        longer terminates the loop on its own.
+        """
+        config = _make_config(max_steps=1)
+        agent, client = _make_agent_and_client(config)
         agent.server_client.post.return_value = _dotjson_mock(_text_response("Hi!"))
 
         res = client.post("/v1/responses", json={"input": "hello"})

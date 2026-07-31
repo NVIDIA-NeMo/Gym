@@ -15,6 +15,55 @@ Complete syntax and field specifications for NeMo Gym configuration files.
 
 ---
 
+## Path Resolution and External Roots
+
+Gym resolves every relative path — `config_paths`, `env.yaml`, prompt configs, dataset files, the `--<component>` selectors (`--benchmark`, `--environment`, `--model-type`, `--resources-server`), and server directories (used by `gym env test`) — against an ordered list of **roots**, returning the first one where the path exists:
+
+1. **Extra roots** from `NEMO_GYM_EXTRA_ROOTS` (or `--search-dir`), in the order listed.
+2. **The current working directory** — your project.
+3. **The Gym install root**, where the built-in components live (in both editable and wheel installs).
+
+Earlier roots win, so a component you provide shadows a same-named built-in. Absolute paths are used unchanged.
+
+### External roots (`NEMO_GYM_EXTRA_ROOTS`)
+
+Point Gym at one or more extra roots so your own benchmarks, environments, resources servers, agents, models, configs, prompts, and data resolve by name — without forking Gym or copying files into the install tree. Each root uses the same layout as the Gym repo:
+
+```
+<root>/
+├── benchmarks/<name>/
+├── environments/<name>/
+├── resources_servers/<name>/
+├── responses_api_agents/<name>/
+└── responses_api_models/<name>/
+```
+
+Set it as an `os.pathsep`-separated list (`:` on Linux/macOS):
+
+```bash
+export NEMO_GYM_EXTRA_ROOTS=~/my-plugins:~/team-benchmarks
+
+gym list benchmarks                 # your benchmarks appear alongside the built-ins
+gym eval run --benchmark my_bench --model-type vllm_model
+```
+
+The variable is inherited by the servers Gym spawns, so plugin components resolve inside them too.
+
+### `--search-dir`
+
+`--search-dir DIR` (repeatable) is the per-invocation equivalent: Gym sets `NEMO_GYM_EXTRA_ROOTS` to its value for the duration of that command, then restores it. Use it for one-off runs instead of exporting the variable.
+
+```bash
+gym list benchmarks --search-dir ~/my-plugins
+gym eval run --benchmark my_bench --model-type vllm_model --search-dir ~/my-plugins
+```
+
+<Tip>
+Prefer `NEMO_GYM_EXTRA_ROOTS` when the same plugin roots apply to every command in a shell session; reach for `--search-dir` for a single invocation. If both are set, `--search-dir` takes precedence for that command.
+</Tip>
+
+---
+
 ## Server Configuration
 
 All servers share this structure:

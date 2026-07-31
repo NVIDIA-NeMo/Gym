@@ -33,6 +33,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -319,6 +320,14 @@ def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     return [Volume(**dict(volume)) for volume in volumes]
 
 
+def _to_image_spec(image: str, image_auth: Mapping[str, Any] | None) -> Any:
+    if image_auth is None:
+        return image
+    from opensandbox.models.sandboxes import SandboxImageAuth, SandboxImageSpec
+
+    return SandboxImageSpec(image, auth=SandboxImageAuth(**dict(image_auth)))
+
+
 def _to_sandbox_status(state: Any) -> SandboxStatus:
     normalized = str(state or "").lower()
     if normalized in {"active", "ready", "running"}:
@@ -419,24 +428,15 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.close_timeout_s must be > 0")
 
 
-def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
-    if value is None:
-        return config_cls()
-    if isinstance(value, config_cls):
-        return value
-    if isinstance(value, Mapping):
-        return config_cls(**value)
-    raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
-
-
 @dataclass(frozen=True)
 class OpenSandboxProviderOptions:
     """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
 
-    ``platform`` and ``volumes`` entries are passed through to the OpenSandbox SDK,
-    so their inner fields are validated by the SDK rather than here.
+    ``image_auth``, ``platform``, and ``volumes`` entries are passed through to the
+    OpenSandbox SDK, so their inner fields are validated by the SDK rather than here.
     """
 
+    image_auth: Mapping[str, Any] | None = None
     platform: Mapping[str, Any] | None = None
     snapshot_id: str | None = None
     volumes: tuple[Mapping[str, Any], ...] = ()
@@ -461,6 +461,9 @@ class OpenSandboxProviderOptions:
         platform = options.get("platform")
         if platform is not None and not isinstance(platform, Mapping):
             raise TypeError("OpenSandbox provider option 'platform' must be a mapping")
+        image_auth = options.get("image_auth")
+        if image_auth is not None and not isinstance(image_auth, Mapping):
+            raise TypeError("OpenSandbox provider option 'image_auth' must be a mapping")
         snapshot_id = options.get("snapshot_id")
         if snapshot_id is not None and not isinstance(snapshot_id, str):
             raise TypeError("OpenSandbox provider option 'snapshot_id' must be a string")
@@ -475,6 +478,7 @@ class OpenSandboxProviderOptions:
             raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
 
         return cls(
+            image_auth=dict(image_auth) if image_auth is not None else None,
             platform=dict(platform) if platform is not None else None,
             snapshot_id=snapshot_id,
             volumes=tuple(dict(volume) for volume in volumes),
@@ -540,6 +544,32 @@ class OpenSandboxProvider:
     async def aclose(self) -> None:
         """Close provider-owned resources."""
         return None
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a descriptor for reattaching to this sandbox by id.
+
+        OpenSandbox sandboxes are reachable by id from any process that has the
+        connection config, so the id alone is enough to reconnect and no sandbox
+        server is needed to share one. ``scope`` is ignored: OpenSandbox has no
+        lease concept of its own.
+        """
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK."""
+        Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+        sandbox_id = str(descriptor["sandbox_id"])
+        timeout_s = self._create.connect_attempt_timeout_s
+        sandbox = await asyncio.wait_for(
+            Sandbox.connect(
+                sandbox_id,
+                connection_config=self._connection_config(request_timeout_s=timeout_s),
+                connect_timeout=timedelta(seconds=timeout_s),
+                skip_health_check=True,
+            ),
+            timeout=timeout_s,
+        )
+        return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
 
     async def _await_sdk_call(
         self,
@@ -732,7 +762,7 @@ class OpenSandboxProvider:
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
         if spec.image is not None:
-            kwargs["image"] = spec.image
+            kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
         if options.snapshot_id is not None:
             kwargs["snapshot_id"] = options.snapshot_id
         if spec.ttl_s is not None:

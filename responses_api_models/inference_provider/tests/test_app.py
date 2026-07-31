@@ -323,7 +323,22 @@ class TestResponses:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
-        response = client.post("/v1/responses", json={"input": "hello", "tool_choice": "required"})
+        response = client.post(
+            "/v1/responses",
+            json={
+                "input": "hello",
+                "tool_choice": "required",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": True,
+                    }
+                ],
+            },
+        )
         assert response.status_code == 200
         assert response.json()["tool_choice"] == "required"
 

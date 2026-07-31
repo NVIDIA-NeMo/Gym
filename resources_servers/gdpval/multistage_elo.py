@@ -16,27 +16,33 @@
 Instead of comparing the evaluated model against every reference model on all
 tasks, multi-stage ELO runs a sequence of *stages*. Each stage:
 
-1. fixes a set of ``T`` tasks sampled from a task-distribution JSON file (see
-   ``responses_api_agents.stirrup_agent.task_distribution``),
-2. judges the evaluated model against a set of ``M`` reference models on those
-   tasks,
-3. fits an anchored Bradley-Terry MLE ELO from that stage's win/loss/tie
-   battles (reusing ``comparison.calculate_mle_elo``), and
-4. uses that estimate to choose the ``M`` references for the next stage.
+1. Samples ``T`` tasks from a task-distribution JSON file (see
+   ``responses_api_agents.stirrup_agent.task_distribution``); ``T`` is
+   configurable per stage and **defaults to the full task set**,
+2. Includes a set of ``M`` reference models and assigns **each task a single
+   reference** drawn uniformly (equal weight) from that set — so a task is
+   judged against one reference, not all ``M``,
+3. Fits an anchored Bradley-Terry MLE ELO from that stage's win/loss/tie
+   battles pooled per reference (reusing ``comparison.calculate_mle_elo``), and
+4. Uses that estimate to choose the ``M`` references for the next stage.
 
 Across stages, ``M`` typically shrinks (zooming in on references whose known
-ELO is closest to the evaluated model's current estimate) while ``T`` grows
-(spending the saved judge budget on a tighter final estimate).
+ELO is closest to the evaluated model's current estimate) while ``T`` grows (up
+to the full task set) — spending the judge budget on a tighter final estimate.
+Because each task's deliverable is reference-independent, a deliverable is
+produced once and reused when its task recurs in a later stage — that stage only
+re-judges it against its freshly assigned reference.
 
 This module is intentionally **pure / server-agnostic** — reference selection,
-task planning, ELO fitting, vote pooling, and distribution loading, with no
-server or rollout I/O. The orchestration that wires these into Gym's standard
-rollout-collection flow (the single supported entry point) lives in
-``multistage_orchestrator`` and is enabled with ``++multistage.enabled=true``.
+per-task reference assignment, ELO fitting, vote pooling, and distribution
+loading, with no server or rollout I/O. The orchestration that wires these into
+Gym's standard rollout-collection flow (the single supported entry point) lives
+in ``multistage_orchestrator`` and is enabled with ``++multistage.enabled=true``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from dataclasses import dataclass
@@ -56,13 +62,17 @@ PerReferenceTotals = Dict[str, Dict[str, float]]
 class StageSpec:
     """Configuration for a single stage.
 
-    ``num_tasks`` is ``T`` (the number of tasks judged this stage). ``num_models``
-    is ``M`` (the number of reference models compared against); ``None`` means
-    "all available references" (used for the first, broad stage). ``seed`` makes
-    task sampling for this stage reproducible.
+    ``num_tasks`` is ``T`` (the number of tasks sampled from the distribution and
+    judged this stage). ``None`` (the default) means **the full task set** — every
+    task in the distribution (e.g. all 220 GDPVal tasks). ``num_models`` is ``M``
+    (the number of reference models included this stage); ``None`` means "all
+    available references" (used for the first, broad stage). Each task is judged
+    against **one** reference sampled uniformly from the included set. ``seed``
+    makes this stage's task sampling and per-task reference assignment
+    reproducible.
     """
 
-    num_tasks: int
+    num_tasks: Optional[int] = None
     num_models: Optional[int] = None
     seed: Optional[int] = None
 
@@ -96,6 +106,64 @@ def select_references(
 
 
 # ---------------------------------------------------------------------------
+# Per-task reference assignment
+# ---------------------------------------------------------------------------
+
+
+def all_task_ids(distribution: Mapping[str, Mapping[str, object]]) -> List[str]:
+    """Every task id in the distribution, de-duplicated, in a stable order.
+
+    Used to size the default (full) task set and, in nested sampling, as the
+    total available count. Order is stable (distribution group order, then task
+    order within each group).
+    """
+    ids: List[str] = []
+    seen: set = set()
+    for group in distribution.values():
+        for tid in (group or {}).get("task_ids", []) or []:
+            tid_str = str(tid)
+            if tid_str not in seen:
+                seen.add(tid_str)
+                ids.append(tid_str)
+    return ids
+
+
+def stage_assignment_rng(seed: Optional[int], stage_seed: Optional[int], stage_index: int) -> random.Random:
+    """Seed a reproducible RNG for a stage's per-task reference assignment.
+
+    Derives the seed from the run seed, the stage's own ``seed``, and the stage
+    index, so each stage draws an independent-but-reproducible assignment. Using
+    a dedicated RNG (rather than a shared, state-advancing one) means a resumed
+    stage recomputes exactly the same assignment it did originally.
+    """
+    payload = "|".join([repr(seed), repr(stage_seed), str(stage_index)])
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return random.Random(int(digest[:16], 16))
+
+
+def assign_task_references(
+    task_ids: Sequence[str],
+    reference_ids: Sequence[str],
+    *,
+    rng: random.Random,
+) -> Dict[str, str]:
+    """Assign each task a single reference model, sampled with equal probability.
+
+    Rather than judging every task against every included reference, each task is
+    compared against **one** reference drawn uniformly (each included reference
+    weighted equally) from ``reference_ids``. Returns a ``{task_id: ref_id}`` map;
+    empty when no references are included.
+
+    Deterministic given *rng*, so a stage's assignment replays identically on
+    resume (it is also recorded in the stage journal).
+    """
+    refs = list(reference_ids)
+    if not refs:
+        return {}
+    return {str(tid): rng.choice(refs) for tid in task_ids}
+
+
+# ---------------------------------------------------------------------------
 # Task planning
 # ---------------------------------------------------------------------------
 
@@ -105,40 +173,48 @@ def plan_stage_task_ids(
     stages: Sequence[StageSpec],
     *,
     rng: Optional[random.Random] = None,
-    nested: bool = True,
+    nested: bool = False,
 ) -> List[List[str]]:
-    """Pre-sample the task set for every stage from a task distribution.
+    """Pre-sample the ``T`` tasks for every stage from a task distribution.
 
     Task selection is independent of any ELO estimate, so all stages' task sets
-    can be planned up front.
+    can be planned up front. A stage's ``num_tasks`` (``T``) is the target count;
+    ``None`` (the default) or a value ``>=`` the total means **the full task
+    set**. ``T`` is always capped at the number of available tasks.
 
-    ``nested=True`` makes each stage's set a superset of the previous one. We get
-    this for free in a single draw: ``sample_task_ids`` samples without
+    ``nested=False`` (the default) samples each stage independently, honoring its
+    own ``seed``.
+
+    ``nested=True`` instead makes each stage's set a superset of the previous one.
+    We get this for free in a single draw: ``sample_task_ids`` samples without
     replacement one task at a time, so a prefix of a large draw is identical to a
     smaller draw made with the same RNG. We therefore draw once, sized to the
     largest stage, and slice each stage's prefix from it — O(max T) work and
     exactly proportional per stage, with nesting guaranteed. A single shared RNG
     is used (per-stage ``seed`` only applies to independent sampling).
-
-    ``nested=False`` samples each stage independently, honoring its own ``seed``.
     """
     from responses_api_agents.stirrup_agent.task_distribution import sample_task_ids
 
     base_rng = rng or random.Random()
+    total = len(all_task_ids(distribution))
+
+    def _target(spec: StageSpec) -> int:
+        # num_tasks=None (default) -> the full task set; always capped at total.
+        return total if spec.num_tasks is None else min(spec.num_tasks, total)
 
     if not nested:
         return [
             sample_task_ids(
                 distribution,
-                s.num_tasks,
+                _target(s),
                 rng=random.Random(s.seed) if s.seed is not None else base_rng,
             )
             for s in stages
         ]
 
-    max_target = max(s.num_tasks for s in stages)
+    max_target = max((_target(s) for s in stages), default=0)
     ordered = sample_task_ids(distribution, max_target, rng=base_rng)
-    return [list(ordered[: s.num_tasks]) for s in stages]
+    return [list(ordered[: _target(s)]) for s in stages]
 
 
 # ---------------------------------------------------------------------------
