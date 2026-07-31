@@ -389,6 +389,28 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     assert "transport" not in config.kwargs
 
 
+async def test_connection_transport_is_shared_and_closed_by_provider(fake_opensandbox_sdk: None) -> None:
+    # The SDK never closes a transport it did not create, so the provider owns
+    # one: built on first use, reused by every ConnectionConfig rather than
+    # leaking a pool per call, and closed in aclose().
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.aclosed = False
+
+        async def aclose(self) -> None:
+            self.aclosed = True
+
+    provider = opensandbox_provider.OpenSandboxProvider()
+    provider._build_transport = FakeTransport
+
+    transport = provider._connection_config().kwargs["transport"]
+    assert provider._connection_config().kwargs["transport"] is transport
+
+    await provider.aclose()
+    assert transport.aclosed
+    assert provider._transport is None
+
+
 def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None) -> None:
     # Opt-in aiohttp backend via the httpx-aiohttp bridge; the package is not a
     # declared dependency, so this coverage only runs where it is installed.
