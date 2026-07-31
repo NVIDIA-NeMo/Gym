@@ -234,3 +234,15 @@ def test_rollout_id_does_not_serialize_run_body() -> None:
     )
 
     assert maybe_rollout_id_from_run_body(body) == "4-2"
+
+
+def test_opaque_rollout_id_wins_over_derived_key() -> None:
+    body = {
+        "_ng_rollout_id": "3f2a_g1",
+        "_ng_task_index": 4,
+        "_ng_rollout_index": 2,
+        "responses_create_params": {"input": "solve"},
+    }
+    assert maybe_rollout_id_from_run_body(body) == "3f2a_g1"
+    # Without the opaque key the derived (task, rollout) id still applies.
+    assert maybe_rollout_id_from_run_body({"_ng_task_index": 4, "_ng_rollout_index": 2}) == "4-2"

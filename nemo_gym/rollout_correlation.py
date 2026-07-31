@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -38,6 +39,12 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
 
     def field(key: str) -> Any:
         return body.get(key) if isinstance(body, Mapping) else getattr(body, key, None)
+
+    # An opaque caller-supplied id wins over the derived (task, rollout) key:
+    # an integrating framework keeps one id across its data plane and capture.
+    opaque = field(ROLLOUT_ID_KEY_NAME)
+    if opaque is not None:
+        return str(opaque)
 
     task = field(TASK_INDEX_KEY_NAME)
     rollout = field(ROLLOUT_INDEX_KEY_NAME)

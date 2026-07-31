@@ -126,6 +126,11 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+# Opaque, caller-supplied rollout id. When present on a run body it is used verbatim as the
+# rollout id (correlation URL prefix + capture key) instead of deriving one from the
+# task/rollout indices — an integrating framework can then keep one id across its own data
+# plane and Gym's capture stack.
+ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
