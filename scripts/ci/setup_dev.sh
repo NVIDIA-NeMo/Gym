@@ -24,6 +24,9 @@ gym_ci_setup_dev() {
         uv venv --python 3.12
     fi
     uv sync --extra dev
+    # Keep the original Actions contract: callers run the environment's commands directly.
+    # shellcheck disable=SC1091
+    source .venv/bin/activate
 }
 
 gym_ci_setup_dev

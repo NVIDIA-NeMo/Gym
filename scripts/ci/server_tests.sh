@@ -32,7 +32,7 @@ fi
 cd "${repo_root}"
 # shellcheck source=scripts/ci/setup_dev.sh
 source "${ci_dir}/setup_dev.sh"
-exec uv run ng_test_all \
+exec ng_test_all \
     +fail_on_total_and_test_mismatch=true \
     +delete_venvs_after_each_test=true \
     +num_shards="${num_shards}" \

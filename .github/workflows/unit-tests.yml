@@ -146,17 +146,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
 
+      # Preserve the public coverage contract: sandbox dependencies are available while
+      # collecting non-sandbox core coverage, then sandbox-marked tests append to it.
+      - name: Setup public test environment
+        if: needs.detect.outputs.run_full == 'true'
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          uv sync --extra dev --extra sandbox
+
       - name: Core unit tests
         if: needs.detect.outputs.run_full == 'true'
+        env:
+          GYM_CI_USE_EXISTING_ENV: "1"
         run: ./scripts/ci/core_unit_tests.sh
 
       # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v1.
       - name: Sandbox unit tests
         if: needs.detect.outputs.run_full == 'true'
         run: |
-          source ./scripts/ci/setup_dev.sh
-          uv sync --extra dev --extra sandbox
-          uv run pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
+          source .venv/bin/activate
+          pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
 
       # The changed-server optimization is specific to GitHub pull requests; internal
       # GitLab merge requests always run the full eight-shard server suite.
@@ -179,7 +188,7 @@ jobs:
             echo "================================================"
             echo "Testing: $server"
             echo "================================================"
-            if uv run ng_test +entrypoint="$server" +delete_venvs_after_each_test=true +should_validate_data=true; then
+            if ng_test +entrypoint="$server" +delete_venvs_after_each_test=true +should_validate_data=true; then
               echo "PASS: $server"
             else
               echo "FAIL: $server"

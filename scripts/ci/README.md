@@ -13,3 +13,7 @@ All scripts can be invoked from any working directory and propagate the underlyi
 status. Contract version 1 is CPU-only: it does not install the `sandbox` extra, run sandbox-marked
 tests, require sandbox credentials, or infer GPU availability. GitHub's sandbox tests remain a
 separate public-only workflow step outside this contract.
+
+GitHub pre-installs its public-only sandbox dependencies before collecting combined coverage, then
+sets `GYM_CI_USE_EXISTING_ENV=1` for `core_unit_tests.sh`. This opt-in only reuses a validated
+`.venv`; the default path used by NeMo CI always creates the sandbox-free development environment.
