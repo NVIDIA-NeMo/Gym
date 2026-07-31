@@ -75,11 +75,6 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     step_limit: int = 250
     tool_choice: Optional[str | dict[str, Any]] = None
     sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
-    # Point litellm straight at the policy model's own base URL, skipping the
-    # single-process policy-model proxy, which saturates ahead of the model
-    # under high rollout concurrency. Loses rollout capture, which pure eval
-    # runs do not use.
-    bypass_policy_proxy: bool = False
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -607,11 +602,6 @@ def _cleanup_env_best_effort(env: Any) -> None:
         print(f"[CLEANUP] best-effort sandbox teardown failed: {e}", flush=True)
 
 
-# Non-empty once the one-time policy-proxy bypass notice has been printed.
-# Module-level so the pydantic agent model needs no extra field for it.
-_BYPASS_LOGGED: list[bool] = []
-
-
 def run_mini_swe_with_sandbox(**params: Any) -> Any:
     return _run_mini_swe_v2(**params)
 
@@ -749,15 +739,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             run_golden = self.config.run_golden
             base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
             base_url = f"{self.base_url_for_run(base_url, body)}/v1"
-            if self.config.bypass_policy_proxy:
-                bypass_base_url = str(global_config_dict.get("policy_base_url") or "").rstrip("/")
-                if bypass_base_url:
-                    if not bypass_base_url.endswith("/v1"):
-                        bypass_base_url = f"{bypass_base_url}/v1"
-                    base_url = bypass_base_url
-                    if not _BYPASS_LOGGED:
-                        _BYPASS_LOGGED.append(True)
-                        print(f"POLICY-PROXY BYPASS ACTIVE -> {base_url}", flush=True)
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
