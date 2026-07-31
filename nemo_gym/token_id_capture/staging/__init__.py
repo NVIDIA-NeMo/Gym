@@ -37,6 +37,13 @@ protocols are named ``StagingSink``/``StagingSource`` to stay distinct from the
 base's entry-based ``TokenSink``/``TokenSource``.
 """
 
+from nemo_gym.token_id_capture.staging.capture import (
+    ActiveCall,
+    CaptureError,
+    CaptureHost,
+    RolloutTokenCapture,
+    StreamingUnsupportedError,
+)
 from nemo_gym.token_id_capture.staging.protocols import (
     CaptureAdapter,
     StagingSink,
@@ -60,8 +67,13 @@ from nemo_gym.token_id_capture.staging.records import (
 
 __all__ = [
     "SCHEMA_VERSION",
+    "ActiveCall",
     "CallRecord",
     "CaptureAdapter",
+    "CaptureError",
+    "CaptureHost",
+    "RolloutTokenCapture",
+    "StreamingUnsupportedError",
     "CaptureDisposition",
     "CaptureMode",
     "CommitCoords",
