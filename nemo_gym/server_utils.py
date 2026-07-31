@@ -156,12 +156,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
                 probes=cfg.global_aiohttp_tcp_keepalive_probes,
             ),
         ),
-        # sock_connect bounds connection setup only. Deliberately no read or
-        # total timeout: some requests on this shared session (e.g. an agent
-        # /run) stay silent on the wire until a whole rollout finishes, so any
-        # read timeout would abort healthy requests and the retry loop would
-        # re-POST them as duplicate rollouts.
-        timeout=ClientTimeout(sock_connect=30),
+        timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
     )
 
