@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import Request
 from pydantic import BaseModel
-from swebench.harness.run_evaluation import make_test_spec, run_instance
+from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST
 
 from nemo_gym.base_resources_server import (
@@ -26,8 +27,9 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.sandbox import Sandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.swebench.swebench_patches import run_instance
 
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -69,10 +71,16 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
 class DockerContainer(BaseModel):
     id: str
 
-    # TODO @bxyu-nvidia: start(), exec_run(), put_archive(), stop()
+    _inner_container: AsyncSandbox
 
+    async def exec_run(self) -> None:
+        pass  # TODO
 
-# TODO @bxyu-nvidia: Patch build_container, copy_to_container, cleanup_container
+    async def copy(self, src: Path, dest: Path) -> None:
+        pass  # TODO
+
+    async def cleanup(self) -> None:
+        await self._inner_container.stop()
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
@@ -125,16 +133,21 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        eval_sandbox = Sandbox(self.config.sandbox_provider).start(eval_sandbox_spec)
+        eval_sandbox = AsyncSandbox(self.config.sandbox_provider)
+        await eval_sandbox.start(eval_sandbox_spec)
 
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
             # TODO @bxyu-nvidia: cd into WORKDIR in the input container
             # extract the patch via git
-            original_workdir = eval_sandbox.exec("pwd").stdout.strip()
+            original_workdir = await eval_sandbox.exec("pwd").stdout.strip()
 
             model_patch = original_workdir
+
+        run_id = request.session[SESSION_ID_KEY]
+        mock_container = DockerContainer(id=run_id)
+        mock_container._inner_container = AsyncSandbox
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         res = run_instance(
@@ -145,8 +158,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             },
             rm_image=False,
             force_rebuild=False,
-            client=None,  # This is supposed to be DockerClient, but since we patch the create method, we set this to None.
-            run_id=request.session[SESSION_ID_KEY],
+            client=mock_container,
+            run_id=run_id,
             timeout=self.config.evaluation_timeout,
             rewrite_reports=False,
         )
