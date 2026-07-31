@@ -37,8 +37,8 @@ from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "mmlu_prox_benchmark.jsonl"
-LANG_LIBS_COMMIT = "f4d4b3de3ee6741a7151a9fe74945ee515262f4c"
-LANG_LIBS_SHA256 = "582a892b4e8419c16384552b369d7ba828418c57768ccdd82d61172116b3da55"
+LANG_LIBS_COMMIT = "f4d4b3de3ee6741a7151a9fe74945ee515262f4c"  # pragma: allowlist secret
+LANG_LIBS_SHA256 = "582a892b4e8419c16384552b369d7ba828418c57768ccdd82d61172116b3da55"  # pragma: allowlist secret
 LANG_LIBS_URL = (
     "https://raw.githubusercontent.com/EleutherAI/lm-evaluation-harness/"
     f"{LANG_LIBS_COMMIT}/lm_eval/tasks/mmlu_prox/lang_libs.py"
