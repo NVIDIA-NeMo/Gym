@@ -877,7 +877,6 @@ class TestApp:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
-
         # Awaiting the Ray result raises, standing in for a failed rollout task.
         mock_runner_ray_remote.remote.return_value = FakeObjectRef(error=Exception("run_mini_swe failed"))
 
@@ -912,7 +911,6 @@ class TestApp:
 
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
-
 
         mock_runner_ray_remote.remote.return_value = FakeObjectRef(error=FileNotFoundError("run_mini_swe not found"))
 
