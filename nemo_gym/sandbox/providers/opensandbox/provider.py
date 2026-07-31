@@ -355,6 +355,8 @@ class OpenSandboxConnectionConfig:
     server has closed them; null falls back to the SDK's default transport.
     ``transport_backend`` is "httpx" or "aiohttp" (via the optional
     ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
+    The pool is shared, so ``max_connections`` also caps in-flight sandbox
+    operations per process; null means no cap.
     """
 
     domain: str | None = None
@@ -364,7 +366,7 @@ class OpenSandboxConnectionConfig:
     use_server_proxy: bool = False
     keepalive_expiry_s: float | None = 3.0
     max_keepalive_connections: int = 20
-    max_connections: int = 100
+    max_connections: int | None = 100
     connect_retries: int = 2
     transport_backend: str = "httpx"
 

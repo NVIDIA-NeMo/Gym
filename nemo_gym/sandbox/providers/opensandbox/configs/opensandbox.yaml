@@ -29,7 +29,9 @@ sandbox:
       # Must stay below the server's keep-alive idle timeout (uvicorn: ~5s),
       # else pooled sockets are reused after the server has closed them.
       keepalive_expiry_s: 3.0
+      # 0 disables connection reuse.
       max_keepalive_connections: 20
+      # null for no cap.
       max_connections: 100
       connect_retries: 2
       # "aiohttp" routes through the optional httpx-aiohttp bridge, falling
