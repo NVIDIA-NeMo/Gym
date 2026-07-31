@@ -152,7 +152,6 @@ class TestApp:
             d.pop("max_agent_steps", None)
             d["config"].pop("max_agent_steps", None)
             d["config"].pop("turns_remaining_interval", None)
-            d["config"].pop("review_model", None)
             d["result"].pop("agent_messages", None)
             d["result"].pop("agent_steps", None)
             d["result"].pop("max_agent_steps", None)
