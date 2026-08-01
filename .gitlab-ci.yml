@@ -39,7 +39,7 @@ gym-cpu-ci:
     GYM_SOURCE_REF: "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
     GYM_TARGET_REF: "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
     GYM_SLURM_ACCOUNT: "coreai_dlalgo_ci"
-    GYM_SLURM_PARTITION: "cpu"
+    GYM_SLURM_PARTITION: "cpu_short"
   rules:
     - if: >-
         $CI_PIPELINE_SOURCE == "merge_request_event" &&

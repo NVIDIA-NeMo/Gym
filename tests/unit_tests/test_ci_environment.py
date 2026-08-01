@@ -87,6 +87,10 @@ def test_gitlab_adapter_selects_current_contract_version() -> None:
     assert f'GYM_CI_CONTRACT_VERSION: "{expected_version}"' in GITLAB_PIPELINE.read_text()
 
 
+def test_gitlab_adapter_selects_cpu_short_partition() -> None:
+    assert 'GYM_SLURM_PARTITION: "cpu_short"' in GITLAB_PIPELINE.read_text()
+
+
 def _write_executable(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(0o755)
