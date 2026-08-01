@@ -12,9 +12,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SANITIZER = REPO_ROOT / "scripts" / "ci" / "sanitize_env.sh"
 SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
+SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
 GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 
 BEHAVIOR_CHANGING_ENV = {
+    "GYM_CI_DEV_VENV_DIR": "/tmp/injected-driver-venv",
     "SKIP": "ruff",
     "NEMO_GYM_EXTRA_ROOTS": "/tmp/external-gym",
     "NEMO_GYM_CONFIG_DICT": '{"search_dir": "/tmp/external-gym"}',
@@ -47,10 +49,14 @@ def _environment_after_sanitizing(stage: str) -> dict[str, str]:
     ("stage", "removed"),
     [
         ("lint", {"SKIP"}),
-        ("core", {"NEMO_GYM_EXTRA_ROOTS", "NEMO_GYM_CONFIG_DICT", "PYTHONPATH"}),
+        (
+            "core",
+            {"GYM_CI_DEV_VENV_DIR", "NEMO_GYM_EXTRA_ROOTS", "NEMO_GYM_CONFIG_DICT", "PYTHONPATH"},
+        ),
         (
             "server",
             {
+                "GYM_CI_DEV_VENV_DIR",
                 "NEMO_GYM_EXTRA_ROOTS",
                 "NEMO_GYM_CONFIG_DICT",
                 "NEMO_GYM_ALLOW_PRERELEASE",
@@ -79,6 +85,17 @@ def test_ci_environment_sanitizer_rejects_unknown_stage() -> None:
 
     assert result.returncode == 2
     assert "unknown Gym CI stage: unknown" in result.stderr
+
+
+@pytest.mark.parametrize("venv_dir", ["relative-driver-venv", "/"])
+def test_setup_dev_rejects_unsafe_driver_venv(venv_dir: str) -> None:
+    env = os.environ.copy()
+    env["GYM_CI_DEV_VENV_DIR"] = venv_dir
+
+    result = subprocess.run([str(SETUP_DEV)], capture_output=True, text=True, env=env)
+
+    assert result.returncode == 2
+    assert f"GYM_CI_DEV_VENV_DIR must be an absolute non-root path: {venv_dir}" in result.stderr
 
 
 def test_gitlab_adapter_selects_current_contract_version() -> None:
@@ -117,10 +134,11 @@ case "${1:-}" in
     --version) printf '%s\\n' 'uv 0.11.19' ;;
     cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
     venv)
-        mkdir -p .venv/bin
-        : > .venv/bin/activate
-        : > .venv/bin/python
-        chmod +x .venv/bin/python
+        venv_dir="${@: -1}"
+        mkdir -p "${venv_dir}/bin"
+        : > "${venv_dir}/bin/activate"
+        : > "${venv_dir}/bin/python"
+        chmod +x "${venv_dir}/bin/python"
         ;;
     sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
@@ -136,6 +154,7 @@ INSTALL
 set -eu
 printf 'UV_CACHE_DIR=%s\\n' "${UV_CACHE_DIR}" > "${GYM_CI_CAPTURE}"
 printf 'UV_LINK_MODE=%s\\n' "${UV_LINK_MODE:-}" >> "${GYM_CI_CAPTURE}"
+printf 'GYM_CI_DEV_VENV_DIR=%s\\n' "${GYM_CI_DEV_VENV_DIR:-}" >> "${GYM_CI_CAPTURE}"
 printf 'ARG=%s\\n' "$@" >> "${GYM_CI_CAPTURE}"
 """,
     )
@@ -156,10 +175,12 @@ printf 'ARG=%s\\n' "$@" >> "${GYM_CI_CAPTURE}"
     captured = capture_path.read_text().splitlines()
     assert f"UV_CACHE_DIR={repo_root}/relative-cache" in captured
     assert "UV_LINK_MODE=copy" in captured
+    assert f"GYM_CI_DEV_VENV_DIR={node_local_root}/.driver-venv" in captured
     assert "ARG=+uv_cache_dir=" + str(repo_root / "relative-cache") in captured
     assert "ARG=+uv_venv_dir=" + str(node_local_root) in captured
     assert "ARG=+shard_index=2" in captured
     assert "ARG=+num_shards=8" in captured
+    assert not (node_local_root / ".driver-venv").exists()
 
 
 @pytest.mark.parametrize("venv_root", ["relative-venvs", "/"])

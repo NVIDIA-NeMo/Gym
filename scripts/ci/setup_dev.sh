@@ -6,6 +6,7 @@ set -euo pipefail
 
 gym_ci_setup_dev() {
     local setup_ci_dir
+    local setup_dev_venv_dir
     local setup_repo_root
     local setup_uv_cache_dir
     local setup_uv_bin_dir
@@ -16,6 +17,11 @@ gym_ci_setup_dev() {
     # 0.11.20 has a resolver regression that silently drops pinned requirements.
     setup_uv_install_url="https://astral.sh/uv/0.11.19/install.sh"
     setup_uv_bin_dir="${setup_repo_root}/.cache/nemo-gym-ci/uv-0.11.19"
+    setup_dev_venv_dir="${GYM_CI_DEV_VENV_DIR:-${setup_repo_root}/.venv}"
+    if [[ "${setup_dev_venv_dir}" != /* || "${setup_dev_venv_dir}" == "/" ]]; then
+        echo "GYM_CI_DEV_VENV_DIR must be an absolute non-root path: ${setup_dev_venv_dir}" >&2
+        return 2
+    fi
 
     cd "${setup_repo_root}"
     curl -LsSf "${setup_uv_install_url}" | env UV_UNMANAGED_INSTALL="${setup_uv_bin_dir}" sh
@@ -27,13 +33,13 @@ gym_ci_setup_dev() {
     mkdir -p "${setup_uv_cache_dir}"
     setup_uv_cache_dir="$(cd "${setup_uv_cache_dir}" && pwd -P)"
     export UV_CACHE_DIR="${setup_uv_cache_dir}"
-    if [[ ! -x .venv/bin/python ]]; then
-        uv venv --python 3.12
+    if [[ ! -x "${setup_dev_venv_dir}/bin/python" ]]; then
+        uv venv --python 3.12 "${setup_dev_venv_dir}"
     fi
-    uv sync --extra dev
+    UV_PROJECT_ENVIRONMENT="${setup_dev_venv_dir}" uv sync --extra dev
     # Keep the original Actions contract: callers run the environment's commands directly.
     # shellcheck disable=SC1091
-    source .venv/bin/activate
+    source "${setup_dev_venv_dir}/bin/activate"
 }
 
 gym_ci_setup_dev

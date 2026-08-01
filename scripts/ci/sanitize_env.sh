@@ -15,11 +15,12 @@ gym_ci_sanitize_environment() {
             ;;
         core)
             # Keep test discovery, configuration, and imports rooted in this checkout.
-            unset NEMO_GYM_EXTRA_ROOTS NEMO_GYM_CONFIG_DICT PYTHONPATH
+            unset GYM_CI_DEV_VENV_DIR NEMO_GYM_EXTRA_ROOTS NEMO_GYM_CONFIG_DICT PYTHONPATH
             ;;
         server)
             # Keep discovery, installation mode, and nested pytest selection provider-neutral.
-            unset NEMO_GYM_EXTRA_ROOTS NEMO_GYM_CONFIG_DICT NEMO_GYM_ALLOW_PRERELEASE
+            unset GYM_CI_DEV_VENV_DIR NEMO_GYM_EXTRA_ROOTS NEMO_GYM_CONFIG_DICT
+            unset NEMO_GYM_ALLOW_PRERELEASE
             unset PYTHONPATH PYTEST_ADDOPTS
             ;;
         *)

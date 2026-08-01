@@ -40,6 +40,11 @@ cd "${repo_root}"
 source "${ci_dir}/sanitize_env.sh"
 gym_ci_sanitize_environment server
 unset -f gym_ci_sanitize_environment
+driver_venv_dir=""
+if [[ -n "${GYM_CI_UV_VENV_DIR:-}" ]]; then
+    driver_venv_dir="${GYM_CI_UV_VENV_DIR%/}/.driver-venv"
+    export GYM_CI_DEV_VENV_DIR="${driver_venv_dir}"
+fi
 # shellcheck source=scripts/ci/setup_dev.sh
 source "${ci_dir}/setup_dev.sh"
 # Nested pytest processes inherit this through ng_test_all even when Slurm provides no TTY.
@@ -56,5 +61,16 @@ if [[ -n "${GYM_CI_UV_VENV_DIR:-}" ]]; then
     # package cache. Avoid cross-device hardlink attempts and keep cache files immutable.
     export UV_LINK_MODE=copy
     ng_test_all_args+=("+uv_venv_dir=${GYM_CI_UV_VENV_DIR}")
+fi
+if [[ -n "${driver_venv_dir}" ]]; then
+    test_status=0
+    ng_test_all "${ng_test_all_args[@]}" || test_status=$?
+    if ! rm -rf -- "${driver_venv_dir}"; then
+        echo "Failed to remove Gym CI driver venv: ${driver_venv_dir}" >&2
+        if [[ "${test_status}" -eq 0 ]]; then
+            test_status=1
+        fi
+    fi
+    exit "${test_status}"
 fi
 exec ng_test_all "${ng_test_all_args[@]}"

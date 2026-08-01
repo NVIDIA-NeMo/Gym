@@ -23,11 +23,12 @@ step outside this contract.
 
 Contract version 3 keeps uv's resolved cache directory consistent across root and nested server
 installs. A CI provider can set `UV_CACHE_DIR` to a persistent package cache and optionally set
-`GYM_CI_UV_VENV_DIR` to place disposable per-server environments on faster local storage. Gym owns
-server discovery and removes each environment from the configured venv root after its tests finish.
-The venv root must be an absolute, non-root path that is private and unique to the current CI job.
-When it is set, nested installs use uv's copy link mode because the persistent cache and local venv
-root can be on different filesystems.
+`GYM_CI_UV_VENV_DIR` to place the server driver environment and disposable per-server environments
+on faster local storage. Gym owns server discovery, removes every nested environment after its
+tests finish, and removes the driver environment when the shard terminates normally. The venv root
+must be an absolute, non-root path that is private and unique to the current CI job. When it is set,
+installs use uv's copy link mode because the persistent cache and local venv root can be on
+different filesystems.
 
 Both CI providers run `core_unit_tests.sh` in its deterministic `dev`-only environment. GitHub then
 installs its public-only sandbox dependencies and runs the sandbox-marked tests as a separate
