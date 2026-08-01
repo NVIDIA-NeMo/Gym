@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
@@ -166,6 +167,69 @@ def test_coerce_config() -> None:
     assert coerce({"concurrency": 7}, cls).concurrency == 7
     with pytest.raises(TypeError):
         coerce(123, cls)
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "values"),
+    [
+        (
+            enroot_provider.EnrootCreateConfig,
+            {"mount_point": "/workspace", "extra_start_args": ["--conf", "foo"]},
+        ),
+        (
+            enroot_provider.EnrootExecConfig,
+            {"concurrency": 4, "default_mounts": ["/host:/container"]},
+        ),
+        (
+            enroot_provider.EnrootProbeConfig,
+            {"command": "true", "expected_stdout": None, "timeout_s": 5},
+        ),
+    ],
+)
+def test_config_pydantic_round_trip(config_cls: type[BaseModel], values: dict[str, Any]) -> None:
+    config = config_cls.model_validate(values)
+
+    assert isinstance(config, BaseModel)
+    for key, value in values.items():
+        assert getattr(config, key) == value
+    assert config_cls.model_validate(config.model_dump()) == config
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    [
+        enroot_provider.EnrootCreateConfig,
+        enroot_provider.EnrootExecConfig,
+        enroot_provider.EnrootProbeConfig,
+    ],
+)
+def test_config_is_frozen_and_rejects_extra_fields(config_cls: type[BaseModel]) -> None:
+    config = config_cls()
+    field_name = next(iter(config_cls.model_fields))
+
+    with pytest.raises(ValidationError, match="frozen"):
+        setattr(config, field_name, getattr(config, field_name))
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        config_cls.model_validate({"unknown": True})
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "field_name"),
+    [
+        (enroot_provider.EnrootCreateConfig, "extra_import_args"),
+        (enroot_provider.EnrootCreateConfig, "extra_create_args"),
+        (enroot_provider.EnrootCreateConfig, "extra_start_args"),
+        (enroot_provider.EnrootExecConfig, "default_mounts"),
+        (enroot_provider.EnrootExecConfig, "extra_exec_args"),
+    ],
+)
+def test_config_list_defaults_are_isolated(config_cls: type[BaseModel], field_name: str) -> None:
+    first = config_cls()
+    second = config_cls()
+
+    getattr(first, field_name).append("value")
+
+    assert getattr(second, field_name) == []
 
 
 def test_config_validation() -> None:

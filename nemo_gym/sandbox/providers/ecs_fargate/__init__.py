@@ -16,7 +16,9 @@
 
 from nemo_gym.sandbox.providers.ecs_fargate.engine import (
     EcsFargateConfig,
+    OutsideEndpoint,
     SshSidecarConfig,
+    VolumeMount,
 )
 from nemo_gym.sandbox.providers.ecs_fargate.provider import (
     EcsFargateProvider,
@@ -27,6 +29,8 @@ from nemo_gym.sandbox.providers.ecs_fargate.provider import (
 __all__ = [
     "EcsFargateConfig",
     "EcsFargateProvider",
+    "OutsideEndpoint",
     "SshSidecarConfig",
+    "VolumeMount",
     "engine_config_from_mapping",
 ]

@@ -18,8 +18,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, Self, runtime_checkable
 from urllib.parse import urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SandboxStatus(str, Enum):
@@ -61,58 +63,134 @@ class SandboxEndpoint:
         )
 
 
-@dataclass(frozen=True)
-class SandboxResources:
-    """Provider-neutral resource request."""
+_SANDBOX_RESOURCES_POSITIONAL_FIELDS = (
+    "cpu",
+    "memory_mib",
+    "disk_gib",
+    "gpu",
+    "gpu_type",
+)
 
-    cpu: float | None = None
+
+class SandboxResources(BaseModel):
+    """Provider-neutral resource quantities."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    cpu: int | float | None = None
     memory_mib: int | None = None
     disk_gib: int | None = None
     gpu: int | None = None
     gpu_type: str | None = None
 
+    def __init__(self, *args: Any, **data: Any) -> None:
+        if len(args) > len(_SANDBOX_RESOURCES_POSITIONAL_FIELDS):
+            raise TypeError(
+                f"SandboxResources() accepts at most {len(_SANDBOX_RESOURCES_POSITIONAL_FIELDS)} "
+                f"positional arguments, got {len(args)}"
+            )
+
+        positional_data = dict(zip(_SANDBOX_RESOURCES_POSITIONAL_FIELDS, args, strict=False))
+        for field_name in positional_data:
+            if field_name in data:
+                raise TypeError(f"SandboxResources() got multiple values for argument {field_name!r}")
+
+        super().__init__(**positional_data, **data)
+
+    @model_validator(mode="before")
     @classmethod
-    def from_mapping(cls, resources: Mapping[str, Any] | None) -> "SandboxResources":
+    def reject_unknown_fields(cls, resources: Any) -> Any:
+        if isinstance(resources, Mapping):
+            unknown_keys = set(resources) - set(cls.model_fields)
+            if unknown_keys:
+                unknown = ", ".join(sorted(unknown_keys))
+                allowed = ", ".join(sorted(cls.model_fields))
+                raise ValueError(f"Unknown sandbox resource keys: {unknown}. Expected keys: {allowed}")
+        return resources
+
+    @field_validator("cpu", mode="before")
+    @classmethod
+    def coerce_cpu(cls, cpu: Any) -> int | float | None:
+        if cpu is None or isinstance(cpu, int):
+            return cpu
+        return float(cpu)
+
+    @field_validator("memory_mib", "disk_gib", "gpu", mode="before")
+    @classmethod
+    def coerce_integer_resource(cls, value: Any) -> int | None:
+        return int(value) if value is not None else None
+
+    @field_validator("gpu_type", mode="before")
+    @classmethod
+    def coerce_gpu_type(cls, gpu_type: Any) -> str | None:
+        return str(gpu_type) if gpu_type is not None else None
+
+    @classmethod
+    def from_mapping(cls, resources: Mapping[str, Any] | Self | None) -> Self:
         if resources is None:
             return cls()
-        allowed_keys = set(cls.__dataclass_fields__)
-        unknown_keys = set(resources) - allowed_keys
-        if unknown_keys:
-            unknown = ", ".join(sorted(unknown_keys))
-            allowed = ", ".join(sorted(allowed_keys))
-            raise ValueError(f"Unknown sandbox resource keys: {unknown}. Expected keys: {allowed}")
-        return cls(
-            cpu=float(resources["cpu"]) if resources.get("cpu") is not None else None,
-            memory_mib=int(resources["memory_mib"]) if resources.get("memory_mib") is not None else None,
-            disk_gib=int(resources["disk_gib"]) if resources.get("disk_gib") is not None else None,
-            gpu=int(resources["gpu"]) if resources.get("gpu") is not None else None,
-            gpu_type=str(resources["gpu_type"]) if resources.get("gpu_type") is not None else None,
-        )
+        if isinstance(resources, cls):
+            return resources
+        values = dict(resources)
+        if values.get("cpu") is not None:
+            values["cpu"] = float(values["cpu"])
+        return cls.model_validate(values)
 
 
-@dataclass(frozen=True)
-class SandboxSpec:
+_SANDBOX_SPEC_POSITIONAL_FIELDS = (
+    "image",
+    "ttl_s",
+    "ready_timeout_s",
+    "workdir",
+    "env",
+    "files",
+    "metadata",
+    "resources",
+    "entrypoint",
+    "provider_options",
+    "ports",
+)
+
+
+class SandboxSpec(BaseModel):
     """Sandbox creation request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     image: str | None = None
     ttl_s: int | float | None = None
     ready_timeout_s: int | float | None = None
     workdir: str | None = None
-    env: dict[str, str] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)
-    metadata: dict[str, str] = field(default_factory=dict)
-    resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+    env: dict[str, str] = Field(default_factory=dict)
+    files: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    resources: SandboxResources = Field(default_factory=SandboxResources)
+    resource_requests: SandboxResources | None = None
     entrypoint: list[str] | None = None
-    provider_options: dict[str, Any] = field(default_factory=dict)
-    ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+    ports: tuple[int, ...] = Field(default_factory=tuple)
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.resources, SandboxResources):
-            object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
-        if not isinstance(self.ports, (list, tuple)):
+    def __init__(self, *args: Any, **data: Any) -> None:
+        if len(args) > len(_SANDBOX_SPEC_POSITIONAL_FIELDS):
+            raise TypeError(
+                f"SandboxSpec() accepts at most {len(_SANDBOX_SPEC_POSITIONAL_FIELDS)} "
+                f"positional arguments, got {len(args)}"
+            )
+
+        positional_data = dict(zip(_SANDBOX_SPEC_POSITIONAL_FIELDS, args, strict=False))
+        for field_name in positional_data:
+            if field_name in data:
+                raise TypeError(f"SandboxSpec() got multiple values for argument {field_name!r}")
+
+        super().__init__(**positional_data, **data)
+
+    @field_validator("ports", mode="before")
+    @classmethod
+    def normalize_ports(cls, ports: Any) -> tuple[int, ...]:
+        if not isinstance(ports, (list, tuple)):
             raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
         normalized_ports: list[int] = []
-        for raw_port in self.ports:
+        for raw_port in ports:
             if isinstance(raw_port, bool):
                 raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
             if not isinstance(raw_port, (int, str)):
@@ -126,7 +204,45 @@ class SandboxSpec:
             if port in normalized_ports:
                 raise ValueError(f"Duplicate sandbox TCP port: {port}")
             normalized_ports.append(port)
-        object.__setattr__(self, "ports", tuple(normalized_ports))
+        return tuple(normalized_ports)
+
+    @field_validator("resources", mode="before")
+    @classmethod
+    def default_resources(cls, resources: Any) -> Any:
+        """Keep accepting an explicit null resource block as an empty request."""
+        if resources is None or isinstance(resources, (Mapping, SandboxResources)):
+            return SandboxResources.from_mapping(resources)
+        return resources
+
+    @field_validator("resource_requests", mode="before")
+    @classmethod
+    def normalize_resource_requests(cls, resource_requests: Any) -> Any:
+        if isinstance(resource_requests, (Mapping, SandboxResources)):
+            return SandboxResources.from_mapping(resource_requests)
+        return resource_requests
+
+    @field_validator("provider_options", mode="before")
+    @classmethod
+    def normalize_provider_options(cls, provider_options: Any) -> Any:
+        if provider_options is None:
+            return {}
+        if isinstance(provider_options, BaseModel):
+            return provider_options.model_dump(mode="python")
+        return provider_options
+
+    @model_validator(mode="after")
+    def validate_resource_requests(self) -> Self:
+        if self.resource_requests is None:
+            return self
+
+        for field_name in ("cpu", "memory_mib", "disk_gib", "gpu"):
+            request = getattr(self.resource_requests, field_name)
+            limit = getattr(self.resources, field_name)
+            if request is not None and limit is not None and request > limit:
+                raise ValueError(
+                    f"resource_requests.{field_name} ({request}) cannot exceed resources.{field_name} ({limit})"
+                )
+        return self
 
 
 @dataclass

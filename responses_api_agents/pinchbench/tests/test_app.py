@@ -96,12 +96,19 @@ def test_build_spec_from_config():
             "image": "/sif/pinchbench.sif",
             "ready_timeout_s": 600,
             "resources": {"cpu": 4, "memory_mib": 8192},
+            "resource_requests": {"cpu": 1, "memory_mib": 2048},
+            "provider_options": {"network": "isolated"},
+            "ports": [8000, 9222],
         }
     )
     spec = agent._build_spec("task_x")
     assert spec.image == "/sif/pinchbench.sif"
     assert spec.ready_timeout_s == 600
     assert spec.resources.cpu == 4 and spec.resources.memory_mib == 8192
+    assert spec.resource_requests is not None
+    assert spec.resource_requests.cpu == 1 and spec.resource_requests.memory_mib == 2048
+    assert spec.provider_options == {"network": "isolated"}
+    assert spec.ports == (8000, 9222)
     assert spec.metadata == {"task_id": "task_x"}
     # the per-task env (incl the in-sandbox gateway token) is injected into the spec
     assert spec.env["TASK_ID"] == "task_x"

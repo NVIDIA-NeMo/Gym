@@ -29,6 +29,9 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.sandbox import SandboxResources, SandboxSpec
+from nemo_gym.sandbox.providers.daytona.provider import DaytonaProviderOptions
+from nemo_gym.sandbox.providers.openshell.provider import OpenShellProviderOptions
 from nemo_gym.server_utils import ServerClient
 
 
@@ -46,6 +49,7 @@ except ModuleNotFoundError as exc:
     sys.modules["minisweagent.config"] = minisweagent_config_module
 
 from responses_api_agents.mini_swe_agent_2 import app as mini_swe_app_module
+from responses_api_agents.mini_swe_agent_2 import sandbox_environment as mini_swe_sandbox_environment_module
 from responses_api_agents.mini_swe_agent_2.app import (
     OPENSANDBOX_API_KEY_ENV,
     MiniSWEAgent,
@@ -343,8 +347,12 @@ class TestApp:
             _json_dict_from_metadata("[]", field_name="extra_body")
 
     def test_sandbox_resource_profiles_override_static_resources(self) -> None:
+        base_spec = {
+            "resources": {"cpu": 2, "memory_mib": 8192, "disk_gib": 30},
+            "resource_requests": {"cpu": 0.5, "memory_mib": 2048, "disk_gib": 30},
+        }
         spec = _sandbox_spec_for_instance(
-            {"resources": {"cpu": 1, "memory_mib": 8192, "disk_gib": 20}},
+            base_spec,
             resource_profiles=[
                 {"cpu": 0.25, "memory_mib": 3072, "disk_gib": 1},
                 {"cpu": 0.5, "memory_mib": 4096, "disk_gib": 1},
@@ -356,7 +364,103 @@ class TestApp:
             {"cpu": 0.25, "memory_mib": 3072, "disk_gib": 1},
             {"cpu": 0.5, "memory_mib": 4096, "disk_gib": 1},
         )
+        assert spec["resource_requests"] in (
+            {"cpu": 0.25, "memory_mib": 2048, "disk_gib": 1},
+            {"cpu": 0.5, "memory_mib": 2048, "disk_gib": 1},
+        )
+        assert SandboxSpec.model_validate(spec).resource_requests is not None
+        assert base_spec["resource_requests"] == {"cpu": 0.5, "memory_mib": 2048, "disk_gib": 30}
+
+        without_requests = _sandbox_spec_for_instance(
+            {"resources": {"cpu": 2}},
+            resource_profiles=[{"cpu": 0.25}],
+            instance_id="task",
+        )
+        assert "resource_requests" not in without_requests
+        assert SandboxSpec.model_validate(without_requests).resource_requests is None
+
+        with pytest.raises(ValueError, match=r"resource_requests\.cpu .* cannot exceed resources\.cpu"):
+            SandboxSpec.model_validate(
+                _sandbox_spec_for_instance(
+                    {
+                        "resources": {"cpu": 0.25},
+                        "resource_requests": {"cpu": 1},
+                    },
+                    resource_profiles=[{"cpu": 0.5}],
+                    instance_id="task",
+                )
+            )
+
+        with pytest.raises(ValueError, match=r"resource_requests\.cpu .* cannot exceed resources\.cpu"):
+            SandboxSpec.model_validate(
+                _sandbox_spec_for_instance(
+                    {
+                        "resources": {"cpu": 0.5},
+                        "resource_requests": {"cpu": 1},
+                    },
+                    resource_profiles=[{"cpu": 0.25}],
+                    instance_id="task",
+                )
+            )
         assert _sandbox_spec_for_instance(None, resource_profiles=None, instance_id="task") == {}
+
+    def test_default_yaml_uses_provider_neutral_resource_requests(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "mini_swe_agent_2.yaml"
+        agent_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))["mini_swe_agent_2"][
+            "responses_api_agents"
+        ]["mini_swe_agent_2"]
+        spec_config = agent_config["sandbox_spec"]
+
+        assert spec_config["resource_requests"] == {
+            "cpu": 0.5,
+            "memory_mib": 2048,
+            "disk_gib": 30,
+        }
+        assert "resource_requests" not in spec_config.get("provider_options", {})
+        spec = SandboxSpec.model_validate(spec_config)
+
+        assert spec.resource_requests == SandboxResources(
+            cpu=0.5,
+            memory_mib=2048,
+            disk_gib=30,
+        )
+        assert DaytonaProviderOptions.from_mapping(spec.provider_options) == DaytonaProviderOptions()
+        assert OpenShellProviderOptions.from_mapping(spec.provider_options) == OpenShellProviderOptions()
+
+    def test_sandbox_environment_passes_provider_neutral_resource_requests(self, monkeypatch) -> None:
+        captured: dict[str, Any] = {}
+
+        class FakeSandbox:
+            def __init__(self, provider: dict[str, Any]) -> None:
+                captured["provider"] = provider
+
+            def start(self, spec: SandboxSpec) -> "FakeSandbox":
+                captured["spec"] = spec
+                return self
+
+            def stop(self) -> None:
+                captured["stopped"] = True
+
+        monkeypatch.setattr(mini_swe_sandbox_environment_module, "Sandbox", FakeSandbox)
+        env = mini_swe_sandbox_environment_module.MiniSWESandboxEnvironment(
+            image="image:tag",
+            provider={"provider-neutral": {}},
+            spec={
+                "resources": {"cpu": 2, "memory_mib": 8192},
+                "resource_requests": {"cpu": 0.5, "memory_mib": 2048},
+                "ports": [8000, 9222],
+            },
+        )
+
+        try:
+            assert captured["provider"] == {"provider-neutral": {}}
+            assert captured["spec"].resource_requests == SandboxResources(cpu=0.5, memory_mib=2048)
+            assert captured["spec"].provider_options == {}
+            assert captured["spec"].ports == (8000, 9222)
+        finally:
+            env.cleanup()
+
+        assert captured["stopped"] is True
 
     def test_sandbox_provider_config_dump_strips_api_key(self) -> None:
         provider = {

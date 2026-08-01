@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.base import (
@@ -116,6 +117,92 @@ def test_coerce_config() -> None:
     assert coerce({"concurrency": 7}, cls).concurrency == 7
     with pytest.raises(TypeError):
         coerce(123, cls)
+
+
+def test_config_models_validate_and_dump() -> None:
+    create = apptainer_provider.ApptainerCreateConfig.model_validate(
+        {
+            "mount_point": "/workspace",
+            "start_timeout_s": 15,
+            "extra_start_args": ["--cleanenv"],
+            "apply_resource_limits": False,
+        }
+    )
+    exec_config = apptainer_provider.ApptainerExecConfig.model_validate(
+        {
+            "default_timeout_s": 12,
+            "fakeroot_for_root": False,
+            "default_binds": ["/host:/container"],
+            "extra_exec_args": ["--contain"],
+            "concurrency": 4,
+        }
+    )
+    probe = apptainer_provider.ApptainerProbeConfig.model_validate(
+        {
+            "command": "true",
+            "expected_stdout": "",
+            "timeout_s": 5,
+            "deadline_s": 20,
+            "stable_count": 2,
+            "stable_delay_s": 0.5,
+        }
+    )
+
+    assert isinstance(create, BaseModel)
+    assert create.model_dump() == {
+        "mount_point": "/workspace",
+        "start_timeout_s": 15.0,
+        "extra_start_args": ["--cleanenv"],
+        "apply_resource_limits": False,
+    }
+    assert exec_config.model_dump() == {
+        "default_timeout_s": 12.0,
+        "fakeroot_for_root": False,
+        "default_binds": ["/host:/container"],
+        "extra_exec_args": ["--contain"],
+        "concurrency": 4,
+    }
+    assert probe.model_dump() == {
+        "command": "true",
+        "expected_stdout": "",
+        "timeout_s": 5,
+        "deadline_s": 20.0,
+        "stable_count": 2,
+        "stable_delay_s": 0.5,
+    }
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    [
+        apptainer_provider.ApptainerCreateConfig,
+        apptainer_provider.ApptainerExecConfig,
+        apptainer_provider.ApptainerProbeConfig,
+    ],
+)
+def test_config_models_are_frozen_and_forbid_extra(config_cls: type[BaseModel]) -> None:
+    config = config_cls()
+    field_name = next(iter(config_cls.model_fields))
+
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        setattr(config, field_name, None)
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        config_cls.model_validate({"unexpected": "value"})
+
+
+def test_config_list_defaults_are_isolated() -> None:
+    first_create = apptainer_provider.ApptainerCreateConfig()
+    second_create = apptainer_provider.ApptainerCreateConfig()
+    first_create.extra_start_args.append("--cleanenv")
+
+    first_exec = apptainer_provider.ApptainerExecConfig()
+    second_exec = apptainer_provider.ApptainerExecConfig()
+    first_exec.default_binds.append("/host:/container")
+    first_exec.extra_exec_args.append("--contain")
+
+    assert second_create.extra_start_args == []
+    assert second_exec.default_binds == []
+    assert second_exec.extra_exec_args == []
 
 
 def test_config_validation() -> None:

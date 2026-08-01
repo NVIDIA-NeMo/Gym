@@ -20,17 +20,22 @@ opensandbox providers. They live here so there is a single implementation.
 
 import posixpath
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TypeVar
+
+from pydantic import BaseModel
 
 
-def coerce_config(value: Any, config_cls: type[Any]) -> Any:
-    """Accept either a config dataclass instance or a plain mapping (Hydra YAML)."""
+_ConfigT = TypeVar("_ConfigT", bound=BaseModel)
+
+
+def coerce_config(value: Any, config_cls: type[_ConfigT]) -> _ConfigT:
+    """Accept either a config model instance or a plain mapping (Hydra YAML)."""
     if value is None:
         return config_cls()
     if isinstance(value, config_cls):
         return value
     if isinstance(value, Mapping):
-        return config_cls(**value)
+        return config_cls.model_validate(value)
     raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
 

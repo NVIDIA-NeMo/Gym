@@ -313,6 +313,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
     ) -> SandboxSpec:
         config = dict(params.sandbox_spec)
         provider_options = dict(config.pop("provider_options", {}))
+        resource_requests = config.pop("resource_requests", None)
         metadata = {
             **params.sandbox_default_metadata,
             **config.pop("metadata", {}),
@@ -328,8 +329,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             files=files or {},
             metadata=metadata,
             resources=SandboxResources.from_mapping(config.pop("resources", {})),
+            resource_requests=(
+                SandboxResources.from_mapping(resource_requests) if resource_requests is not None else None
+            ),
             entrypoint=config.pop("entrypoint", None),
             provider_options=provider_options,
+            ports=config.pop("ports", ()),
         )
 
     @staticmethod

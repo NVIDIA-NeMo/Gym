@@ -60,8 +60,8 @@ The public API is part of `nemo-gym`. Runtime backends can have optional depende
 | --- | --- |
 | `AsyncSandbox` | Async facade for FastAPI servers, async agents, and rollout code. Use this inside async code. |
 | `Sandbox` | Sync facade for synchronous harnesses. It owns a private event loop and rejects calls from an already-running async loop. |
-| `SandboxSpec` | Provider-neutral sandbox creation request. Includes image, TTL, working directory, files, metadata, resources, entrypoint, and provider options. |
-| `SandboxResources` | Typed resource request with CPU, memory, disk, and GPU fields. |
+| `SandboxSpec` | Provider-neutral sandbox creation request. Includes image, TTL, working directory, files, metadata, resource limits and requests, entrypoint, and provider options. |
+| `SandboxResources` | Typed resource quantities with CPU, memory, disk, and GPU fields. |
 | `SandboxExecResult` | Command result with `stdout`, `stderr`, `return_code`, and optional `error_type`. |
 | `SandboxStatus` | Provider-neutral lifecycle status: `starting`, `running`, `stopped`, `error`, or `unknown`. |
 | `SandboxCreateError` | Base create-time failure for provider allocation and readiness errors. |
@@ -145,6 +145,8 @@ mini_swe_agent_2:
 
 Every provider config can bind the same name, such as `sandbox`, so swapping backends is swapping the provider config path passed to `gym env start`. If one run needs multiple sandboxes, give each block a distinct name and reference each one separately.
 
+Built-in provider configuration and option types are Pydantic models. Where a provider constructor exposes configuration sections, each section accepts its exported typed model or a plain Hydra mapping. `resolve_provider_config()` recursively normalizes typed models to plain configuration values while preserving explicitly supplied fields.
+
 `default_metadata` is merged into `SandboxSpec.metadata` before create. The agent's own `sandbox_spec.metadata` wins on key conflicts.
 
 The helpers used by agents are public:
@@ -212,7 +214,7 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 
 ## SandboxSpec Fields
 
-`SandboxSpec` is intentionally provider-neutral. Providers map these fields onto their own runtime primitives.
+`SandboxSpec` is intentionally provider-neutral. Providers map these fields onto their own runtime primitives. `SandboxSpec` and `SandboxResources` are Pydantic models, so configuration mappings can be loaded with `model_validate()` and serialized with `model_dump()`.
 
 | Field | Description |
 | --- | --- |
@@ -223,7 +225,8 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 | `env` | Environment variables injected into the sandbox. Forward only values required by the task. |
 | `files` | Text files to upload at startup, keyed by remote target path. |
 | `metadata` | String metadata for tracing, debugging, and backend labels. Providers may normalize values for their runtime. |
-| `resources` | `SandboxResources` or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. |
+| `resources` | Resource limits or requirements as `SandboxResources`, or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. |
+| `resource_requests` | Optional scheduling requests using the same fields as `resources`. Numeric requests cannot exceed corresponding limits. Providers without distinct request and limit semantics ignore this hint. |
 | `entrypoint` | Optional container entrypoint override. |
 | `provider_options` | Provider-specific options that do not fit the common schema. |
 
@@ -237,10 +240,15 @@ spec = SandboxSpec(
         "memory_mib": 8192,
         "disk_gib": 20,
     },
+    resource_requests={
+        "cpu": 0.5,
+        "memory_mib": 2048,
+        "disk_gib": 20,
+    },
 )
 ```
 
-Unknown resource keys raise a `ValueError`, which catches config drift early.
+Unknown resource keys raise a `ValueError`, which catches config drift early. When `resource_requests` is omitted, providers retain their existing single-resource-map behavior.
 
 ## Startup Files and File Transfer
 

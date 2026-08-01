@@ -42,6 +42,8 @@ the provider rather than the agent config::
 from collections.abc import Mapping
 from typing import Any
 
+from pydantic import BaseModel
+
 
 # Reserved keys inside a sandbox block that are not the provider config.
 SANDBOX_BLOCK_DEFAULT_METADATA_KEY = "default_metadata"
@@ -49,7 +51,7 @@ SANDBOX_BLOCK_RESERVED_KEYS = frozenset({SANDBOX_BLOCK_DEFAULT_METADATA_KEY})
 
 
 def _to_plain_dict(value: Any) -> Any:
-    """Return a plain ``dict`` for mappings, including OmegaConf ``DictConfig``."""
+    """Recursively normalize config containers and Pydantic models to plain values."""
     try:
         from omegaconf import DictConfig, OmegaConf
     except ImportError:  # pragma: no cover - omegaconf is a core dependency
@@ -57,9 +59,13 @@ def _to_plain_dict(value: Any) -> Any:
         OmegaConf = None  # type: ignore[assignment]
 
     if OmegaConf is not None and isinstance(value, DictConfig):
-        return OmegaConf.to_container(value, resolve=True)
+        return _to_plain_dict(OmegaConf.to_container(value, resolve=True))
+    if isinstance(value, BaseModel):
+        return _to_plain_dict(value.model_dump(mode="python", exclude_unset=True))
     if isinstance(value, Mapping):
-        return dict(value)
+        return {key: _to_plain_dict(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_plain_dict(item) for item in value]
     return value
 
 

@@ -105,7 +105,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
 
-        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        resource_requests = self.config.sandbox_config.get("resource_requests")
         sandbox_spec = SandboxSpec(
             image="swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",  # This is just the first SWE Bench Verified image for now
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
@@ -113,12 +113,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             workdir=None,  # Default to container's WORKDIR
             env=dict(),
             files=dict(),
+            ports=self.config.sandbox_config.get("ports", []),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
             | {
                 "nemo_gym_agent": self.config.name,
             },
             resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            resource_requests=(
+                SandboxResources.from_mapping(resource_requests) if resource_requests is not None else None
+            ),
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )

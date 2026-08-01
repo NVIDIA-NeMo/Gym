@@ -24,6 +24,7 @@ from nemo_gym.sandbox.providers.opensandbox.provider import (
     OpenSandboxOperationConfig,
     OpenSandboxProbeConfig,
     OpenSandboxProvider,
+    OpenSandboxProviderOptions,
 )
 
 
@@ -37,4 +38,5 @@ __all__ = [
     "OpenSandboxOperationConfig",
     "OpenSandboxProbeConfig",
     "OpenSandboxProvider",
+    "OpenSandboxProviderOptions",
 ]

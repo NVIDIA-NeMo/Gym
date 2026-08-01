@@ -41,12 +41,12 @@ import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
-from dataclasses import replace as _dc_replace
 from pathlib import Path
 from typing import Any, Callable, Self, TypeVar
 from urllib.parse import ParseResult, urlparse
 
 import aiohttp
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # Matches the exec-server script's TB_EXEC_PORT fallback and the
@@ -66,8 +66,7 @@ class ExecResult:
     return_code: int
 
 
-@dataclass
-class OutsideEndpoint:
+class OutsideEndpoint(BaseModel):
     """A host-side URL that must be reachable from inside the sandbox.
 
     The sandbox rewrites *url* for its network topology and exposes the
@@ -75,13 +74,16 @@ class OutsideEndpoint:
     container.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     url: str
     env_var: str
 
 
-@dataclass
-class VolumeMount:
+class VolumeMount(BaseModel):
     """EFS mount (ECS Fargate). Host bind mounts are unused on Fargate."""
+
+    model_config = ConfigDict(extra="forbid")
 
     host_path: str = ""
     container_path: str = ""
@@ -97,16 +99,17 @@ class VolumeMount:
         return self.efs or self.efs_filesystem_id is not None
 
 
-@dataclass
-class SandboxSpec:
+class SandboxSpec(BaseModel):
     """Per-problem sandbox requirements."""
+
+    model_config = ConfigDict(extra="forbid")
 
     image: str
     workdir: str = "/workspace"
-    env: dict[str, str] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict)
+    files: dict[str, str] = Field(default_factory=dict)
     entrypoint: str | None = None
-    volumes: list[VolumeMount] = field(default_factory=list)
+    volumes: list[VolumeMount] = Field(default_factory=list)
     environment_dir: str | None = None
 
 
@@ -187,7 +190,7 @@ def resolve_ecs_config_from_ssm(
     return config
 
 
-# ── Config dataclasses ───────────────────────────────────────────────
+# ── Config models ─────────────────────────────────────────────────────
 
 
 def _sanitize_id(value: str, max_len: int = 100) -> str:
@@ -208,13 +211,14 @@ def _is_ecr_image_ref(image: str) -> bool:
     return bool(_ECR_IMAGE_REF_RE.match(image))
 
 
-@dataclass(frozen=True)
-class SshSidecarConfig:
+class SshSidecarConfig(BaseModel):
     """SSH sidecar container configuration.
 
     exec_server_port set → exec-server mode (one-way tunnel).
     exec_server_port None → agent-server mode (two-way tunnel).
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     sshd_port: int = 2222
     ssh_ready_timeout_sec: float = 300.0
@@ -224,14 +228,15 @@ class SshSidecarConfig:
     exec_server_port: int | None = None
 
 
-@dataclass(frozen=True)
-class EcsFargateConfig:
+class EcsFargateConfig(BaseModel):
     """Configuration for the ECS Fargate sandbox."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     region: str | None = None
     cluster: str = ""
-    subnets: list[str] = field(default_factory=list)
-    security_groups: list[str] = field(default_factory=list)
+    subnets: list[str] = Field(default_factory=list)
+    security_groups: list[str] = Field(default_factory=list)
     assign_public_ip: bool = False
     task_definition: str | None = None
     task_definition_family_prefix: str = "ecs-sandbox"
@@ -1706,7 +1711,7 @@ class EcsFargateSandbox:
         built_image: str | None = None
         env_dir = cfg.environment_dir or self._spec.environment_dir
         if cfg.ecr_repository and env_dir:
-            per_task_cfg = _dc_replace(cfg, environment_dir=env_dir)
+            per_task_cfg = cfg.model_copy(update={"environment_dir": env_dir})
             built_image = ImageBuilder.ensure_image_built(
                 cfg=per_task_cfg, environment_name=_sanitize_id(self._spec.image or "sandbox")
             )

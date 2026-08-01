@@ -16,7 +16,7 @@
 import asyncio
 import builtins
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +24,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
 
@@ -169,6 +170,83 @@ async def test_provider_conversion_helpers(
     assert opensandbox_provider._to_volumes([{"name": "workspace"}]) == [FakeVolume(name="workspace")]
 
 
+@pytest.mark.parametrize(
+    ("config_cls", "values", "field_name", "expected"),
+    [
+        (
+            opensandbox_provider.OpenSandboxConnectionConfig,
+            {"domain": "sandbox.example"},
+            "domain",
+            "sandbox.example",
+        ),
+        (
+            opensandbox_provider.OpenSandboxAttributionConfig,
+            {"key_prefix": " acme.example.com "},
+            "key_prefix",
+            "acme.example.com/",
+        ),
+        (opensandbox_provider.OpenSandboxCreateConfig, {"retries": 4}, "retries", 4),
+        (
+            opensandbox_provider.OpenSandboxProbeConfig,
+            {"command": None, "timeout_s": 0},
+            "timeout_s",
+            0,
+        ),
+        (
+            opensandbox_provider.OpenSandboxOperationConfig,
+            {"command_retries": 2},
+            "command_retries",
+            2,
+        ),
+        (
+            opensandbox_provider.OpenSandboxProviderOptions,
+            {"volumes": [{"name": "workspace"}], "extensions": {"retry-count": 3}},
+            "volumes",
+            ({"name": "workspace"},),
+        ),
+    ],
+)
+def test_config_models_are_frozen_pydantic_models(
+    config_cls: type[BaseModel],
+    values: dict[str, Any],
+    field_name: str,
+    expected: Any,
+) -> None:
+    config = config_cls.model_validate(values)
+
+    assert isinstance(config, BaseModel)
+    assert not is_dataclass(config)
+    assert getattr(config, field_name) == expected
+    assert config_cls.model_validate(config.model_dump()) == config
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        setattr(config, field_name, expected)
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        config_cls.model_validate({"unknown_option": True})
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        opensandbox_provider.OpenSandboxConnectionConfig(),
+        opensandbox_provider.OpenSandboxAttributionConfig(),
+        opensandbox_provider.OpenSandboxCreateConfig(),
+        opensandbox_provider.OpenSandboxProbeConfig(),
+        opensandbox_provider.OpenSandboxOperationConfig(),
+    ],
+)
+def test_coerce_config_preserves_model_identity(config: BaseModel) -> None:
+    assert opensandbox_provider._coerce_config(config, type(config)) is config
+
+
+def test_provider_options_mutable_defaults_are_isolated() -> None:
+    first = opensandbox_provider.OpenSandboxProviderOptions()
+    second = opensandbox_provider.OpenSandboxProviderOptions()
+
+    first.extensions["custom"] = "value"
+
+    assert second.extensions == {}
+
+
 async def test_direct_create_passes_platform_to_sdk_create(
     fake_opensandbox_sdk: None,
 ) -> None:
@@ -200,7 +278,7 @@ async def test_direct_create_passes_resource_requests_to_sdk_create(
         SandboxSpec(
             image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
             resources={"cpu": 1, "memory_mib": 8192, "disk_gib": 30},
-            provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 2048, "disk_gib": 30}},
+            resource_requests={"cpu": 0.5, "memory_mib": 2048, "disk_gib": 30},
         ),
     )
 
@@ -211,16 +289,20 @@ async def test_direct_create_passes_resource_requests_to_sdk_create(
         "ephemeral-storage": "30Gi",
     }
 
-    with pytest.raises(TypeError, match="'resource_requests' must be a mapping"):
-        opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"resource_requests": "big"})
 
-    with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
-        await provider.create(
-            SandboxSpec(
-                image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
-                provider_options={"resource_requests": {"memory_gib": 2}},
-            ),
-        )
+async def test_direct_create_omits_resource_requests_when_unspecified(
+    fake_opensandbox_sdk: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.create(
+        SandboxSpec(
+            image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
+            resources={"cpu": 1, "memory_mib": 8192, "disk_gib": 30},
+        ),
+    )
+
+    assert "resource_requests" not in FakeSandbox.created_kwargs
 
 
 async def test_direct_create_passes_image_auth_to_sdk_create(
@@ -308,7 +390,7 @@ def test_provider_options_from_mapping() -> None:
             "snapshot_id": "snap-1",
             "volumes": [{"name": "workspace"}],
             "skip_health_check": True,
-            "extensions": {"imagePullPolicy": "Never"},
+            "extensions": {"imagePullPolicy": "Never", "retry-count": 3},
         }
     )
     assert parsed.image_auth == {"username": "user", "password": TEST_REGISTRY_PASSWORD}
@@ -316,10 +398,21 @@ def test_provider_options_from_mapping() -> None:
     assert parsed.snapshot_id == "snap-1"
     assert parsed.volumes == ({"name": "workspace"},)
     assert parsed.skip_health_check is True
-    assert parsed.extensions == {"imagePullPolicy": "Never"}
+    assert parsed.extensions == {"imagePullPolicy": "Never", "retry-count": "3"}
+
+    model_validated = options_cls.model_validate(
+        {
+            "volumes": [{"name": "workspace"}],
+            "extensions": {"retry-count": 3},
+        }
+    )
+    assert model_validated.volumes == ({"name": "workspace"},)
+    assert model_validated.extensions == {"retry-count": "3"}
 
     with pytest.raises(ValueError, match="Unknown OpenSandbox provider option"):
         options_cls.from_mapping({"bogus": 1})
+    with pytest.raises(ValueError, match="Unknown OpenSandbox provider option"):
+        options_cls.from_mapping({"resource_requests": {"cpu": 0.5}})
     with pytest.raises(TypeError, match="provider_options must be a mapping"):
         options_cls.from_mapping(["not", "a", "mapping"])
     with pytest.raises(TypeError, match="'platform' must be a mapping"):
@@ -330,6 +423,10 @@ def test_provider_options_from_mapping() -> None:
         options_cls.from_mapping({"snapshot_id": 123})
     with pytest.raises(TypeError, match="'volumes' must be a list of mappings"):
         options_cls.from_mapping({"volumes": ["workspace"]})
+
+    first = options_cls.from_mapping({"volumes": None, "extensions": {}})
+    second = options_cls.from_mapping({"volumes": (), "extensions": {}})
+    assert first == second == options_cls()
 
 
 def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
@@ -887,6 +984,7 @@ async def test_create_once_and_connect_after_create_error_paths(
             "platform": {"os": "linux", "arch": "amd64"},
             "volumes": [{"name": "workspace"}],
             "skip_health_check": False,
+            "extensions": {"custom": 3},
         },
     )
     handle = await provider._create_once(spec)
@@ -905,6 +1003,11 @@ async def test_create_once_and_connect_after_create_error_paths(
     assert FakeSandbox.created_kwargs["platform"] == FakePlatformSpec(os="linux", arch="amd64")
     assert FakeSandbox.created_kwargs["volumes"] == [{"name": "workspace"}]
     assert FakeSandbox.created_kwargs["skip_health_check"] is True
+    assert FakeSandbox.created_kwargs["extensions"] == {
+        "custom": "3",
+        "imagePullPolicy": "IfNotPresent",
+        "opensandbox.extensions.image-pull-policy": "IfNotPresent",
+    }
 
     class FailingConnectSandbox(FakeSandbox):
         @classmethod

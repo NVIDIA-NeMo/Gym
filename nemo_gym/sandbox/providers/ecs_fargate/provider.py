@@ -22,7 +22,7 @@ to it. The model endpoint is reached directly from the sandbox, or via the SSH r
 
 from __future__ import annotations
 
-from dataclasses import replace
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -39,24 +39,12 @@ from nemo_gym.sandbox.providers.ecs_fargate import engine
 
 def _outside_endpoints(spec: SandboxSpec) -> list[engine.OutsideEndpoint]:
     raw = spec.provider_options.get("outside_endpoints") or []
-    endpoints = []
-    for item in raw:
-        if isinstance(item, engine.OutsideEndpoint):
-            endpoints.append(item)
-        else:
-            endpoints.append(engine.OutsideEndpoint(url=item["url"], env_var=item["env_var"]))
-    return endpoints
+    return [engine.OutsideEndpoint.model_validate(item) for item in raw]
 
 
 def _volumes(spec: SandboxSpec) -> list[engine.VolumeMount]:
     raw = spec.provider_options.get("volumes") or []
-    volumes = []
-    for item in raw:
-        if isinstance(item, engine.VolumeMount):
-            volumes.append(item)
-        else:
-            volumes.append(engine.VolumeMount(**item))
-    return volumes
+    return [engine.VolumeMount.model_validate(item) for item in raw]
 
 
 def _engine_spec(spec: SandboxSpec) -> engine.SandboxSpec:
@@ -96,7 +84,7 @@ def _apply_spec_overrides(cfg: engine.EcsFargateConfig, spec: SandboxSpec) -> en
         overrides["memory"] = str(int(resources.memory_mib))
     if resources.disk_gib is not None:
         overrides["ephemeral_storage_gib"] = int(resources.disk_gib)
-    return replace(cfg, **overrides) if overrides else cfg
+    return cfg.model_copy(update=overrides) if overrides else cfg
 
 
 class EcsFargateProvider:
@@ -187,65 +175,60 @@ def engine_config_from_mapping(config: dict[str, Any]) -> engine.EcsFargateConfi
 
     ssh_sidecar = _sidecar_config(config.get("ssh_sidecar"), ssm.get("ssh_sidecar", {}))
 
-    return engine.EcsFargateConfig(
-        region=region,
-        cluster=pick("cluster", ""),
-        subnets=config.get("subnets") or ssm.get("subnets", []),
-        security_groups=config.get("security_groups") or ssm.get("security_groups", []),
-        assign_public_ip=pick("assign_public_ip", True),
-        task_definition=config.get("task_definition"),
-        task_definition_family_prefix=config.get("task_definition_family_prefix", "ecs-sandbox"),
-        image_template=config.get("image_template"),
-        container_name=config.get("container_name", "main"),
-        container_port=config.get("container_port"),
-        cpu=str(config.get("cpu", "4096")),
-        memory=str(config.get("memory", "8192")),
-        ephemeral_storage_gib=config.get("ephemeral_storage_gib"),
-        platform_version=config.get("platform_version"),
-        execution_role_arn=pick("execution_role_arn"),
-        task_role_arn=pick("task_role_arn"),
-        extra_env=config.get("extra_env"),
-        log_group=pick("log_group"),
-        log_stream_prefix=config.get("log_stream_prefix"),
-        max_task_lifetime_sec=config.get("max_task_lifetime_sec") or 14400,
-        startup_timeout_sec=float(config.get("startup_timeout_sec", 300.0)),
-        ssh_sidecar=ssh_sidecar,
-        s3_bucket=pick("s3_bucket"),
-        s3_prefix=config.get("s3_prefix"),
-        ecr_repository=pick("ecr_repository"),
-        environment_dir=config.get("environment_dir"),
-        codebuild_project=config.get("codebuild_project"),
-        codebuild_service_role=pick("codebuild_service_role"),
-        codebuild_compute_type=config.get("codebuild_compute_type") or "BUILD_GENERAL1_MEDIUM",
-        codebuild_build_timeout=config.get("codebuild_build_timeout") or 60,
-        auto_mirror=config.get("auto_mirror", True),
-        dockerhub_secret_arn=pick("dockerhub_secret_arn"),
-        efs_filesystem_id=pick("efs_filesystem_id"),
-        efs_access_point_id=pick("efs_access_point_id"),
-        ssm_project=ssm_project,
-    )
+    resolved = {
+        **config,
+        "region": region,
+        "cluster": pick("cluster", ""),
+        "subnets": config.get("subnets") or ssm.get("subnets", []),
+        "security_groups": config.get("security_groups") or ssm.get("security_groups", []),
+        "assign_public_ip": pick("assign_public_ip", True),
+        "cpu": str(config.get("cpu", "4096")),
+        "memory": str(config.get("memory", "8192")),
+        "execution_role_arn": pick("execution_role_arn"),
+        "task_role_arn": pick("task_role_arn"),
+        "log_group": pick("log_group"),
+        "max_task_lifetime_sec": config.get("max_task_lifetime_sec") or 14400,
+        "startup_timeout_sec": float(config.get("startup_timeout_sec", 300.0)),
+        "ssh_sidecar": ssh_sidecar,
+        "s3_bucket": pick("s3_bucket"),
+        "ecr_repository": pick("ecr_repository"),
+        "codebuild_service_role": pick("codebuild_service_role"),
+        "codebuild_compute_type": config.get("codebuild_compute_type") or "BUILD_GENERAL1_MEDIUM",
+        "codebuild_build_timeout": config.get("codebuild_build_timeout") or 60,
+        "auto_mirror": config.get("auto_mirror", True),
+        "dockerhub_secret_arn": pick("dockerhub_secret_arn"),
+        "efs_filesystem_id": pick("efs_filesystem_id"),
+        "efs_access_point_id": pick("efs_access_point_id"),
+        "ssm_project": ssm_project,
+    }
+    return engine.EcsFargateConfig.model_validate(resolved)
 
 
-def _sidecar_config(yaml_sidecar: Any, ssm_ssh: dict[str, Any]) -> engine.SshSidecarConfig | None:
+def _sidecar_config(yaml_sidecar: Any, ssm_ssh: Mapping[str, Any]) -> engine.SshSidecarConfig | None:
     if yaml_sidecar is not None:
-        sc = dict(yaml_sidecar) if isinstance(yaml_sidecar, dict) else yaml_sidecar
-        if isinstance(sc, engine.SshSidecarConfig):
-            return sc
-        pub = sc.get("public_key_secret_arn") or ssm_ssh.get("public_key_secret_arn", "")
-        priv = sc.get("private_key_secret_arn") or ssm_ssh.get("private_key_secret_arn", "")
+        if isinstance(yaml_sidecar, engine.SshSidecarConfig):
+            return yaml_sidecar
+        if not isinstance(yaml_sidecar, Mapping):
+            raise TypeError("ssh_sidecar must be a mapping or SshSidecarConfig instance")
+
+        resolved = dict(yaml_sidecar)
+        pub = resolved.get("public_key_secret_arn") or ssm_ssh.get("public_key_secret_arn", "")
+        priv = resolved.get("private_key_secret_arn") or ssm_ssh.get("private_key_secret_arn", "")
         if not pub or not priv:
             raise ValueError(
                 "ssh_sidecar.public_key_secret_arn and ssh_sidecar.private_key_secret_arn "
                 "are required (set explicitly or auto-discovered from SSM)."
             )
-        return engine.SshSidecarConfig(
-            sshd_port=sc.get("sshd_port", engine.DEFAULT_SSHD_PORT),
-            ssh_ready_timeout_sec=sc.get("ssh_ready_timeout_sec", 300.0),
-            public_key_secret_arn=pub,
-            private_key_secret_arn=priv,
-            image=sc.get("image"),
-            exec_server_port=sc.get("exec_server_port", engine.DEFAULT_EXEC_SERVER_PORT),
+        resolved.update(
+            {
+                "sshd_port": resolved.get("sshd_port", engine.DEFAULT_SSHD_PORT),
+                "ssh_ready_timeout_sec": resolved.get("ssh_ready_timeout_sec", 300.0),
+                "public_key_secret_arn": pub,
+                "private_key_secret_arn": priv,
+                "exec_server_port": resolved.get("exec_server_port", engine.DEFAULT_EXEC_SERVER_PORT),
+            }
         )
+        return engine.SshSidecarConfig.model_validate(resolved)
     if ssm_ssh.get("public_key_secret_arn") and ssm_ssh.get("private_key_secret_arn"):
         return engine.SshSidecarConfig(
             sshd_port=ssm_ssh.get("sshd_port", engine.DEFAULT_SSHD_PORT),

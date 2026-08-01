@@ -29,7 +29,9 @@ import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
@@ -78,42 +80,49 @@ def _require_apptainer() -> str:
     return path
 
 
-@dataclass(frozen=True)
-class ApptainerCreateConfig:
+class ApptainerCreateConfig(BaseModel):
     """Settings for creating an Apptainer sandbox instance."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     mount_point: str = DEFAULT_MOUNT_POINT
     start_timeout_s: float | None = 600
-    extra_start_args: list[str] = field(default_factory=list)
+    extra_start_args: list[str] = Field(default_factory=list)
     apply_resource_limits: bool = True
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
             raise ValueError("create.start_timeout_s must be > 0")
         if not self.mount_point.startswith("/"):
             raise ValueError("create.mount_point must be an absolute path")
+        return self
 
 
-@dataclass(frozen=True)
-class ApptainerExecConfig:
+class ApptainerExecConfig(BaseModel):
     """Settings for running commands inside an Apptainer sandbox."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     default_timeout_s: float | None = 180
     fakeroot_for_root: bool = True
-    default_binds: list[str] = field(default_factory=list)
-    extra_exec_args: list[str] = field(default_factory=list)
+    default_binds: list[str] = Field(default_factory=list)
+    extra_exec_args: list[str] = Field(default_factory=list)
     concurrency: int = 32
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
+        return self
 
 
-@dataclass(frozen=True)
-class ApptainerProbeConfig:
+class ApptainerProbeConfig(BaseModel):
     """Post-create probe settings: a test command confirming the sandbox is usable."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     command: str | None = READY_PROBE_COMMAND
     expected_stdout: str | None = READY_PROBE_EXPECTED
@@ -122,7 +131,8 @@ class ApptainerProbeConfig:
     stable_count: int = 1
     stable_delay_s: float = 0.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.command is not None and self.timeout_s <= 0:
             raise ValueError("probe.timeout_s must be > 0")
         if self.deadline_s is not None and self.deadline_s <= 0:
@@ -131,6 +141,7 @@ class ApptainerProbeConfig:
             raise ValueError("probe.stable_count must be >= 1")
         if self.stable_delay_s < 0:
             raise ValueError("probe.stable_delay_s must be >= 0")
+        return self
 
 
 @dataclass

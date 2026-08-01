@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.registry import get_provider_class
@@ -235,6 +236,54 @@ def test_constructor_builds_real_client_and_config_coercion() -> None:
         openshell_provider._release_shared_client(provider._shared)
 
 
+def test_configs_are_frozen_pydantic_models_with_roundtrip_support() -> None:
+    configs = (
+        OpenShellConnectionConfig(endpoint="gateway:8080"),
+        OpenShellCreateConfig(retries=3),
+        OpenShellExecConfig(concurrency=4),
+        OpenShellProbeConfig(command=None, timeout_s=0),
+        OpenShellOperationsConfig(close_wait_deleted=False),
+        OpenShellProviderOptions.from_mapping({"providers": "nvidia"}),
+    )
+
+    for config in configs:
+        assert isinstance(config, BaseModel)
+        assert config.model_config["frozen"] is True
+        assert type(config).model_validate(config.model_dump()) == config
+
+    with pytest.raises(ValidationError, match="frozen"):
+        configs[0].endpoint = "other:8080"
+
+
+def test_connection_config_remains_hashable_for_shared_client_keys() -> None:
+    connection = OpenShellConnectionConfig(endpoint="gateway:8080", workspace="team-a")
+    equivalent = OpenShellConnectionConfig.model_validate(connection.model_dump())
+
+    assert {connection: "shared-client"}[equivalent] == "shared-client"
+
+
+def test_config_coercion_preserves_model_identity_and_normalizes_mappings() -> None:
+    config = OpenShellExecConfig(concurrency=4)
+
+    assert openshell_provider._coerce_config(config, OpenShellExecConfig) is config
+    assert openshell_provider._coerce_config({"concurrency": "4"}, OpenShellExecConfig) == config
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    [
+        OpenShellConnectionConfig,
+        OpenShellCreateConfig,
+        OpenShellExecConfig,
+        OpenShellProbeConfig,
+        OpenShellOperationsConfig,
+    ],
+)
+def test_config_models_reject_unknown_fields(config_cls: type[BaseModel]) -> None:
+    with pytest.raises(ValueError):
+        config_cls.model_validate({"unexpected": True})
+
+
 @pytest.mark.parametrize(
     ("group", "kwargs"),
     [
@@ -289,6 +338,14 @@ def test_provider_options_validation() -> None:
         OpenShellProviderOptions.from_mapping({"driver_config": ["not", "a", "mapping"]})
     options = OpenShellProviderOptions.from_mapping({"providers": "solo"})
     assert options.providers == ["solo"]
+    assert OpenShellProviderOptions.model_validate(
+        {"providers": ("first", 2), "template_resources": {"cpu": "2"}}
+    ).model_dump() == {
+        "providers": ["first", "2"],
+        "policy": None,
+        "template_resources": {"cpu": "2"},
+        "driver_config": {},
+    }
 
 
 async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) -> None:
@@ -299,10 +356,13 @@ async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) 
         metadata={"task": "demo", SANDBOX_LABEL: "user-override"},
         workdir="/workspace",
         resources={"gpu": 2},
+        resource_requests={"gpu": 1},
         provider_options={"providers": ["nvidia"]},
     )
     handle = await provider.create(spec)
 
+    assert spec.provider_options == {"providers": ["nvidia"]}
+    assert "resource_requests" not in spec.provider_options
     call = fake_client.create_calls[0]
     assert call["workspace"] == "default"
     assert call["name"].startswith(SANDBOX_NAME_PREFIX)

@@ -55,6 +55,7 @@ When `spec.image` is unset, the gateway's configured default image is used
 | `workdir` | default `workdir` for every exec (no create-time equivalent) |
 | `resources.gpu` | `ResourceRequirements.gpu.count` |
 | `resources.cpu/memory_mib/disk_gib/gpu_type` | not mapped by this provider; OpenShell exposes driver-specific limits through `SandboxTemplate.resources` — pass `provider_options.template_resources` (a warning notes the redirection) |
+| `resource_requests` | scheduling hint ignored; OpenShell does not expose separate request/limit semantics through this provider |
 | `ttl_s` | not enforced (sandboxes live until `close()`); logs a warning |
 | `entrypoint` | unsupported; raises (the OpenShell supervisor owns the entrypoint) |
 | `provider_options.providers` | OpenShell credential-provider names attached to the sandbox |

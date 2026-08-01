@@ -100,12 +100,14 @@ Use `SandboxSpec.provider_options` for per-sandbox options that do not belong in
 
 ```python
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict
 
-@dataclass(frozen=True)
-class MyProviderOptions:
+
+class MyProviderOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     snapshot_id: str | None = None
     labels: dict[str, str] | None = None
 
@@ -113,11 +115,9 @@ class MyProviderOptions:
     def from_mapping(cls, options: Mapping[str, Any] | None) -> "MyProviderOptions":
         if options is None:
             return cls()
-        allowed = set(cls.__dataclass_fields__)
-        unknown = set(options) - allowed
-        if unknown:
-            raise ValueError(f"Unknown provider option(s): {', '.join(sorted(unknown))}")
-        return cls(**dict(options))
+        if not isinstance(options, Mapping):
+            raise TypeError("provider_options must be a mapping")
+        return cls.model_validate(dict(options))
 ```
 
 Then resolve it inside `create()`:
@@ -128,7 +128,7 @@ async def create(self, spec: SandboxSpec) -> SandboxHandle:
     ...
 ```
 
-This keeps common fields such as `image`, `env`, `files`, `metadata`, and `resources` portable while still giving a provider room for runtime-specific behavior.
+This keeps common fields such as `image`, `env`, `files`, `metadata`, `resources`, and `resource_requests` portable while still giving a provider room for runtime-specific behavior. Pydantic rejects unknown provider-option keys and exposes `model_validate()` and `model_dump()` for typed configuration boundaries.
 
 ## Registry
 

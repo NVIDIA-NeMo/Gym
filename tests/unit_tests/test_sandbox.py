@@ -22,6 +22,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
@@ -383,8 +384,6 @@ def test_sandbox_resources_validation() -> None:
     assert spec.resources == SandboxResources(cpu=0.5, memory_mib=4096, disk_gib=8)
     assert spec.ports == (8000, 9222)
 
-    with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
-        SandboxSpec(resources={"memory": "4Gi"})
     with pytest.raises(ValueError, match="Duplicate sandbox TCP port"):
         SandboxSpec(ports=[8000, 8000])
     with pytest.raises(ValueError, match="between 1 and 65535"):
@@ -395,28 +394,256 @@ def test_sandbox_resources_validation() -> None:
         SandboxEndpoint(endpoint="/relative/path")
 
 
+def test_sandbox_spec_models_validate_config_and_dump() -> None:
+    assert issubclass(SandboxResources, BaseModel)
+    assert issubclass(SandboxSpec, BaseModel)
+
+    spec = SandboxSpec.model_validate(
+        {
+            "image": "image:tag",
+            "env": {"MODE": "test"},
+            "resources": {
+                "cpu": "2",
+                "memory_mib": "4096",
+                "disk_gib": "8",
+                "gpu": "1",
+                "gpu_type": 100,
+            },
+            "resource_requests": {
+                "cpu": "0.5",
+                "memory_mib": "2048",
+                "disk_gib": "4",
+                "gpu": "1",
+            },
+        }
+    )
+
+    assert spec.resources == SandboxResources(cpu=2.0, memory_mib=4096, disk_gib=8, gpu=1, gpu_type="100")
+    assert spec.resource_requests == SandboxResources(cpu=0.5, memory_mib=2048, disk_gib=4, gpu=1)
+    assert spec.provider_options == {}
+    assert "resource_requests" not in spec.provider_options
+    assert spec.model_dump() == {
+        "image": "image:tag",
+        "ttl_s": None,
+        "ready_timeout_s": None,
+        "workdir": None,
+        "env": {"MODE": "test"},
+        "files": {},
+        "metadata": {},
+        "resources": {
+            "cpu": 2.0,
+            "memory_mib": 4096,
+            "disk_gib": 8,
+            "gpu": 1,
+            "gpu_type": "100",
+        },
+        "resource_requests": {
+            "cpu": 0.5,
+            "memory_mib": 2048,
+            "disk_gib": 4,
+            "gpu": 1,
+            "gpu_type": None,
+        },
+        "entrypoint": None,
+        "provider_options": {},
+        "ports": (),
+    }
+    assert SandboxSpec.model_validate(spec.model_dump()) == spec
+    empty_spec = SandboxSpec(resources=None)
+    assert empty_spec.resources == SandboxResources()
+    assert empty_spec.resource_requests is None
+    assert SandboxResources.from_mapping(spec.resources) is spec.resources
+
+
+def test_sandbox_spec_models_reject_unknown_fields() -> None:
+    with pytest.raises(ValidationError, match="Unknown sandbox resource keys: memory"):
+        SandboxSpec(resources={"memory": "4Gi"})
+
+    with pytest.raises(ValidationError, match="Unknown sandbox resource keys: memory"):
+        SandboxSpec(resource_requests={"memory": "2Gi"})
+
+    with pytest.raises(ValidationError) as spec_error:
+        SandboxSpec(image="image:tag", ready_timout_s=10)
+    assert spec_error.value.errors()[0]["loc"] == ("ready_timout_s",)
+    assert spec_error.value.errors()[0]["type"] == "extra_forbidden"
+
+
+def test_sandbox_resources_keeps_legacy_positional_field_order() -> None:
+    resources = SandboxResources(1.5, 4096, 8, 1, "H100")
+
+    assert resources == SandboxResources(
+        cpu=1.5,
+        memory_mib=4096,
+        disk_gib=8,
+        gpu=1,
+        gpu_type="H100",
+    )
+
+
+def test_sandbox_resources_rejects_invalid_positional_construction() -> None:
+    with pytest.raises(TypeError, match=r"accepts at most 5 positional arguments, got 6"):
+        SandboxResources(1, 4096, 8, 1, "H100", "extra")
+
+    with pytest.raises(TypeError, match=r"got multiple values for argument 'cpu'"):
+        SandboxResources(1, cpu=2)
+
+
 def test_sandbox_endpoint_is_an_optional_provider_capability() -> None:
     assert isinstance(FakeSandboxProvider(), SupportsSandboxEndpoint)
     assert not isinstance(PlainSandboxProvider(), SupportsSandboxEndpoint)
 
 
-def test_sandbox_spec_keeps_legacy_positional_provider_options() -> None:
-    provider_options = {"legacy": True}
+def test_sandbox_spec_keeps_legacy_positional_field_order() -> None:
     spec = SandboxSpec(
         "image:tag",
         60,
         30,
         "/workspace",
-        {},
-        {},
-        {},
-        SandboxResources(cpu=1),
-        ["/bin/sh"],
-        provider_options,
+        {"MODE": "test"},
+        {"/tmp/input": "contents"},
+        {"suite": "unit"},
+        {"cpu": 2},
+        ["/bin/sh", "-lc"],
+        {"legacy": True},
+        [8000, "9222"],
+        resource_requests={"cpu": 1},
     )
 
-    assert spec.provider_options == provider_options
-    assert spec.ports == ()
+    assert spec.image == "image:tag"
+    assert spec.ttl_s == 60
+    assert spec.ready_timeout_s == 30
+    assert spec.workdir == "/workspace"
+    assert spec.env == {"MODE": "test"}
+    assert spec.files == {"/tmp/input": "contents"}
+    assert spec.metadata == {"suite": "unit"}
+    assert spec.resources == SandboxResources(cpu=2)
+    assert spec.entrypoint == ["/bin/sh", "-lc"]
+    assert spec.provider_options == {"legacy": True}
+    assert spec.ports == (8000, 9222)
+    assert spec.resource_requests == SandboxResources(cpu=1)
+
+
+def test_sandbox_spec_rejects_invalid_positional_construction() -> None:
+    with pytest.raises(TypeError, match=r"accepts at most 11 positional arguments, got 12"):
+        SandboxSpec(*([None] * 12))
+
+    with pytest.raises(TypeError, match=r"got multiple values for argument 'image'"):
+        SandboxSpec("image:tag", image="other:tag")
+
+
+@pytest.mark.parametrize(
+    ("field", "limit", "requested"),
+    [
+        ("cpu", 1, 1.5),
+        ("memory_mib", 4096, 4097),
+        ("disk_gib", 8, 9),
+        ("gpu", 1, 2),
+    ],
+)
+def test_sandbox_spec_rejects_resource_requests_above_limits(
+    field: str,
+    limit: int | float,
+    requested: int | float,
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match=rf"resource_requests\.{field} .* cannot exceed resources\.{field}",
+    ):
+        SandboxSpec(resources={field: limit}, resource_requests={field: requested})
+
+
+def test_sandbox_spec_allows_resource_request_without_corresponding_limit() -> None:
+    spec = SandboxSpec(resource_requests={"cpu": "2"})
+
+    assert spec.resources.cpu is None
+    assert spec.resource_requests == SandboxResources(cpu=2.0)
+
+
+def test_sandbox_spec_does_not_compare_gpu_type_requests() -> None:
+    differing = SandboxSpec(
+        resources={"gpu_type": "H100"},
+        resource_requests={"gpu_type": "A100"},
+    )
+    request_only = SandboxSpec(resource_requests={"gpu_type": "H100"})
+
+    assert differing.resource_requests == SandboxResources(gpu_type="A100")
+    assert request_only.resource_requests == SandboxResources(gpu_type="H100")
+
+
+def test_sandbox_spec_allows_equal_numeric_resource_requests() -> None:
+    numeric_resources = {
+        "cpu": "1.5",
+        "memory_mib": "2048",
+        "disk_gib": "8",
+        "gpu": "1",
+    }
+
+    spec = SandboxSpec(resources=numeric_resources, resource_requests=numeric_resources)
+
+    assert spec.resource_requests == spec.resources
+
+
+def test_sandbox_spec_compares_resource_requests_after_coercion() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=r"resource_requests\.cpu \(1\.5\) cannot exceed resources\.cpu \(1\.0\)",
+    ):
+        SandboxSpec(resources={"cpu": "1.0"}, resource_requests={"cpu": "1.5"})
+
+
+@pytest.mark.parametrize("cpu", ["nan", "inf", "-inf"])
+@pytest.mark.parametrize("field", ["resources", "resource_requests"])
+def test_sandbox_spec_rejects_non_finite_cpu_quantities(field: str, cpu: str) -> None:
+    with pytest.raises(ValidationError, match="Input should be a finite number"):
+        SandboxSpec.model_validate({field: {"cpu": cpu}})
+
+
+def test_sandbox_spec_distinguishes_empty_and_omitted_resource_requests() -> None:
+    explicit_empty = SandboxSpec(resource_requests={})
+
+    assert explicit_empty.resource_requests == SandboxResources()
+    assert explicit_empty.resource_requests is not None
+    assert SandboxSpec().resource_requests is None
+
+
+def test_sandbox_spec_accepts_typed_provider_options_models() -> None:
+    from nemo_gym.sandbox.providers.daytona import DaytonaProviderOptions
+    from nemo_gym.sandbox.providers.opensandbox import OpenSandboxProviderOptions
+    from nemo_gym.sandbox.providers.openshell import OpenShellProviderOptions
+
+    options_models = [
+        DaytonaProviderOptions(snapshot_id="snapshot-1"),
+        OpenSandboxProviderOptions(snapshot_id="snapshot-1"),
+        OpenShellProviderOptions(providers=["local"]),
+    ]
+
+    for options in options_models:
+        spec = SandboxSpec(provider_options=options)
+        assert spec.provider_options == options.model_dump(mode="python")
+        assert isinstance(spec.model_dump()["provider_options"], dict)
+        assert type(options).from_mapping(options) is options
+
+    assert SandboxSpec(provider_options=None).provider_options == {}
+
+
+def test_sandbox_spec_models_preserve_frozen_and_default_factory_behavior() -> None:
+    spec = SandboxSpec()
+    resources = SandboxResources()
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        spec.image = "other:tag"
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        resources.cpu = 1
+    assert spec.resource_requests is None
+
+    other_spec = SandboxSpec()
+    spec.env["MODE"] = "test"
+    spec.files["/tmp/input"] = "contents"
+    spec.metadata["suite"] = "unit"
+    spec.provider_options["platform"] = {"arch": "arm64"}
+    assert other_spec.env == {}
+    assert other_spec.files == {}
+    assert other_spec.metadata == {}
+    assert other_spec.provider_options == {}
 
 
 def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -545,6 +772,35 @@ def test_resolve_provider_config_inline_mapping() -> None:
     assert resolve_provider_config(inline) == inline
     # The result is a fresh dict, not the same object.
     assert resolve_provider_config(inline) is not inline
+
+
+def test_resolve_provider_config_normalizes_typed_sections_without_losing_explicit_none() -> None:
+    from nemo_gym.sandbox.providers.daytona import DaytonaConnectionConfig
+    from nemo_gym.sandbox.providers.opensandbox import OpenSandboxConnectionConfig
+
+    default_connection = resolve_provider_config({"daytona": {"connection": DaytonaConnectionConfig()}})
+    explicit_none = resolve_provider_config({"daytona": {"connection": DaytonaConnectionConfig(api_url=None)}})
+    opensandbox = resolve_provider_config(
+        {
+            "opensandbox": {
+                "connection": OpenSandboxConnectionConfig(
+                    domain="sandbox.example",
+                    api_key="secret",
+                )
+            }
+        }
+    )
+
+    assert default_connection == {"daytona": {"connection": {}}}
+    assert explicit_none == {"daytona": {"connection": {"api_url": None}}}
+    assert opensandbox == {
+        "opensandbox": {
+            "connection": {
+                "domain": "sandbox.example",
+                "api_key": "secret",
+            }
+        }
+    }
 
 
 def test_resolve_provider_config_errors() -> None:
