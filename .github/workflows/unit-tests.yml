@@ -156,7 +156,7 @@ jobs:
           source ./scripts/ci/setup_dev.sh
           uv sync --extra dev --extra sandbox
 
-      # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v2.
+      # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v3.
       - name: Sandbox unit tests
         if: needs.detect.outputs.run_full == 'true'
         run: |

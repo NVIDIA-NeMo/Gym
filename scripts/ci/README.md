@@ -14,12 +14,20 @@ pseudo-terminal: lint passes `--color=always` to pre-commit, core passes `--colo
 `PYTEST_ADDOPTS`, and server tests export `PY_COLORS=1` for every nested pytest process.
 
 All scripts can be invoked from any working directory and propagate the underlying command's exit
-status. Contract version 2 is CPU-only: it does not install the `sandbox` extra, run sandbox-marked
+status. Contract version 3 is CPU-only: it does not install the `sandbox` extra, run sandbox-marked
 tests, require sandbox credentials, or infer GPU availability. When `GYM_CI_JUNIT_DIR` is set,
 core tests write `core.xml` there and each server module writes a uniquely named pytest JUnit XML
 report with a module-qualified class prefix. Lint remains a required pre-commit status because
 pre-commit has no native JUnit output. GitHub's sandbox tests remain a separate public-only workflow
 step outside this contract.
+
+Contract version 3 keeps uv's resolved cache directory consistent across root and nested server
+installs. A CI provider can set `UV_CACHE_DIR` to a persistent package cache and optionally set
+`GYM_CI_UV_VENV_DIR` to place disposable per-server environments on faster local storage. Gym owns
+server discovery and removes each environment from the configured venv root after its tests finish.
+The venv root must be an absolute, non-root path that is private and unique to the current CI job.
+When it is set, nested installs use uv's copy link mode because the persistent cache and local venv
+root can be on different filesystems.
 
 Both CI providers run `core_unit_tests.sh` in its deterministic `dev`-only environment. GitHub then
 installs its public-only sandbox dependencies and runs the sandbox-marked tests as a separate

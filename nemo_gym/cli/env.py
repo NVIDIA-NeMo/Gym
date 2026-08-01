@@ -37,7 +37,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.cli.setup_command import run_command, setup_env_command
+from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -633,6 +633,12 @@ def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> L
     return sorted(dir_paths, key=str)[shard_index::num_shards]
 
 
+def _delete_server_venv(dir_path: Path, global_config_dict: DictConfig) -> None:
+    venv_path = get_venv_path(dir_path, global_config_dict)
+    print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
+    rmtree(venv_path, ignore_errors=True)
+
+
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
@@ -700,9 +706,7 @@ def test_all():  # pragma: no cover
             data_validation_failed.append(dir_path)
 
         if test_all_config.delete_venvs_after_each_test:
-            venv_path = _resolve_server_dir(dir_path) / ".venv"
-            print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
-            rmtree(venv_path, ignore_errors=True)
+            _delete_server_venv(_resolve_server_dir(dir_path), global_config_dict)
 
         times_taken.append((time() - start_time, dir_path))
 

@@ -34,6 +34,7 @@ from nemo_gym.cli.env import (
     RunConfig,
     RunHelper,
     TestConfig,
+    _delete_server_venv,
     _resolve_server_dir,
     _select_shard,
     _test_single,
@@ -109,6 +110,20 @@ class TestServerJunitReports:
         assert f"--junitxml={tmp_path}/reports/responses_api_agents__example.xml" in command
         assert "--junit-prefix=responses_api_agents.example" in command
         assert (tmp_path / "reports").is_dir()
+
+
+def test_server_venv_cleanup_uses_configured_root(tmp_path: Path) -> None:
+    server_dir = tmp_path / "checkout" / "resources_servers" / "example"
+    source_venv = server_dir / ".venv"
+    custom_root = tmp_path / "node-local"
+    configured_venv = custom_root / "resources_servers" / "example" / ".venv"
+    source_venv.mkdir(parents=True)
+    configured_venv.mkdir(parents=True)
+
+    _delete_server_venv(server_dir, OmegaConf.create({"uv_venv_dir": str(custom_root)}))
+
+    assert source_venv.is_dir()
+    assert not configured_venv.exists()
 
 
 # TODO: Eventually we want to add more tests to ensure that the CLI flows do not break

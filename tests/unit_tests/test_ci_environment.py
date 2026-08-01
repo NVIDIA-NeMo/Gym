@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SANITIZER = REPO_ROOT / "scripts" / "ci" / "sanitize_env.sh"
+SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
 
 BEHAVIOR_CHANGING_ENV = {
     "SKIP": "ruff",
@@ -76,3 +78,85 @@ def test_ci_environment_sanitizer_rejects_unknown_stage() -> None:
 
     assert result.returncode == 2
     assert "unknown Gym CI stage: unknown" in result.stderr
+
+
+def _write_executable(path: Path, contents: str) -> None:
+    path.write_text(contents)
+    path.chmod(0o755)
+
+
+def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    ci_dir = repo_root / "scripts" / "ci"
+    shutil.copytree(REPO_ROOT / "scripts" / "ci", ci_dir)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_path = tmp_path / "ng-test-all.args"
+
+    _write_executable(
+        bin_dir / "curl",
+        """#!/usr/bin/env bash
+cat <<'INSTALL'
+set -eu
+mkdir -p "${UV_UNMANAGED_INSTALL}"
+cat > "${UV_UNMANAGED_INSTALL}/uv" <<'UV'
+#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+    --version) printf '%s\\n' 'uv 0.11.19' ;;
+    cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
+    venv)
+        mkdir -p .venv/bin
+        : > .venv/bin/activate
+        : > .venv/bin/python
+        chmod +x .venv/bin/python
+        ;;
+    sync) ;;
+    *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
+esac
+UV
+chmod +x "${UV_UNMANAGED_INSTALL}/uv"
+INSTALL
+""",
+    )
+    _write_executable(
+        bin_dir / "ng_test_all",
+        """#!/usr/bin/env bash
+set -eu
+printf 'UV_CACHE_DIR=%s\\n' "${UV_CACHE_DIR}" > "${GYM_CI_CAPTURE}"
+printf 'UV_LINK_MODE=%s\\n' "${UV_LINK_MODE:-}" >> "${GYM_CI_CAPTURE}"
+printf 'ARG=%s\\n' "$@" >> "${GYM_CI_CAPTURE}"
+""",
+    )
+
+    node_local_root = tmp_path / "node-local"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "HOME": str(tmp_path / "home"),
+            "UV_CACHE_DIR": "relative-cache",
+            "GYM_CI_UV_VENV_DIR": str(node_local_root),
+            "GYM_CI_CAPTURE": str(capture_path),
+        }
+    )
+    subprocess.run([str(ci_dir / "server_tests.sh"), "2", "8"], check=True, env=env)
+
+    captured = capture_path.read_text().splitlines()
+    assert f"UV_CACHE_DIR={repo_root}/relative-cache" in captured
+    assert "UV_LINK_MODE=copy" in captured
+    assert "ARG=+uv_cache_dir=" + str(repo_root / "relative-cache") in captured
+    assert "ARG=+uv_venv_dir=" + str(node_local_root) in captured
+    assert "ARG=+shard_index=2" in captured
+    assert "ARG=+num_shards=8" in captured
+
+
+@pytest.mark.parametrize("venv_root", ["relative-venvs", "/"])
+def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
+    env = os.environ.copy()
+    env["GYM_CI_UV_VENV_DIR"] = venv_root
+
+    result = subprocess.run([str(SERVER_TESTS), "0", "8"], capture_output=True, text=True, env=env)
+
+    assert result.returncode == 2
+    assert f"GYM_CI_UV_VENV_DIR must be an absolute non-root path: {venv_root}" in result.stderr

@@ -7,6 +7,7 @@ set -euo pipefail
 gym_ci_setup_dev() {
     local setup_ci_dir
     local setup_repo_root
+    local setup_uv_cache_dir
     local setup_uv_bin_dir
     local setup_uv_install_url
 
@@ -20,6 +21,12 @@ gym_ci_setup_dev() {
     curl -LsSf "${setup_uv_install_url}" | env UV_UNMANAGED_INSTALL="${setup_uv_bin_dir}" sh
     export PATH="${setup_uv_bin_dir}:${PATH}"
     test "$(uv --version | awk '{print $2}')" = "0.11.19"
+    # Resolve uv's default when the CI provider did not supply a cache directory, then export the
+    # same path for nested per-server installs.
+    setup_uv_cache_dir="$(uv cache dir)"
+    mkdir -p "${setup_uv_cache_dir}"
+    setup_uv_cache_dir="$(cd "${setup_uv_cache_dir}" && pwd -P)"
+    export UV_CACHE_DIR="${setup_uv_cache_dir}"
     if [[ ! -x .venv/bin/python ]]; then
         uv venv --python 3.12
     fi

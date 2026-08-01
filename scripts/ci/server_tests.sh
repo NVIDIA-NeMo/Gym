@@ -28,6 +28,12 @@ if ((shard_index >= num_shards)); then
     echo "SHARD_INDEX (${shard_index}) must be less than NUM_SHARDS (${num_shards})" >&2
     exit 2
 fi
+if [[ -n "${GYM_CI_UV_VENV_DIR:-}" ]]; then
+    if [[ "${GYM_CI_UV_VENV_DIR}" != /* || "${GYM_CI_UV_VENV_DIR}" == "/" ]]; then
+        echo "GYM_CI_UV_VENV_DIR must be an absolute non-root path: ${GYM_CI_UV_VENV_DIR}" >&2
+        exit 2
+    fi
+fi
 
 cd "${repo_root}"
 # shellcheck source=scripts/ci/sanitize_env.sh
@@ -38,8 +44,17 @@ unset -f gym_ci_sanitize_environment
 source "${ci_dir}/setup_dev.sh"
 # Nested pytest processes inherit this through ng_test_all even when Slurm provides no TTY.
 export PY_COLORS=1
-exec ng_test_all \
-    +fail_on_total_and_test_mismatch=true \
-    +delete_venvs_after_each_test=true \
-    +num_shards="${num_shards}" \
-    +shard_index="${shard_index}"
+ng_test_all_args=(
+    "+fail_on_total_and_test_mismatch=true"
+    "+delete_venvs_after_each_test=true"
+    "+uv_cache_dir=${UV_CACHE_DIR}"
+    "+num_shards=${num_shards}"
+    "+shard_index=${shard_index}"
+)
+if [[ -n "${GYM_CI_UV_VENV_DIR:-}" ]]; then
+    # A provider-supplied fast venv root may be on a different filesystem from the persistent
+    # package cache. Avoid cross-device hardlink attempts and keep cache files immutable.
+    export UV_LINK_MODE=copy
+    ng_test_all_args+=("+uv_venv_dir=${GYM_CI_UV_VENV_DIR}")
+fi
+exec ng_test_all "${ng_test_all_args[@]}"
