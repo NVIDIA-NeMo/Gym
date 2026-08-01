@@ -34,7 +34,7 @@ async def main(examples: list) -> None:
     num_resolved = 0
     num_total = 0
     pbar = tqdm()
-    for future in pbar.as_completed(tasks):
+    for future in asyncio.as_completed(tasks):
         result = await future
         data = await result.json()
 
@@ -42,7 +42,8 @@ async def main(examples: list) -> None:
         num_total += 1
 
         resolved_pct = 100 * num_resolved / num_total
-        pbar.set_description_str(desc=f"Resolved: {num_resolved} / {num_total} ({resolved_pct:.2f}%)", refresh=True)
+        pbar.set_description_str(desc=f"Resolved: {num_resolved} / {num_total} ({resolved_pct:.2f}%)")
+        pbar.update(1)
 
 
 if __name__ == "__main__":
