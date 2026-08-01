@@ -92,7 +92,8 @@ class DockerContainer(BaseModel):
         return ExecResult(
             exit_code=res.return_code,
             # @bxyu-nvidia: This is not entirely 1:1, but it works for the purposes of this patch.
-            output=(res.stdout + res.stderr).encode(),
+            # The sandbox API returns None for an empty stream (docker-py returned bytes).
+            output=((res.stdout or "") + (res.stderr or "")).encode(),
         )
 
     async def exec_run_with_timeout(self, command: str, timeout: int) -> Tuple[str, bool, float]:
@@ -101,10 +102,11 @@ class DockerContainer(BaseModel):
         try:
             res = await self._inner_container.exec(
                 command=command,
-                timeout=timeout,
+                # AsyncSandbox.exec takes timeout_s, not docker-py's timeout.
+                timeout_s=timeout,
             )
             timed_out = False
-            test_output = res.stdout + res.stderr
+            test_output = (res.stdout or "") + (res.stderr or "")
         except TimeoutError:
             # Gym Sandbox API will throw a timeout error on actual timeout.
             timed_out = True
@@ -113,7 +115,7 @@ class DockerContainer(BaseModel):
         return (test_output, timed_out, time() - start_time)
 
     async def copy(self, src: Path, dest: Path) -> None:
-        await self._inner_container.upload(local_path=src, remote_path=dest)
+        await self._inner_container.upload(local_path=src, remote_path=str(dest))
 
     async def cleanup(self) -> None:
         await self._inner_container.stop()
@@ -181,13 +183,13 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         else:
             # TODO @bxyu-nvidia: cd into WORKDIR in the input container
             # extract the patch via git
-            original_workdir = await eval_sandbox.exec("pwd").stdout.strip()
+            original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
 
             model_patch = original_workdir
 
         run_id = request.session[SESSION_ID_KEY]
         mock_container = DockerContainer(id=run_id)
-        mock_container._inner_container = AsyncSandbox
+        mock_container._inner_container = eval_sandbox
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         res = await run_instance(
@@ -205,7 +207,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         )
         return SWEBenchVerifyResponse(
             **body.model_dump(),
-            **res,
+            # run_instance returns "completed"; the response field is "evaluation_completed".
+            evaluation_completed=res["completed"],
+            resolved=res["resolved"],
             reward=int(res["resolved"]),
         )
 

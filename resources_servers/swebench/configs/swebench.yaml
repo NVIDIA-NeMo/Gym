@@ -8,6 +8,8 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
                                                 #   e2e, rlhf, other. Change 'other' to the closest fit.
       verified: false                           # set true once the benchmark has been baselined and reviewed
 
+      evaluation_timeout: 1800
+
       sandbox_provider: sandbox
       sandbox_config:
         ttl_s: 18000
