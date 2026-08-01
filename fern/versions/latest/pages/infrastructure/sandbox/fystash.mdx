@@ -23,7 +23,7 @@ Install / vendor the Fystash adapter (see [docs.fystash.ai/guides/nemo-gym](http
 Register before starting envs:
 
 ```python
-from integrations.nemo_gym import register  # from fystash-infra adapter
+from integrations.nemo_gym import register  # see https://docs.fystash.ai/guides/nemo-gym
 
 register()  # register_provider("fystash", FystashProvider)
 ```
@@ -73,4 +73,4 @@ If you already run Harbor-backed NeMo Gym agents (`harbor_agent`), point Harbor 
 
 - Not a built-in provider until an in-tree `nemo_gym.sandbox.providers.fystash` lands
 - Not GPU scheduling / multi-host placement / NGC packaging
-- Full how-to: [docs.fystash.ai/guides/nemo-gym](https://docs.fystash.ai/guides/nemo-gym) · adapter: [fystash/fystash-infra integrations/nemo_gym](https://github.com/fystash/fystash-infra/tree/main/integrations/nemo_gym)
+- Full how-to: [docs.fystash.ai/guides/nemo-gym](https://docs.fystash.ai/guides/nemo-gym)
