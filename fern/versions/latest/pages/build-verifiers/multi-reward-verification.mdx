@@ -28,7 +28,15 @@ If a single pass/fail signal captures everything you care about, a scalar `rewar
 
 ## The Verifier Contract
 
-A multi-reward verifier is a normal resources server with one change to what `verify()` returns. The recipe is four steps:
+A multi-reward verifier is a normal resources server with one change to what `verify()` returns. Return **three forms** of the same scores:
+
+| Form | Who reads it |
+|---|---|
+| Scalar `reward` | GRPO and other single-reward consumers; overall score in reports |
+| `reward_components` dict | GDPO and other multi-objective trainers |
+| Top-level numeric fields (one per objective) | Aggregate metrics (per-objective pass rates) |
+
+The recipe is three steps:
 
 ### 1. Scaffold a resources server
 
@@ -38,25 +46,26 @@ Skip if you already have one. Otherwise generate the app, config, and test layou
 gym env init --resources-server my_server
 ```
 
-### 2. Subclass `BaseMultiRewardVerifyResponse`
+### 2. Subclass `BaseMultiRewardVerifyResponse` with top-level component fields
 
-`BaseMultiRewardVerifyResponse` defines the shared multi-reward contract: a required `{objective_name: score}` dict. Use the same objective keys for every task in an environment. Environments that only return a scalar reward should continue to use `BaseVerifyResponse`.
+`BaseMultiRewardVerifyResponse` defines the shared multi-reward contract: a required `{objective_name: score}` dict (`reward_components`). Use the same objective keys for every task in an environment. Environments that only return a scalar reward should continue to use `BaseVerifyResponse`.
+
+Subclass it and declare **one top-level float field per objective** — don't leave the subclass empty. Aggregate metrics computes a stat for every top-level numeric field, but does not descend into nested dicts, so a key inside `reward_components` alone won't appear in your metrics.
 
 ```python
 from nemo_gym.base_resources_server import BaseMultiRewardVerifyResponse
 
 
 class MultiRewardResponse(BaseMultiRewardVerifyResponse):
-    pass
+    # One top-level field per objective so aggregate metrics can profile each.
+    correctness: float = 0.0
+    schema_valid: float = 0.0
+    format: float = 0.0
 ```
 
 ### 3. Set the scalar `reward`
 
 Every verify response carries a scalar `reward`, and most consumers read it rather than the components: aggregate metrics reports it as the overall score for evaluation, and single-reward trainers (e.g. GRPO) use it directly. A weighted sum of the components is commonly used as the scalar reward.
-
-### 4. Expose each reward component as a top-level field
-
-Aggregate metrics computes a stat for every **top-level numeric field**, but does not descend into nested dicts — so a key inside `reward_components` won't appear in your metrics on its own. To get a per-objective pass rate during evaluation, surface each component as its own field too.
 
 ---
 
@@ -69,12 +78,19 @@ We'll make the contract concrete with the [`example_tool_call_multireward`](http
 The example data carries an `expected_call` describing the tool call the agent should make:
 
 ```json
-{"responses_create_params": {"input": [{"role": "developer", "content": "Respond with exactly one get_weather tool call and no other text."}, {"role": "user", "content": "what's the weather in San Francisco?"}], "tools": [{"type": "function", "name": "get_weather", "description": "Get the current weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}, "strict": true}]}, "expected_call": {"name": "get_weather", "arguments": {"city": "San Francisco"}}}
+{"responses_create_params": {"input": [{"content": "You are a helpful assistant. When the user asks about the weather, respond with exactly one get_weather tool call and no other text.", "role": "developer"}, {"content": "what's the weather in San Francisco?", "role": "user"}], "tools": [{"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "The city to get the weather for."}}, "required": ["city"], "additionalProperties": false}, "strict": true, "type": "function", "description": "Get the current weather for a city."}]}, "expected_call": {"name": "get_weather", "arguments": {"city": "San Francisco"}}}
 ```
 
 Subclass `BaseVerifyRequest` to declare any extra per-task fields your scoring needs:
 
 ```python
+from typing import Any, Dict
+
+from pydantic import Field
+
+from nemo_gym.base_resources_server import BaseVerifyRequest
+
+
 class ToolCallMultiRewardVerifyRequest(BaseVerifyRequest):
     expected_call: Dict[str, Any] = Field(default_factory=dict)
 ```
@@ -164,7 +180,7 @@ gym eval run --no-serve --agent example_tool_call_multireward_simple_agent \
     --limit null --num-repeats null --concurrency null
 ```
 
-Because `correctness`, `schema_valid`, and `format` are top-level numeric fields, the [aggregate-metrics](/evaluation/aggregate-metrics) step reports a separate mean (pass rate) for each one alongside the summed `reward`. The metrics file then has an entry per component (illustrative):
+Because `correctness`, `schema_valid`, and `format` are top-level numeric fields, the [Aggregate Metrics](/evaluation/aggregate-metrics) step reports a separate mean (pass rate) for each one alongside the summed `reward`. After `gym eval run`, those stats land next to your rollouts as `<output>_aggregate_metrics.json` — for the command above, that is `resources_servers/example_tool_call_multireward/data/example_rollouts_aggregate_metrics.json`. The file has an entry per component (illustrative):
 
 ```json
 [
