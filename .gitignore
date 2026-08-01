@@ -89,11 +89,6 @@ instance/
 # Scrapy stuff:
 .scrapy
 
-# Sphinx documentation
-docs/_build
-docs/apidocs
-docs/_build/
-
 # PyBuilder
 .pybuilder/
 target/
@@ -160,10 +155,8 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# mkdocs documentation
+# MkDocs output
 /site
-/docs/html
-/docs/docs_zh/zh
 
 # mypy
 .mypy_cache/
@@ -201,8 +194,6 @@ examples/*/wandb
 examples/*/data
 wandb
 dump.py
-
-docs/sources/source/test_build/
 
 # Checkpoints, config files and temporary files created in tutorials.
 examples/neural_graphs/*.chkpt

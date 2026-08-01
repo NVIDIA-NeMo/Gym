@@ -15,12 +15,14 @@
 
 import asyncio
 import builtins
+import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
@@ -32,6 +34,9 @@ pytestmark = pytest.mark.sandbox
 pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
 
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
+
+
+TEST_REGISTRY_PASSWORD = "secret"  # pragma: allowlist secret
 
 
 @dataclass(frozen=True)
@@ -186,6 +191,56 @@ async def test_direct_create_passes_platform_to_sdk_create(
     )
 
 
+async def test_direct_create_passes_resource_requests_to_sdk_create(
+    fake_opensandbox_sdk: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.create(
+        SandboxSpec(
+            image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
+            resources={"cpu": 1, "memory_mib": 8192, "disk_gib": 30},
+            provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 2048, "disk_gib": 30}},
+        ),
+    )
+
+    assert FakeSandbox.created_kwargs["resource"] == {"cpu": "1", "memory": "8192Mi", "ephemeral-storage": "30Gi"}
+    assert FakeSandbox.created_kwargs["resource_requests"] == {
+        "cpu": "0.5",
+        "memory": "2048Mi",
+        "ephemeral-storage": "30Gi",
+    }
+
+    with pytest.raises(TypeError, match="'resource_requests' must be a mapping"):
+        opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"resource_requests": "big"})
+
+    with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
+        await provider.create(
+            SandboxSpec(
+                image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
+                provider_options={"resource_requests": {"memory_gib": 2}},
+            ),
+        )
+
+
+async def test_direct_create_passes_image_auth_to_sdk_create(
+    fake_opensandbox_sdk: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.create(
+        SandboxSpec(
+            image="registry.example/repo:tag",
+            provider_options={"image_auth": {"username": "user", "password": TEST_REGISTRY_PASSWORD}},
+        )
+    )
+
+    image = FakeSandbox.created_kwargs["image"]
+    assert image.image == "registry.example/repo:tag"
+    assert image.auth.username == "user"
+    assert image.auth.password == TEST_REGISTRY_PASSWORD
+
+
 def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")
@@ -248,6 +303,7 @@ def test_provider_options_from_mapping() -> None:
 
     parsed = options_cls.from_mapping(
         {
+            "image_auth": {"username": "user", "password": TEST_REGISTRY_PASSWORD},
             "platform": {"os": "linux", "arch": "amd64"},
             "snapshot_id": "snap-1",
             "volumes": [{"name": "workspace"}],
@@ -255,6 +311,7 @@ def test_provider_options_from_mapping() -> None:
             "extensions": {"imagePullPolicy": "Never"},
         }
     )
+    assert parsed.image_auth == {"username": "user", "password": TEST_REGISTRY_PASSWORD}
     assert parsed.platform == {"os": "linux", "arch": "amd64"}
     assert parsed.snapshot_id == "snap-1"
     assert parsed.volumes == ({"name": "workspace"},)
@@ -267,6 +324,8 @@ def test_provider_options_from_mapping() -> None:
         options_cls.from_mapping(["not", "a", "mapping"])
     with pytest.raises(TypeError, match="'platform' must be a mapping"):
         options_cls.from_mapping({"platform": "linux/amd64"})
+    with pytest.raises(TypeError, match="'image_auth' must be a mapping"):
+        options_cls.from_mapping({"image_auth": "not-a-mapping"})
     with pytest.raises(TypeError, match="'snapshot_id' must be a string"):
         options_cls.from_mapping({"snapshot_id": 123})
     with pytest.raises(TypeError, match="'volumes' must be a list of mappings"):
@@ -285,6 +344,8 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     )
 
     config = provider._connection_config()
+    transport = config.kwargs.pop("transport")
+    assert isinstance(transport, httpx.AsyncBaseTransport)
     assert config.kwargs == {
         "domain": "sandbox.example",
         "api_key": "key",  # pragma: allowlist secret
@@ -294,6 +355,84 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     }
     short_timeout_config = provider._connection_config(request_timeout_s=3)
     assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
+
+
+def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default backend is httpx, with the configured keepalive expiry on the pool.
+    provider = opensandbox_provider.OpenSandboxProvider()
+    transport = provider._build_transport()
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
+
+    # Custom pool settings still produce an httpx transport.
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "transport_backend": "httpx",
+            "keepalive_expiry_s": 2.5,
+            "max_connections": 7,
+            "max_keepalive_connections": 3,
+            "connect_retries": 1,
+        }
+    )
+    transport = provider._build_transport()
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
+    # connect_retries reaches the pool rather than silently falling back.
+    assert transport._pool._retries == 1
+
+    # aiohttp requested but httpx-aiohttp unavailable: falls back to httpx.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(sys.modules, "httpx_aiohttp", None)
+        provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
+        transport = provider._build_transport()
+        assert isinstance(transport, httpx.AsyncHTTPTransport)
+
+    # keepalive_expiry_s=null disables transport injection entirely.
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None})
+    config = provider._connection_config()
+    assert "transport" not in config.kwargs
+
+    # max_connections=null uncaps the pool; max_keepalive_connections=0 disables reuse.
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"max_connections": None, "max_keepalive_connections": 0}
+    )
+    transport = provider._build_transport()
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
+    assert transport._pool._max_connections > 2**32
+    assert transport._pool._max_keepalive_connections == 0
+
+
+async def test_connection_transport_is_shared_and_closed_by_provider(fake_opensandbox_sdk: None) -> None:
+    # The SDK never closes a transport it did not create, so the provider owns
+    # one: built on first use, reused by every ConnectionConfig rather than
+    # leaking a pool per call, and closed in aclose().
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.aclosed = False
+
+        async def aclose(self) -> None:
+            self.aclosed = True
+
+    provider = opensandbox_provider.OpenSandboxProvider()
+    provider._build_transport = FakeTransport
+
+    transport = provider._connection_config().kwargs["transport"]
+    assert provider._connection_config().kwargs["transport"] is transport
+
+    await provider.aclose()
+    assert transport.aclosed
+    assert provider._transport is None
+
+
+def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None) -> None:
+    # Opt-in aiohttp backend via the httpx-aiohttp bridge; the package is not a
+    # declared dependency, so this coverage only runs where it is installed.
+    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
+    transport = provider._build_transport()
+    assert isinstance(transport, httpx_aiohttp.AiohttpTransport)
+    assert transport.limits.keepalive_expiry == 3.0
+    # Both backends honor connect_retries; the bridge default is 0, so this
+    # would catch the option being dropped on the aiohttp path.
+    assert transport.retries == 2
 
     extensions = provider._resolve_extensions({"imagePullPolicy": "Never"})
     assert extensions["imagePullPolicy"] == "Never"
@@ -306,16 +445,19 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
 def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox_sdk: None) -> None:
     import httpx
 
-    # Default: no transport override (SDK uses its pooled default).
+    # Default: a keepalive-bounded transport with connection reuse enabled.
     pooled = opensandbox_provider.OpenSandboxProvider(connection={"domain": "sandbox.example"})
-    assert "transport" not in pooled._connection_config().kwargs
+    pooled_transport = pooled._connection_config().kwargs["transport"]
+    assert isinstance(pooled_transport, httpx.AsyncHTTPTransport)
+    assert pooled_transport._pool._max_keepalive_connections > 0
 
-    # disable_connection_pooling -> a fresh-connection (no-keepalive) transport.
+    # disable_connection_pooling -> same transport plumbing, but no reuse.
     fresh = opensandbox_provider.OpenSandboxProvider(
         connection={"domain": "sandbox.example", "disable_connection_pooling": True}
     )
     transport = fresh._connection_config().kwargs.get("transport")
     assert isinstance(transport, httpx.AsyncHTTPTransport)
+    assert transport._pool._max_keepalive_connections == 0
 
 
 async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -901,3 +1043,130 @@ async def test_retry_loop_empty_iterator_guards(monkeypatch: pytest.MonkeyPatch)
 
 async def _return_value(value: Any) -> Any:
     return value
+
+
+ATTRIBUTION_ENV_VARS = (
+    "NEMO_GYM_TEAM",
+    "NEMO_GYM_USER",
+    "NEMO_GYM_WORKLOAD",
+    "NEMO_GYM_RUN_ID",
+    "NEMO_GYM_CONFIG_PATH",
+    "SLURM_JOB_ACCOUNT",
+    "SLURM_JOB_USER",
+    "SLURM_JOB_NAME",
+)
+
+
+@pytest.fixture
+def clean_attribution_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ATTRIBUTION_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+async def test_create_injects_attribution_metadata(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TEAM", "gym team")  # sanitized to a valid label value below
+    monkeypatch.setenv("NEMO_GYM_USER", "alice")
+    monkeypatch.setenv("NEMO_GYM_WORKLOAD", "swe-gym")
+    monkeypatch.setenv("NEMO_GYM_RUN_ID", "run-123")
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag", metadata={"purpose": "test"}))
+
+    assert FakeSandbox.created_kwargs["metadata"] == {
+        "nemo-gym.nvidia.com/team": "gym_team",
+        "nemo-gym.nvidia.com/user": "alice",
+        "nemo-gym.nvidia.com/workload": "swe-gym",
+        "nemo-gym.nvidia.com/run": "run-123",
+        "purpose": "test",
+    }
+
+
+async def test_create_spec_metadata_and_config_win_over_attribution_detection(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TEAM", "env-team")
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+        attribution={"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload", "run": "cfg-run"},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag", metadata={"nemo-gym.nvidia.com/team": "explicit-team"}))
+
+    assert FakeSandbox.created_kwargs["metadata"] == {
+        "nemo-gym.nvidia.com/team": "explicit-team",
+        "nemo-gym.nvidia.com/user": "cfg-user",
+        "nemo-gym.nvidia.com/workload": "cfg-workload",
+        "nemo-gym.nvidia.com/run": "cfg-run",
+    }
+
+
+async def test_create_attribution_disabled(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+        attribution={"enabled": False, "team": "cfg-team"},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag"))
+
+    assert FakeSandbox.created_kwargs["metadata"] == {}
+
+
+@pytest.mark.parametrize(
+    ("key_prefix", "expected_key"),
+    [
+        ("", "team"),
+        ("acme.example.com/", "acme.example.com/team"),
+        ("acme.example.com", "acme.example.com/team"),  # trailing slash is normalized in
+        ("  ", "team"),
+    ],
+)
+async def test_create_attribution_key_prefix(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+    key_prefix: str,
+    expected_key: str,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+        attribution={"team": "cfg-team", "key_prefix": key_prefix},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag"))
+
+    metadata = FakeSandbox.created_kwargs["metadata"]
+    assert metadata[expected_key] == "cfg-team"
+
+
+async def test_create_attribution_run_id_generated(
+    fake_opensandbox_sdk: None,
+    clean_attribution_env: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag"))
+
+    assert FakeSandbox.created_kwargs["metadata"]["nemo-gym.nvidia.com/run"]  # generated per process
+
+
+@pytest.mark.parametrize("key_prefix", ["Not_A_Valid_Prefix/", "-bad.example.com/", "bad..example.com/"])
+def test_attribution_invalid_key_prefix_raises(key_prefix: str) -> None:
+    with pytest.raises(ValueError, match="key_prefix"):
+        opensandbox_provider.OpenSandboxAttributionConfig(key_prefix=key_prefix)

@@ -263,7 +263,10 @@ class ResponsesConverter(BaseModel):
         match m["role"]:
             case "assistant":
                 final_content = ""
-                if isinstance(m["content"], list):
+                if m["content"] is None:
+                    # Tool-call only turns have "None" according to the official API spec.
+                    pass
+                elif isinstance(m["content"], list):
                     content_str = "".join([part.get("text", "") for part in m["content"]])
                     final_content += content_str
                 elif isinstance(m["content"], str):
@@ -314,7 +317,8 @@ class ResponsesConverter(BaseModel):
 
         This is done to group together one (or multiple) reasoning message(s) into a single,
         cohesive block, later prepending it to a subsequent assistant message.
-        See: https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/how-to-faq.md#faq-openai-responses-vs-chat-completions-api for an example of reasoning in responses api.
+        See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
+        for background on reasoning in the Responses API.
         """
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
