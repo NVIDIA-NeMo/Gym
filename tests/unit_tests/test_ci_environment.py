@@ -22,6 +22,7 @@ BEHAVIOR_CHANGING_ENV = {
     "NEMO_GYM_CONFIG_DICT": '{"search_dir": "/tmp/external-gym"}',
     "NEMO_GYM_ALLOW_PRERELEASE": "true",
     "PYTHONPATH": "/tmp/python",
+    "PYTHONSAFEPATH": "1",
     "PYTEST_ADDOPTS": "-m injected-selection",
 }
 
@@ -61,6 +62,7 @@ def _environment_after_sanitizing(stage: str) -> dict[str, str]:
                 "NEMO_GYM_CONFIG_DICT",
                 "NEMO_GYM_ALLOW_PRERELEASE",
                 "PYTHONPATH",
+                "PYTHONSAFEPATH",
                 "PYTEST_ADDOPTS",
             },
         ),

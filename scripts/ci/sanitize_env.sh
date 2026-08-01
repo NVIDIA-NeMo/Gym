@@ -18,10 +18,11 @@ gym_ci_sanitize_environment() {
             unset GYM_CI_DEV_VENV_DIR NEMO_GYM_EXTRA_ROOTS NEMO_GYM_CONFIG_DICT PYTHONPATH
             ;;
         server)
-            # Keep discovery, installation mode, and nested pytest selection provider-neutral.
+            # Keep discovery, installation mode, Python import behavior, and nested pytest
+            # selection provider-neutral.
             unset GYM_CI_DEV_VENV_DIR NEMO_GYM_EXTRA_ROOTS NEMO_GYM_CONFIG_DICT
             unset NEMO_GYM_ALLOW_PRERELEASE
-            unset PYTHONPATH PYTEST_ADDOPTS
+            unset PYTHONPATH PYTHONSAFEPATH PYTEST_ADDOPTS
             ;;
         *)
             echo "unknown Gym CI stage: $1" >&2

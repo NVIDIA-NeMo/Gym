@@ -36,5 +36,7 @@ coverage pass.
 
 Before setup, the entrypoints remove inherited variables that can change the work selected by CI.
 Lint clears `SKIP`; core and server tests clear external Gym roots, root configuration, and
-`PYTHONPATH`; server tests also clear prerelease-install and inherited pytest-option overrides.
-Resolver/index settings are intentionally preserved so internal package access remains available.
+`PYTHONPATH`; server tests also clear prerelease-install, inherited pytest-option, and
+`PYTHONSAFEPATH` overrides. Clearing `PYTHONSAFEPATH` keeps nested module imports consistent with
+GitHub when a CI image enables Python safe-path mode globally. Resolver/index settings are
+intentionally preserved so internal package access remains available.
