@@ -146,21 +146,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
 
-      # Preserve the public coverage contract: sandbox dependencies are available while
-      # collecting non-sandbox core coverage, then sandbox-marked tests append to it.
-      - name: Setup public test environment
+      - name: Core unit tests
+        if: needs.detect.outputs.run_full == 'true'
+        run: ./scripts/ci/core_unit_tests.sh
+
+      - name: Setup public sandbox test environment
         if: needs.detect.outputs.run_full == 'true'
         run: |
           source ./scripts/ci/setup_dev.sh
           uv sync --extra dev --extra sandbox
 
-      - name: Core unit tests
-        if: needs.detect.outputs.run_full == 'true'
-        env:
-          GYM_CI_USE_EXISTING_ENV: "1"
-        run: ./scripts/ci/core_unit_tests.sh
-
-      # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v1.
+      # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v2.
       - name: Sandbox unit tests
         if: needs.detect.outputs.run_full == 'true'
         run: |

@@ -21,6 +21,6 @@ report with a module-qualified class prefix. Lint remains a required pre-commit 
 pre-commit has no native JUnit output. GitHub's sandbox tests remain a separate public-only workflow
 step outside this contract.
 
-GitHub pre-installs its public-only sandbox dependencies before collecting combined coverage, then
-sets `GYM_CI_USE_EXISTING_ENV=1` for `core_unit_tests.sh`. This opt-in only reuses a validated
-`.venv`; the default path used by NeMo CI always creates the sandbox-free development environment.
+Both CI providers run `core_unit_tests.sh` in its deterministic `dev`-only environment. GitHub then
+installs its public-only sandbox dependencies and runs the sandbox-marked tests as a separate
+coverage pass.
