@@ -161,6 +161,16 @@ class TestStartStop:
         assert provider.exec_calls[0]["command"] == "mkdir -p /logs/agent /logs/verifier"
 
     @pytest.mark.asyncio
+    async def test_start_passes_provider_options_through(self, tmp_path):
+        env = _make_environment(
+            tmp_path,
+            sandbox_provider_options={"resource_requests": {"cpu": 0.25, "memory_mib": 1024}},
+        )
+        await env.start(force_build=False)
+        spec = _provider().created_specs[0]
+        assert spec.provider_options == {"resource_requests": {"cpu": 0.25, "memory_mib": 1024}}
+
+    @pytest.mark.asyncio
     async def test_start_applies_image_rewrites(self, tmp_path):
         env = _make_environment(
             tmp_path,
