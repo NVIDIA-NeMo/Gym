@@ -15,10 +15,14 @@
 import json
 from asyncio import run
 
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.server_utils import ServerClient
 
 
-with open("benchmarks/swebench/data/swebench_verified_benchmark.jsonl") as f:
+global_config_dict = get_global_config_dict()
+
+
+with open(global_config_dict["benchmark_jsonl"]) as f:
     first_example = json.loads(next(f))
 
 first_example |= {
