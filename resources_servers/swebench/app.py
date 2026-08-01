@@ -71,6 +71,10 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     evaluation_completed: bool
     resolved: bool
 
+    # Misc metrics
+    eval_sandbox_start_time_taken: float
+    patch_verification_time_taken: float
+
 
 class DockerContainer(BaseModel):
     id: str
@@ -176,7 +180,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
+        start_time = time()
         await eval_sandbox.start(eval_sandbox_spec)
+        eval_sandbox_start_time_taken = time() - start_time
 
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
@@ -192,6 +198,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         mock_container._inner_container = eval_sandbox
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
+        start_time = time()
         res = await run_instance(
             test_spec=test_spec,
             pred={
@@ -205,12 +212,15 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             timeout=self.config.evaluation_timeout,
             rewrite_reports=False,
         )
+        patch_verification_time_taken = time() - start_time
         return SWEBenchVerifyResponse(
             **body.model_dump(),
             # run_instance returns "completed"; the response field is "evaluation_completed".
             evaluation_completed=res["completed"],
             resolved=res["resolved"],
             reward=int(res["resolved"]),
+            eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
+            patch_verification_time_taken=patch_verification_time_taken,
         )
 
 
