@@ -12,11 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import traceback
 from asyncio import Semaphore
@@ -47,6 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
@@ -61,7 +62,9 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     env: Literal["sandbox"]
     concurrency: int
-    sandbox_provider: Optional[dict[str, Any]] = None
+    # A sandbox name resolved from a separate provider config (e.g. "sandbox"),
+    # or an inline single-key provider mapping ({provider_name: {...}}).
+    sandbox_provider: Optional[str | dict[str, Any]] = None
     sandbox_spec: Optional[dict[str, Any]] = None
     sandbox_environment_kwargs: Optional[dict[str, Any]] = None
     run_golden: bool = False
@@ -86,6 +89,10 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
 
 
 @ray.remote(
+    # Rollout tasks spend nearly all their time waiting on LLM calls and
+    # sandbox I/O; reserving a full CPU per task caps concurrent rollouts at
+    # the Ray cluster's core count long before any real resource limit.
+    num_cpus=0.25,
     scheduling_strategy="SPREAD",
     runtime_env={
         "py_executable": sys.executable,
@@ -137,7 +144,9 @@ def _responses_create_params_to_model_kwargs(
     tool_choice = default_tool_choice if default_tool_choice is not None else params.get("tool_choice")
     if tool_choice == "bash":
         model_kwargs["tool_choice"] = _bash_tool_choice()
-    elif tool_choice is not None:
+    elif tool_choice is not None and tool_choice != "auto":
+        # Don't propagate "auto" — it would overwrite a more specific default
+        # in the mini-swe-agent base config (e.g. swebench.yaml: tool_choice: required).
         model_kwargs["tool_choice"] = tool_choice
 
     return model_kwargs
@@ -504,6 +513,11 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
     model_kwargs = model_config.setdefault("model_kwargs", {})
     model_kwargs["api_key"] = params["api_key"]
     model_kwargs["base_url"] = params["base_url"]
+    # Bounded retries for transient LLM-call failures (disconnects, resets):
+    # without any retry a single failed call kills the whole rollout, while a
+    # large value makes litellm retry silently for so long that the rollout
+    # looks hung. Config-provided model_kwargs take precedence.
+    model_kwargs.setdefault("num_retries", 5)
     model_kwargs.pop("api_base", None)
     max_output_tokens = model_kwargs.pop("max_output_tokens", None)
     if max_output_tokens is not None and "max_tokens" not in model_kwargs:
@@ -573,7 +587,18 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
         }
     finally:
         if env and hasattr(env, "cleanup"):
-            env.cleanup()
+            # Off the critical path: this finally block runs before the task's
+            # return value becomes fetchable, so an in-band stop() delays every
+            # finished result and, on failure, re-raises over it. Orphans are
+            # covered by the provider's sandbox TTL.
+            threading.Thread(target=_cleanup_env_best_effort, args=(env,), daemon=True).start()
+
+
+def _cleanup_env_best_effort(env: Any) -> None:
+    try:
+        env.cleanup()
+    except Exception as e:
+        print(f"[CLEANUP] best-effort sandbox teardown failed: {e}", flush=True)
 
 
 def run_mini_swe_with_sandbox(**params: Any) -> Any:
@@ -711,7 +736,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             split = body.split
             workers = 1
             run_golden = self.config.run_golden
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+            base_url = f"{self.base_url_for_run(base_url, body)}/v1"
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
@@ -733,7 +759,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             top_p = (
                 body.responses_create_params.top_p
                 if body.responses_create_params.top_p is not None
-                else default_model_kwargs["top_p"]
+                else default_model_kwargs.get("top_p", None)
             )
             model_kwargs = _responses_create_params_to_model_kwargs(
                 responses_create_params_dict,
@@ -747,13 +773,19 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             should_write_config = bool(model_kwargs)
             if self.config.sandbox_provider is None:
                 raise ValueError("mini_swe_agent_2 requires sandbox_provider")
+            resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+            provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
             config.setdefault("environment", {}).update(self.config.sandbox_environment_kwargs or {})
-            config["environment"]["provider"] = _sandbox_provider_for_config_dump(self.config.sandbox_provider)
-            config["environment"]["spec"] = _sandbox_spec_for_instance(
+            config["environment"]["provider"] = _sandbox_provider_for_config_dump(resolved_sandbox_provider)
+            instance_spec = _sandbox_spec_for_instance(
                 self.config.sandbox_spec,
                 resource_profiles=self.config.sandbox_resource_profiles,
                 instance_id=instance_id,
             )
+            if provider_default_metadata:
+                # Provider defaults first; the agent's own spec metadata wins on conflict.
+                instance_spec["metadata"] = {**provider_default_metadata, **(instance_spec.get("metadata") or {})}
+            config["environment"]["spec"] = instance_spec
             should_write_config = True
 
             if should_write_config:
@@ -791,11 +823,16 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     step_limit=step_limit,
                 )
                 runner = runner_ray_remote
-                runtime_env = _sandbox_runtime_env(self.config.sandbox_provider)
+                runtime_env = _sandbox_runtime_env(resolved_sandbox_provider)
                 if runtime_env.get("env_vars"):
                     runner = runner.options(runtime_env=runtime_env)
                 future = runner.remote(run_mini_swe_with_sandbox, params)
-                result = await asyncio.to_thread(ray.get, future)
+                # Ray ObjectRefs are awaitable: park on the event loop instead
+                # of pinning a thread in asyncio's default executor (capped at
+                # min(32, cpu+4) workers). With the thread-blocking ray.get,
+                # at most ~32 rollouts can be waiting on results at once and
+                # every other finished task queues behind them.
+                result = await future
                 result = result[instance_id]
                 input_messages = result["input_messages"]
                 response_output = result["response_output"]

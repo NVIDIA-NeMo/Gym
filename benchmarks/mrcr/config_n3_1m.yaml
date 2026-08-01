@@ -24,5 +24,5 @@ mrcr_n3_1m_benchmark_simple_agent:
         # NOTE: for `type: benchmark` datasets, `num_repeats` here is a
         # placeholder — it only triggers row duplication for
         # `type: train`/`validation`. To actually get N rollouts per task,
-        # pass `+num_repeats=N` on the `ng_collect_rollouts` CLI.
+        # pass `--num-repeats N` on the `gym eval run --no-serve` CLI.
         num_repeats: 1

@@ -23,11 +23,12 @@ from app import (
     NSToolsVerifyRequest,
 )
 from fastapi import FastAPI
+from nemo_skills.mcp.tool_manager import ToolManager
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
 class TestApp:
@@ -98,6 +99,9 @@ class TestApp:
             default_verifier="math_with_judge",
         )
         server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server.tool_manager = MagicMock(spec_set=ToolManager)
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rollout-123"}
 
         # Mock the server_client.post to return a successful verification
         mock_response = AsyncMock()
@@ -142,7 +146,7 @@ class TestApp:
             expected_answer="4",
         )
 
-        result = await server.verify(None, verify_request)
+        result = await server.verify(request, verify_request)
 
         assert result.reward == 1.0
         assert result.delegated_response is not None
@@ -153,6 +157,32 @@ class TestApp:
         call_args = server.server_client.post.call_args
         assert call_args.kwargs["server_name"] == "math_with_judge"
         assert call_args.kwargs["url_path"] == "/verify"
+        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
+
+    async def test_verify_cleans_up_when_verifier_fails(self) -> None:
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+        }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server.tool_manager = MagicMock(spec_set=ToolManager)
+        server.server_client.post = AsyncMock(side_effect=RuntimeError("verifier failed"))
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rollout-123"}
+        verify_request = MagicMock(spec=NSToolsVerifyRequest)
+        verify_request.verifier_type = None
+
+        with pytest.raises(RuntimeError, match="verifier failed"):
+            await server.verify(request, verify_request)
+
+        server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
 
     async def test_verify_uses_default_verifier(self) -> None:
         """Test that default verifier is used when verifier_type not specified."""

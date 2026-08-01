@@ -167,6 +167,15 @@ class ServerRefNotFoundError(ConfigError, ValueError):
     """A server cross-reference points to an instance that is not defined in the merged config."""
 
 
+class InheritPathNotFoundError(ConfigError, ValueError):
+    """An `_inherit_from` / swap / copy directive references a config path that does not exist."""
+
+
+class AlmostServerError(ConfigError, ValueError):
+    """One or more server blocks are almost-servers (right shape, failed validation) and
+    `error_on_almost_servers` is set, so the run is aborted."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
@@ -428,6 +437,8 @@ class DatasetConfig(BaseModel):
             Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["CC BY-SA 4.0"],
+            Literal["CC BY-NC 3.0"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
             Literal["NVIDIA Evaluation Dataset License Agreement"],
             Literal["TBD"],
@@ -504,7 +515,7 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
-    prompt_config: Optional[Path]
+    prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
 
 
@@ -740,7 +751,7 @@ class WANDBConfig(BaseModel):
 
 
 ########################################
-# Weights and Biases
+# Aggregate Metrics
 ########################################
 
 
@@ -773,3 +784,12 @@ class AggregateMetrics(BaseModel):
         default_factory=dict,
         description="Headline metrics for this benchmark. Subset of agent_metrics.",
     )
+
+
+########################################
+# Model Call Capture
+########################################
+
+# Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
+# the capture middleware in base_responses_api_model.py strips this prefix before routing.
+ROLLOUT_PATH_PREFIX = "ng-rollout"

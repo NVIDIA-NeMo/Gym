@@ -13,17 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import sys
 import types
 
 import pytest
+from hydra.core.override_parser.overrides_parser import OverridesParser
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
-from nemo_gym import WORKING_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+
+
+@pytest.fixture(autouse=True)
+def _isolate_extra_roots_env(monkeypatch: MonkeyPatch):
+    # `main()` folds `--search-dir` into NEMO_GYM_EXTRA_ROOTS by mutating os.environ directly; delenv gives
+    # each test a clean baseline and restores the original on teardown (even after main() reassigns the key),
+    # so the roots never leak between tests.
+    monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
 
 
 def _dispatch_for(monkeypatch: MonkeyPatch, argv: list[str]) -> tuple[str, list[str]]:
@@ -58,6 +68,7 @@ CONFIG_COMMANDS = [
     (["eval", "prepare"], "nemo_gym.cli.eval:prepare_benchmark"),
     (["eval", "aggregate"], "nemo_gym.cli.eval:aggregate_rollouts"),
     (["eval", "run"], "nemo_gym.cli.eval:e2e_rollout_collection"),
+    (["eval", "reverify"], "nemo_gym.cli.eval:reverify_rollouts"),
     (["dataset", "collate"], "nemo_gym.cli.dataset:prepare_data"),
 ]
 
@@ -407,8 +418,8 @@ class TestDatasetFlags:
 
     def test_bool_flags_omitted_when_unset(self, monkeypatch: MonkeyPatch) -> None:
         # --create-pr not passed -> no +create_pr override leaks in.
-        _, overrides = _dispatch_for(monkeypatch, ["dataset", "upload", "--name", "my_ds"])
-        assert overrides == ["+dataset_name=my_ds"]
+        _, overrides = _dispatch_for(monkeypatch, ["dataset", "upload", "--input", "d.jsonl", "--name", "my_ds"])
+        assert set(overrides) == {"+input_jsonl_fpath=d.jsonl", "+dataset_name=my_ds"}
 
     def test_collate_mode_rejects_invalid_choice(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "argv", ["gym", "dataset", "collate", "--mode", "bogus"])
@@ -423,6 +434,78 @@ class TestEvalAggregateFlags:
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
         assert set(overrides) == {"+input_glob=results/rollouts-*.jsonl", "+output_jsonl_fpath=out.jsonl"}
+
+
+class TestFriendlyValidationError:
+    """No flag is argparse-required (every value can also be supplied as a Hydra `+key=value` override).
+    A missing required value therefore surfaces from the command's own model_validate as a pydantic
+    ValidationError, which the router renders as a concise message + exit 2 instead of a raw traceback."""
+
+    def test_format_lists_missing_and_invalid_fields(self) -> None:
+        from pydantic import ValidationError
+
+        from nemo_gym.cli.main import _handle_pydantic_validation_error
+        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+
+        # A CLI config (so it passes the scoping check) with one missing and one invalid field.
+        class _Model(BaseNeMoGymCLIConfig):
+            required_path: str
+            count: int
+
+        class _FakeParser:
+            message: str = ""
+
+            def error(self, message: str) -> None:
+                self.message = message
+
+        recorder = _FakeParser()
+        try:
+            _Model.model_validate({"count": "not-an-int"})
+        except ValidationError as exc:
+            _handle_pydantic_validation_error(exc, recorder)
+
+        assert "missing required configuration: required_path" in recorder.message
+        assert "+required_path=<value>" in recorder.message
+        assert "invalid configuration: count" in recorder.message
+
+    def test_validation_error_from_dispatch_is_rendered_cleanly(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+
+        # A CLI config (BaseNeMoGymCLIConfig subclass) failing validation is the user's mistake -> friendly.
+        class _Config(BaseNeMoGymCLIConfig):
+            materialized_inputs_jsonl_fpath: str
+
+        def _raise_validation_error(target: str, overrides: list[str]) -> None:
+            _Config.model_validate({})  # missing required field -> ValidationError
+
+        monkeypatch.setattr(cli_main, "dispatch", _raise_validation_error)
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "aggregate"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "gym eval aggregate: error:" in err
+        assert "missing required configuration: materialized_inputs_jsonl_fpath" in err
+
+    def test_non_config_validation_error_is_reraised(self, monkeypatch: MonkeyPatch) -> None:
+        # A ValidationError from a non-CLI-config model (e.g. a server response validated deep inside a
+        # command) is a real error, not a user-config mistake: it must propagate, not be rendered as a
+        # misleading "invalid configuration".
+        from pydantic import BaseModel, ValidationError
+
+        class _ServerResponse(BaseModel):  # NOT a BaseNeMoGymCLIConfig subclass
+            count: int
+
+        def _raise_validation_error(target: str, overrides: list[str]) -> None:
+            _ServerResponse.model_validate({"count": "not-an-int"})
+
+        monkeypatch.setattr(cli_main, "dispatch", _raise_validation_error)
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "run"])
+
+        with pytest.raises(ValidationError):
+            main()
 
 
 class TestDispatch:
@@ -506,6 +589,73 @@ class TestEvalProfileFlags:
             main()
 
 
+class TestEvalReverifyFlags:
+    @pytest.mark.parametrize(
+        "flag_argv, expected_override",
+        [
+            (["--inputs", "in.jsonl"], "+materialized_inputs_jsonl_fpath=in.jsonl"),
+            (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
+            (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["--concurrency", "10"], "+num_samples_in_parallel=10"),
+            (["--limit", "50"], "+limit=50"),
+            (["--force"], "+force=true"),
+            (["--overwrite"], "+overwrite=true"),
+            (["--resume"], "+resume_from_cache=true"),
+            (["--disable-aggregation"], "+disable_aggregation=true"),
+            (["--judge-failed-only"], "+judge_failed_only=true"),
+            (["--append"], "+append=true"),
+        ],
+    )
+    def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "reverify", *flag_argv])
+        assert overrides == [expected_override]
+
+    def test_unset_flags_contribute_nothing(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "reverify"])
+        assert overrides == []
+
+    def test_dispatches_to_reverify_rollouts(self, monkeypatch: MonkeyPatch) -> None:
+        target, _ = _dispatch_for(monkeypatch, ["eval", "reverify"])
+        assert target == "nemo_gym.cli.eval:reverify_rollouts"
+
+    def test_all_flags_compose(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "reverify",
+                "--inputs",
+                "inputs.jsonl",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output",
+                "out.jsonl",
+                "--concurrency",
+                "10",
+                "--limit",
+                "50",
+                "--force",
+                "--overwrite",
+                "--resume",
+                "--disable-aggregation",
+                "--judge-failed-only",
+            ],
+        )
+        assert set(overrides) == {
+            "+materialized_inputs_jsonl_fpath=inputs.jsonl",
+            "+rollouts_jsonl_fpath=rollouts.jsonl",
+            "+output_jsonl_fpath=out.jsonl",
+            "+num_samples_in_parallel=10",
+            "+limit=50",
+            "+force=true",
+            "+overwrite=true",
+            "+resume_from_cache=true",
+            "+disable_aggregation=true",
+            "+judge_failed_only=true",
+        }
+
+
 class TestEnvRunFlags:
     def test_model_flags(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(
@@ -573,6 +723,7 @@ class TestJsonFlag:
         [
             (["list", "benchmarks", "--json"], "nemo_gym.cli.eval:list_benchmarks"),
             (["list", "agents", "--json"], "nemo_gym.cli.agents:list_agents"),
+            (["list", "models", "--json"], "nemo_gym.cli.models:list_models"),
             (["env", "status", "--json"], "nemo_gym.cli.env:status"),
         ],
     )
@@ -588,15 +739,41 @@ class TestJsonFlag:
 
 
 class TestSearch:
-    def test_search_routes_to_list_with_query(self, monkeypatch: MonkeyPatch) -> None:
-        # `gym search <query>` reuses the benchmarks listing, passing the query as the `query` config key.
+    def test_search_query_only_defaults_to_benchmarks(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym search <query>` (no type) reuses the benchmarks listing — backward compatible.
         target, overrides = _dispatch_for(monkeypatch, ["search", "math"])
         assert target == "nemo_gym.cli.eval:list_benchmarks"
-        assert overrides == ["+query=math"]
+        assert overrides == ['+query="math"']
+
+    @pytest.mark.parametrize(
+        "component_type, expected_target",
+        [
+            ("benchmarks", "nemo_gym.cli.eval:list_benchmarks"),
+            ("environments", "nemo_gym.cli.env:list_environments"),
+            ("agents", "nemo_gym.cli.agents:list_agents"),
+            ("models", "nemo_gym.cli.models:list_models"),
+            ("resources-servers", "nemo_gym.cli.resources_servers:list_resources_servers"),
+        ],
+    )
+    def test_search_type_routes_to_that_listing(self, monkeypatch, component_type, expected_target) -> None:
+        # `gym search <type> <query>` runs that type's listing, filtered by the query.
+        target, overrides = _dispatch_for(monkeypatch, ["search", component_type, "swe"])
+        assert target == expected_target
+        assert overrides == ['+query="swe"']
 
     def test_search_json(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["search", "math", "--json"])
-        assert set(overrides) == {"+query=math", "+json=true"}
+        assert set(overrides) == {'+query="math"', "+json=true"}
+
+    @pytest.mark.parametrize("query", ["(A)", "a b", "[x]", "A|B"])
+    def test_search_query_with_special_chars_is_hydra_safe(self, monkeypatch: MonkeyPatch, query) -> None:
+        # The query is quoted so Hydra's override grammar accepts characters that are otherwise syntax,
+        # e.g. `gym search agents "(A)"` used to raise an override parse error. The quoted override must
+        # both be valid Hydra and round-trip back to the original query string.
+        _, overrides = _dispatch_for(monkeypatch, ["search", "agents", query])
+        assert overrides == [f'+query="{query}"']
+        parsed = OverridesParser.create().parse_overrides(overrides)[0]
+        assert parsed.value() == query
 
     def test_version_json_dispatches_with_override(self, monkeypatch: MonkeyPatch) -> None:
         # `gym --version --json` is the top-level path; it still forwards +json=true to the version command.
@@ -780,6 +957,30 @@ class TestAssetSelectors:
             "+output_dirpath=data/example_multi_step",
         }
 
+    def test_collate_model_type_selector(self, monkeypatch: MonkeyPatch) -> None:
+        # `dataset collate` accepts --model-type so model-dependent data workflows (e.g. train_preparation that
+        # generates with a model) can select the model by name instead of an internal config path.
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "dataset",
+                "collate",
+                "--resources-server",
+                "format_verification/freeform_formatting",
+                "--model-type",
+                "vllm_model",
+                "--mode",
+                "train_preparation",
+            ],
+        )
+        assert target == "nemo_gym.cli.dataset:prepare_data"
+        paths, others = _split_overrides(overrides)
+        assert paths == {
+            str(WORKING_DIR / "resources_servers/format_verification/configs/freeform_formatting.yaml"),
+            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+        }
+        assert others == {"+mode=train_preparation"}
+
     def test_resource_server_flavor_syntax(self, monkeypatch: MonkeyPatch) -> None:
         # `<server>/<flavor>` picks a named config inside the server's configs/ dir; math_with_judge ships several
         # flavoured configs (see reference/faq.mdx, which pairs a math_with_judge dataset flavour for profiling).
@@ -842,10 +1043,14 @@ class TestDidYouMean:
     """difflib-backed "did you mean?" hints for mistyped commands, flags, and component names (proposal UX 4)."""
 
     def test_helper_suggests_close_match(self) -> None:
-        assert cli_main._did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
+        from nemo_gym.cli.utils import did_you_mean
+
+        assert did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
 
     def test_helper_silent_when_nothing_close(self) -> None:
-        assert cli_main._did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
+        from nemo_gym.cli.utils import did_you_mean
+
+        assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
 
     def _run_expecting_exit(self, monkeypatch: MonkeyPatch, capsys, argv: list[str]) -> str:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
@@ -883,6 +1088,19 @@ class TestDidYouMean:
         )
         assert "Did you mean `dapo17k`?" in err
 
+    def test_benchmark_group_dir_suggests_a_nested_token(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # `livecodebench` is a directory that only groups benchmarks (its configs are nested), so it is not
+        # itself a valid `--benchmark` value. The hint must point at a real nested token, not circle back to
+        # the bare directory name.
+        err = self._run_expecting_exit(monkeypatch, capsys, ["eval", "run", "--benchmark", "livecodebench"])
+        assert "Did you mean `livecodebench/" in err
+        assert "Did you mean `livecodebench`?" not in err
+
+    def test_benchmark_group_dir_with_flavor_configs_subdir(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # tau2 keeps its benchmarks under `configs/`; the hint should surface one of those tokens.
+        err = self._run_expecting_exit(monkeypatch, capsys, ["eval", "prepare", "--benchmark", "tau2"])
+        assert "Did you mean `tau2/configs/" in err
+
 
 class TestSearchDir:
     """--search-dir registers extra roots that the name->config selectors also search (REQ 5)."""
@@ -890,7 +1108,9 @@ class TestSearchDir:
     def _make_user_benchmark(self, tmp_path, name: str = "mybench") -> None:
         bench_dir = tmp_path / "benchmarks" / name
         bench_dir.mkdir(parents=True)
-        (bench_dir / "config.yaml").write_text("{}\n")
+        # A `type: benchmark` dataset so the config is discoverable as a real benchmark (the "did you mean"
+        # suggestions enumerate real benchmark tokens); resolution itself only needs the file to exist.
+        (bench_dir / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
 
     def test_resolves_component_from_user_dir(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         self._make_user_benchmark(tmp_path)
@@ -907,19 +1127,17 @@ class TestSearchDir:
         )
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'benchmarks/gsm8k/config.yaml'}]"]
 
-    def test_ambiguous_match_errors(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
-        # A built-in name also present in a --search-dir is ambiguous; the user must disambiguate with --config.
+    def test_collision_prefers_search_dir_and_warns(self, monkeypatch: MonkeyPatch, tmp_path, caplog) -> None:
+        # A built-in name also present in a --search-dir resolves to the higher-priority --search-dir copy
+        # (matching `gym list`'s earlier-root-wins rule), with a warning about the shadowed built-in.
         self._make_user_benchmark(tmp_path, name="gsm8k")  # gsm8k also exists under WORKING_DIR
-        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
-        monkeypatch.setattr(
-            sys, "argv", ["gym", "eval", "prepare", "--benchmark", "gsm8k", "--search-dir", str(tmp_path)]
-        )
-        with pytest.raises(SystemExit):
-            main()
-        err = capsys.readouterr().err
-        assert "ambiguous" in err
-        assert str(WORKING_DIR / "benchmarks" / "gsm8k" / "config.yaml") in err
-        assert str(tmp_path / "benchmarks" / "gsm8k" / "config.yaml") in err
+        with caplog.at_level(logging.WARNING):
+            _, overrides = _dispatch_for(
+                monkeypatch, ["eval", "prepare", "--benchmark", "gsm8k", "--search-dir", str(tmp_path)]
+            )
+        assert overrides == [f"+config_paths=[{tmp_path / 'benchmarks' / 'gsm8k' / 'config.yaml'}]"]
+        assert "matches multiple configs" in caplog.text
+        assert str(WORKING_DIR / "benchmarks" / "gsm8k" / "config.yaml") in caplog.text
 
     def test_search_dir_alone_emits_nothing(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # --search-dir is consumed by the selectors; on its own it is not a Hydra override.
@@ -937,6 +1155,77 @@ class TestSearchDir:
         assert "Did you mean `mybench`?" in capsys.readouterr().err
 
 
+class TestInstallRootResolution:
+    """Built-in assets resolve from the Gym install root regardless of cwd (REQ C2/C5).
+
+    In a wheel install PARENT_DIR is site-packages (where the asset trees are installed) while the
+    user runs from an unrelated project dir, so WORKING_DIR/cwd is not the install root. The selector
+    must still find built-ins under PARENT_DIR. Editable-from-repo keeps working because PARENT_DIR,
+    WORKING_DIR, and cwd all coincide and dedupe to a single root.
+    """
+
+    def _make_resources_server(self, root, name: str = "foo") -> None:
+        config_dir = root / "resources_servers" / name / "configs"
+        config_dir.mkdir(parents=True)
+        (config_dir / f"{name}.yaml").write_text("{}\n")
+
+    def test_builtin_resolves_from_install_root_when_cwd_differs(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        install_root = tmp_path / "site-packages"
+        user_cwd = tmp_path / "my-project"
+        install_root.mkdir()
+        user_cwd.mkdir()
+        self._make_resources_server(install_root)  # built-in only under the install root
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
+        monkeypatch.chdir(user_cwd)
+
+        resolved = cli_main._asset_config_path("resources-server", "foo")
+        assert resolved == str(install_root / "resources_servers" / "foo" / "configs" / "foo.yaml")
+
+    def test_user_cwd_asset_resolves_when_not_builtin(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        install_root = tmp_path / "site-packages"
+        user_cwd = tmp_path / "my-project"
+        install_root.mkdir()
+        user_cwd.mkdir()
+        self._make_resources_server(user_cwd, name="myenv")  # exists only in the user's project
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
+        monkeypatch.chdir(user_cwd)
+
+        resolved = cli_main._asset_config_path("resources-server", "myenv")
+        assert resolved == str(user_cwd / "resources_servers" / "myenv" / "configs" / "myenv.yaml")
+
+    def test_same_name_in_install_root_and_cwd_prefers_cwd(self, monkeypatch: MonkeyPatch, tmp_path, caplog) -> None:
+        # A user asset in cwd shadows a built-in of the same name (cwd outranks the install root), with a warning.
+        install_root = tmp_path / "site-packages"
+        user_cwd = tmp_path / "my-project"
+        install_root.mkdir()
+        user_cwd.mkdir()
+        self._make_resources_server(install_root)
+        self._make_resources_server(user_cwd)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", install_root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
+        monkeypatch.chdir(user_cwd)
+
+        with caplog.at_level(logging.WARNING):
+            resolved = cli_main._asset_config_path("resources-server", "foo")
+        assert resolved == str(user_cwd / "resources_servers" / "foo" / "configs" / "foo.yaml")
+        assert "matches multiple configs" in caplog.text
+
+    def test_editable_layout_single_root_not_self_ambiguous(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # Editable install: PARENT_DIR == WORKING_DIR == cwd. The same file found via all three roots
+        # must dedupe to one match, not raise a spurious ambiguity error.
+        repo_root = tmp_path / "Gym"
+        repo_root.mkdir()
+        self._make_resources_server(repo_root)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", repo_root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", repo_root)
+        monkeypatch.chdir(repo_root)
+
+        resolved = cli_main._asset_config_path("resources-server", "foo")
+        assert resolved == str(repo_root / "resources_servers" / "foo" / "configs" / "foo.yaml")
+
+
 class TestListEnvironmentsRouting:
     def test_list_environments_dispatches(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments"])
@@ -947,3 +1236,43 @@ class TestListEnvironmentsRouting:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "--json"])
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+json=true"]
+
+    def test_search_dir_populates_extra_roots_env_during_command_then_restores(self, monkeypatch: MonkeyPatch) -> None:
+        # `--search-dir` (repeatable) is folded into NEMO_GYM_EXTRA_ROOTS for the duration of the command (no
+        # Hydra override) so the roots reach every resolver, then restored so main() leaves no global state.
+        seen = {}
+
+        def fake_dispatch(target: str, overrides: list[str]) -> None:
+            seen["overrides"] = overrides
+            seen["env"] = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
+
+        monkeypatch.setattr(cli_main, "dispatch", fake_dispatch)
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "environments", "--search-dir", "/a", "--search-dir", "/b"])
+        main()
+
+        assert seen["overrides"] == []
+        assert seen["env"] == os.pathsep.join(["/a", "/b"])  # set while the command runs
+        assert NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME not in os.environ  # restored (unset) after main()
+
+    def test_search_dir_prepends_to_pre_existing_extra_roots_env(self, monkeypatch: MonkeyPatch) -> None:
+        # --search-dir roots take priority over a pre-existing NEMO_GYM_EXTRA_ROOTS (both searched), then restore.
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "/pre")
+        seen = {}
+
+        def fake_dispatch(target: str, overrides: list[str]) -> None:
+            seen["env"] = os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
+
+        monkeypatch.setattr(cli_main, "dispatch", fake_dispatch)
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "environments", "--search-dir", "/a", "--search-dir", "/b"])
+        main()
+
+        # --search-dir roots come first, existing extra roots after, so both stay searchable
+        assert seen["env"] == os.pathsep.join(["/a", "/b", "/pre"])
+        assert os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] == "/pre"  # original restored after main()
+
+    def test_name_positional_becomes_component_name_override(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym list <type> <name>` reaches the listing command as the reserved `component_name` config key,
+        # switching it into inspect mode.
+        target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "calendar"])
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert overrides == ["+component_name=calendar"]

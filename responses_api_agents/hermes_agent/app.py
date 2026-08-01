@@ -35,7 +35,6 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -71,6 +70,7 @@ def _trajectory_to_output_items(messages, n_input):
                     prompt_token_ids=item.get("prompt_token_ids") or [],
                     generation_token_ids=item.get("generation_token_ids") or [],
                     generation_log_probs=item.get("generation_log_probs") or [],
+                    routed_experts=item.get("routed_experts"),
                 )
             )
             for tc in item.get("tool_calls") or []:
@@ -153,6 +153,7 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    model: Optional[str] = None
     concurrency: int = 32
     max_turns: int = 90
     enabled_toolsets: Optional[list[str]] = None
@@ -211,7 +212,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         import yaml
 
         config: dict[str, Any] = {
-            "model": str(self.config.model_server.name),
+            "model": self._model_name(),
             "provider": "auto",
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
@@ -251,14 +252,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
 
-    def _resolve_model_base_url(self) -> str:
-        # aiagent builds its own openai client; resolve policy_model url
-        model_server_cfg = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.model_server.name,
-        )
-        base = self.server_client._build_server_base_url(model_server_cfg)
-        return f"{base}/v1"
+    def _model_name(self) -> str:
+        return self.config.model or str(self.config.model_server.name)
 
     async def responses(
         self,
@@ -274,8 +269,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
         system_message = self.config.system_prompt or input_system
 
-        base_url = self._resolve_model_base_url()
-        model_name = str(self.config.model_server.name)
+        # A prefixed self-call carries the rollout id into the model-server base URL.
+        rollout_id = request.path_params.get("rollout_id") if request is not None else None
+        base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        model_name = self._model_name()
 
         agent = AIAgent(
             base_url=base_url,
@@ -346,6 +343,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             pti = last_valid["prompt_token_ids"] if last_valid else [0]
             gti = last_valid["generation_token_ids"] if last_valid else [0]
             glp = (last_valid.get("generation_log_probs") if last_valid else None) or [0.0]
+            routed_experts = last_valid.get("routed_experts") if last_valid else None
             output_items.append(
                 NeMoGymResponseOutputMessageForTraining(
                     id=f"msg_{uuid4().hex}",
@@ -356,6 +354,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     prompt_token_ids=pti,
                     generation_token_ids=gti,
                     generation_log_probs=glp,
+                    routed_experts=routed_experts,
                 )
             )
 
@@ -392,7 +391,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path="/v1/responses",
+                url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,
             )

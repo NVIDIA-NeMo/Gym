@@ -150,8 +150,10 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
+            has_overrides_txt = (dir_path / "overrides.txt").exists()
+            override_flag = "--override overrides.txt " if has_overrides_txt else ""
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 # with support for pre-releases, custom indexes, and version pinning
@@ -159,7 +161,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(
@@ -172,16 +174,24 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     return f"cd {dir_path} && {env_setup_cmd}"
 
 
-def run_command(command: str, working_dir_path: Path, server_name: str = "") -> Popen:
+def run_command(
+    command: str, working_dir_path: Path, server_name: str = "", project_root: Path | None = None
+) -> Popen:
     global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
-    py_path = custom_env.get("PYTHONPATH", None)
-    if py_path is not None:
-        custom_env["PYTHONPATH"] = f"{work_dir}:{py_path}"
-    else:
-        custom_env["PYTHONPATH"] = work_dir
+    # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
+    # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
+    # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
+    # this generic helper doesn't bake a layout assumption in for its other callers.
+    py_path_entries = [work_dir]
+    if project_root is not None:
+        py_path_entries.append(f"{project_root.absolute()}")
+    existing_py_path = custom_env.get("PYTHONPATH")
+    if existing_py_path:
+        py_path_entries.append(existing_py_path)
+    custom_env["PYTHONPATH"] = ":".join(py_path_entries)
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
 

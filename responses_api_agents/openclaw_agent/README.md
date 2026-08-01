@@ -12,11 +12,11 @@ OpenClaw must be installed (or it is auto-installed on first start).
 Make sure `env.yaml` is also set.
 
 ```bash
-ng_run "+config_paths=[resources_servers/math_with_judge/configs/math_with_judge_openclaw_agent.yaml]"
+gym env start --resources-server math_with_judge/math_with_judge_openclaw_agent
 
-ng_collect_rollouts +agent_name=math_with_judge_openclaw_agent \
-  +input_jsonl_fpath=resources_servers/math_with_judge/data/example.jsonl \
-  +output_jsonl_fpath=openclaw_rollout.jsonl +limit=3
+gym eval run --no-serve --agent math_with_judge_openclaw_agent \
+  --input resources_servers/math_with_judge/data/example.jsonl \
+  --output openclaw_rollout.jsonl --limit 3
 ```
 
 ## Model id
@@ -37,11 +37,18 @@ openclaw_config:
         - {id: nvidia/meta/llama-3.3-70b-instruct, name: nvidia/meta/llama-3.3-70b-instruct, api: openai-completions}
 ```
 
+Alternatively, set `model_server` to a Gym model server and set `model` to its served model id. The
+agent creates the OpenClaw provider entry automatically. Without `model_server`, the existing
+provider configuration is unchanged.
+
 ## Config fields
 
 - `concurrency`: max simultaneous `run()` calls
 - `command`: the OpenClaw command, split on spaces so a multi-word launcher works (e.g. `npx openclaw`)
 - `model`: `<provider>/<model-name>` (see Model id)
+- `model_server`: optional Gym model server used to generate the provider entry
+- `context_window`: context limit for a generated model entry
+- `max_output_tokens`: output limit for a generated model entry
 - `workspace_root`: where per-request workspaces are created and deleted
 - `openclaw_agent_id`: passed to `--agent`
 - `thinking`: passed to `--thinking` (off, low, medium, high, ...)

@@ -21,23 +21,30 @@ from pathlib import Path
 from subprocess import TimeoutExpired
 from unittest.mock import MagicMock, patch
 
+import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli.env
 import nemo_gym.global_config
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.cli.env import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
+    TestConfig,
+    _resolve_server_dir,
     _select_shard,
-    exit_cleanly_on_config_error,
+    dump_config,
     init_resources_server,
     list_environments,
+    pip_list,
+    run,
+    status,
     validate,
 )
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
 from nemo_gym.registry import EnvironmentEntry
 
@@ -192,6 +199,28 @@ class TestCLI:
         assert dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
 
 
+class TestResolveServerDir:
+    """`_resolve_server_dir` resolves a relative server dir against cwd first, then the install root."""
+
+    def test_prefers_local_server_in_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        local = tmp_path / "resources_servers" / "my_server"
+        local.mkdir(parents=True)
+        (local / "requirements.txt").write_text("nemo-gym\n")
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_server_dir(Path("resources_servers/my_server")) == local
+
+    def test_falls_back_to_install_root(self, tmp_path: Path, monkeypatch) -> None:
+        # Empty cwd (no local server) -> the built-in resolves under the install root.
+        monkeypatch.chdir(tmp_path)
+        rel = Path("resources_servers/arc_agi")
+        assert _resolve_server_dir(rel) == PARENT_DIR / rel
+
+    def test_test_config_resolved_dir_path_uses_install_root(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        cfg = TestConfig(entrypoint="resources_servers/arc_agi")
+        assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
+
+
 class TestRunHelperShutdownReap:
     """RunHelper.shutdown must reap every server subprocess on every exit path."""
 
@@ -260,6 +289,11 @@ class TestRunHelperShutdownReap:
 class TestExitCleanlyOnConfigError:
     """The CLI decorator turns ConfigError into a clean message + non-zero exit, not a traceback."""
 
+    # Every CLI entrypoint that must carry the clean-error contract (each calls get_global_config_dict
+    # and wears @exit_cleanly_on_config_error). Keep this list in sync when decorating new commands —
+    # it's the single place that asserts each one actually exits cleanly on a config error.
+    DECORATED_COMMANDS = [run, validate, dump_config, status, pip_list]
+
     def test_config_error_becomes_clean_exit(self) -> None:
         @exit_cleanly_on_config_error
         def boom():
@@ -290,6 +324,31 @@ class TestExitCleanlyOnConfigError:
 
     def test_config_error_base_catches_subclasses(self) -> None:
         assert issubclass(NoServerInstancesError, ConfigError)
+
+    @pytest.mark.parametrize("command", DECORATED_COMMANDS)
+    def test_command_exits_cleanly_on_config_error(self, monkeypatch: MonkeyPatch, command) -> None:
+        # A ConfigError surfacing from config parsing becomes exit(1), not a traceback. Without the
+        # decorator the ConfigError would propagate as itself, so asserting SystemExit is exactly what
+        # proves each command is decorated.
+        def _raise(*args, **kwargs):
+            raise NoServerInstancesError("nothing configured to run")
+
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
+
+        with raises(SystemExit) as exc_info:
+            command()
+        assert exc_info.value.code == 1
+
+    @pytest.mark.parametrize("command", DECORATED_COMMANDS)
+    def test_command_propagates_non_config_error(self, monkeypatch: MonkeyPatch, command) -> None:
+        # The decorator must only swallow ConfigError; an unexpected error must surface unchanged.
+        def _raise(*args, **kwargs):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
+
+        with raises(RuntimeError, match="unexpected"):
+            command()
 
 
 class TestValidate:
@@ -325,17 +384,6 @@ class TestValidate:
         )
         with raises(SystemExit) as exc_info:
             self._validate_config(monkeypatch, tmp_path, bad)
-        assert exc_info.value.code == 1
-
-    def test_config_error_becomes_clean_exit(self, monkeypatch: MonkeyPatch) -> None:
-        # Fast unit check of the decorator path: any ConfigError -> exit(1), no traceback.
-        def _raise(**kwargs):
-            raise NoServerInstancesError("nothing configured to run")
-
-        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
-
-        with raises(SystemExit) as exc_info:
-            validate()
         assert exc_info.value.code == 1
 
 
@@ -375,3 +423,163 @@ class TestListEnvironments:
         assert json.loads(capsys.readouterr().out) == [
             {"name": "alpha", "domain": "agent", "description": "Alpha env"}
         ]
+
+    def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # `gym search environments <query>` reuses this command via the `query` config key
+        # (matches name + domain + description).
+        beta = EnvironmentEntry(
+            name="beta",
+            config_path=Path("environments/beta/config.yaml"),
+            path=Path("environments/beta"),
+            description="Beta env",
+            domain="math",
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "alpha"})
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "beta": beta}
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "Environments matching 'alpha'" in out
+        assert "agent" in out  # alpha's domain -> its row was rendered
+        assert "beta" not in out and "math" not in out  # beta and its domain filtered out
+
+    def test_query_matches_description(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # "Robotics" only appears in gamma's description, not its name or domain.
+        gamma = EnvironmentEntry(
+            name="gamma",
+            config_path=Path("environments/gamma/config.yaml"),
+            path=Path("environments/gamma"),
+            description="Robotics manipulation tasks",
+            domain="control",
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "Robotics"})
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "gamma": gamma}
+        )
+
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {
+                "domain": "agent",
+                "description": "Alpha env",
+                "value": "Some value",
+                "resources_servers": ["alpha_rs"],
+                "agent": "simple_agent",
+                "datasets": ["train", "example"],
+            },
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+
+        assert "gamma" in out
+        assert "alpha" not in out
+
+    def test_inspect_environment_by_name(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"component_name": "alpha"})
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {
+                "domain": "agent",
+                "description": "Alpha env",
+                "value": "Some value",
+                "resources_servers": ["alpha_rs"],
+                "agent": "simple_agent",
+                "datasets": ["train", "example"],
+            },
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+
+        assert "The alpha environment (domain: agent)" in out
+        assert "Value: Some value" in out
+        assert "resources servers: alpha_rs" in out and "agent: simple_agent" in out
+        assert "datasets: train, example" in out
+        assert "gym env start --environment alpha --model-type vllm_model" in out
+
+    def _mock_inspect_alpha(self, monkeypatch: MonkeyPatch, config: dict) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "get_global_config_dict",
+            lambda **k: OmegaConf.create({"component_name": "alpha", **config}),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {
+                "domain": "agent",
+                "description": "Alpha env",
+                "value": "Some value",
+                "resources_servers": [],
+                "agent": None,
+                "datasets": [],
+            },
+        )
+
+    def test_inspect_folds_value_into_description(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # `value` is not a separate field: it is appended to the description, not surfaced on its own.
+        self._mock_inspect_alpha(monkeypatch, {"json": True})
+
+        list_environments()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["description"] == "Alpha env\nValue: Some value"
+        assert "value" not in payload and "value" not in payload["details"]
+
+    def test_inspect_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        self._mock_inspect_alpha(monkeypatch, {"json": True})
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out) == {
+            "name": "alpha",
+            "type": "environment",
+            "domain": "agent",
+            "description": "Alpha env\nValue: Some value",
+            "details": {"config": str(self._ALPHA.config_path.resolve())},
+            "usage_example": "gym env start --environment alpha --model-type vllm_model",
+        }
+
+    def test_inspect_unknown_environment_exits(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"component_name": "alfa"})
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+
+        with raises(SystemExit):
+            list_environments()
+
+        out = capsys.readouterr().out
+        assert "Unknown environment 'alfa'" in out and "alpha" in out
+
+    def test_inspect_shows_absolute_config_path(self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path) -> None:
+        # Real discovery (via an extra root): the config line must be the config's absolute path.
+        cfg = tmp_path / "environments" / "my_env" / "config.yaml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("my_env:\n  resources_servers:\n    my_env:\n      domain: agent\n      description: D\n")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "get_global_config_dict",
+            lambda **k: OmegaConf.create({"component_name": "my_env"}),
+        )
+
+        list_environments()
+
+        assert f"config: {cfg.resolve()}" in capsys.readouterr().out

@@ -19,11 +19,12 @@ import logging
 import re
 import shlex
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -33,6 +34,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -89,13 +91,13 @@ RETRYABLE_ERROR_MARKERS = (
     "timeout",
 )
 METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+# Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/run).
+DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
+# Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
+ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
-PROVIDER_OPTION_PLATFORM = "platform"
-PROVIDER_OPTION_SKIP_HEALTH_CHECK = "skip_health_check"
-PROVIDER_OPTION_SNAPSHOT_ID = "snapshot_id"
-PROVIDER_OPTION_VOLUMES = "volumes"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
 
@@ -323,24 +325,12 @@ def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     return [Volume(**dict(volume)) for volume in volumes]
 
 
-def _spec_volumes(spec: SandboxSpec) -> list[Mapping[str, Any]] | None:
-    return spec.provider_options.get(PROVIDER_OPTION_VOLUMES)
+def _to_image_spec(image: str, image_auth: Mapping[str, Any] | None) -> Any:
+    if image_auth is None:
+        return image
+    from opensandbox.models.sandboxes import SandboxImageAuth, SandboxImageSpec
 
-
-def _spec_extensions(spec: SandboxSpec) -> dict[str, str]:
-    value = spec.provider_options.get("extensions", {})
-    if not isinstance(value, Mapping):
-        raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
-    return _string_map(dict(value))
-
-
-def _provider_option_bool(provider_options: dict[str, Any], key: str) -> bool | None:
-    value = provider_options.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, bool):
-        raise TypeError(f"OpenSandbox provider option {key!r} must be a bool")
-    return value
+    return SandboxImageSpec(image, auth=SandboxImageAuth(**dict(image_auth)))
 
 
 def _to_sandbox_status(state: Any) -> SandboxStatus:
@@ -358,13 +348,68 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
 
 @dataclass(frozen=True)
 class OpenSandboxConnectionConfig:
-    """OpenSandbox server connection settings."""
+    """OpenSandbox server connection settings.
+
+    ``keepalive_expiry_s`` must stay below the server's own keep-alive idle
+    timeout (uvicorn defaults to 5s), or pooled sockets are reused after the
+    server has closed them; null falls back to the SDK's default transport.
+    ``transport_backend`` is "httpx" or "aiohttp" (via the optional
+    ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
+    The pool is shared, so ``max_connections`` also caps in-flight sandbox
+    operations per process; null means no cap.
+    """
 
     domain: str | None = None
     api_key: str | None = None
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
+    keepalive_expiry_s: float | None = 3.0
+    max_keepalive_connections: int = 20
+    max_connections: int | None = 100
+    connect_retries: int = 2
+    transport_backend: str = "httpx"
+
+
+@dataclass(frozen=True)
+class OpenSandboxAttributionConfig:
+    """Job attribution merged into every sandbox's metadata (Kubernetes labels on the sandbox).
+
+    OpenSandbox propagates sandbox metadata as Kubernetes labels on the sandbox resources, so
+    attribution is queryable both through the OpenSandbox list API and at the cluster level
+    (e.g. ``kubectl get pods -l nemo-gym.nvidia.com/team=my-team``). ``key_prefix`` namespaces
+    the label keys (Kubernetes prefixed-key convention); set it to ``""`` for bare
+    ``team`` / ``user`` / ``workload`` / ``run`` keys.
+
+    Unset fields are auto-detected: ``NEMO_GYM_TEAM`` / ``NEMO_GYM_USER`` / ``NEMO_GYM_WORKLOAD``
+    environment variables first, then Slurm job env vars (``SLURM_JOB_ACCOUNT`` /
+    ``SLURM_JOB_USER`` / ``SLURM_JOB_NAME``), then the OS login name for ``user`` (``root`` is
+    ignored) and the gym CLI's ``NEMO_GYM_CONFIG_PATH`` server instance name for ``workload``.
+    Fields that cannot be resolved are omitted. ``run`` scopes sandboxes to one launch of the
+    creating process (``NEMO_GYM_RUN_ID``, else generated per process and logged) so a run's
+    sandboxes can be listed and cleaned up exactly. Explicit ``SandboxSpec.metadata`` keys
+    always take precedence over attribution keys.
+    """
+
+    enabled: bool = True
+    team: str | None = None
+    user: str | None = None
+    workload: str | None = None
+    run: str | None = None
+    key_prefix: str = DEFAULT_ATTRIBUTION_KEY_PREFIX
+
+    def __post_init__(self) -> None:
+        normalized = self.key_prefix.strip()
+        if normalized and not normalized.endswith("/"):
+            normalized += "/"
+        if normalized and not ATTRIBUTION_KEY_PREFIX_RE.fullmatch(normalized[:-1]):
+            # Invalid prefixes would otherwise fail server-side at sandbox create with an
+            # opaque error; values are sanitized by the provider but keys pass through.
+            raise ValueError(
+                f"attribution key_prefix {self.key_prefix!r} must be a lowercase DNS subdomain "
+                "(Kubernetes label-key prefix), e.g. 'nemo-gym.nvidia.com/', or '' for bare keys"
+            )
+        object.__setattr__(self, "key_prefix", normalized)
 
 
 @dataclass(frozen=True)
@@ -443,14 +488,70 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.close_timeout_s must be > 0")
 
 
-def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
-    if value is None:
-        return config_cls()
-    if isinstance(value, config_cls):
-        return value
-    if isinstance(value, Mapping):
-        return config_cls(**value)
-    raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
+@dataclass(frozen=True)
+class OpenSandboxProviderOptions:
+    """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
+
+    ``image_auth``, ``platform``, and ``volumes`` entries are passed through to the
+    OpenSandbox SDK, so their inner fields are validated by the SDK rather than here.
+    """
+
+    image_auth: Mapping[str, Any] | None = None
+    platform: Mapping[str, Any] | None = None
+    snapshot_id: str | None = None
+    volumes: tuple[Mapping[str, Any], ...] = ()
+    skip_health_check: bool | None = None
+    extensions: Mapping[str, str] = field(default_factory=dict)
+    # Scheduling requests (same keys as SandboxSpec.resources, which become the
+    # limits). Unset, the server applies the single resources map as both.
+    resource_requests: Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_mapping(cls, options: Mapping[str, Any] | None) -> "OpenSandboxProviderOptions":
+        if options is None:
+            return cls()
+        if not isinstance(options, Mapping):
+            raise TypeError("OpenSandbox provider_options must be a mapping")
+
+        allowed = set(cls.__dataclass_fields__)
+        unknown = set(options) - allowed
+        if unknown:
+            raise ValueError(
+                f"Unknown OpenSandbox provider option(s): {', '.join(sorted(unknown))}. "
+                f"Supported: {', '.join(sorted(allowed))}"
+            )
+
+        platform = options.get("platform")
+        if platform is not None and not isinstance(platform, Mapping):
+            raise TypeError("OpenSandbox provider option 'platform' must be a mapping")
+        image_auth = options.get("image_auth")
+        if image_auth is not None and not isinstance(image_auth, Mapping):
+            raise TypeError("OpenSandbox provider option 'image_auth' must be a mapping")
+        snapshot_id = options.get("snapshot_id")
+        if snapshot_id is not None and not isinstance(snapshot_id, str):
+            raise TypeError("OpenSandbox provider option 'snapshot_id' must be a string")
+        volumes = options.get("volumes") or ()
+        if not isinstance(volumes, (list, tuple)) or not all(isinstance(volume, Mapping) for volume in volumes):
+            raise TypeError("OpenSandbox provider option 'volumes' must be a list of mappings")
+        skip_health_check = options.get("skip_health_check")
+        if skip_health_check is not None and not isinstance(skip_health_check, bool):
+            raise TypeError("OpenSandbox provider option 'skip_health_check' must be a bool")
+        extensions = options.get("extensions", {})
+        if not isinstance(extensions, Mapping):
+            raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
+        resource_requests = options.get("resource_requests")
+        if resource_requests is not None and not isinstance(resource_requests, Mapping):
+            raise TypeError("OpenSandbox provider option 'resource_requests' must be a mapping")
+
+        return cls(
+            image_auth=dict(image_auth) if image_auth is not None else None,
+            platform=dict(platform) if platform is not None else None,
+            snapshot_id=snapshot_id,
+            volumes=tuple(dict(volume) for volume in volumes),
+            skip_health_check=skip_health_check,
+            extensions=_string_map(dict(extensions)),
+            resource_requests=dict(resource_requests) if resource_requests is not None else None,
+        )
 
 
 class OpenSandboxProvider:
@@ -465,29 +566,33 @@ class OpenSandboxProvider:
         create: OpenSandboxCreateConfig | Mapping[str, Any] | None = None,
         probe: OpenSandboxProbeConfig | Mapping[str, Any] | None = None,
         operations: OpenSandboxOperationConfig | Mapping[str, Any] | None = None,
+        attribution: OpenSandboxAttributionConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _coerce_config(connection, OpenSandboxConnectionConfig)
         self._create = _coerce_config(create, OpenSandboxCreateConfig)
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
+        self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
+        # Shared injected transport. The SDK never closes transports it did not
+        # create, so the provider owns this one: built once, reused by every
+        # ConnectionConfig, closed in aclose().
+        self._transport: Any | None = None
 
-    def _with_default_image_pull_policy(self, spec: SandboxSpec) -> SandboxSpec:
-        """Ensure SDK create requests carry the desired image pull policy."""
+    def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
+        """Add the configured default image pull policy to SDK create extensions."""
+        resolved = dict(extensions)
         if self._create.image_pull_policy is None:
-            return spec
+            return resolved
 
-        provider_options = dict(spec.provider_options)
-        extensions = _spec_extensions(spec)
-        image_pull_policy = extensions.get(IMAGE_PULL_POLICY_EXTENSION_KEY) or extensions.get(
-            IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY
+        image_pull_policy = (
+            resolved.get(IMAGE_PULL_POLICY_EXTENSION_KEY)
+            or resolved.get(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY)
+            or self._create.image_pull_policy
         )
-        if image_pull_policy is None:
-            image_pull_policy = self._create.image_pull_policy
         image_pull_policy = validate_image_pull_policy(image_pull_policy)
-        extensions.setdefault(IMAGE_PULL_POLICY_EXTENSION_KEY, image_pull_policy)
-        extensions.setdefault(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY, image_pull_policy)
-        provider_options["extensions"] = extensions
-        return replace(spec, provider_options=provider_options)
+        resolved.setdefault(IMAGE_PULL_POLICY_EXTENSION_KEY, image_pull_policy)
+        resolved.setdefault(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY, image_pull_policy)
+        return resolved
 
     def _connection_config(
         self,
@@ -507,11 +612,68 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+        if self._connection.keepalive_expiry_s is not None:
+            kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
+
+    def _get_transport(self) -> Any:
+        """Return the provider-owned shared transport, building it on first use."""
+        if self._transport is None:
+            self._transport = self._build_transport()
+        return self._transport
+
+    def _build_transport(self) -> Any:
+        """Build the SDK transport with the configured pool limits."""
+        import httpx
+
+        limits = httpx.Limits(
+            max_connections=self._connection.max_connections,
+            max_keepalive_connections=self._connection.max_keepalive_connections,
+            keepalive_expiry=self._connection.keepalive_expiry_s,
+        )
+        if self._connection.transport_backend == "aiohttp":
+            try:
+                from httpx_aiohttp import AiohttpTransport
+
+                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
+            except ImportError:
+                LOGGER.warning(
+                    "connection.transport_backend=aiohttp requested but httpx-aiohttp "
+                    "is not installed; falling back to the httpx transport"
+                )
+        return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
 
     async def aclose(self) -> None:
         """Close provider-owned resources."""
-        return None
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            await transport.aclose()
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a descriptor for reattaching to this sandbox by id.
+
+        OpenSandbox sandboxes are reachable by id from any process that has the
+        connection config, so the id alone is enough to reconnect and no sandbox
+        server is needed to share one. ``scope`` is ignored: OpenSandbox has no
+        lease concept of its own.
+        """
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK."""
+        Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+        sandbox_id = str(descriptor["sandbox_id"])
+        timeout_s = self._create.connect_attempt_timeout_s
+        sandbox = await asyncio.wait_for(
+            Sandbox.connect(
+                sandbox_id,
+                connection_config=self._connection_config(request_timeout_s=timeout_s),
+                connect_timeout=timedelta(seconds=timeout_s),
+                skip_health_check=True,
+            ),
+            timeout=timeout_s,
+        )
+        return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
 
     async def _await_sdk_call(
         self,
@@ -674,7 +836,7 @@ class OpenSandboxProvider:
                 sandbox = await asyncio.wait_for(
                     Sandbox.connect(
                         handle.sandbox_id,
-                        connection_config=self._connection_config(request_timeout_s=attempt_timeout_s),
+                        connection_config=self._connection_config(),
                         connect_timeout=timedelta(seconds=attempt_timeout_s),
                         skip_health_check=True,
                     ),
@@ -694,37 +856,35 @@ class OpenSandboxProvider:
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+        options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
         kwargs: dict[str, Any] = {
             "env": spec.env,
             "metadata": spec.metadata,
             "resource": _resource_map(spec.resources),
-            "extensions": _spec_extensions(spec),
+            "extensions": self._resolve_extensions(options.extensions),
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
+        if options.resource_requests is not None:
+            kwargs["resource_requests"] = _resource_map(SandboxResources.from_mapping(options.resource_requests))
         if spec.image is not None:
-            kwargs["image"] = spec.image
-        snapshot_id = spec.provider_options.get(PROVIDER_OPTION_SNAPSHOT_ID)
-        if snapshot_id is not None:
-            kwargs["snapshot_id"] = snapshot_id
+            kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
+        if options.snapshot_id is not None:
+            kwargs["snapshot_id"] = options.snapshot_id
         if spec.ttl_s is not None:
             kwargs["timeout"] = timedelta(seconds=spec.ttl_s)
         if spec.ready_timeout_s is not None:
             kwargs["ready_timeout"] = timedelta(seconds=spec.ready_timeout_s)
         if spec.entrypoint is not None:
             kwargs["entrypoint"] = spec.entrypoint
-        platform = spec.provider_options.get(PROVIDER_OPTION_PLATFORM)
-        volumes = _spec_volumes(spec)
-        if platform is not None:
-            kwargs["platform"] = _to_platform_spec(platform)
-        if volumes is not None:
-            kwargs["volumes"] = _to_volumes(volumes)
+        if options.platform is not None:
+            kwargs["platform"] = _to_platform_spec(options.platform)
+        if options.volumes:
+            kwargs["volumes"] = _to_volumes(list(options.volumes))
         if self._create.skip_health_check:
             kwargs["skip_health_check"] = True
-        else:
-            skip_health_check = _provider_option_bool(spec.provider_options, PROVIDER_OPTION_SKIP_HEALTH_CHECK)
-            if skip_health_check is not None:
-                kwargs["skip_health_check"] = skip_health_check
+        elif options.skip_health_check is not None:
+            kwargs["skip_health_check"] = options.skip_health_check
 
         timeout_s = self._create.timeout_s
         if timeout_s is None and self._connection.request_timeout_s is not None:
@@ -788,10 +948,28 @@ class OpenSandboxProvider:
 
         raise OpenSandboxCreateError("OpenSandbox create retry loop did not run")
 
+    def _attribution_metadata(self) -> dict[str, str]:
+        if not self._attribution.enabled:
+            return {}
+        resolved = resolve_attribution(
+            team=self._attribution.team,
+            user=self._attribution.user,
+            workload=self._attribution.workload,
+        )
+        resolved[RUN_KEY] = resolve_run_id(self._attribution.run)
+        prefix = self._attribution.key_prefix
+        metadata = {f"{prefix}{key}": value for key, value in resolved.items()}
+        log_attribution_once(metadata)
+        return metadata
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        """Create one sandbox through the configured OpenSandbox path."""
-        spec = self._with_default_image_pull_policy(_normalize_spec(spec))
-        return await self._create_with_retries(spec)
+        """Create one sandbox through the configured OpenSandbox path.
+
+        Job attribution keys (``team`` / ``user`` / ``workload`` / ``run``) are merged into the
+        spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
+        """
+        spec = replace(spec, metadata={**self._attribution_metadata(), **spec.metadata})
+        return await self._create_with_retries(_normalize_spec(spec))
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Return the current OpenSandbox lifecycle status."""

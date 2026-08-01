@@ -31,6 +31,9 @@ from nemo_gym.sandbox.providers.base import (
 )
 
 
+pytestmark = pytest.mark.sandbox
+
+
 FAKE_BINARY = "/usr/bin/apptainer"
 
 

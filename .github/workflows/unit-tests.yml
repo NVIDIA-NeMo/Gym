@@ -40,18 +40,17 @@ jobs:
       server_all_changed_files: ${{ steps.changed-files.outputs.server_all_changed_files }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
 
       - name: Detect changed files
         id: changed-files
-        uses: step-security/changed-files@v45.0.1
+        uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
         with:
           # 'files' input enables global other_changed_files_count for uncategorized files
           files: |
             **.md
-            docs/**
             fern/**
             LICENSE
             resources_servers/**
@@ -61,7 +60,6 @@ jobs:
           files_yaml: |
             doc:
               - '**.md'
-              - docs/**
               - fern/**
               - LICENSE
               - benchmarks/**
@@ -90,7 +88,7 @@ jobs:
           echo "============================================"
           echo ""
           echo "Categories:"
-          echo "  doc (skip tests):          **.md, docs/**, fern/**, LICENSE, benchmarks/**"
+          echo "  doc (skip tests):          **.md, fern/**, LICENSE, benchmarks/**"
           echo "  server (test changed):     resources_servers/**, responses_api_agents/**, responses_api_models/**"
           echo "  other (full suite):        everything else (core library, CI, scripts, etc.)"
           echo "  Priority:                  other > server > doc"
@@ -134,12 +132,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
 
       - name: Cache uv dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/uv
           key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -166,8 +164,11 @@ jobs:
           # Full suite: core library unit tests run here once; all server tests run in the
           # parallel `server-suite` matrix.
           if [[ "${{ needs.detect.outputs.run_full }}" == "true" ]]; then
-            echo "Running core library unit tests (server suite runs in the sharded matrix)"
-            ng_dev_test
+            echo "Running core library unit tests without sandbox marker (server suite runs in the sharded matrix)"
+            PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
+
+            echo "Running sandbox unit tests and appending them to the coverage report"
+            pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
 
           # Server-only: test only the changed servers (typically a small set, no sharding needed)
           elif [[ "${{ needs.detect.outputs.run_servers }}" == "true" ]]; then
@@ -183,7 +184,7 @@ jobs:
               echo "================================================"
               echo "Testing: $server"
               echo "================================================"
-              if ng_test +entrypoint=$server +delete_venvs_after_each_test=true; then
+              if ng_test +entrypoint=$server +delete_venvs_after_each_test=true +should_validate_data=true; then
                 echo "PASS: $server"
               else
                 echo "FAIL: $server"
@@ -209,12 +210,12 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
 
       - name: Cache uv dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/uv
           key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}

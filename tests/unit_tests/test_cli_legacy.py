@@ -61,7 +61,7 @@ class TestLegacyDeprecation:
 
     @pytest.mark.parametrize("key, tokens", list(legacy.LEGACY.items()))
     def test_legacy_tokens_resolve_to_real_gym_command(
-        self, monkeypatch: MonkeyPatch, key: str, tokens: list[str]
+        self, monkeypatch: MonkeyPatch, capsys, key: str, tokens: list[str]
     ) -> None:
         # The tests above confirm each alias routes through the shim, but not that the mapped tokens
         # are a real `gym` command. Feed every mapping through the actual parser so a typo in the
@@ -71,9 +71,16 @@ class TestLegacyDeprecation:
         try:
             cli_main.main()
         except SystemExit as exc:
-            # `gym --help` is the only mapping that legitimately exits (argparse prints help, exit 0).
-            assert tokens == ["--help"], f"`gym {' '.join(tokens)}` (legacy `{key}`) is not a valid command"
-            assert exc.code == 0
+            # `gym --help` is the only mapping that legitimately exits 0 (argparse prints help).
+            if tokens == ["--help"]:
+                assert exc.code == 0
+                return
+            # Many commands exit because they bare-resolve without their required flags; that still
+            # proves the command path resolved. Only an unresolved command (a typo in the mapping) is a
+            # failure, which argparse reports as an "invalid choice".
+            assert "invalid choice" not in capsys.readouterr().err, (
+                f"`gym {' '.join(tokens)}` (legacy `{key}`) is not a valid command"
+            )
 
     def test_unknown_alias_exits_nonzero(self, monkeypatch: MonkeyPatch, capsys) -> None:
         # An alias with no LEGACY mapping (stale script or user typo) must fail loudly, not KeyError.

@@ -27,30 +27,43 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig
+from nemo_gym.base_responses_api_model import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+)
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    get_global_config_dict,
     get_wandb_run,
 )
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+
+
+_failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
-    GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
-    is_global_aiohttp_client_setup,
     raise_for_status,
-    set_global_aiohttp_client,
 )
+from nemo_gym.server_utils import (
+    setup_server_client as setup_server_client_utils,
+)
+from nemo_gym.skills import SkillsConfig, load_skill_directory
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +118,6 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
-def _failures_path_for(output_fpath: Path) -> Path:
-    """Sidecar path used by the dispatcher and ``_load_from_cache``."""
-    return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
-
-
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -129,6 +137,16 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
             "Skip the post-rollout aggregate-metrics computation and file write. "
             "Used when sharding rollouts across multiple jobs that will be aggregated together "
             "afterward by `gym eval aggregate`."
+        ),
+    )
+    rollout_collection_driver: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional dotted ``module.path:function`` to run rollout collection instead of the "
+            "built-in helper. Lets a benchmark plug in a custom procedure (e.g. an adaptive, "
+            "multi-pass run) while still producing the standard rollout + aggregate-metrics "
+            "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
+            "When unset, the standard single-pass collection runs."
         ),
     )
 
@@ -198,6 +216,17 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
     )
+    skills: Optional[SkillsConfig] = Field(
+        default=None,
+        description="Run-level skills config (skills.path). Makes a directory of Agent Skills standard skills available to the agent at rollout time and stamps each result with a skills_ref. Applied to a skill-agnostic dataset; not a dataset-row field.",
+    )
+
+    @field_validator("num_repeats", mode="before")
+    @classmethod
+    def _coerce_null_num_repeats(cls, v):
+        # default to 1 if num_repeats is None
+        # for backwards compatibility
+        return 1 if v is None else v
 
     @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
@@ -268,14 +297,30 @@ class RolloutCollectionHelper(BaseModel):
             prompt_cfg = load_prompt_config(config.prompt_config)
             print(f"Using prompt config: {config.prompt_config}")
 
-        _input_path = Path(config.input_jsonl_fpath)
-        if not _input_path.is_absolute():
-            _cwd_path = Path.cwd() / _input_path
-            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        # Resolve skills once for the whole run (hash is content-derived, computed at startup).
+        skills_ref_dict = None
+        if config.skills:
+            skills_ref = load_skill_directory(config.skills.path)
+            skills_ref_dict = skills_ref.model_dump()
+            print(
+                f"Using skills from {config.skills.path} "
+                f"(hash={skills_ref.hash}, {len(skills_ref.skills)} skill(s): "
+                f"{', '.join(s.name for s in skills_ref.skills)})"
+            )
+
+        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
+        _input_path = _resolve_under_cwd_or_install(config.input_jsonl_fpath)
+        if not _input_path.exists():
+            raise ConfigPathNotFoundError(
+                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
+            )
         with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in rows_iterator]
+            raw_rows = [
+                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+            ]
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
@@ -304,6 +349,11 @@ class RolloutCollectionHelper(BaseModel):
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
             )
+
+            # Stamp the run-level skills_ref onto the row so it is sent to the agent in the
+            # /run request body and propagated to results. The source dataset stays untouched.
+            if skills_ref_dict is not None:
+                row[SKILLS_REF_KEY_NAME] = skills_ref_dict
 
             # Resolve task index. Honor a caller-provided value when present (e.g. when an
             # upstream slicer has stamped a globally-stable index across chunks so that
@@ -377,7 +427,7 @@ class RolloutCollectionHelper(BaseModel):
 
         # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
-        failures_fpath = _failures_path_for(Path(config.output_jsonl_fpath))
+        failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
         if failures_fpath.exists():
@@ -399,6 +449,14 @@ class RolloutCollectionHelper(BaseModel):
         gated = successes_seen | terminal_keys | maxed_out
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
+
+        # Stamp the resume attempt (count of prior failures for this key) on actual retries so their
+        # captured model calls are keyed separately from the prior attempt's (see
+        # maybe_rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
+        for row in input_rows:
+            attempt = attempts_by_key.get(get_key(row), 0)
+            if attempt > 0:
+                row[ATTEMPT_INDEX_KEY_NAME] = attempt
 
         key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
@@ -425,6 +483,8 @@ class RolloutCollectionHelper(BaseModel):
                 results,
                 result_strs,
             ) = self._load_from_cache(config)
+            persisted_rows = list(rows)
+            persisted_results = list(results)
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -439,6 +499,8 @@ class RolloutCollectionHelper(BaseModel):
             rows: List[Dict] = []
             results: List[Dict] = []
             result_strs: List[List[str]] = []
+            persisted_rows: List[Dict] = []
+            persisted_results: List[Dict] = []
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -455,7 +517,17 @@ class RolloutCollectionHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
-        failures_fpath = _failures_path_for(output_fpath)
+        failures_fpath = failures_path_for(output_fpath)
+
+        # Resolve capture dirs once so each rollout's captured model calls can be folded
+        # into its record below (uniform across agents; no-op when capture is off / dirs absent).
+        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+
+        # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
+        # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
+        if capture_dirs:
+            print("Clearing existing model-call captures for rollouts being dispatched")
+            clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
@@ -467,6 +539,15 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if SKILLS_REF_KEY_NAME in row:
+                result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+            if ATTEMPT_INDEX_KEY_NAME in row:
+                result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+
+            # Fold this rollout's captured model calls into its record (uniform across agents; no-op
+            # when capture is off). Never alters the harness output/reward already in `result`.
+            if capture_dirs:
+                merge_model_call_capture_into_record(result, capture_dirs)
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -489,6 +570,8 @@ class RolloutCollectionHelper(BaseModel):
                 # Success → main jsonl.
                 results_file.write(serialized + b"\n")
                 results_file.flush()
+                persisted_rows.append(row)
+                persisted_results.append(result)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -516,8 +599,12 @@ class RolloutCollectionHelper(BaseModel):
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Compute and write aggregate metrics via /aggregate_metrics on each agent server
+        # Compute and write aggregate metrics via /aggregate_metrics using only the
+        # rows written to the main rollouts jsonl so runtime aggregation matches
+        # `gym eval aggregate`.
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -526,7 +613,9 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
+            aggregate_metrics_fpath = await self._call_aggregate_metrics(
+                persisted_results, persisted_rows, output_fpath
+            )
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
@@ -563,7 +652,17 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             # Strip heavyweight fields before sending, but preserve response.usage
             stripped = []
             for r in agent_result_list:
-                entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+                entry = {
+                    k: v
+                    for k, v in r.items()
+                    if k
+                    not in (
+                        "response",
+                        "responses_create_params",
+                        "ng_agent_observations",
+                        "ng_model_call_capture",
+                    )
+                }
                 usage = (r.get("response") or {}).get("usage")
                 if usage:
                     entry["response"] = {"usage": usage}
@@ -663,15 +762,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
     def setup_server_client(
         self, head_server_config: Optional[BaseServerConfig] = None
     ) -> ServerClient:  # pragma: no cover
-        server_client = ServerClient.load_from_global_config(head_server_config)
-
-        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
-
-        return server_client
+        return setup_server_client_utils(head_server_config)
 
 
 class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
@@ -714,6 +805,14 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     )
 
 
+def loads_jsonl_line(raw, fpath, line_no: int):
+    """Parse one JSONL line, raising a clean `ConfigError` (naming file + line) on malformed JSON."""
+    try:
+        return orjson.loads(raw)
+    except orjson.JSONDecodeError as e:
+        raise ConfigError(f"Malformed JSON in '{fpath}' at line {line_no}: {e}") from e
+
+
 def _expand_input_glob(input_glob: str) -> List[str]:
     """Expand a glob-or-comma-separated-globs string into a sorted, deduplicated list of paths.
 
@@ -733,7 +832,7 @@ class RolloutAggregationHelper(BaseModel):
     async def run_from_config(self, config: RolloutAggregationConfig) -> Optional[Path]:
         input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
-            raise FileNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
+            raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
         print(f"Aggregating {len(input_paths)} shard(s):")
         for p in input_paths:
             print(f"  - {p}")
@@ -741,11 +840,11 @@ class RolloutAggregationHelper(BaseModel):
         results: List[Dict] = []
         for shard_path in input_paths:
             with open(shard_path, "rb") as f:
-                for line in f:
+                for line_no, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
-                    results.append(orjson.loads(line))
+                    results.append(loads_jsonl_line(line, shard_path, line_no))
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)

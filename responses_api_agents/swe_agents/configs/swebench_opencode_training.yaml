@@ -1,0 +1,56 @@
+# SWE-bench wrapper configuration for opencode RL training.
+
+swe_agents_train:
+  responses_api_agents:
+    swe_agents: &swe_agents_config
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench driven by the opencode agent framework for RL training.
+      value: Train software engineering capabilities on SWE tasks using opencode rollouts.
+
+      # Agent framework configuration
+      agent_framework: opencode
+      agent_max_turns: 100
+      # Pinned NeMo-Gym opencode fork (adds bench/cli.ts + the nemo-gym LanguageModelV3 provider).
+      agent_framework_repo: https://github.com/sdevare-nv/nv-opencode.git
+      agent_framework_commit: sdd/dev
+
+      # Container configuration (same SIFs as the openhands path)
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 65536
+      command_exec_timeout: 300
+
+      dataset_path: ???
+
+      agent_prompt_overrides:
+        - user_prompt_template: responses_api_agents/swe_agents/prompts/opencode_harness/user_prompt.txt
+          agent_cls: OpenCodeAgent
+          diversify_tool_names: false
+
+      # Enable opencode's `task` tool (subagent sessions)
+      opencode_subagents_enabled: true
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.2
+            artifact_fpath: swegym-converted.jsonl
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
+
+swe_agents_val:
+  responses_api_agents:
+    swe_agents:
+      <<: *swe_agents_config

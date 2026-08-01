@@ -15,7 +15,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 uv venv --python 3.12
 source .venv/bin/activate
-uv sync --extra dev --group docs
+uv sync --extra dev
 
 # Install pre-commit hooks (required for contributors)
 pre-commit install
@@ -62,7 +62,11 @@ All contributions must pass these automated checks:
 
 If the build-docs check fails:
 
-1. **Test documentation locally**: Preview the Fern docs by running `fern docs dev` from the repository root.
+1. **Test documentation locally**: Follow the [Fern docs quickstart](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md).
+   - For local documentation previews, ensure Node.js 22+ is installed.
+   - From the repository root, run `make docs-login` once to provision and authenticate Fern.
+   - From the repository root, run `make docs` to generate the API reference and start the local preview.
+   - After the initial generation, prose-only changes can use `cd fern && npm run dev`.
 
 2. **Common issues**:
    - Missing docstrings in public functions
@@ -177,16 +181,40 @@ ssh-add -l
 **Problem**: IDE not signing commits
 - Restart your IDE after configuring Git
 - Check IDE Git settings match the command line configuration
-- Try committing through the command line first to verify setup
+- Try committing through the command line first to validate setup
 
 **Problem**: "DCO sign-off missing"
+
+**If you have not pushed yet:**
 ```bash
-# Fix the last commit (if not pushed yet)
+# Fix the last commit
 git commit --amend -s --no-edit
 
-# For multiple commits, use interactive rebase
-git rebase -i HEAD~3  # Adjust number as needed
+# Fix multiple local commits
+git rebase --signoff HEAD~3  # Adjust number as needed
 ```
+
+**If you already pushed to your PR branch:**
+
+Force-pushing is disallowed on branches in the upstream `NVIDIA-NeMo/Gym` repo. If your PR branch is in a fork and your fork allows force pushes, you can re-sign commits locally and push with `--force-with-lease`; otherwise, push the signed history to a new branch and update the PR.
+
+```bash
+# Option 1: Re-sign commits locally, then push to a new branch and update your PR
+git rebase --signoff origin/main
+git push origin HEAD:your-user/your-feature-dco-fix
+
+# Option 2: Squash into one signed commit on a fresh branch
+git checkout -b your-feature-dco-fix origin/main
+git merge --squash your-feature-branch
+git commit -s -m "Your commit message"
+git push -u origin your-feature-dco-fix
+
+# Option 3 (forks only): Re-sign and force-push to the same branch
+git rebase --signoff origin/main
+git push --force-with-lease
+```
+
+**Tip:** Always use `git commit -s` when creating commits to avoid this issue.
 
 ### Alternative: GPG Signing
 
@@ -261,7 +289,7 @@ Install the [GitHub CLI](https://cli.github.com/) (`gh`) v2.0 or later, the `gh 
 
 ```bash
 gh extension install github/gh-stack
-gh skill install github/gh-stack gh-stack   # vendored under .claude/skills/gh-stack/; this installs it for your agent
+gh skill install github/gh-stack gh-stack   # vendored under .agents/skills/gh-stack/; this installs it for your agent
 ```
 
 <Warning>
@@ -324,7 +352,7 @@ On a rebase conflict (exit code 3), resolve the listed files, `git add` them, th
 
 #### Command Reference
 
-The vendored skill (`.claude/skills/gh-stack/SKILL.md`) carries the full reference, exit codes, and non-interactive rules for agents.
+The vendored skill (`.agents/skills/gh-stack/SKILL.md`) carries the full reference, exit codes, and non-interactive rules for agents.
 
 | Task | Command |
 |------|---------|

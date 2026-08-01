@@ -17,6 +17,7 @@ import importlib.util
 import threading
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -36,10 +37,15 @@ from nemo_gym.sandbox import (
     get_provider_class,
     list_providers,
     register_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
 from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
+
+
+pytestmark = pytest.mark.sandbox
 
 
 def _has_module(module_name: str) -> bool:
@@ -383,6 +389,59 @@ def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatc
     assert builtin_name in list_providers()
 
 
+def _fake_entry_point(name: str, provider: type, dist_name: str) -> SimpleNamespace:
+    return SimpleNamespace(name=name, load=lambda: provider, dist=SimpleNamespace(name=dist_name))
+
+
+def test_provider_entry_point_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    ep_name = f"ep-{uuid4().hex}"
+
+    class EntryPointProvider(FakeSandboxProvider):
+        pass
+
+    def fake_entry_points(*, group: str) -> list[SimpleNamespace]:
+        assert group == provider_registry.ENTRY_POINT_GROUP
+        return [_fake_entry_point(ep_name, EntryPointProvider, "pkg-a")]
+
+    monkeypatch.setattr(provider_registry, "entry_points", fake_entry_points)
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+
+    assert ep_name in list_providers()
+    assert get_provider_class(ep_name) is EntryPointProvider
+
+
+def test_provider_entry_point_collisions(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class EntryPointProvider(FakeSandboxProvider):
+        pass
+
+    # Two distributions publishing the same name raise, naming both packages.
+    dup_name = f"ep-{uuid4().hex}"
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+    monkeypatch.setattr(
+        provider_registry,
+        "entry_points",
+        lambda *, group: [
+            _fake_entry_point(dup_name, EntryPointProvider, "pkg-a"),
+            _fake_entry_point(dup_name, EntryPointProvider, "pkg-b"),
+        ],
+    )
+    with pytest.raises(ValueError, match=r"Duplicate sandbox provider entry point.*pkg-a.*pkg-b"):
+        list_providers()
+
+    # An entry point shadowed by a built-in is warned (at discovery) and ignored.
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+    monkeypatch.setattr(
+        provider_registry,
+        "entry_points",
+        lambda *, group: [_fake_entry_point("opensandbox", EntryPointProvider, "pkg-a")],
+    )
+    with caplog.at_level("WARNING", logger=provider_registry.__name__):
+        list_providers()
+    assert any("shadowed" in message for message in caplog.messages)
+    # Built-in still wins on lookup.
+    assert get_provider_class("opensandbox").__name__ == "OpenSandboxProvider"
+
+
 def test_create_provider_validation_and_constructor_cleanup() -> None:
     provider_name = f"fake-{uuid4().hex}"
     register_provider(provider_name, FakeSandboxProvider)
@@ -405,6 +464,73 @@ def test_create_provider_validation_and_constructor_cleanup() -> None:
     register_provider(failing_provider_name, FailingProvider)
     with pytest.raises(RuntimeError, match="provider constructor failed"):
         Sandbox({failing_provider_name: {}})
+
+
+def test_resolve_provider_config_named_reference() -> None:
+    global_config = {
+        "policy_model_name": "test_model",
+        "sandbox_main": {"opensandbox": {"connection": {"domain": "sandbox.example"}}},
+    }
+
+    resolved = resolve_provider_config("sandbox_main", global_config)
+    assert resolved == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+
+    # An OmegaConf DictConfig block resolves to a plain dict.
+    from omegaconf import OmegaConf
+
+    omega_config = OmegaConf.create(global_config)
+    resolved_from_omega = resolve_provider_config("sandbox_main", omega_config)
+    assert resolved_from_omega == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+    assert isinstance(resolved_from_omega["opensandbox"], dict)
+
+
+def test_resolve_provider_config_inline_mapping() -> None:
+    inline = {"opensandbox": {"connection": {}}}
+    assert resolve_provider_config(inline) == inline
+    # The result is a fresh dict, not the same object.
+    assert resolve_provider_config(inline) is not inline
+
+
+def test_resolve_provider_config_errors() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        resolve_provider_config("", {})
+
+    with pytest.raises(ValueError, match="is not defined in the merged config"):
+        resolve_provider_config("missing", {"sandbox_main": {"opensandbox": {}}})
+
+    # Error lists available single-key sandbox blocks as candidates.
+    with pytest.raises(ValueError, match="'sandbox_main'"):
+        resolve_provider_config("missing", {"sandbox_main": {"opensandbox": {}}})
+
+    with pytest.raises(TypeError, match="must be a name reference"):
+        resolve_provider_config(123)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="exactly one provider key"):
+        resolve_provider_config({"opensandbox": {}, "extra": {}})
+
+    with pytest.raises(ValueError, match="exactly one provider key"):
+        resolve_provider_config("sandbox_main", {"sandbox_main": {}})
+
+
+def test_resolve_provider_metadata() -> None:
+    block = {
+        "opensandbox": {"connection": {"domain": "sandbox.example"}},
+        "default_metadata": {"sandbox-api": "opensandbox-sdk"},
+    }
+
+    # default_metadata is excluded from the provider config and read separately.
+    assert resolve_provider_config(block) == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+    assert resolve_provider_metadata(block) == {"sandbox-api": "opensandbox-sdk"}
+
+    # A named reference works the same way.
+    global_config = {"sandbox": block}
+    assert resolve_provider_metadata("sandbox", global_config) == {"sandbox-api": "opensandbox-sdk"}
+
+    # No default_metadata key -> empty dict.
+    assert resolve_provider_metadata({"opensandbox": {}}) == {}
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        resolve_provider_metadata({"opensandbox": {}, "default_metadata": "not-a-mapping"})
 
 
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:
@@ -613,11 +739,11 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
 
 
 @requires_tenacity
-def test_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
-    asyncio.run(_assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch))
+def test_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch))
 
 
-async def _assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
+async def _assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
     opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
     class FakeConnectionConfig:
@@ -642,7 +768,7 @@ async def _assert_opensandbox_connect_after_create_uses_connection_config(monkey
     )
 
     provider = OpenSandboxProvider(
-        connection={"domain": "sandbox.example", "protocol": "https"},
+        connection={"domain": "sandbox.example", "protocol": "https", "request_timeout_s": 300},
         create={"connect_attempt_timeout_s": 1},
         probe={"command": None},
     )
@@ -655,10 +781,13 @@ async def _assert_opensandbox_connect_after_create_uses_connection_config(monkey
     assert isinstance(handle.raw, FakeSDKSandbox)
     connect_call = FakeSDKSandbox.connect_calls[0]
     assert connect_call["skip_health_check"] is True
-    assert connect_call["connection_config"].kwargs == {
+    connection_kwargs = dict(connect_call["connection_config"].kwargs)
+    # Transport identity is asserted in test_opensandbox_provider.py.
+    connection_kwargs.pop("transport", None)
+    assert connection_kwargs == {
         "domain": "sandbox.example",
         "protocol": "https",
-        "request_timeout": timedelta(seconds=1),
+        "request_timeout": timedelta(seconds=300),
     }
 
 
@@ -1090,3 +1219,59 @@ def test_mini_swe_sandbox_environment_submit_sentinel() -> None:
         assert exc_info.value.messages[0]["extra"]["submission"] == "final answer"
     finally:
         env.cleanup()
+
+
+@requires_tenacity
+def test_opensandbox_implements_connectable_provider(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_implements_connectable_provider(monkeypatch))
+
+
+async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> None:
+    from nemo_gym.sandbox import ConnectableProvider
+
+    opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeSDKSandbox:
+        connect_calls: list[dict[str, Any]] = []
+
+        def __init__(self, sandbox_id: str) -> None:
+            self.id = sandbox_id
+
+        @classmethod
+        async def connect(cls, sandbox_id: str, **kwargs: Any) -> "FakeSDKSandbox":
+            cls.connect_calls.append({"sandbox_id": sandbox_id, **kwargs})
+            return cls(sandbox_id)
+
+    monkeypatch.setattr(
+        opensandbox_provider_module,
+        "_require_opensandbox_sdk",
+        lambda: (FakeSDKSandbox, FakeConnectionConfig, object, object, object),
+    )
+
+    provider = OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "protocol": "https"},
+        create={"connect_attempt_timeout_s": 1},
+        probe={"command": None},
+    )
+
+    # The provider satisfies the optional capability protocol.
+    assert isinstance(provider, ConnectableProvider)
+
+    # serialize_handle returns a descriptor of just the id.
+    descriptor = await provider.serialize_handle(
+        SandboxHandle(sandbox_id="sdk-sandbox-9", provider_name="opensandbox", raw=object())
+    )
+    assert descriptor == {"sandbox_id": "sdk-sandbox-9"}
+
+    # connect rebuilds a live handle by reconnecting to that id via the SDK.
+    handle = await provider.connect(descriptor)
+    assert handle.sandbox_id == "sdk-sandbox-9"
+    assert isinstance(handle.raw, FakeSDKSandbox)
+    connect_call = FakeSDKSandbox.connect_calls[0]
+    assert connect_call["sandbox_id"] == "sdk-sandbox-9"
+    assert connect_call["skip_health_check"] is True
+    assert connect_call["connection_config"].kwargs["domain"] == "sandbox.example"

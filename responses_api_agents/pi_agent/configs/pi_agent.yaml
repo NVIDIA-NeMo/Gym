@@ -1,0 +1,30 @@
+pi_agent:
+  responses_api_agents:
+    pi_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      concurrency: 8
+      command: pi
+      model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+      env: {}
+      workspace_root: outputs/pi_agent/workspaces
+      thinking: null
+      system_prompt: null
+      timeout: 900
+      extra_args: []
+      # written to ~/.pi/agent/models.json
+      models_config:
+        providers:
+          nvinf:
+            baseUrl: https://integrate.api.nvidia.com/v1
+            api: openai-completions
+            apiKey: ${nvidia_api_key}
+            compat:
+              supportsDeveloperRole: false
+              supportsReasoningEffort: false
+            models:
+            - id: nvidia/qwen/qwen3-next-80b-a3b-instruct
+              reasoning: false
+      pi_version: 0.80.2

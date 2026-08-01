@@ -21,6 +21,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.train_data_utils
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
@@ -576,7 +577,9 @@ class TestValidateSamplesAndAggregateMetrics:
                 write_filenames.append(filename)
                 return mock_write_file()
 
-            if filename == "resources_servers/example_multi_step/data/example.jsonl":
+            if Path(filename) == _resolve_under_cwd_or_install(
+                "resources_servers/example_multi_step/data/example.jsonl"
+            ):
                 return original_open(filename, mode)
             elif filename == Path("resources_servers/example_multi_step/data/example_metrics.json"):
                 with original_open(filename, mode) as f:
@@ -1116,6 +1119,26 @@ class TestCollateSamples:
             Path("resources_servers/example_multi_step/data/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
+
+    def test_collate_creates_missing_parent_dir(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        # The prepared-output file is written next to the dataset's jsonl_fpath. When that dir does not
+        # exist in the cwd (e.g. a built-in dataset resolved from the install root while collating from
+        # a fresh cwd), the write must create the parent instead of crashing with FileNotFoundError.
+        missing_dir = tmp_path / "does" / "not" / "exist"
+        assert not missing_dir.exists()
+        cfg = _make_agent_instance_config(
+            "ex", [{"name": "example", "type": "example", "jsonl_fpath": str(missing_dir / "data.jsonl")}]
+        )
+        processor = TrainDataProcessor()
+        # Bypass the dataset read so the source file isn't needed; we're exercising the write path.
+        monkeypatch.setattr(processor, "_iter_dataset_lines", lambda d: iter(['{"foo": "bar"}']))
+
+        paths = processor._collate_samples_single_type("example", [cfg])
+
+        prepare_path = missing_dir / "data_prepare.jsonl"
+        assert paths == [prepare_path]
+        assert prepare_path.exists()  # parent dir auto-created; write did not crash
+        assert json.loads(prepare_path.read_text().strip())["foo"] == "bar"
 
     def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         write_filenames_to_mock = dict()
