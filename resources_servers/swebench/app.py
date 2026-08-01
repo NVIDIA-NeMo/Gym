@@ -76,6 +76,9 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     patch_verification_time_taken: float
 
 
+# @bxyu-nvidia: This is a wrapper that can be passed directly to a very lightly modified version of `run_instance`
+# The method is almost identical to the original, just with async awaits rather than sync.
+# See resources_servers/swebench/swebench_patches.py
 class DockerContainer(BaseModel):
     id: str
 
