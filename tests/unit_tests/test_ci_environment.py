@@ -12,6 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SANITIZER = REPO_ROOT / "scripts" / "ci" / "sanitize_env.sh"
 SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
+GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 
 BEHAVIOR_CHANGING_ENV = {
     "SKIP": "ruff",
@@ -78,6 +79,12 @@ def test_ci_environment_sanitizer_rejects_unknown_stage() -> None:
 
     assert result.returncode == 2
     assert "unknown Gym CI stage: unknown" in result.stderr
+
+
+def test_gitlab_adapter_selects_current_contract_version() -> None:
+    expected_version = (REPO_ROOT / "scripts" / "ci" / "contract-version").read_text().strip()
+
+    assert f'GYM_CI_CONTRACT_VERSION: "{expected_version}"' in GITLAB_PIPELINE.read_text()
 
 
 def _write_executable(path: Path, contents: str) -> None:
