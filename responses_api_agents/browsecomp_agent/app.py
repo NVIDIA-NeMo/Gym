@@ -724,6 +724,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             cookies = seed_session_response.cookies
 
             last_verify_response = None
+            last_response_json = None
             for attempt in range(self.config.max_run_retries):
                 # Seed snapshot keys so responses() can name per-reset/-final files.
                 # (ported from gym-gitlab fe9845ee)
@@ -748,6 +749,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 # (Keyed on the last assistant message, matching bc_frankie, NOT the concatenated
                 # output_text — a final think-only turn retries even if an earlier turn had text.)
                 response_json = await get_response_json(response)
+                last_response_json = response_json
                 raw_output_text = self._last_message_text(NeMoGymResponse.model_validate(response_json))
                 cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
                 # Need to get last_verify_response if all attempts are exhausted
@@ -783,7 +785,34 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             return last_verify_response
         except Exception as e:
             print(f"[browsecomp][abort][{qid}] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
-            raise
+            # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
+            # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
+            # and every remaining sample dies with it — that cost two full 8-node allocations
+            # (job 5748664 at 34/400, job 5751899 at 167/400, one bad sample each).
+            #
+            # Score it 0, but carry `agent_error` so the failure stays COUNTABLE in the results
+            # instead of being indistinguishable from a genuine wrong answer. Always check that
+            # count before reading accuracy: silent zeros would have hidden the malformed
+            # tool-arguments bug (bdfba2f4) instead of surfacing it.
+            if last_response_json is None:
+                last_response_json = NeMoGymResponse(
+                    id="resp_agent_error",
+                    created_at=0.0,
+                    model=self.config.model_server.name,
+                    object="response",
+                    output=[],
+                    parallel_tool_calls=False,
+                    tool_choice="none",
+                    tools=[],
+                ).model_dump()
+            return BrowsecompAgentVerifyResponse.model_validate(
+                body.model_dump()
+                | {
+                    "response": last_response_json,
+                    "reward": 0.0,
+                    "agent_error": f"{type(e).__name__}: {str(e)[:300]}",
+                }
+            )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
