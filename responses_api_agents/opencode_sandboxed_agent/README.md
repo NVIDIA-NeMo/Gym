@@ -1,0 +1,1 @@
+# OpenCode Sandboxed Agent
