@@ -30,6 +30,10 @@ if ((shard_index >= num_shards)); then
 fi
 
 cd "${repo_root}"
+# shellcheck source=scripts/ci/sanitize_env.sh
+source "${ci_dir}/sanitize_env.sh"
+gym_ci_sanitize_environment server
+unset -f gym_ci_sanitize_environment
 # shellcheck source=scripts/ci/setup_dev.sh
 source "${ci_dir}/setup_dev.sh"
 # Nested pytest processes inherit this through ng_test_all even when Slurm provides no TTY.

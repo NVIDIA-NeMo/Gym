@@ -10,6 +10,10 @@ repo_root="$(cd "${ci_dir}/../.." && pwd)"
 readonly repo_root
 
 cd "${repo_root}"
+# shellcheck source=scripts/ci/sanitize_env.sh
+source "${ci_dir}/sanitize_env.sh"
+gym_ci_sanitize_environment core
+unset -f gym_ci_sanitize_environment
 # shellcheck source=scripts/ci/setup_dev.sh
 source "${ci_dir}/setup_dev.sh"
 pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0 --color=yes'

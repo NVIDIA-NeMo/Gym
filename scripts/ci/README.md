@@ -24,3 +24,8 @@ step outside this contract.
 Both CI providers run `core_unit_tests.sh` in its deterministic `dev`-only environment. GitHub then
 installs its public-only sandbox dependencies and runs the sandbox-marked tests as a separate
 coverage pass.
+
+Before setup, the entrypoints remove inherited variables that can change the work selected by CI.
+Lint clears `SKIP`; core and server tests clear external Gym roots, root configuration, and
+`PYTHONPATH`; server tests also clear prerelease-install and inherited pytest-option overrides.
+Resolver/index settings are intentionally preserved so internal package access remains available.
