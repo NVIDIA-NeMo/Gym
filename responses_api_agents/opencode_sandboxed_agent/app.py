@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from shlex import quote
 from time import time
 from typing import Any, Dict
 from uuid import uuid4
@@ -95,11 +96,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
+        query = None
+        # This can be modified to handle system/developer prompts too.
+        for input_item in body.input:
+            if input_item.role == "user":
+                assert not query, body.input
+                if isinstance(input_item.content, str):
+                    query = input_item.content
+                elif isinstance(input_item.content, list):
+                    assert len(input_item.content) == 1, body.input
+                    query = input_item.content[0]["text"]
+
+        assert query, body.input
+
         command = f"""
         echo "Shell: $SHELL" \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run "hello!"
+        && opencode run "{quote(query)}"
         """
         result = await sandbox.exec(command)
         import sys
