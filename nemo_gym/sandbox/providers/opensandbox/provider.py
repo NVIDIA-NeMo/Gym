@@ -653,7 +653,9 @@ class OpenSandboxProvider:
 
         # disable_connection_pooling means "never reuse a connection", which is
         # exactly a zero-sized keepalive pool.
-        max_keepalive = 0 if self._connection.disable_connection_pooling else self._connection.max_keepalive_connections
+        max_keepalive = (
+            0 if self._connection.disable_connection_pooling else self._connection.max_keepalive_connections
+        )
         limits = httpx.Limits(
             max_connections=self._connection.max_connections,
             max_keepalive_connections=max_keepalive,
