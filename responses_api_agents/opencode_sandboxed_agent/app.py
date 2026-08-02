@@ -27,6 +27,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -37,6 +38,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
@@ -46,6 +49,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 
     opencode_version: str
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
+
+    # Sandbox config
+    sandbox_provider: str
+    sandbox_config: Dict[str, Any]
 
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
@@ -65,6 +72,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        global_config_dict = get_global_config_dict()
+        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+        provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        sandbox_spec = SandboxSpec(
+            image=None,  # TODO: Use first SWE Bench
+            ttl_s=self.config.sandbox_config.get("ttl_s", None),
+            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
+            workdir=None,  # Default to container's WORKDIR
+            env=dict(),
+            files=dict(),
+            metadata=provider_default_metadata
+            | self.config.sandbox_config.get("metadata", {})
+            | {
+                "nemo_gym_agent": self.config.name,
+            },
+            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            entrypoint=None,
+            provider_options=self.config.sandbox_config.get("provider_options", {}),
+        )
+        sandbox = AsyncSandbox(resolved_sandbox_provider)
+        await sandbox.start(sandbox_spec)
+
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]

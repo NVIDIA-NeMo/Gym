@@ -15,3 +15,18 @@ opencode_sandboxed_agent:
           bash: allow
           edit: allow
           webfetch: allow
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
+          # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          benchmark: swebench-verified
+          harness: mini-swe-agent
