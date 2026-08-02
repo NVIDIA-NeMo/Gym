@@ -37,10 +37,13 @@ PACKAGE_NAME = "nemo-gym-ci-junit"
 PACKAGE_FILENAME = "reports.zip"
 RECEIPT_FILENAME = "receipt.json"
 RECEIPT_SCHEMA_VERSION = 1
+EXPECTED_GITLAB_API_URL = "https://gitlab-master.nvidia.com/api/v4"
+EXPECTED_GYM_PROJECT_ID = 191584
+EXPECTED_GYM_PROJECT_PATH = "dl/nemo/gym"
 NEMO_PROJECT_ID = 65523
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 10_000
-MAX_RECEIPT_BYTES = 1024 * 1024
+MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 MAX_XML_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_XML_BYTES = 256 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 30
@@ -139,6 +142,8 @@ class GitLabPackageClient:
             raise CollectorError("CI_API_V4_URL must be an absolute HTTP(S) URL")
         if parsed.query or parsed.fragment:
             raise CollectorError("CI_API_V4_URL must not contain a query string or fragment")
+        if self.api_url != EXPECTED_GITLAB_API_URL:
+            raise CollectorError(f"Gym report relay requires CI_API_V4_URL={EXPECTED_GITLAB_API_URL}")
         if not job_token:
             raise CollectorError("CI_JOB_TOKEN is required to download the Gym JUnit relay")
         self.job_token = job_token
@@ -222,16 +227,21 @@ def _required_env(environ: Mapping[str, str], name: str) -> str:
 
 
 def identity_from_env(environ: Mapping[str, str]) -> GymIdentity:
-    source_sha = _required_env(environ, "CI_COMMIT_SHA").lower()
+    source_sha = _required_env(environ, "CI_COMMIT_SHA")
     if not COMMIT_SHA_PATTERN.fullmatch(source_sha):
         raise CollectorError("CI_COMMIT_SHA must be a full 40-character lowercase hexadecimal SHA")
-    return GymIdentity(
+    identity = GymIdentity(
         project_id=_positive_integer(_required_env(environ, "CI_PROJECT_ID"), "CI_PROJECT_ID"),
         project_path=_required_env(environ, "CI_PROJECT_PATH"),
         pipeline_id=_positive_integer(_required_env(environ, "CI_PIPELINE_ID"), "CI_PIPELINE_ID"),
         mr_iid=_positive_integer(_required_env(environ, "CI_MERGE_REQUEST_IID"), "CI_MERGE_REQUEST_IID"),
         source_sha=source_sha,
     )
+    if identity.project_id != EXPECTED_GYM_PROJECT_ID:
+        raise CollectorError(f"CI_PROJECT_ID must be {EXPECTED_GYM_PROJECT_ID}")
+    if identity.project_path != EXPECTED_GYM_PROJECT_PATH:
+        raise CollectorError(f"CI_PROJECT_PATH must be {EXPECTED_GYM_PROJECT_PATH}")
+    return identity
 
 
 def _validate_member(info: zipfile.ZipInfo, *, label: str, max_size: int) -> PurePosixPath:
@@ -266,8 +276,18 @@ def _read_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, *, max_size: i
 
 
 def _parse_receipt(payload: bytes) -> dict[str, Any]:
+    def object_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise CollectorError(f"relay receipt contains duplicate key {key!r}")
+            value[key] = item
+        return value
+
     try:
-        receipt = json.loads(payload)
+        receipt = json.loads(payload, object_pairs_hook=object_pairs)
+    except CollectorError:
+        raise
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise CollectorError("relay receipt is not valid UTF-8 JSON") from exc
     if not isinstance(receipt, dict):

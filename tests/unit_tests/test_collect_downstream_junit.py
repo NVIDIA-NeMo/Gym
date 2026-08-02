@@ -50,7 +50,7 @@ def _identity():
 
 def _environment(**updates):
     environment = {
-        "CI_API_V4_URL": "https://gitlab.example/api/v4",
+        "CI_API_V4_URL": "https://gitlab-master.nvidia.com/api/v4",
         "CI_JOB_TOKEN": "job-secret",
         "CI_PROJECT_ID": "191584",
         "CI_PROJECT_PATH": "dl/nemo/gym",
@@ -252,7 +252,11 @@ def _request_headers(request: urllib.request.Request) -> dict[str, str]:
 
 def test_package_client_downloads_exact_same_project_coordinate_with_job_token():
     opener = _OpenSequence([_Response(b"relay")])
-    client = collector.GitLabPackageClient("https://gitlab.example/api/v4/", job_token="job-secret", open_url=opener)
+    client = collector.GitLabPackageClient(
+        "https://gitlab-master.nvidia.com/api/v4/",
+        job_token="job-secret",
+        open_url=opener,
+    )
 
     result = client.download_relay(project_id=191584, package_version=_identity().package_version)
 
@@ -269,10 +273,10 @@ def test_package_client_downloads_exact_same_project_coordinate_with_job_token()
 
 
 def test_missing_package_error_does_not_leak_token():
-    url = "https://gitlab.example/api/v4/projects/191584/packages/generic/x/y/z"
+    url = "https://gitlab-master.nvidia.com/api/v4/projects/191584/packages/generic/x/y/z"
     error = urllib.error.HTTPError(url, 404, "Not Found", {}, BytesIO(b'{"message":"404"}'))
     client = collector.GitLabPackageClient(
-        "https://gitlab.example/api/v4",
+        "https://gitlab-master.nvidia.com/api/v4",
         job_token="do-not-print-this",
         open_url=_OpenSequence([error]),
     )
@@ -286,7 +290,7 @@ def test_missing_package_error_does_not_leak_token():
 
 def test_cross_origin_redirect_drops_all_authentication_headers():
     request = urllib.request.Request(
-        "https://gitlab.example/api/v4/projects/191584/packages/generic/x/y/z",
+        "https://gitlab-master.nvidia.com/api/v4/projects/191584/packages/generic/x/y/z",
         headers={
             "JOB-TOKEN": "job-secret",
             "PRIVATE-TOKEN": "read-secret",
@@ -315,6 +319,22 @@ def test_main_requires_ci_job_token_without_network(tmp_path):
 def test_identity_requires_full_sha():
     with pytest.raises(collector.CollectorError, match="full 40-character"):
         collector.identity_from_env(_environment(CI_COMMIT_SHA="abc"))
+
+
+def test_package_client_rejects_noncanonical_api_origin():
+    with pytest.raises(collector.CollectorError, match="requires CI_API_V4_URL"):
+        collector.GitLabPackageClient("https://evil.example/api/v4", job_token="secret")
+
+
+def test_receipt_rejects_duplicate_json_keys_atomically(tmp_path):
+    receipt = json.dumps(_receipt({})).encode()
+    duplicate = receipt[:-1] + b',"schema_version":1}'
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("receipt.json", duplicate)
+
+    with pytest.raises(collector.CollectorError, match="duplicate key"):
+        collector.extract_relay(archive.getvalue(), identity=_identity(), output_dir=tmp_path / "collected")
 
 
 def test_pipeline_forwards_identity_and_keeps_bridge_status_separate():
