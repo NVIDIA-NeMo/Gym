@@ -1,7 +1,7 @@
 # SWE-bench wrapper configuration for upstream opencode RL training.
 # Runs `opencode run` headless with an opencode.json provider pointed at Switchyard
-# (no fork, no harness modification). Supply the Switchyard endpoint at run time via
-# `switchyard_base_url` or `switchyard_spawn_routing_profile` — token capture needs it.
+# (no fork, no harness modification). Supply `switchyard_spawn_routing_profile` at run
+# time — token capture needs it.
 
 swe_agents_train:
   responses_api_agents:

@@ -955,7 +955,7 @@ class TestOpenHandsHarnessProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(
                 tmpdir,
-                switchyard_base_url="http://switchyard:4000",
+                switchyard_spawned_base_url="http://switchyard:4000",
                 switchyard_session_id="0123456789abcdef0123456789abcdef",
                 ng_global_config_dict_str=_ng_config_dict_str(),
             )
@@ -1001,15 +1001,6 @@ class TestSwitchyardTransportConfig:
         loaded = OmegaConf.create(shlex.split(rewritten)[0])
         assert loaded.test_model.responses_api_models.vllm_model.host == "switchyard"
         assert loaded.test_model.responses_api_models.vllm_model.port == 4000
-
-    def test_wrapper_fails_fast_on_bad_url(self, monkeypatch) -> None:
-        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
-        monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
-        config = _minimal_server_config()
-        config.switchyard_base_url = "http://switchyard:4000/v1"
-        with pytest.raises(ValueError, match="http://<host>:<port>"):
-            SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
-
 
 ########################################
 # Workspace path + user-message resolver tests
@@ -2386,7 +2377,7 @@ class TestSWEBenchWrapperSetupParams:
             (Path(tmpdir) / "django__django-12345.sif").touch()
             wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
             self._setup_oh_dirs(wrapper)
-            wrapper.config.switchyard_base_url = "http://switchyard:4000"
+            wrapper.config.switchyard_spawn_routing_profile = "/tmp/profile.yaml"
             wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
 
             params, _ = wrapper._setup_params(self._switchyard_body())
@@ -2395,7 +2386,10 @@ class TestSWEBenchWrapperSetupParams:
             assert len(session_id) == 32
             assert set(session_id) <= set("0123456789abcdef")
             # Routed into the agent container via the TOML and the rewritten
-            # NEMO_GYM_CONFIG_DICT — no OpenHands-side changes involved.
+            # NEMO_GYM_CONFIG_DICT — no OpenHands-side changes involved. The URL is
+            # only known once the Ray task spawns the proxy, so the script is rebuilt then.
+            params.switchyard_spawned_base_url = "http://switchyard:4000"
+            wrapper._build_agent_command(params)
             assert f'proxy_x_session_id = "{session_id}"' in params.agent_script
             assert "host: switchyard" in params.agent_script
 
@@ -2422,7 +2416,7 @@ class TestSWEBenchWrapperSetupParams:
             (Path(tmpdir) / "django__django-12345.sif").touch()
             wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
             self._setup_oh_dirs(wrapper)
-            wrapper.config.switchyard_base_url = "http://switchyard:4000"
+            wrapper.config.switchyard_spawn_routing_profile = "/tmp/profile.yaml"
             wrapper.config.verify_golden_patch = True
             wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
 
@@ -2438,11 +2432,6 @@ class TestSWEBenchWrapperSetupParams:
         config.switchyard_spawn_routing_profile = str(profile)
         swe_app._validate_switchyard_config(config)  # valid: spawn only
 
-        config.switchyard_base_url = "http://switchyard:4000"
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            swe_app._validate_switchyard_config(config)
-
-        config.switchyard_base_url = None
         config.switchyard_spawn_routing_profile = str(tmp_path / "missing.yaml")
         with pytest.raises(ValueError, match="does not exist"):
             swe_app._validate_switchyard_config(config)
@@ -2461,11 +2450,11 @@ class TestSWEBenchWrapperSetupParams:
             params, _ = wrapper._setup_params(self._switchyard_body())
             # A session is minted even though the instance URL is not known yet.
             assert params.switchyard_session_id is not None
-            assert params.switchyard_base_url is None
+            assert params.switchyard_spawned_base_url is None
             assert wrapper._switchyard_spawn_needed(params)
 
             # Spawn mode assigns the URL after setup and rebuilds the script.
-            params.switchyard_base_url = "http://spawnhost:12345"
+            params.switchyard_spawned_base_url = "http://spawnhost:12345"
             wrapper._build_agent_command(params)
             assert "host: spawnhost" in params.agent_script
             assert f'proxy_x_session_id = "{params.switchyard_session_id}"' in params.agent_script
@@ -2484,69 +2473,6 @@ class TestSWEBenchWrapperSetupParams:
 
             params, _ = wrapper._setup_params(self._switchyard_body())
             assert not wrapper._switchyard_spawn_needed(params)
-
-
-class _FakeSwitchyardProc:
-    def __init__(self, returncode=None):
-        self.returncode = returncode
-        self.terminated = False
-
-    def terminate(self):
-        self.terminated = True
-        self.returncode = 0
-
-    def kill(self):
-        self.returncode = -9
-
-    async def wait(self):
-        return self.returncode
-
-
-class TestSwitchyardSpawnLifecycle:
-    def _spawn_wrapper(self, monkeypatch, tmp_path: Path) -> SWEBenchWrapper:
-        wrapper = _create_wrapper(monkeypatch)
-        profile = tmp_path / "profile.yaml"
-        profile.write_text("routes: {}\n")
-        wrapper.config.switchyard_spawn_routing_profile = str(profile)
-        wrapper.config.switchyard_spawn_host = "spawnhost"
-        return wrapper
-
-    @pytest.mark.asyncio
-    async def test_spawn_and_teardown(self, monkeypatch, tmp_path: Path) -> None:
-        wrapper = self._spawn_wrapper(monkeypatch, tmp_path)
-        params = _make_instance_config(str(tmp_path), agent_run_id="run-1")
-        proc = _FakeSwitchyardProc()
-        spawn_mock = AsyncMock(return_value=proc)
-        monkeypatch.setattr(swe_app.asyncio, "create_subprocess_exec", spawn_mock)
-        monkeypatch.setattr(swe_app, "request", AsyncMock(return_value=MagicMock(status=200)))
-
-        base_url = await wrapper._spawn_switchyard(params)
-
-        assert base_url.startswith("http://spawnhost:")
-        assert wrapper._switchyard_procs["run-1"] is proc
-        argv = spawn_mock.call_args.args
-        assert argv[0] == "switchyard"
-        assert "--enable-rl-logging" in argv
-        assert str(tmp_path / "persistent" / "switchyard_traces") in argv
-        assert (tmp_path / "persistent" / "switchyard_traces").is_dir()
-
-        await wrapper._teardown_switchyard("run-1")
-        assert proc.terminated
-        assert wrapper._switchyard_procs == {}
-        # Idempotent.
-        await wrapper._teardown_switchyard("run-1")
-
-    @pytest.mark.asyncio
-    async def test_spawn_readiness_failure_reaps(self, monkeypatch, tmp_path: Path) -> None:
-        wrapper = self._spawn_wrapper(monkeypatch, tmp_path)
-        params = _make_instance_config(str(tmp_path), agent_run_id="run-2")
-        proc = _FakeSwitchyardProc(returncode=1)  # exits before ready
-        monkeypatch.setattr(swe_app.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
-        monkeypatch.setattr(swe_app, "request", AsyncMock(side_effect=ConnectionError))
-
-        with pytest.raises(RuntimeError, match="exited with code 1"):
-            await wrapper._spawn_switchyard(params)
-        assert wrapper._switchyard_procs == {}
 
 
 class TestSWEBenchWrapperResponses:
@@ -2756,7 +2682,7 @@ class TestSWEBenchWrapperRun:
                 "metrics": json.dumps({"resolved": True, "patch_exists": True}),
                 "instance_config": _make_instance_config(
                     tempfile.mkdtemp(),
-                    switchyard_base_url="http://switchyard:4000",
+                    switchyard_spawned_base_url="http://switchyard:4000",
                     switchyard_session_id="0123456789abcdef0123456789abcdef",
                     **instance_config_overrides,
                 ).model_dump_json(),
@@ -2783,14 +2709,22 @@ class TestSWEBenchWrapperRun:
             model="Qwen/Qwen3-0.6B",
         )
 
+        # run() consumes the payload the Ray task returned via _inner_responses.
+        wrapper._pending_switchyard["test_run_123"] = {
+            "trace": trace,
+            "root_id": "0123456789abcdef0123456789abcdef",
+            "subagent_trajectories": None,
+            "degraded": None,
+            "error": None,
+        }
         with (
             patch.object(
                 SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._switchyard_response()
             ),
-            patch.object(SWEBenchWrapper, "_retrieve_switchyard_trace", new_callable=AsyncMock, return_value=trace),
         ):
             result = await wrapper.run(self._run_body())
 
+        assert wrapper._pending_switchyard == {}  # popped exactly once
         assert result.switchyard_trace_error is None
         assert result.mask_sample is False
         assert result.instance_config.mask_sample is False
@@ -2811,18 +2745,21 @@ class TestSWEBenchWrapperRun:
     async def test_run_switchyard_failure_masks_sample(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
 
+        wrapper._pending_switchyard["test_run_123"] = {
+            "trace": None,
+            "root_id": None,
+            "subagent_trajectories": None,
+            "degraded": None,
+            "error": "SwitchyardTraceError: record 1 prompt does not extend the reconstructed history",
+        }
         with (
             patch.object(
                 SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._switchyard_response()
             ),
-            patch.object(
-                SWEBenchWrapper,
-                "_retrieve_switchyard_trace",
-                new_callable=AsyncMock,
-                side_effect=SwitchyardTraceError("record 1 prompt does not extend the reconstructed history"),
-            ),
         ):
             result = await wrapper.run(self._run_body())
+
+        assert wrapper._pending_switchyard == {}
 
         # Fail closed for training, open for diagnostics.
         assert result.mask_sample is True
@@ -2858,7 +2795,7 @@ class TestSWEBenchWrapperRun:
 
         with (
             patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response),
-            patch.object(SWEBenchWrapper, "_retrieve_switchyard_trace", new_callable=AsyncMock) as retrieve,
+            patch.object(SWEBenchWrapper, "_retrieve_switchyard_trace") as retrieve,
         ):
             result = await wrapper.run(self._run_body())
 
@@ -2867,53 +2804,76 @@ class TestSWEBenchWrapperRun:
         assert result.mask_sample is False
         assert result.instance_config.mask_sample is False
 
-    @pytest.mark.asyncio
-    async def test_retrieve_switchyard_trace_url(self, monkeypatch) -> None:
-        wrapper = _create_wrapper(monkeypatch)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            instance_config = _make_instance_config(
-                tmpdir,
-                switchyard_base_url="http://switchyard:4000/",
-                switchyard_session_id="0123456789abcdef0123456789abcdef",
-            )
+    @staticmethod
+    def _write_record(rl_log_dir: Path, session_id: str, parent_id, uuid: str, **extra) -> None:
+        """Write one capture record the way Switchyard lays them out on disk."""
+        session_dir = rl_log_dir / "sessions" / f"dir_{session_id}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "schema_version": 1,
+            "session_id": session_id,
+            "parent_session_id": parent_id,
+            "uuid": uuid,
+            "captured_at": uuid,
+            **extra,
+        }
+        (session_dir / f"{uuid}.json").write_text(json.dumps(record))
 
-        request_mock = AsyncMock(return_value=MagicMock())
-        envelope = {"schema_version": 1}
-        monkeypatch.setattr(swe_app, "request", request_mock)
-        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=envelope))
+    def test_retrieve_switchyard_trace_builds_envelope_from_records(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        records = {"ses_1": [{"schema_version": 1, "session_id": "ses_1", "uuid": "u1"}]}
         reconstruct_mock = MagicMock(return_value="trace")
         monkeypatch.setattr(swe_app, "reconstruct_switchyard_rollout", reconstruct_mock)
 
-        result = await wrapper._retrieve_switchyard_trace(
-            instance_config.switchyard_base_url, instance_config.switchyard_session_id
-        )
+        result = wrapper._retrieve_switchyard_trace(records, "ses_1")
 
         assert result == "trace"
-        args, kwargs = request_mock.await_args
-        assert args == ("GET", "http://switchyard:4000/v1/sessions/0123456789abcdef0123456789abcdef/completions")
-        assert kwargs["timeout"].total == 60
-        reconstruct_mock.assert_called_once_with(envelope, "0123456789abcdef0123456789abcdef", wrapper._vllm_converter)
+        reconstruct_mock.assert_called_once_with(
+            {"schema_version": 1, "session_id": "ses_1", "completions": records["ses_1"]},
+            "ses_1",
+            wrapper._vllm_converter,
+            allow_partial=True,
+        )
 
-    async def test_list_switchyard_sessions_url_and_parse(self, monkeypatch) -> None:
+    def test_read_switchyard_records_groups_and_orders(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
-        envelope = {
-            "schema_version": 1,
-            "sessions": [
-                {"session_id": "root", "parent_session_id": None},
-                {"session_id": "sub", "parent_session_id": "root"},
-            ],
-        }
-        request_mock = AsyncMock(return_value=MagicMock())
-        monkeypatch.setattr(swe_app, "request", request_mock)
-        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=envelope))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rl_log_dir = Path(tmpdir) / "switchyard_traces"
+            self._write_record(rl_log_dir, "root", None, "b")
+            self._write_record(rl_log_dir, "root", None, "a")
+            self._write_record(rl_log_dir, "sub", "root", "c")
 
-        result = await wrapper._list_switchyard_sessions("http://switchyard:4000/")
+            records = wrapper._read_switchyard_records(rl_log_dir)
 
-        assert result == envelope["sessions"]
-        args, _ = request_mock.await_args
-        assert args == ("GET", "http://switchyard:4000/v1/sessions")
+        assert sorted(records) == ["root", "sub"]
+        # Ordered by (captured_at, uuid) so the chain reconstructs in call order.
+        assert [r["uuid"] for r in records["root"]] == ["a", "b"]
+
+    def test_read_switchyard_records_skips_unreadable(self, monkeypatch) -> None:
+        """A torn record must not sink a rollout whose other records are intact."""
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rl_log_dir = Path(tmpdir) / "switchyard_traces"
+            self._write_record(rl_log_dir, "root", None, "a")
+            (rl_log_dir / "sessions" / "dir_root" / "torn.json").write_text("{ not json")
+
+            records = wrapper._read_switchyard_records(rl_log_dir)
+
+        assert [r["uuid"] for r in records["root"]] == ["a"]
+
+    def test_list_switchyard_sessions_reads_capture_dir(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rl_log_dir = Path(tmpdir) / "switchyard_traces"
+            self._write_record(rl_log_dir, "root", None, "u1")
+            self._write_record(rl_log_dir, "sub", "root", "u2")
+
+            result = wrapper._list_switchyard_sessions(rl_log_dir)
+
+        assert result == [
+            {"session_id": "root", "parent_session_id": None},
+            {"session_id": "sub", "parent_session_id": "root"},
+        ]
 
     @staticmethod
     def _fake_trace(model: str) -> SwitchyardTrace:
@@ -2921,47 +2881,71 @@ class TestSWEBenchWrapperRun:
         item.model_dump.return_value = {"model": model}
         return SwitchyardTrace(input_items=[item], output_items=[item], tools=[], record_uuids=["u"], model=model)
 
-    async def test_reconstruct_switchyard_sessions_tree(self, monkeypatch) -> None:
+    def test_reconstruct_switchyard_sessions_tree(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         # trace.model echoes the session id so we can assert per-session retrieval.
         monkeypatch.setattr(
-            wrapper,
-            "_retrieve_switchyard_trace",
-            AsyncMock(side_effect=lambda base, sid, **kw: self._fake_trace(sid)),
+            swe_app,
+            "_retrieve_switchyard_trace_from_records",
+            MagicMock(side_effect=lambda recs, sid, conv, **kw: self._fake_trace(sid)),
         )
         sessions = [
             {"session_id": "root", "parent_session_id": None},
             {"session_id": "sub1", "parent_session_id": "root"},
             {"session_id": "sub2", "parent_session_id": "root"},
         ]
-        root_trace, root_id, subs = await wrapper._reconstruct_switchyard_sessions("http://sw", sessions)
+        root_trace, root_id, subs, degraded = wrapper._reconstruct_switchyard_sessions({}, sessions)
 
         assert root_id == "root" and root_trace.model == "root"
+        assert degraded is None
         assert [s["session_id"] for s in subs] == ["sub1", "sub2"]
         assert all(s["parent_session_id"] == "root" for s in subs)
         assert subs[0]["model"] == "sub1" and subs[0]["output"] == [{"model": "sub1"}]
 
-    async def test_reconstruct_switchyard_sessions_single_root(self, monkeypatch) -> None:
+    def test_reconstruct_switchyard_sessions_single_root(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         monkeypatch.setattr(
-            wrapper,
-            "_retrieve_switchyard_trace",
-            AsyncMock(side_effect=lambda base, sid, **kw: self._fake_trace(sid)),
+            swe_app,
+            "_retrieve_switchyard_trace_from_records",
+            MagicMock(side_effect=lambda recs, sid, conv, **kw: self._fake_trace(sid)),
         )
-        root_trace, root_id, subs = await wrapper._reconstruct_switchyard_sessions(
-            "http://sw", [{"session_id": "only", "parent_session_id": None}]
+        root_trace, root_id, subs, degraded = wrapper._reconstruct_switchyard_sessions(
+            {}, [{"session_id": "only", "parent_session_id": None}]
         )
-        assert root_id == "only" and subs == []
+        assert root_id == "only" and subs == [] and degraded is None
 
-    async def test_reconstruct_switchyard_sessions_requires_single_root(self, monkeypatch) -> None:
+    def test_reconstruct_switchyard_sessions_degrades_on_multiple_roots(self, monkeypatch) -> None:
+        """Compaction starts a second parent-less session mid-rollout.
+
+        Emit the larger chain and report it as degraded rather than raising: a
+        rollout with no generation data aborts its whole prompt group downstream,
+        while a masked one only removes itself from the loss.
+        """
         wrapper = _create_wrapper(monkeypatch)
-        monkeypatch.setattr(wrapper, "_retrieve_switchyard_trace", AsyncMock())
+        monkeypatch.setattr(
+            swe_app,
+            "_retrieve_switchyard_trace_from_records",
+            MagicMock(side_effect=lambda recs, sid, conv, **kw: self._fake_trace(sid)),
+        )
+        records = {"small": [{"uuid": "1"}], "big": [{"uuid": "1"}, {"uuid": "2"}]}
+        sessions = [
+            {"session_id": "small", "parent_session_id": None},
+            {"session_id": "big", "parent_session_id": None},
+        ]
+
+        root_trace, root_id, subs, degraded = wrapper._reconstruct_switchyard_sessions(records, sessions)
+
+        assert root_id == "big" and root_trace.model == "big"
+        assert degraded and "2 root sessions" in degraded
+
+    def test_reconstruct_switchyard_sessions_requires_a_root(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        monkeypatch.setattr(wrapper, "_retrieve_switchyard_trace", MagicMock())
         with pytest.raises(SwitchyardTraceError):
-            await wrapper._reconstruct_switchyard_sessions(
-                "http://sw",
+            wrapper._reconstruct_switchyard_sessions(
+                {},
                 [
-                    {"session_id": "a", "parent_session_id": None},
-                    {"session_id": "b", "parent_session_id": None},
+                    {"session_id": "a", "parent_session_id": "b"},
                 ],
             )
 
@@ -3121,7 +3105,7 @@ class TestUpstreamOpenCodeSetup:
             agent_framework="opencode",
             opencode_source="opencode",
             opencode_setup_dir=opencode_setup_dir,
-            switchyard_base_url="http://switchyard:4000",
+            switchyard_spawned_base_url="http://switchyard:4000",
             **overrides,
         )
 
@@ -3199,7 +3183,7 @@ class TestUpstreamOpenCodeRunCommand:
             agent_framework="opencode",
             opencode_source="opencode",
             opencode_setup_dir=opencode_setup_dir,
-            switchyard_base_url="http://switchyard:4000",
+            switchyard_spawned_base_url="http://switchyard:4000",
             ng_global_config_dict_str=_ng_config_dict_str(),
             **overrides,
         )
@@ -3274,19 +3258,19 @@ class TestUpstreamOpenCodeRunCommand:
             assert swe_app._OPENCODE_INSTRUCTIONS_PATH in script
             assert "do not set the `task_id` parameter" in script
 
-    def test_upstream_requires_switchyard_base_url(self, _stub_model_server) -> None:
+    def test_upstream_requires_spawned_switchyard(self, _stub_model_server) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(
                 tmpdir,
                 agent_framework="opencode",
                 opencode_source="opencode",
                 opencode_setup_dir=Path(tmpdir) / "setup",
-                switchyard_base_url=None,
+                switchyard_spawned_base_url=None,
                 ng_global_config_dict_str=_ng_config_dict_str(),
             )
             config.persistent_dir.mkdir(parents=True, exist_ok=True)
             (Path(tmpdir) / "setup").mkdir(parents=True, exist_ok=True)
-            with pytest.raises(AssertionError, match="switchyard_base_url"):
+            with pytest.raises(AssertionError, match="requires a spawned Switchyard"):
                 OpenCodeHarnessProcessor(config=config)._get_upstream_run_command()
 
     def test_upstream_requires_opencode_setup_dir(self, _stub_model_server) -> None:
@@ -3296,7 +3280,7 @@ class TestUpstreamOpenCodeRunCommand:
                 agent_framework="opencode",
                 opencode_source="opencode",
                 opencode_setup_dir=None,
-                switchyard_base_url="http://switchyard:4000",
+                switchyard_spawned_base_url="http://switchyard:4000",
                 ng_global_config_dict_str=_ng_config_dict_str(),
             )
             config.persistent_dir.mkdir(parents=True, exist_ok=True)
@@ -3310,36 +3294,28 @@ class TestUpstreamOpenCodeRunCommand:
 
 
 class TestRetrieveSwitchyardTraceFilterTitleGen:
-    # Envelopes use the real Switchyard shape: completions list, messages flat on each record.
-    @pytest.mark.asyncio
-    async def test_filter_false_passes_envelope_unchanged(self, monkeypatch) -> None:
+    # Records use the real Switchyard shape: messages flat on each record.
+    def test_filter_false_passes_envelope_unchanged(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
-        envelope = {"completions": [{"messages": [{"role": "system", "content": "You are a title generator"}]}]}
-        monkeypatch.setattr(swe_app, "request", AsyncMock(return_value=MagicMock()))
-        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=envelope))
+        records = {"ses_1": [{"messages": [{"role": "system", "content": "You are a title generator"}]}]}
         reconstruct = MagicMock(return_value="trace")
         monkeypatch.setattr(swe_app, "reconstruct_switchyard_rollout", reconstruct)
 
-        await wrapper._retrieve_switchyard_trace("http://sw:4000", "ses_1", filter_title_gen=False)
+        wrapper._retrieve_switchyard_trace(records, "ses_1", filter_title_gen=False)
         assert len(reconstruct.call_args[0][0]["completions"]) == 1
 
-    @pytest.mark.asyncio
-    async def test_filter_true_strips_title_gen(self, monkeypatch) -> None:
+    def test_filter_true_strips_title_gen(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
-        envelope = {
-            "completions": [
+        records = {
+            "ses_1": [
                 {"messages": [{"role": "system", "content": "You are a title generator"}]},
                 {"messages": [{"role": "system", "content": "You are a coding assistant"}]},
             ]
         }
-        monkeypatch.setattr(swe_app, "request", AsyncMock(return_value=MagicMock()))
-        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=envelope))
         reconstruct = MagicMock(return_value="trace")
         monkeypatch.setattr(swe_app, "reconstruct_switchyard_rollout", reconstruct)
 
-        await wrapper._retrieve_switchyard_trace("http://sw:4000", "ses_1", filter_title_gen=True)
+        wrapper._retrieve_switchyard_trace(records, "ses_1", filter_title_gen=True)
         called_env = reconstruct.call_args[0][0]
         assert len(called_env["completions"]) == 1
         assert called_env["completions"][0]["messages"][0]["content"] == "You are a coding assistant"
@@ -3362,24 +3338,24 @@ class TestReconstructFilterTitleGenThreading:
     @pytest.mark.asyncio
     async def test_filter_true_threaded_to_retrieve(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
-        retrieve = AsyncMock(side_effect=lambda base, sid, filter_title_gen=False: self._fake_trace(sid))
-        monkeypatch.setattr(wrapper, "_retrieve_switchyard_trace", retrieve)
+        retrieve = MagicMock(side_effect=lambda recs, sid, conv, filter_title_gen=False, **kw: self._fake_trace(sid))
+        monkeypatch.setattr(swe_app, "_retrieve_switchyard_trace_from_records", retrieve)
         sessions = [
             {"session_id": "root", "parent_session_id": None},
             {"session_id": "sub", "parent_session_id": "root"},
         ]
-        await wrapper._reconstruct_switchyard_sessions("http://sw", sessions, filter_title_gen=True)
-        for call in retrieve.await_args_list:
+        wrapper._reconstruct_switchyard_sessions({}, sessions, filter_title_gen=True)
+        for call in retrieve.call_args_list:
             assert call.kwargs.get("filter_title_gen") is True
 
     @pytest.mark.asyncio
     async def test_filter_defaults_false(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
-        retrieve = AsyncMock(side_effect=lambda base, sid, filter_title_gen=False: self._fake_trace(sid))
-        monkeypatch.setattr(wrapper, "_retrieve_switchyard_trace", retrieve)
+        retrieve = MagicMock(side_effect=lambda recs, sid, conv, filter_title_gen=False, **kw: self._fake_trace(sid))
+        monkeypatch.setattr(swe_app, "_retrieve_switchyard_trace_from_records", retrieve)
         sessions = [{"session_id": "only", "parent_session_id": None}]
-        await wrapper._reconstruct_switchyard_sessions("http://sw", sessions)
-        for call in retrieve.await_args_list:
+        wrapper._reconstruct_switchyard_sessions({}, sessions)
+        for call in retrieve.call_args_list:
             assert call.kwargs.get("filter_title_gen") is False
 
 
@@ -3407,7 +3383,10 @@ class TestRunOpencodeGateFilterTitleGen:
                     tempfile.mkdtemp(),
                     agent_framework="opencode",
                     opencode_source="opencode",
-                    switchyard_base_url="http://switchyard:4000",
+                    # Retrieval is gated on spawn mode: that is what assigns the
+                    # per-run capture dir the records are read back from.
+                    switchyard_spawn_routing_profile="/tmp/profile.yaml",
+                    switchyard_spawned_base_url="http://switchyard:4000",
                     **overrides,
                 ).model_dump_json(),
             },
@@ -3433,41 +3412,81 @@ class TestRunOpencodeGateFilterTitleGen:
         )
 
     @pytest.mark.asyncio
-    async def test_run_calls_reconstruct_with_filter_title_gen_true(self, monkeypatch) -> None:
+    async def test_run_applies_opencode_payload(self, monkeypatch) -> None:
+        """run() consumes the trace the Ray task reconstructed on its own node."""
         wrapper = _create_wrapper(monkeypatch)
         from nemo_gym.switchyard_trace import SwitchyardTrace
 
         fake_trace = SwitchyardTrace(input_items=[], output_items=[], tools=[], record_uuids=[], model="m")
-        sessions_mock = AsyncMock(return_value=[{"session_id": "root", "parent_session_id": None}])
-        reconstruct_mock = AsyncMock(return_value=(fake_trace, "root", []))
-        monkeypatch.setattr(wrapper, "_list_switchyard_sessions", sessions_mock)
-        monkeypatch.setattr(wrapper, "_reconstruct_switchyard_sessions", reconstruct_mock)
-
+        wrapper._pending_switchyard["test_run_123"] = {
+            "trace": fake_trace,
+            "root_id": "root",
+            "subagent_trajectories": [],
+            "degraded": None,
+            "error": None,
+        }
         with patch.object(
             SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._opencode_response()
         ):
-            await wrapper.run(self._run_body())
+            result = await wrapper.run(self._run_body())
 
-        reconstruct_mock.assert_awaited_once()
-        assert reconstruct_mock.call_args.kwargs.get("filter_title_gen") is True
+        assert wrapper._pending_switchyard == {}
+        assert result.switchyard_trace_error is None
+        assert result.mask_sample is False
+        # Reconstructed subagents replace the text ones even when empty.
+        assert result.subagent_trajectories == []
+        assert result.response.metadata["switchyard_session_id"] == "root"
 
     @pytest.mark.asyncio
-    async def test_run_masks_on_reconstruct_failure(self, monkeypatch) -> None:
-        from nemo_gym.switchyard_trace import SwitchyardTraceError
-
+    async def test_run_masks_on_payload_error(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
-        monkeypatch.setattr(wrapper, "_list_switchyard_sessions", AsyncMock(return_value=[]))
-        monkeypatch.setattr(
-            wrapper,
-            "_reconstruct_switchyard_sessions",
-            AsyncMock(side_effect=SwitchyardTraceError("no root")),
-        )
+        wrapper._pending_switchyard["test_run_123"] = {
+            "trace": None,
+            "root_id": None,
+            "subagent_trajectories": None,
+            "degraded": None,
+            "error": "SwitchyardTraceError: no root session captured",
+        }
         with patch.object(
             SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._opencode_response()
         ):
             result = await wrapper.run(self._run_body())
         assert result.mask_sample is True
         assert "opencode sessions" in result.switchyard_trace_error
+        assert "no root session captured" in result.switchyard_trace_error
+
+    @pytest.mark.asyncio
+    async def test_run_masks_and_emits_tokens_on_degraded_payload(self, monkeypatch) -> None:
+        """Degraded (compaction) payloads still emit real tokens, plus a mask."""
+        wrapper = _create_wrapper(monkeypatch)
+        from nemo_gym.switchyard_trace import SwitchyardTrace
+
+        fake_trace = SwitchyardTrace(input_items=[], output_items=[], tools=[], record_uuids=[], model="m")
+        wrapper._pending_switchyard["test_run_123"] = {
+            "trace": fake_trace,
+            "root_id": "root",
+            "subagent_trajectories": [],
+            "degraded": "ambiguous session tree: 2 root sessions (likely context compaction)",
+            "error": None,
+        }
+        with patch.object(
+            SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._opencode_response()
+        ):
+            result = await wrapper.run(self._run_body())
+        assert result.mask_sample is True
+        assert "2 root sessions" in result.switchyard_trace_error
+        assert result.response.metadata["switchyard_session_id"] == "root"
+
+    @pytest.mark.asyncio
+    async def test_run_masks_when_payload_missing(self, monkeypatch) -> None:
+        """A rollout that never returned a payload cannot be trained on."""
+        wrapper = _create_wrapper(monkeypatch)
+        with patch.object(
+            SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._opencode_response()
+        ):
+            result = await wrapper.run(self._run_body())
+        assert result.mask_sample is True
+        assert "no switchyard payload" in result.switchyard_trace_error
 
 
 ########################################
@@ -3492,7 +3511,7 @@ class TestBuildApptainerCommandUpstreamOpencode:
                 agent_framework="opencode",
                 opencode_source="opencode",
                 opencode_setup_dir=opencode_setup_dir,
-                switchyard_base_url="http://switchyard:4000",
+                switchyard_spawned_base_url="http://switchyard:4000",
             )
             params.persistent_dir.mkdir(parents=True, exist_ok=True)
             self._setup_upstream_dirs(params)
@@ -3525,3 +3544,322 @@ class TestBuildApptainerCommandUpstreamOpencode:
             )
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "migration" in result
+
+
+########################################
+# Node-local Switchyard spawn (proxies run beside their agent, not on the server)
+########################################
+
+
+class TestSwitchyardSpawnsOnAgentNode:
+    def test_backend_url_round_robins_across_policy_endpoints(self, monkeypatch) -> None:
+        """The server hands each run a backend so one vLLM node does not take the whole wave."""
+        wrapper = _create_wrapper(monkeypatch)
+        cfg = shlex.quote(OmegaConf.to_yaml(OmegaConf.create({"policy_base_url": ["http://a/v1", "http://b/v1"]})))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir, ng_global_config_dict_str=cfg)
+            picked = [wrapper._next_switchyard_backend_url(params) for _ in range(4)]
+
+        assert picked == ["http://a/v1", "http://b/v1", "http://a/v1", "http://b/v1"]
+
+    def test_backend_url_none_when_policy_exposes_no_endpoint(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        cfg = shlex.quote(OmegaConf.to_yaml(OmegaConf.create({})))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir, ng_global_config_dict_str=cfg)
+            assert wrapper._next_switchyard_backend_url(params) is None
+
+    def test_spawn_needed_decided_from_run_config(self) -> None:
+        """The Ray task has no server object, so the predicate reads the run's own config."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spawning = _make_instance_config(
+                tmpdir,
+                switchyard_spawn_routing_profile="/tmp/profile.yaml",
+                agent_framework="opencode",
+                opencode_source="opencode",
+            )
+            assert swe_app._switchyard_spawn_needed_for(spawning) is True
+
+            no_profile = _make_instance_config(tmpdir, agent_framework="opencode", opencode_source="opencode")
+            assert swe_app._switchyard_spawn_needed_for(no_profile) is False
+
+            golden = _make_instance_config(
+                tmpdir,
+                switchyard_spawn_routing_profile="/tmp/profile.yaml",
+                agent_framework="opencode",
+                opencode_source="opencode",
+                verify_golden_patch=True,
+            )
+            assert swe_app._switchyard_spawn_needed_for(golden) is False
+
+    async def test_agent_run_reaps_its_switchyard(self, monkeypatch) -> None:
+        """The task that starts a proxy also stops it — nothing outlives its rollout."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(
+                tmpdir,
+                switchyard_spawn_routing_profile="/tmp/profile.yaml",
+                agent_framework="opencode",
+                opencode_source="opencode",
+            )
+            process = MagicMock()
+            monkeypatch.setattr(
+                swe_app, "_spawn_switchyard_local", AsyncMock(return_value=("http://node-7:1234", process))
+            )
+            monkeypatch.setattr(swe_app, "_teardown_switchyard_process", AsyncMock())
+            monkeypatch.setattr(
+                SWEBenchWrapper, "_fetch_switchyard_max_model_len", AsyncMock(return_value=4096)
+            )
+            monkeypatch.setattr(SWEBenchWrapper, "_build_agent_command", MagicMock())
+            monkeypatch.setattr(
+                swe_app.RunOpenHandsAgent, "process_single_datapoint", AsyncMock(return_value=Path("/tmp/r.json"))
+            )
+
+            result = await swe_app._run_agent_with_switchyard(params)
+
+        assert result["report_file"] == "/tmp/r.json"
+        assert result["switchyard"] is not None
+        assert params.switchyard_spawned_base_url == "http://node-7:1234"
+        assert params.opencode_context_len == 4096
+        swe_app._teardown_switchyard_process.assert_awaited_once_with(process)
+
+    async def test_switchyard_reaped_even_when_agent_raises(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(
+                tmpdir,
+                switchyard_spawn_routing_profile="/tmp/profile.yaml",
+                agent_framework="opencode",
+                opencode_source="opencode",
+            )
+            process = MagicMock()
+            monkeypatch.setattr(
+                swe_app, "_spawn_switchyard_local", AsyncMock(return_value=("http://node-7:1234", process))
+            )
+            monkeypatch.setattr(swe_app, "_teardown_switchyard_process", AsyncMock())
+            monkeypatch.setattr(
+                SWEBenchWrapper, "_fetch_switchyard_max_model_len", AsyncMock(return_value=None)
+            )
+            monkeypatch.setattr(SWEBenchWrapper, "_build_agent_command", MagicMock())
+            monkeypatch.setattr(
+                swe_app.RunOpenHandsAgent, "process_single_datapoint", AsyncMock(side_effect=RuntimeError("boom"))
+            )
+
+            with pytest.raises(RuntimeError):
+                await swe_app._run_agent_with_switchyard(params)
+
+        swe_app._teardown_switchyard_process.assert_awaited_once_with(process)
+
+    def test_retrieval_gate_does_not_require_a_proxy_url(self, monkeypatch) -> None:
+        """Regression: the proxy URL is set on the agent's node and never returns to the
+        server, so gating retrieval on it silently skipped every rollout."""
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rl_log_dir = Path(tmpdir) / "switchyard_traces"
+            session_dir = rl_log_dir / "sessions" / "dir_root"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / "u1.json").write_text(
+                json.dumps({"schema_version": 1, "session_id": "root", "parent_session_id": None, "uuid": "u1"})
+            )
+
+            # No proxy URL anywhere: retrieval is disk-only.
+            records = wrapper._read_switchyard_records(rl_log_dir)
+            sessions = wrapper._list_switchyard_sessions(rl_log_dir)
+
+        assert records and sessions, "capture must be readable without any proxy URL"
+
+
+def _write_full_record(rl_log_dir: Path, session_id: str, parent_id, turn: int, history: list) -> list:
+    """One complete capture record (the shape Switchyard writes); returns new history."""
+    generation = [100 + turn, 101 + turn]
+    session_dir = rl_log_dir / "sessions" / f"dir_{session_id}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "parent_session_id": parent_id,
+        "uuid": f"{session_id}-{turn:03d}",
+        "captured_at": f"2026-01-01T00:00:{turn:02d}",
+        "model": "test-model",
+        "is_valid": True,
+        "finish_reason": "stop",
+        # Cumulative conversation: record N's prompt must extend record N-1's
+        # history (validator), so each record carries the whole chat so far.
+        "messages": [
+            m for t in range(turn + 1) for m in (
+                {"role": "user", "content": f"turn {t}"},
+                {"role": "assistant", "content": f"reply {t}"},
+            )
+        ],
+        "tools": [],
+        "tool_choice": None,
+        "request_id": f"req-{turn}",
+        "token_count": len(history) + len(generation),
+        "prompt_token_ids": list(history),
+        "generation_token_ids": generation,
+        "generation_log_probs": [-0.1] * len(generation),
+    }
+    (session_dir / f"{record['uuid']}.json").write_text(json.dumps(record))
+    return history + generation
+
+
+class TestCollectSwitchyardPayload:
+    """Task-side retrieval: real records, real converter, no mocks.
+
+    This is the code that runs inside runner_ray_remote on the rollout's node;
+    these tests exercise it standalone (Gate 2 exercises it inside a real Ray
+    task, including payload picklability through the object store).
+    """
+
+    def _params(self, tmpdir: str, **overrides):
+        defaults = dict(
+            switchyard_spawn_routing_profile="/tmp/profile.yaml",
+            agent_framework="opencode",
+            opencode_source="opencode",
+        )
+        return _make_instance_config(tmpdir, **{**defaults, **overrides})
+
+    def _write_tree(self, rl_log_dir: Path) -> None:
+        history = [1, 2, 3]
+        for turn in range(3):
+            history = _write_full_record(rl_log_dir, "ses_root", None, turn, history)
+        _write_full_record(rl_log_dir, "ses_sub", "ses_root", 0, [1, 2, 3])
+
+    def test_opencode_tree_reconstructs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = self._params(tmpdir)
+            self._write_tree(params.persistent_dir / "switchyard_traces")
+            payload = swe_app._collect_switchyard_payload(params)
+
+        assert payload["error"] is None
+        assert payload["degraded"] is None
+        assert payload["root_id"] == "ses_root"
+        assert payload["trace"] is not None and payload["trace"].output_items
+        assert len(payload["subagent_trajectories"]) == 1
+        assert payload["subagent_trajectories"][0]["session_id"] == "ses_sub"
+
+    def test_two_roots_degrade_but_emit_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = self._params(tmpdir)
+            rl_log_dir = params.persistent_dir / "switchyard_traces"
+            self._write_tree(rl_log_dir)
+            _write_full_record(rl_log_dir, "ses_compacted", None, 0, [9, 9])
+            payload = swe_app._collect_switchyard_payload(params)
+
+        assert payload["error"] is None
+        assert payload["degraded"] and "2 root sessions" in payload["degraded"]
+        assert payload["root_id"] == "ses_root"  # largest chain wins
+        assert payload["trace"] is not None and payload["trace"].output_items
+
+    def test_no_records_is_error_not_raise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = self._params(tmpdir)
+            payload = swe_app._collect_switchyard_payload(params)
+        assert payload["trace"] is None
+        assert "no root session captured" in payload["error"]
+
+    def test_spawn_not_needed_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir)  # no profile, openhands, no session
+            assert swe_app._collect_switchyard_payload(params) is None
+
+    def test_openhands_session_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = self._params(
+                tmpdir,
+                agent_framework="openhands",
+                opencode_source="nv-opencode",
+                switchyard_session_id="ses_root",
+            )
+            history = [1, 2, 3]
+            for turn in range(2):
+                history = _write_full_record(
+                    params.persistent_dir / "switchyard_traces", "ses_root", None, turn, history
+                )
+            payload = swe_app._collect_switchyard_payload(params)
+
+        assert payload["error"] is None
+        assert payload["root_id"] == "ses_root"
+        assert payload["trace"] is not None and payload["trace"].output_items
+
+    def test_payload_pickles(self) -> None:
+        """The payload crosses the Ray object store; plain pickle is the stricter proxy."""
+        import pickle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = self._params(tmpdir)
+            self._write_tree(params.persistent_dir / "switchyard_traces")
+            payload = swe_app._collect_switchyard_payload(params)
+        restored = pickle.loads(pickle.dumps(payload))
+        assert restored["trace"].output_items
+        assert restored["root_id"] == "ses_root"
+
+
+class TestCollectSwitchyardPayloadPartial:
+    """A mid-chain validation break emits the longest valid prefix + mask,
+    so one bad rollout costs one masked sample instead of its whole group."""
+
+    def _params(self, tmpdir: str):
+        return _make_instance_config(
+            tmpdir,
+            switchyard_spawn_routing_profile="/tmp/profile.yaml",
+            agent_framework="opencode",
+            opencode_source="opencode",
+        )
+
+    def test_midchain_break_emits_prefix_and_degrades(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = self._params(tmpdir)
+            rl_log_dir = params.persistent_dir / "switchyard_traces"
+            history = [1, 2, 3]
+            for turn in range(2):
+                history = _write_full_record(rl_log_dir, "ses_root", None, turn, history)
+            # Turn 2 breaks token continuity: prompt does not extend history.
+            _write_full_record(rl_log_dir, "ses_root", None, 2, [999, 998])
+            payload = swe_app._collect_switchyard_payload(params)
+
+        assert payload["error"] is None
+        assert payload["trace"] is not None and payload["trace"].output_items
+        assert payload["degraded"] and "partial trace" in payload["degraded"]
+        assert "record 2" in payload["degraded"]
+        # Only the two valid records made it in.
+        assert payload["trace"].record_uuids == ["ses_root-000", "ses_root-001"]
+
+    def test_record_zero_break_is_still_an_error(self) -> None:
+        """No valid prefix exists -> error path (empty output, masked, group cost).
+        Deliberately unchanged: emitting fabricated tokens would be worse."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = self._params(tmpdir)
+            rl_log_dir = params.persistent_dir / "switchyard_traces"
+            sd = rl_log_dir / "sessions" / "dir_ses_root"
+            sd.mkdir(parents=True)
+            (sd / "r0.json").write_text(json.dumps({
+                "schema_version": 1, "session_id": "ses_root", "parent_session_id": None,
+                "uuid": "r0", "captured_at": "t0", "model": "test-model", "is_valid": True,
+                "finish_reason": "stop",
+                "messages": [{"role": "user", "content": "only a user message"}],
+                "tools": [], "tool_choice": None, "request_id": "r",
+                "token_count": 2, "prompt_token_ids": [1], "generation_token_ids": [2],
+                "generation_log_probs": [-0.1],
+            }))
+            payload = swe_app._collect_switchyard_payload(params)
+        assert payload["trace"] is None
+        assert "assistant message" in payload["error"]
+
+    def test_default_reconstruction_is_partial(self) -> None:
+        """Partial is the DEFAULT (training is the primary consumer); strict
+        fail-fast is the explicit opt-in for analysis/tests."""
+        from nemo_gym.switchyard_trace import SwitchyardTraceError, reconstruct_switchyard_rollout
+        from responses_api_models.vllm_model.app import VLLMConverter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rl_log_dir = Path(tmpdir) / "switchyard_traces"
+            history = [1, 2, 3]
+            history = _write_full_record(rl_log_dir, "s", None, 0, history)
+            _write_full_record(rl_log_dir, "s", None, 1, [777])
+            records = SWEBenchWrapper._read_switchyard_records(rl_log_dir)
+            envelope = {"schema_version": 1, "session_id": "s", "completions": records["s"]}
+            conv = VLLMConverter(return_token_id_information=True)
+            trace = reconstruct_switchyard_rollout(envelope, "s", conv)
+            assert trace.partial_reason and "do not extend" in trace.partial_reason
+            assert trace.record_uuids == ["s-000"]
+            with pytest.raises(SwitchyardTraceError, match="do not extend"):
+                reconstruct_switchyard_rollout(envelope, "s", conv, allow_partial=False)
