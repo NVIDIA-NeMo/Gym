@@ -175,7 +175,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
             | {
-                "nemo_gym_agent": "mini_swe_agent_2",
+                "nemo_gym_agent": self.config.name,
                 "instance_id": test_spec.instance_id[:63],
             },
             resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
