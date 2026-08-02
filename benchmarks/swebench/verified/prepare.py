@@ -24,7 +24,12 @@ def prepare() -> Path:
         for row in ds:
             row = row | {
                 "responses_create_params": {
-                    "input": [],
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": row["problem_statement"],
+                        }
+                    ],
                 },
                 "subset": "verified",
                 "split": "test",
