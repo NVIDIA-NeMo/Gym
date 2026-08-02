@@ -96,7 +96,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await sandbox.start(sandbox_spec)
 
         command = f"""
-        echo $SHELL \
+        echo "Shell: $SHELL" \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && opencode run "hello!"
@@ -104,8 +104,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         result = await sandbox.exec(command)
         import sys
 
-        print(result.stdout, file=sys.stderr)
-        print(result.stderr, file=sys.stderr)
+        print("STDOUT: ", result.stdout, file=sys.stderr)
+        print("STDERR: ", result.stderr, file=sys.stderr)
         await sandbox.stop()
 
         body = body.model_copy(deep=True)
