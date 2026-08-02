@@ -62,6 +62,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
@@ -215,6 +216,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     metrics_fpath: Path
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
+    # Capture-correlation id from the /run rollout_context, snapshotted in _setup_params so it
+    # survives the Ray-remote hop into the harness processor. None outside capture runs.
+    ng_rollout_id: Optional[str] = None
     persistent_dir: Path
     ray_queue_timestamp: float
     inference_params: Dict[str, Any]
@@ -1591,6 +1595,14 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             "temperature": self.config.inference_params["temperature"],
             "top_p": self.config.inference_params["top_p"],
         }
+        # Capture attribution: OpenHands' NemoGymClient posts to a fixed url_path, so the
+        # /ng-rollout/<id> prefix cannot ride its model calls. Carry the id in the body instead —
+        # completion_kwargs merge into every assembled request, and the gate middleware resolves
+        # path -> body metadata. The id was snapshotted from the /run rollout_context in
+        # _setup_params (this code runs in a Ray remote); absent (legacy runs, eval) it's a no-op.
+        rollout_id = self.config.ng_rollout_id
+        if rollout_id is not None:
+            config["llm"]["model"]["completion_kwargs"] = {"metadata": {"ng_rollout_id": rollout_id}}
 
         config_str = tomlkit.dumps(config)
 
@@ -3450,6 +3462,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             **self._swe_bench_wrapper_server_config.model_dump(),
             problem_info=problem_info,
             body=body,
+            # Capture attribution: snapshot the run-request rollout_context here (server
+            # process) — the harness runs in a Ray remote where contextvars don't reach.
+            ng_rollout_id=current_rollout_id(),
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,

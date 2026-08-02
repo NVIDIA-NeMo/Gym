@@ -1041,6 +1041,46 @@ def _record(
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
 
 
+async def _rollout_id_from_body_metadata(receive: Any) -> tuple[Optional[str], Any]:
+    """Peek an ASGI request body for ``metadata.ng_rollout_id``; return (id, replay receive).
+
+    Fallback identity channel for request-rebuilding harnesses whose model-call URL is not
+    configurable (see the call site). Drains ``http.request`` messages, parses the JSON body, and
+    hands back a receive callable that replays the drained messages verbatim, so the downstream
+    app sees an untouched stream. Any parse failure resolves to (None, replay) — attribution
+    fallbacks must never break serving.
+    """
+    messages: list[dict[str, Any]] = []
+    body = bytearray()
+    while True:
+        message = await receive()
+        messages.append(message)
+        if message.get("type") != "http.request":
+            break
+        body.extend(message.get("body", b"") or b"")
+        if not message.get("more_body", False):
+            break
+
+    rollout_id: Optional[str] = None
+    if body:
+        try:
+            parsed = orjson.loads(bytes(body))
+            candidate = (parsed.get("metadata") or {}).get("ng_rollout_id")
+            if candidate is not None:
+                rollout_id = str(candidate)
+        except Exception:  # noqa: BLE001 — malformed bodies are the server's problem, not ours
+            rollout_id = None
+
+    replay = list(messages)
+
+    async def _replay_receive() -> dict[str, Any]:
+        if replay:
+            return replay.pop(0)
+        return await receive()
+
+    return rollout_id, _replay_receive
+
+
 class _CaptureMiddleware:
     """Pure-ASGI per-rollout capture.
 
@@ -1082,6 +1122,15 @@ class _CaptureMiddleware:
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
         dialect = _OBSERVED_PATHS.get(path)
+
+        # Body-metadata attribution fallback: request-rebuilding harnesses (OpenHands, opencode)
+        # compose fresh model calls through clients whose URL is not harness-configurable, so the
+        # /ng-rollout/ prefix cannot be applied on their hop. They CAN carry the id in the request
+        # body (completion kwargs merge into every call), so an unprefixed observed call is peeked
+        # for ``metadata.ng_rollout_id`` before being declared uncorrelated. Resolution order is
+        # path -> body metadata (the path stays authoritative when both are present).
+        if (self._store is not None or self._token_store is not None) and dialect is not None and rollout_from_path is None:
+            rollout_from_path, receive = await _rollout_id_from_body_metadata(receive)
 
         # Nothing to capture: neither store is active, the call isn't correlated to a rollout, or the
         # path isn't an observed model endpoint. The prefix is already stripped, so just forward.
