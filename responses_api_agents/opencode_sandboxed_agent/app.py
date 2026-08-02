@@ -96,7 +96,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await sandbox.start(sandbox_spec)
 
         command = f"""
-        curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
+        echo $SHELL \
+        && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
+        && export PATH=$HOME/.opencode/bin:$PATH \
         && opencode run "hello!"
         """
         result = await sandbox.exec(command)
