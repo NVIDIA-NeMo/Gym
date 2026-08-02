@@ -28,7 +28,7 @@ masks the sample rather than emitting partially annotated training data.
 
 import json
 import math
-from typing import Any, Dict, List, NamedTuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from openai.types.responses.function_tool import FunctionTool
 
@@ -54,6 +54,9 @@ class SwitchyardTrace(NamedTuple):
     tools: List[FunctionTool]
     record_uuids: List[str]
     model: str
+    # Set when reconstruction stopped at a validation break and emitted only the
+    # longest valid prefix. Carriers of this MUST be masked from the loss.
+    partial_reason: Optional[str] = None
 
 
 def map_switchyard_tools(raw_tools: Any) -> List[FunctionTool]:
@@ -79,12 +82,22 @@ def map_switchyard_tools(raw_tools: Any) -> List[FunctionTool]:
     return tools
 
 
-def reconstruct_switchyard_rollout(envelope: Any, session_id: str, converter: ResponsesConverter) -> SwitchyardTrace:
+def reconstruct_switchyard_rollout(
+    envelope: Any, session_id: str, converter: ResponsesConverter, allow_partial: bool = True
+) -> SwitchyardTrace:
     """Validate a retrieval envelope and rebuild one token-annotated Gym rollout.
 
     Records are processed in the endpoint's returned order; each later prompt
     must strictly extend the already assembled history with a non-empty
-    environment-message suffix. Raises `SwitchyardTraceError` on any deviation.
+    environment-message suffix. By default (``allow_partial=True`` — the
+    training pipeline is the primary consumer, and masking a partial sample is
+    its correct semantics) a deviation at record i > 0 stops the walk and emits
+    the longest valid prefix with ``partial_reason`` set; pass
+    ``allow_partial=False`` for fail-fast certification (analysis, tests). The prefix is the only token-continuous object that exists once the
+    chain breaks (each record's tokens are deltas over the accumulated history),
+    and emitting it lets the sample mask itself from the loss instead of
+    aborting its whole prompt group downstream. A record-0 failure still raises:
+    there is no valid prefix to emit.
     """
     records = _validate_envelope(envelope, session_id)
 
@@ -104,7 +117,9 @@ def reconstruct_switchyard_rollout(envelope: Any, session_id: str, converter: Re
     # violation (e.g. a template that re-renders history differently) masks the
     # sample instead of crashing the training step.
     token_history: List[int] = []
+    partial_reason: Optional[str] = None
     for i, record in enumerate(records):
+      try:
         _validate_record(record, i, session_id, record_uuids)
         if record["prompt_token_ids"][: len(token_history)] != token_history:
             raise SwitchyardTraceError(f"record {i} prompt_token_ids do not extend the prior prompt+generation tokens")
@@ -148,6 +163,11 @@ def reconstruct_switchyard_rollout(envelope: Any, session_id: str, converter: Re
             }
         )
         record_uuids.append(record["uuid"])
+      except SwitchyardTraceError as e:
+        if not allow_partial or i == 0:
+            raise
+        partial_reason = f"record {i} of {len(records)}: {e}"
+        break
 
     items = converter.chat_completions_messages_to_responses_items(annotated)
     input_items, output_items = split_responses_input_output_items(items)
@@ -158,6 +178,7 @@ def reconstruct_switchyard_rollout(envelope: Any, session_id: str, converter: Re
         tools=map_switchyard_tools(tools),
         record_uuids=record_uuids,
         model=model,
+        partial_reason=partial_reason,
     )
 
 

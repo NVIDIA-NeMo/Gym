@@ -91,7 +91,9 @@ def _envelope(records: list, **overrides) -> dict:
 
 def _reconstruct(envelope: dict):
     converter = ResponsesConverter(return_token_id_information=True)
-    return reconstruct_switchyard_rollout(envelope, SESSION_ID, converter)
+    # These tests certify the strict validator; the default is allow_partial=True
+    # for the training consumer, so strictness is requested explicitly here.
+    return reconstruct_switchyard_rollout(envelope, SESSION_ID, converter, allow_partial=False)
 
 
 class TestReconstruction:
