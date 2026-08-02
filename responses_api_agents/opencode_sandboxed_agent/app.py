@@ -118,6 +118,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         """
 
         config = {
+            "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
             "provider": {
                 "nemo_gym": {
