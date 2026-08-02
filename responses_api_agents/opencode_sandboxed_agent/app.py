@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from shlex import quote
 from time import time
 from typing import Any, Dict
@@ -41,7 +42,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, get_server_url, raise_for_status
 
 
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
@@ -115,7 +116,26 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && export PATH=$HOME/.opencode/bin:$PATH \
         && opencode run "{quote(query)}"
         """
-        result = await sandbox.exec(command)
+
+        config = {
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+                "nemo_gym": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
+                        "apiKey": "dummy_key",
+                    },
+                    "models": {
+                        "dummy_model": {},  # TODO @bxyu-nvidia: Propogate sampling params here.
+                    },
+                }
+            },
+        }
+        result = await sandbox.exec(
+            command=command,
+            env={"OPENCODE_CONFIG_CONTENT": json.dumps(config)},
+        )
         import sys
 
         print("STDOUT: ", result.stdout, file=sys.stderr)
