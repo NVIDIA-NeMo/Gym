@@ -277,26 +277,30 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if self.config.harbor_ray_task_num_cpus is not None:
                     runner = runner_ray_remote.options(num_cpus=self.config.harbor_ray_task_num_cpus)
                 future = runner.remote(_run_harbor_job_sync, params)
-                trial_dir_path = await asyncio.to_thread(ray.get, future)
+                # Await the ObjectRef directly: to_thread(ray.get, ...) pins one of
+                # the default executor's 32 threads until THIS trial finishes, so
+                # completed trials queue behind long-running ones and results
+                # drain at ~32-at-a-time regardless of rollout concurrency.
+                trial_dir_path = await future
                 trial_dir = Path(trial_dir_path)
 
-                # Read the trial result (summary: reward, agent_result, verifier_result)
-                with open(trial_dir / "result.json", "r") as f:
-                    trial_result = json.load(f)
+                def _read_trial_files():
+                    with open(trial_dir / "result.json", "r") as f:
+                        result = json.load(f)
+                    traj = None
+                    trajectory_path = trial_dir / "agent" / "trajectory.json"
+                    if trajectory_path.exists():
+                        with open(trajectory_path, "r") as f:
+                            traj = json.load(f)
+                    flags = {}
+                    flags_path = trial_dir / "agent" / "agent_error_flags.json"
+                    if flags_path.exists():
+                        with open(flags_path, "r") as f:
+                            flags = json.load(f)
+                    return result, traj, flags
 
-                # Read the ATIF trajectory (full conversation with per-token logprobs)
-                trajectory = None
-                trajectory_path = trial_dir / "agent" / "trajectory.json"
-                if trajectory_path.exists():
-                    with open(trajectory_path, "r") as f:
-                        trajectory = json.load(f)
-
-                # Read agent error flags written by the agent
-                agent_error_flags = {}
-                agent_error_flags_path = trial_dir / "agent" / "agent_error_flags.json"
-                if agent_error_flags_path.exists():
-                    with open(agent_error_flags_path, "r") as f:
-                        agent_error_flags = json.load(f)
+                # Trajectories can be many MB; parse off the event loop.
+                trial_result, trajectory, agent_error_flags = await asyncio.to_thread(_read_trial_files)
 
                 # Extract reward from verifier result
                 verifier_result = trial_result.get("verifier_result")
