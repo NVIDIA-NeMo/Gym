@@ -114,7 +114,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         echo "Shell: $SHELL" \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run "{quote(query)}"
+        && opencode run "{quote(query)}" \
+        && opencode export $OPENCODE_SESSION_ID
         """
 
         config = {
