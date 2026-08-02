@@ -95,6 +95,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
+        command = """
+        curl -fsSL https://opencode.ai/install | bash \
+        && opencode run "hello!"
+        """
+        result = await sandbox.exec(command)
+        import sys
+
+        print(result.stdout, file=sys.stderr)
+        print(result.stderr, file=sys.stderr)
+        await sandbox.stop()
+
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
