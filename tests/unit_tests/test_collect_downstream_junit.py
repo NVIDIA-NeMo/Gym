@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the Gym-to-NeMo JUnit collection hop."""
+"""Tests for the receipt-bound NeMo-to-Gym JUnit relay."""
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -22,6 +23,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COLLECTOR_PATH = REPO_ROOT / ".gitlab" / "ci" / "collect_downstream_junit.py"
 PIPELINE_PATH = REPO_ROOT / ".gitlab-ci.yml"
+SOURCE_SHA = "a" * 40
 
 
 def _load_collector():
@@ -36,234 +38,190 @@ def _load_collector():
 collector = _load_collector()
 
 
-def _artifact(entries: dict[str, bytes | str]) -> bytes:
+def _identity():
+    return collector.GymIdentity(
+        project_id=191584,
+        project_path="dl/nemo/gym",
+        pipeline_id=60672261,
+        mr_iid=452,
+        source_sha=SOURCE_SHA,
+    )
+
+
+def _environment(**updates):
+    environment = {
+        "CI_API_V4_URL": "https://gitlab.example/api/v4",
+        "CI_JOB_TOKEN": "job-secret",
+        "CI_PROJECT_ID": "191584",
+        "CI_PROJECT_PATH": "dl/nemo/gym",
+        "CI_PIPELINE_ID": "60672261",
+        "CI_MERGE_REQUEST_IID": "452",
+        "CI_COMMIT_SHA": SOURCE_SHA,
+    }
+    environment.update(updates)
+    return environment
+
+
+def _junit(suite: str) -> bytes:
+    return (f'<testsuite name="{suite}" tests="1"><testcase classname="ci" name="ok"/></testsuite>').encode()
+
+
+def _receipt(reports: dict[str, bytes], **updates):
+    identity = _identity()
+    receipt = {
+        "schema_version": 1,
+        "package_name": "nemo-gym-ci-junit",
+        "package_version": identity.package_version,
+        "package_filename": "reports.zip",
+        "gym_project_id": identity.project_id,
+        "gym_project_path": identity.project_path,
+        "gym_pipeline_id": identity.pipeline_id,
+        "gym_mr_iid": identity.mr_iid,
+        "gym_source_sha": identity.source_sha,
+        "nemo_project_id": 65523,
+        "nemo_pipeline_id": 60672262,
+        "nemo_job_id": 381778367,
+        "nemo_child_pipeline_id": 60672286,
+        "report_count": len(reports),
+        "reports": [
+            {
+                "path": path,
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            for path, payload in sorted(reports.items())
+        ],
+    }
+    receipt.update(updates)
+    return receipt
+
+
+def _relay(reports: dict[str, bytes] | None = None, *, receipt_updates=None, extra=None) -> bytes:
+    reports = reports or {}
+    receipt = _receipt(reports, **(receipt_updates or {}))
     archive = BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
-        for name, content in entries.items():
-            output.writestr(name, content.encode() if isinstance(content, str) else content)
+        output.writestr("receipt.json", json.dumps(receipt, sort_keys=True))
+        for path, payload in reports.items():
+            output.writestr(path, payload)
+        for path, payload in (extra or {}).items():
+            output.writestr(path, payload)
     return archive.getvalue()
 
 
-def _junit(suite: str) -> str:
-    return f'<testsuite name="{suite}" tests="1"><testcase classname="ci" name="ok"/></testsuite>'
-
-
-def _bridge(
-    bridge_id: int = 11,
-    *,
-    pipeline_id: int = 22,
-    project_id: int = 99,
-    status: str = "success",
-    name: str = "gym-cpu-ci",
-) -> dict:
-    return {
-        "id": bridge_id,
-        "name": name,
-        "downstream_pipeline": {
-            "id": pipeline_id,
-            "project_id": project_id,
-            "status": status,
-        },
+def test_valid_relay_is_extracted_atomically(tmp_path):
+    reports = {
+        "junit/core/core.xml": _junit("core"),
+        "junit/server-0/server.xml": _junit("server"),
     }
-
-
-def _report_job(job_id: int, *, status: str = "success", junit: bool = True) -> dict:
-    artifacts = [{"file_type": "junit", "filename": "junit.xml.gz"}] if junit else []
-    return {
-        "id": job_id,
-        "name": "nemo_gym_collect_junit",
-        "status": status,
-        "artifacts": artifacts,
-    }
-
-
-class _FakeApi:
-    def __init__(self, *, bridges, jobs, archives):
-        self.bridges = bridges
-        self.jobs = jobs
-        self.archives = archives
-        self.bridge_calls = []
-        self.job_calls = []
-        self.artifact_calls = []
-
-    def list_bridges(self, project_id, pipeline_id):
-        self.bridge_calls.append((project_id, pipeline_id))
-        return self.bridges
-
-    def list_pipeline_jobs(self, project_id, pipeline_id):
-        self.job_calls.append((project_id, pipeline_id))
-        return self.jobs
-
-    def download_job_artifacts(self, project_id, job_id):
-        self.artifact_calls.append((project_id, job_id))
-        value = self.archives[job_id]
-        if isinstance(value, Exception):
-            raise value
-        return value
-
-
-def test_collects_partial_junit_from_failed_parent_and_latest_retries(tmp_path):
-    api = _FakeApi(
-        bridges=[
-            _bridge(10, pipeline_id=20),
-            _bridge(12, pipeline_id=24, status="failed"),
-        ],
-        jobs=[
-            _report_job(100, status="failed"),
-            {"id": 105, "name": "unrelated", "status": "success", "artifacts": []},
-            _report_job(110, status="failed"),
-        ],
-        archives={
-            110: _artifact(
-                {
-                    "gym-junit/gym_core_unit_tests-80/core.xml": _junit("core"),
-                    "gym-junit/gym_server_tests-90/server.xml": _junit("server"),
-                    "coverage.xml": "<coverage/>",
-                }
-            )
-        },
-    )
     output_dir = tmp_path / "collected"
 
-    result = collector.collect_downstream_junit(
-        api,
-        gym_project_id=77,
-        gym_pipeline_id=88,
-        bridge_name="gym-cpu-ci",
-        report_job_name="nemo_gym_collect_junit",
-        output_dir=output_dir,
-    )
+    result = collector.extract_relay(_relay(reports), identity=_identity(), output_dir=output_dir)
 
-    assert result.downstream_project_id == 99
-    assert result.downstream_pipeline_id == 24
-    assert result.report_job_id == 110
-    assert result.report_job_status == "failed"
+    assert result.package_version == f"pipeline-60672261-{SOURCE_SHA}"
+    assert result.nemo_pipeline_id == 60672262
+    assert result.nemo_job_id == 381778367
+    assert result.nemo_child_pipeline_id == 60672286
     assert result.report_count == 2
-    assert api.bridge_calls == [(77, 88)]
-    assert api.job_calls == [(99, 24)]
-    assert api.artifact_calls == [(99, 110)]
-    assert len(list(output_dir.glob("**/*.xml"))) == 2
+    assert (output_dir / "core" / "core.xml").read_bytes() == reports["junit/core/core.xml"]
+    assert (output_dir / "server-0" / "server.xml").read_bytes() == reports["junit/server-0/server.xml"]
+    assert list(tmp_path.glob(".collected.tmp-*")) == []
 
 
-def test_latest_bridge_without_downstream_never_falls_back():
-    bridges = [_bridge(10), {"id": 12, "name": "gym-cpu-ci", "downstream_pipeline": None}]
-
-    with pytest.raises(collector.CollectorError, match="latest bridge.*has no downstream"):
-        collector.resolve_downstream_pipeline(bridges, bridge_name="gym-cpu-ci")
-
-
-@pytest.mark.parametrize("status", ["running", "manual", "unknown", ""])
-def test_nonterminal_or_unknown_downstream_status_is_rejected(status):
-    with pytest.raises(collector.CollectorError, match="non-terminal or unknown status"):
-        collector.resolve_downstream_pipeline([_bridge(status=status)], bridge_name="gym-cpu-ci")
-
-
-def test_latest_nonterminal_report_attempt_does_not_publish_stale_retry():
-    jobs = [_report_job(100), _report_job(110, status="running")]
-
-    with pytest.raises(collector.CollectorError, match="report job.*non-terminal"):
-        collector.select_report_job(jobs, report_job_name="nemo_gym_collect_junit")
-
-
-def test_successful_report_job_without_junit_creates_empty_directory(tmp_path):
-    api = _FakeApi(
-        bridges=[_bridge(status="failed")],
-        jobs=[_report_job(110, junit=False)],
-        archives={},
-    )
+def test_zero_report_relay_creates_empty_output(tmp_path):
     output_dir = tmp_path / "collected"
 
-    result = collector.collect_downstream_junit(
-        api,
-        gym_project_id=77,
-        gym_pipeline_id=88,
-        bridge_name="gym-cpu-ci",
-        report_job_name="nemo_gym_collect_junit",
-        output_dir=output_dir,
-    )
+    result = collector.extract_relay(_relay(), identity=_identity(), output_dir=output_dir)
 
     assert result.report_count == 0
     assert output_dir.is_dir()
     assert list(output_dir.iterdir()) == []
-    assert api.artifact_calls == []
-
-
-@pytest.mark.parametrize("status", ["failed", "canceled", "skipped"])
-def test_unsuccessful_report_job_without_junit_fails_closed(tmp_path, status):
-    api = _FakeApi(
-        bridges=[_bridge(status="failed")],
-        jobs=[_report_job(110, status=status, junit=False)],
-        archives={},
-    )
-
-    with pytest.raises(collector.CollectorError, match=f"ended {status} without a JUnit artifact"):
-        collector.collect_downstream_junit(
-            api,
-            gym_project_id=77,
-            gym_pipeline_id=88,
-            bridge_name="gym-cpu-ci",
-            report_job_name="nemo_gym_collect_junit",
-            output_dir=tmp_path / "collected",
-        )
 
 
 @pytest.mark.parametrize(
-    ("entries", "message"),
+    ("updates", "message"),
     [
-        ({"gym-junit/../../escape.xml": _junit("bad")}, "unsafe XML path"),
-        ({"gym-junit/report.xml": "<testsuite>"}, "is malformed"),
-        (
-            {"gym-junit/report.xml": '<!DOCTYPE x [<!ENTITY y "z">]><testsuite name="&y;"/>'},
-            "forbidden DTD/entity",
-        ),
-        ({"other/report.xml": _junit("wrong-prefix")}, "contains no validated XML"),
+        ({"schema_version": 2}, "schema_version mismatch"),
+        ({"gym_project_id": 1}, "gym_project_id mismatch"),
+        ({"gym_project_path": "other/project"}, "gym_project_path mismatch"),
+        ({"gym_pipeline_id": 1}, "gym_pipeline_id mismatch"),
+        ({"gym_mr_iid": 1}, "gym_mr_iid mismatch"),
+        ({"gym_source_sha": "b" * 40}, "gym_source_sha mismatch"),
+        ({"nemo_project_id": 1}, "nemo_project_id mismatch"),
+        ({"nemo_pipeline_id": 0}, "nemo_pipeline_id must be a positive integer"),
     ],
 )
-def test_malformed_or_unsafe_xml_is_rejected_atomically(tmp_path, entries, message):
+def test_receipt_identity_mismatch_is_rejected_atomically(tmp_path, updates, message):
     output_dir = tmp_path / "collected"
-    api = _FakeApi(
-        bridges=[_bridge()],
-        jobs=[_report_job(110)],
-        archives={110: _artifact(entries)},
-    )
 
     with pytest.raises(collector.CollectorError, match=message):
-        collector.collect_downstream_junit(
-            api,
-            gym_project_id=77,
-            gym_pipeline_id=88,
-            bridge_name="gym-cpu-ci",
-            report_job_name="nemo_gym_collect_junit",
+        collector.extract_relay(
+            _relay({"junit/core.xml": _junit("core")}, receipt_updates=updates),
+            identity=_identity(),
             output_dir=output_dir,
         )
 
     assert not output_dir.exists()
     assert list(tmp_path.glob(".collected.tmp-*")) == []
-    assert not (tmp_path / "escape.xml").exists()
 
 
-def test_artifact_download_error_is_contextual_and_atomic(tmp_path):
-    api = _FakeApi(
-        bridges=[_bridge()],
-        jobs=[_report_job(110)],
-        archives={110: collector.CollectorError("HTTP 404: expired")},
-    )
+@pytest.mark.parametrize(
+    ("reports", "receipt_updates", "extra", "message"),
+    [
+        ({"junit/../escape.xml": _junit("bad")}, None, None, "unsafe JUnit path"),
+        ({"other/report.xml": _junit("bad")}, None, None, "unsafe JUnit path"),
+        ({"junit/report.xml": b"<testsuite>"}, None, None, "malformed"),
+        (
+            {"junit/report.xml": b'<!DOCTYPE x [<!ENTITY y "z">]><testsuite name="&y;"/>'},
+            None,
+            None,
+            "forbidden DTD/entity",
+        ),
+        (
+            {"junit/report.xml": _junit("ok")},
+            None,
+            {"unexpected.txt": b"x"},
+            "members do not match receipt",
+        ),
+    ],
+)
+def test_unsafe_or_malformed_relay_is_rejected_atomically(tmp_path, reports, receipt_updates, extra, message):
+    output_dir = tmp_path / "collected"
 
-    with pytest.raises(collector.CollectorError, match="report job 110 artifacts.*expired"):
-        collector.collect_downstream_junit(
-            api,
-            gym_project_id=77,
-            gym_pipeline_id=88,
-            bridge_name="gym-cpu-ci",
-            report_job_name="nemo_gym_collect_junit",
-            output_dir=tmp_path / "collected",
+    with pytest.raises(collector.CollectorError, match=message):
+        collector.extract_relay(
+            _relay(reports, receipt_updates=receipt_updates, extra=extra),
+            identity=_identity(),
+            output_dir=output_dir,
         )
+
+    assert not output_dir.exists()
+
+
+def test_hash_mismatch_is_rejected(tmp_path):
+    reports = {"junit/report.xml": _junit("ok")}
+    receipt = _receipt(reports)
+    receipt["reports"][0]["sha256"] = "0" * 64
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("receipt.json", json.dumps(receipt))
+        output.writestr("junit/report.xml", reports["junit/report.xml"])
+
+    with pytest.raises(collector.CollectorError, match="SHA-256 mismatch"):
+        collector.extract_relay(archive.getvalue(), identity=_identity(), output_dir=tmp_path / "collected")
+
+
+def test_output_must_be_fresh(tmp_path):
+    output_dir = tmp_path / "collected"
+    output_dir.mkdir()
+
+    with pytest.raises(collector.CollectorError, match="refusing to overwrite"):
+        collector.extract_relay(_relay(), identity=_identity(), output_dir=output_dir)
 
 
 class _Response:
-    def __init__(self, body: bytes, headers: dict[str, str] | None = None):
+    def __init__(self, body: bytes):
         self._body = BytesIO(body)
-        self.headers = headers or {}
 
     def read(self, size=-1):
         return self._body.read(size)
@@ -288,134 +246,47 @@ class _OpenSequence:
         return response
 
 
-def _json_response(value, headers=None):
-    return _Response(json.dumps(value).encode(), headers)
-
-
 def _request_headers(request: urllib.request.Request) -> dict[str, str]:
     return {key.lower(): value for key, value in request.header_items()}
 
 
-def test_gitlab_client_paginates_cross_project_and_uses_split_auth():
-    opener = _OpenSequence(
-        [
-            _json_response([_bridge(10)], {"X-Next-Page": "2"}),
-            _json_response([_bridge(11)], {"X-Next-Page": ""}),
-            _json_response([_report_job(110)]),
-            _Response(b"artifact zip"),
-        ]
+def test_package_client_downloads_exact_same_project_coordinate_with_job_token():
+    opener = _OpenSequence([_Response(b"relay")])
+    client = collector.GitLabPackageClient("https://gitlab.example/api/v4/", job_token="job-secret", open_url=opener)
+
+    result = client.download_relay(project_id=191584, package_version=_identity().package_version)
+
+    assert result == b"relay"
+    request, timeout = opener.requests[0]
+    parsed = urllib.parse.urlsplit(request.full_url)
+    assert parsed.path.endswith(
+        f"/projects/191584/packages/generic/nemo-gym-ci-junit/pipeline-60672261-{SOURCE_SHA}/reports.zip"
     )
-    api = collector.GitLabApi(
-        "https://gitlab.example/api/v4/",
-        job_token="job-secret",
-        metadata_token="read-secret",
-        open_url=opener,
-    )
-
-    assert [bridge["id"] for bridge in api.list_bridges(77, 88)] == [10, 11]
-    assert api.list_pipeline_jobs(99, 22)[0]["id"] == 110
-    assert api.download_job_artifacts(99, 110) == b"artifact zip"
-
-    first_url = urllib.parse.urlsplit(opener.requests[0][0].full_url)
-    assert first_url.path.endswith("/projects/77/pipelines/88/bridges")
-    assert urllib.parse.parse_qs(first_url.query) == {"per_page": ["100"], "page": ["1"]}
-    jobs_url = urllib.parse.urlsplit(opener.requests[2][0].full_url)
-    assert jobs_url.path.endswith("/projects/99/pipelines/22/jobs")
-    assert "include_retried" not in jobs_url.query
-    assert _request_headers(opener.requests[0][0])["private-token"] == "read-secret"
-    assert _request_headers(opener.requests[3][0])["job-token"] == "job-secret"
+    assert parsed.query == ""
+    assert _request_headers(request)["job-token"] == "job-secret"
+    assert "private-token" not in _request_headers(request)
+    assert timeout == collector.REQUEST_TIMEOUT_SECONDS
 
 
-def test_job_token_artifact_denial_is_actionable_and_does_not_leak_token():
-    error = urllib.error.HTTPError(
-        "https://gitlab.example/api/v4/projects/99/jobs/110/artifacts",
-        403,
-        "Forbidden",
-        {},
-        BytesIO(b'{"message":"403 Forbidden"}'),
-    )
-    opener = _OpenSequence([error])
-    api = collector.GitLabApi(
+def test_missing_package_error_does_not_leak_token():
+    url = "https://gitlab.example/api/v4/projects/191584/packages/generic/x/y/z"
+    error = urllib.error.HTTPError(url, 404, "Not Found", {}, BytesIO(b'{"message":"404"}'))
+    client = collector.GitLabPackageClient(
         "https://gitlab.example/api/v4",
         job_token="do-not-print-this",
-        open_url=opener,
+        open_url=_OpenSequence([error]),
     )
 
     with pytest.raises(collector.CollectorError) as caught:
-        api.download_job_artifacts(99, 110)
+        client.download_relay(project_id=191584, package_version=_identity().package_version)
 
-    message = str(caught.value)
-    assert "owner-approved target-project job-token allowlist" in message
-    assert "do-not-print-this" not in message
-
-
-def test_job_token_metadata_denial_names_the_safe_fallback_without_leaking_token():
-    error = urllib.error.HTTPError(
-        "https://gitlab.example/api/v4/projects/77/pipelines/88/bridges",
-        403,
-        "Forbidden",
-        {},
-        BytesIO(b'{"message":"403 Forbidden"}'),
-    )
-    opener = _OpenSequence([error])
-    api = collector.GitLabApi(
-        "https://gitlab.example/api/v4",
-        job_token="do-not-print-this",
-        open_url=opener,
-    )
-
-    with pytest.raises(collector.CollectorError) as caught:
-        api.list_bridges(77, 88)
-
-    message = str(caught.value)
-    assert "RO_API_TOKEN or GITLAB_API_TOKEN" in message
-    assert "read_api access to both projects" in message
-    assert "do-not-print-this" not in message
-
-
-@pytest.mark.parametrize(
-    ("environment", "metadata_token", "uses_job_token"),
-    [
-        (
-            {
-                "CI_API_V4_URL": "https://gitlab.example/api/v4",
-                "CI_JOB_TOKEN": "job",
-                "RO_API_TOKEN": "read-only",
-                "GITLAB_API_TOKEN": "fallback",
-            },
-            "read-only",
-            False,
-        ),
-        (
-            {
-                "CI_API_V4_URL": "https://gitlab.example/api/v4",
-                "CI_JOB_TOKEN": "job",
-                "GITLAB_API_TOKEN": "fallback",
-            },
-            "fallback",
-            False,
-        ),
-        (
-            {
-                "CI_API_V4_URL": "https://gitlab.example/api/v4",
-                "CI_JOB_TOKEN": "job",
-            },
-            "job",
-            True,
-        ),
-    ],
-)
-def test_api_from_env_auth_priority(environment, metadata_token, uses_job_token):
-    api = collector.api_from_env(environment)
-
-    assert api.metadata_token == metadata_token
-    assert api.metadata_uses_job_token is uses_job_token
-    assert api.job_token == "job"
+    assert "missing for this exact pipeline" in str(caught.value)
+    assert "do-not-print-this" not in str(caught.value)
 
 
 def test_cross_origin_redirect_drops_all_authentication_headers():
     request = urllib.request.Request(
-        "https://gitlab.example/api/v4/projects/99/jobs/110/artifacts",
+        "https://gitlab.example/api/v4/projects/191584/packages/generic/x/y/z",
         headers={
             "JOB-TOKEN": "job-secret",
             "PRIVATE-TOKEN": "read-secret",
@@ -424,12 +295,7 @@ def test_cross_origin_redirect_drops_all_authentication_headers():
     )
 
     redirected = collector.AuthSafeRedirectHandler().redirect_request(
-        request,
-        None,
-        302,
-        "Found",
-        {},
-        "https://object-storage.example/signed-artifact",
+        request, None, 302, "Found", {}, "https://object-storage.example/signed-package"
     )
 
     headers = _request_headers(redirected)
@@ -439,25 +305,31 @@ def test_cross_origin_redirect_drops_all_authentication_headers():
 
 
 def test_main_requires_ci_job_token_without_network(tmp_path):
-    environment = {
-        "CI_API_V4_URL": "https://gitlab.example/api/v4",
-        "CI_PROJECT_ID": "77",
-        "CI_PIPELINE_ID": "88",
-    }
+    environment = _environment()
+    environment.pop("CI_JOB_TOKEN")
 
     with pytest.raises(SystemExit, match="CI_JOB_TOKEN is required"):
         collector.main(["--output-dir", os.fspath(tmp_path / "reports")], environment)
 
 
-def test_pipeline_keeps_bridge_required_and_collector_always_running():
+def test_identity_requires_full_sha():
+    with pytest.raises(collector.CollectorError, match="full 40-character"):
+        collector.identity_from_env(_environment(CI_COMMIT_SHA="abc"))
+
+
+def test_pipeline_forwards_identity_and_keeps_bridge_status_separate():
     pipeline = PIPELINE_PATH.read_text()
 
+    assert 'GYM_GITLAB_PROJECT_ID: "$CI_PROJECT_ID"' in pipeline
+    assert 'GYM_GITLAB_PIPELINE_ID: "$CI_PIPELINE_ID"' in pipeline
     assert "gym-cpu-ci:\n  stage: test" in pipeline
     assert "gym-cpu-ci-junit:\n  stage: report" in pipeline
-    assert "--report-job-name nemo_gym_collect_junit" in pipeline
+    assert "collect_downstream_junit.py" in pipeline
     assert "junit: collected-junit/**/*.xml" in pipeline
     collector_job = pipeline.split("gym-cpu-ci-junit:", 1)[1]
     assert "when: always" in collector_job
     assert "allow_failure: false" in collector_job
     bridge_job = pipeline.split("gym-cpu-ci:", 1)[1].split("gym-cpu-ci-junit:", 1)[0]
     assert "allow_failure" not in bridge_job
+    assert "RO_API_TOKEN" not in collector_job
+    assert "GITLAB_API_TOKEN" not in collector_job
