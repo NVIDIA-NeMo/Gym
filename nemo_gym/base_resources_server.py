@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 if TYPE_CHECKING:
@@ -85,6 +85,12 @@ class BaseResourcesServer(BaseServer):
 
 
 class BaseRunRequest(BaseModel):
+    # The opaque capture-correlation keys (_ng_rollout_id, _ng_task_index, ...) ride the run body
+    # as sibling fields of responses_create_params. Pydantic's default extra='ignore' silently
+    # drops them at the FastAPI boundary, so rollout_id_from_run(body) never sees them; extras
+    # must be retained for maybe_rollout_id_from_run_body's getattr accessor to work.
+    model_config = ConfigDict(extra="allow")
+
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
 
