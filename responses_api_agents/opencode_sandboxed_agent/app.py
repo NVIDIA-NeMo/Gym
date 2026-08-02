@@ -77,7 +77,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         sandbox_spec = SandboxSpec(
-            image=None,  # TODO: Use first SWE Bench
+            image="swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",  # This is just the first SWE Bench Verified image for now
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
