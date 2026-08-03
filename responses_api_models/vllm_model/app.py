@@ -18,7 +18,7 @@ import json
 import os
 from copy import deepcopy
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
@@ -46,6 +46,17 @@ from nemo_gym.responses_converter import (
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
+ReasoningField = Literal["both", "reasoning", "reasoning_content"]
+
+
+def _set_reasoning(message_dict: dict[str, Any], reasoning: str, field: ReasoningField) -> None:
+    """Attach reasoning to an outgoing assistant message under the configured key(s)."""
+    if field in ("both", "reasoning_content"):
+        message_dict["reasoning_content"] = reasoning
+    if field in ("both", "reasoning"):
+        message_dict["reasoning"] = reasoning
+
+
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     api_key: str
@@ -55,6 +66,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
     replace_developer_role_with_system: bool = False
+
+    # Which key(s) carry reasoning back to the server on an assistant message.
+    # "both" (the default) is the historically safe choice: vLLM < 0.16.0 reads
+    # `reasoning_content`, >= 0.16.0 reads `reasoning`, and each ignores the key it
+    # does not know. Some servers instead treat the two as aliases of one field and
+    # reject the pair -- Kimi-K3's Rust frontend answers
+    # `400 duplicate field 'reasoning'` -- so those need exactly one.
+    reasoning_field: ReasoningField = "both"
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
@@ -345,11 +364,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
                     if reasoning_matches and self.config.uses_interleaved_reasoning:
-                        message_dict["reasoning_content"] = reasoning_matches[0]
-
-                        # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
-                        # Starting with vLLM 0.16.0, the `reasoning_content` field has been deprecated in favor of just `reasoning`
-                        message_dict["reasoning"] = reasoning_matches[0]
+                        # TODO when NeMo RL migrates to vLLM>=0.16.0, drop reasoning_content.
+                        # Starting with vLLM 0.16.0, `reasoning_content` is deprecated in favor of `reasoning`.
+                        _set_reasoning(message_dict, reasoning_matches[0], self.config.reasoning_field)
                 elif isinstance(content, list):
                     reasoning_content = None
                     for content_item_dict in content:
@@ -363,9 +380,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
                         if reasoning_matches and self.config.uses_interleaved_reasoning:
-                            message_dict["reasoning_content"] = reasoning_matches[0]
                             # See the TODO wrt reasoning_content above
-                            message_dict["reasoning"] = reasoning_matches[0]
+                            _set_reasoning(message_dict, reasoning_matches[0], self.config.reasoning_field)
                 elif not content:
                     # No content or content None is a no-op
                     pass
