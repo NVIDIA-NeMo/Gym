@@ -72,12 +72,18 @@ class SandboxSpec:
     files: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+    resource_requests: SandboxResources | Mapping[str, Any] | None = None
+    resource_limits: SandboxResources | Mapping[str, Any] | None = None
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if self.resource_requests is not None and not isinstance(self.resource_requests, SandboxResources):
+            object.__setattr__(self, "resource_requests", SandboxResources.from_mapping(self.resource_requests))
+        if self.resource_limits is not None and not isinstance(self.resource_limits, SandboxResources):
+            object.__setattr__(self, "resource_limits", SandboxResources.from_mapping(self.resource_limits))
 
 
 @dataclass
