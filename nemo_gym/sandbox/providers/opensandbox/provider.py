@@ -1167,7 +1167,12 @@ class OpenSandboxProvider:
                 timeout_s=poll_timeout_s,
                 retries=self._operations.retries,
             )
-            if not getattr(status, "running", False):
+            if not hasattr(status, "running"):
+                raise RuntimeError(
+                    "OpenSandbox background command status has no 'running' field, so the poll loop cannot "
+                    f"tell when the command finished; execution_id={execution_id!r}"
+                )
+            if not status.running:
                 break
             if deadline is not None and loop.time() >= deadline:
                 raise TimeoutError(
@@ -1194,6 +1199,11 @@ class OpenSandboxProvider:
         elif status_error is not None:
             return_code = 125
             error_type = "sandbox"
+        elif not hasattr(status, "exit_code"):
+            raise RuntimeError(
+                "OpenSandbox background command status has no 'exit_code' field, so a failed command cannot "
+                f"be told from a successful one; execution_id={execution_id!r}"
+            )
         else:
             return_code = 0
 

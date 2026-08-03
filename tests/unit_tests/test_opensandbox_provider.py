@@ -619,6 +619,55 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.log_calls == ["exec-42"]
 
 
+@pytest.mark.parametrize(
+    ("status", "missing"),
+    [
+        (SimpleNamespace(exit_code=0, error=None), "running"),
+        (SimpleNamespace(running=False, error=None), "exit_code"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exec_background_rejects_status_missing_a_field(
+    monkeypatch: pytest.MonkeyPatch, status: Any, missing: str
+) -> None:
+    """An SDK field rename must fail loudly, not score a failed command as success."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return status
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="combined output", cursor=None)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-bg", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(RuntimeError, match=missing):
+        await provider.exec(handle, "make build", timeout_s=30)
+
+
 async def test_exec_hard_cap_converts_wait_for_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """A wedged exec (hard wall-clock cap tripping) surfaces as TimeoutError."""
 
