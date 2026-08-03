@@ -15,6 +15,7 @@
 import hashlib
 import json
 import re
+import traceback
 from pathlib import Path
 from typing import List, Optional
 
@@ -230,6 +231,26 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        # Thin diagnostic wrapper around the real implementation. A full-400 eval lost 6
+        # samples to a 500 out of THIS endpoint with NO traceback anywhere in the log — not
+        # even the `🚨` marker that exception_handling_middleware prints for ordinary app
+        # exceptions (the malformed-JSON bug printed a full ExceptionGroup). With nothing
+        # logged the cause can only be bounded, never named. Print whatever escapes, then
+        # RE-RAISE unchanged so run()'s containment behaves exactly as before.
+        # Grep the next run for [browsecomp][responses_exc].
+        try:
+            return await self._responses_impl(request, response, body)
+        except Exception as e:
+            print(f"[browsecomp][responses_exc] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
+            traceback.print_exc()
+            raise
+
+    async def _responses_impl(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
