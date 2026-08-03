@@ -39,6 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
@@ -139,13 +140,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             if message["info"]["role"] == "user":
                 message_parts = []
                 for part in message["parts"]:
-                    message_parts.append(ResponseInputTextParam(text=part[""]))
+                    if part["type"] != "text":
+                        continue
+
+                    message_parts.append(ResponseInputTextParam(text=part["text"]))
 
                 messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
             elif message["info"]["role"] == "assistant":
-                pass
+                message_parts = []
+                for part in message["parts"]:
+                    if part["type"] != "text":
+                        continue
+
+                    message_parts.append(ResponseInputTextParam(text=part["text"]))
+
+                messages.append(NeMoGymResponseOutputMessage(id=message["id"], content=message_parts))
             else:
-                raise NotImplementedError(message["info"]["role"])
+                raise NotImplementedError(message)
 
         return messages
 
