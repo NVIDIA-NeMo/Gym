@@ -60,8 +60,8 @@ from typing import Any, Dict, List, Optional, Tuple
 # import originating from nltk if the module path falls inside the process CWD —
 # which happens in CI where the server venv lives inside the repo root.
 import defusedxml.ElementTree  # noqa: F401
-import regex  # noqa: F401
 import polars as pl
+import regex  # noqa: F401
 from fastapi import FastAPI, Request
 from openai import NOT_GIVEN
 from openai.types.chat import ChatCompletion
