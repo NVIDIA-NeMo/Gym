@@ -1,39 +1,80 @@
 # Description
 
-A Responses-API **model server** backed by an [SGLang](https://github.com/sgl-project/sglang)
-server's native `/generate` endpoint.
+A Responses-API **model server** for policies served by [SGLang](https://github.com/sgl-project/sglang).
 
-It subclasses `vllm_model`'s `VLLMModel` and overrides **only** `chat_completions`. Unlike the
-OpenAI-compatible `/v1/chat/completions` path (which can only surface logprobs as `token_id:NNN`
-string tokens, and not at all for some serving stacks), this server talks to SGLang's native
-`/generate` with `return_logprob=true`, so it recovers the **exact generated token ids and their
-logprobs**. That makes it suitable as the policy model server for RL training (GRPO etc.), where
-the trainer needs the precise token sequence + logprobs the policy emitted, not a re-tokenized
-decode of the text.
+RL trainers (GRPO etc.) need the *exact* token ids the policy emitted and their logprobs, not a
+re-tokenized decode of the text. `vllm_model` recovers those by parsing `token_id:NNN` logprob
+tokens out of `/v1/chat/completions` — a vLLM-specific encoding SGLang does not produce. This
+server closes that gap.
 
-What it does per request:
+It subclasses `vllm_model`'s `VLLMModel`. Everything else — Responses<->ChatCompletions
+conversion, `responses()`, and the assistant-message training-class upgrade — is inherited
+unchanged.
 
-1. Renders the prompt to token ids with the model's own HF chat template (local tokenizer).
-2. Caps the prompt to the context window and shrinks `max_new_tokens` so `input + gen < context`.
-3. POSTs `{base_url}/generate` with those `input_ids` and parses
-   `meta_info.output_token_logprobs` into `(generation_token_ids, generation_log_probs)`.
-4. Attaches `prompt_token_ids` / `generation_token_ids` / `generation_log_probs` to the assistant
-   message (when `return_token_id_information: true`), exactly as the vLLM path does. The graded
-   `content` is decoded with `skip_special_tokens=True`; the raw token ids are preserved for training.
+## Transports
 
-Everything else — Responses<->ChatCompletions conversion, `responses()`, and the assistant-message
-training-class upgrade — is inherited unchanged from `vllm_model`.
+### `transport: chat` (default) — requires **sglang >= 0.5.13**
 
-The pure request/response transforms live in `_logic.py` and are unit-tested in `tests/`.
+Drives SGLang's OpenAI-compatible `/v1/chat/completions`, requesting the training metadata via
+SGLang's native `return_meta_info` / `return_prompt_token_ids` extensions. Token ids and logprobs
+come back on each choice as `meta_info.output_token_logprobs` and `prompt_token_ids`.
+
+These extensions landed with the sglang-miles TITO sync series and are in the tree as of the
+0.5.13 release — **no patched build or fork is required**. (ProRL ships a
+`patch_sglang_0513_token_metadata.sh`, but that patch only makes `logprobs=true` *imply* those
+flags for clients that don't set them; this server sets them explicitly, so the patch is
+unnecessary here.)
+
+This is the path to use whenever you can. Only the token extraction is overridden, so prompt
+templating, **tool-call parsing**, sampling parameters, auth, and context-overflow handling are
+all done server-side by SGLang — there is no local tokenizer that can drift from the server's.
+
+### `transport: generate` — fallback for older builds
+
+Drives SGLang's native `/generate` with `return_logprob=true`, tokenizing the prompt locally.
+Use only for SGLang builds/forks predating chat-side TITO. Inherent limitations of this path:
+
+- **Tool calls are not parsed** out of the generated text (tool *schemas* are rendered into the
+  prompt only if the local chat template does so).
+- The prompt is tokenized by a **local** copy of the chat template, so `model` must be the exact
+  path/revision the SGLang server was launched with — otherwise generation is silently
+  conditioned on ids from the wrong template.
+- Sampling params `/generate` does not accept (`n`, `seed`, `response_format`, `logit_bias`) are
+  logged and dropped rather than honored.
+- A prompt that overflows `context_length` yields an empty completion with
+  `finish_reason="length"` (matching the inherited vLLM behavior) so it is filterable, rather
+  than a head-truncated prompt that would generate from a malformed context.
+
+In both transports, a generation SGLang reports as `finish_reason="abort"` raises instead of
+being emitted, so a server-cancelled partial rollout cannot enter a training batch looking like
+a normal completion.
+
+## On-policy scope
+
+Single-turn rollouts are exactly on-policy: the ids attached to the assistant message are the
+ids the policy emitted.
+
+**Multi-turn is not yet on-policy.** Turn N re-renders the whole history through the chat
+template, which re-tokenizes prior assistant spans; those generally differ from the
+`generation_token_ids` the policy actually produced. The fix is to splice the carried-forward
+token ids and tokenize only the newly inserted environment/user messages — tracked as follow-up
+work, not yet implemented here.
 
 ## Config
 
-See `configs/sglang_model_for_training.yaml`. Key fields (beyond `vllm_model`'s):
+- `transport`: `chat` (default) or `generate`.
+- `base_url`: **must end in `/v1` for `transport: chat`** (like `vllm_model`), and must be the
+  **bare** server URL for `transport: generate` (the server appends `/generate`). Migrating a
+  bare URL to the chat transport 404s.
+- `context_length` (generate only): SGLang context window; keep in sync with the trainer's max
+  sequence length.
+- `default_max_new_tokens` (generate only): used only when a request carries no
+  `max_(completion_)tokens`.
+- `add_generation_prompt`, `trust_remote_code` (generate only): forwarded to the local
+  tokenizer / chat template. `trust_remote_code` defaults to `false`.
 
-- `base_url`: bare SGLang server URL(s); the server calls `{base_url}/generate` (not `/v1/...`).
-- `context_length`: SGLang context window; keep in sync with the trainer's max sequence length.
-- `default_max_new_tokens`: used only when a request carries no `max_(completion_)tokens`.
-- `add_generation_prompt`, `trust_remote_code`: forwarded to the local tokenizer / chat template.
+See `configs/sglang_model_for_training.yaml` and
+`configs/sglang_model_for_training_generate.yaml`.
 
 ## Licensing information
 

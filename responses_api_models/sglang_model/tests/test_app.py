@@ -12,62 +12,138 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Orchestration tests for SGLangModel.chat_completions.
+"""Orchestration tests for SGLangModel, for both transports.
 
-These exercise the full request->generate->response path with the SGLang HTTP call
-(`ng_request`) and the HF tokenizer mocked out, so no live SGLang server / GPU / model
-weights are required. They lock in the integration behaviors that the end-to-end smoke
-runs surfaced:
-  - the exact `/generate` payload (input_ids + return_logprob),
-  - parsing token-ids + logprobs back out of the SGLang response,
-  - attaching the training token fields only when return_token_id_information is set,
-  - decoding graded `content` with skip_special_tokens=True (so trailing special tokens
-    don't break strict parsers like structured_outputs json.loads),
-  - the error path setting `response_content` on the raised exception (so the nemo_gym
-    exception middleware doesn't itself assert).
+Servers are built the same way `vllm_model/tests/test_app.py` builds them -- a real
+`SGLangModel` with a mocked `ServerClient` -- so the *inherited* `VLLMModel` behavior is
+genuinely exercised rather than stubbed. In particular the real
+`_preprocess_chat_completion_create_params` runs, which is what locks in the contract between
+it and this subclass.
 
-Importing this needs nemo_gym + transformers (the per-server venv); it is skipped cleanly
-otherwise. Pure-logic coverage lives in test_logic.py.
+All patching goes through pytest's `monkeypatch` fixture so module globals are restored
+afterwards and cannot leak into later tests in the same process.
+
+Pure-logic coverage lives in test_logic.py.
 """
 
-import asyncio
-import os
-import sys
-from types import SimpleNamespace
+from typing import Any, Dict
+from unittest.mock import MagicMock
+
+from pytest import MonkeyPatch, raises
+
+import nemo_gym.server_utils
+from nemo_gym.server_utils import ServerClient
+from responses_api_models.sglang_model.app import SGLangModel, SGLangModelConfig
 
 
-try:
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-    from responses_api_models.sglang_model import app as sglang_app
-
-    _IMPORT_ERR = None
-except Exception as e:  # nemo_gym / transformers / vllm_model not importable here
-    _IMPORT_ERR = e
-
-try:
-    import pytest
-
-    skip_if_no_framework = pytest.mark.skipif(
-        _IMPORT_ERR is not None, reason=f"sglang_model app not importable: {_IMPORT_ERR}"
+def _make_server(monkeypatch: MonkeyPatch, **overrides: Any) -> SGLangModel:
+    config = SGLangModelConfig(
+        host="0.0.0.0",
+        port=8081,
+        base_url=overrides.pop("base_url", "http://sglang-host:30000/v1"),
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy_model",
+        entrypoint="",
+        name="sglang_model",
+        return_token_id_information=True,
+        uses_reasoning_parser=False,
+        **overrides,
     )
-except ImportError:  # allow standalone `python tests/test_app.py`
-    pytest = None
+    get_global_config_dict_mock = MagicMock()
+    get_global_config_dict_mock.return_value = dict()
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+    return SGLangModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
-    def skip_if_no_framework(fn):
-        return fn
+
+def _choice(**overrides: Any) -> Dict[str, Any]:
+    """An SGLang >= 0.5.13 chat choice with the native TITO extensions populated."""
+    choice: Dict[str, Any] = {
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {"role": "assistant", "content": "the answer"},
+        "prompt_token_ids": [1, 2, 3],
+        "meta_info": {"output_token_logprobs": [[-0.5, 10, "a"], [-0.25, 11, "b"]]},
+        "logprobs": {"content": [{"token": "a", "logprob": -0.5}]},
+    }
+    choice.update(overrides)
+    return choice
 
 
-# ----------------------------- fakes -----------------------------
+# --------------------------- chat transport ---------------------------
+
+
+class TestChatTransport:
+    def test_preprocess_requests_sglang_tito_extensions(self, monkeypatch: MonkeyPatch) -> None:
+        """The real inherited preprocess runs, then we swap vLLM's knob for SGLang's."""
+        server = _make_server(monkeypatch)
+        body: Dict[str, Any] = {"messages": [{"role": "user", "content": "hi"}]}
+
+        out = server._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert out["return_meta_info"] is True
+        assert out["return_prompt_token_ids"] is True
+        # vLLM's `token_id:NNN` encoding does not exist on SGLang; leaving it set would be a
+        # silent no-op that misrepresents where the ids come from.
+        assert "return_tokens_as_token_ids" not in out
+        # ...and the inherited behavior is still in force.
+        assert out["logprobs"] is True
+        assert out["model"] == "dummy_model"
+
+    def test_preprocess_honors_per_request_chat_template_kwargs(self, monkeypatch: MonkeyPatch) -> None:
+        """Per-sample overrides must survive; dropping them tokenizes with the wrong template."""
+        server = _make_server(monkeypatch, chat_template_kwargs={"enable_thinking": False})
+        body: Dict[str, Any] = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "metadata": {"chat_template_kwargs": '{"enable_thinking": true}'},
+        }
+
+        out = server._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert out["chat_template_kwargs"] == {"enable_thinking": True}
+
+    async def test_attach_reads_native_ids_and_logprobs(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(monkeypatch)
+        choice = _choice()
+
+        await server._attach_token_id_information(choice, {}, MagicMock())
+
+        assert choice["message"]["prompt_token_ids"] == [1, 2, 3]
+        assert choice["message"]["generation_token_ids"] == [10, 11]
+        assert choice["message"]["generation_log_probs"] == [-0.5, -0.25]
+        # Non-OpenAI / duplicated fields are stripped so the response validates.
+        for key in ("logprobs", "prompt_token_ids", "meta_info"):
+            assert key not in choice
+
+    async def test_attach_rejects_aborted_generation(self, monkeypatch: MonkeyPatch) -> None:
+        """An abort is a truncated fragment; it must not enter a training batch as a `stop`."""
+        server = _make_server(monkeypatch)
+
+        with raises(RuntimeError, match="abort"):
+            await server._attach_token_id_information(_choice(finish_reason="abort"), {}, MagicMock())
+
+    async def test_attach_errors_when_server_predates_chat_tito(self, monkeypatch: MonkeyPatch) -> None:
+        """Older SGLang ignores the extensions; say so instead of emitting empty token ids."""
+        server = _make_server(monkeypatch)
+        choice = _choice()
+        choice.pop("prompt_token_ids")
+
+        with raises(RuntimeError, match="0.5.13"):
+            await server._attach_token_id_information(choice, {}, MagicMock())
+
+
+# ------------------------- generate transport -------------------------
+
+
 class _FakeTokenizer:
-    """Records the prompt token-ids it returns and the decode kwargs it is called with."""
-
-    def __init__(self, prompt_ids, decoded="the answer"):
-        self._prompt_ids = prompt_ids
+    def __init__(self, prompt_ids=(1, 2, 3, 4, 5), decoded="the answer"):
+        self._prompt_ids = list(prompt_ids)
         self._decoded = decoded
-        self.decode_calls = []
+        self.decode_calls: list = []
+        self.template_calls: list = []
 
     def apply_chat_template(self, messages, add_generation_prompt, tokenize, return_dict, **kw):
         assert tokenize is True and return_dict is False
+        self.template_calls.append(kw)
         return list(self._prompt_ids)
 
     def decode(self, token_ids, skip_special_tokens=False):
@@ -89,146 +165,112 @@ class _FakeResp:
             raise RuntimeError(f"HTTP {self.status}")
 
 
-def _make_self(prompt_ids=(1, 2, 3, 4, 5), return_token_ids=True, decoded="the answer"):
-    """A minimal stand-in for an initialized SGLangModel (avoids loading real weights)."""
-    cfg = SimpleNamespace(
-        model="dummy-model",
-        chat_template_kwargs=None,
-        add_generation_prompt=True,
-        context_length=4096,
-        default_max_new_tokens=1024,
-        return_token_id_information=return_token_ids,
+def _make_generate_server(monkeypatch: MonkeyPatch, tokenizer=None, **overrides: Any) -> SGLangModel:
+    server = _make_server(
+        monkeypatch, transport="generate", base_url="http://sglang-host:30000", **overrides
     )
-    me = SimpleNamespace(
-        config=cfg,
-        _tokenizer=_FakeTokenizer(prompt_ids, decoded=decoded),
-        _sglang_urls=["http://sglang-host:30000"],
-    )
-    # _preprocess_chat_completion_create_params is inherited from VLLMModel; stub as passthrough.
-    me._preprocess_chat_completion_create_params = lambda request, body_dict: body_dict
-    return me
+    server._tokenizer = tokenizer or _FakeTokenizer()
+    server._sglang_urls = ["http://sglang-host:30000"]
+    return server
 
 
-class _FakeBody:
-    def __init__(self, **fields):
+def _patch_http(monkeypatch: MonkeyPatch, *, result=None, resp=None) -> Dict[str, Any]:
+    """Patch the module globals via monkeypatch so they are restored after the test."""
+    import responses_api_models.sglang_model.app as sglang_app
+
+    rec: Dict[str, Any] = {}
+
+    async def fake_ng_request(method, url, json=None, **kw):
+        rec.update(payload=json, url=url, headers=kw.get("headers"))
+        return resp if resp is not None else _FakeResp(ok=True)
+
+    async def fake_get_response_json(_resp):
+        return result
+
+    monkeypatch.setattr(sglang_app, "ng_request", fake_ng_request)
+    monkeypatch.setattr(sglang_app, "get_response_json", fake_get_response_json)
+    return rec
+
+
+class _Body:
+    def __init__(self, **fields: Any):
         self._fields = {"messages": [{"role": "user", "content": "hi"}], **fields}
 
     def model_dump(self, exclude_unset=True):
         return dict(self._fields)
 
 
-def _patch_http(monkeypatch_like, *, result=None, resp=None):
-    """Patch the module-level ng_request / get_response_json; return a call-recorder."""
-    rec = {"payload": None, "url": None}
-
-    async def fake_ng_request(method, url, json=None, **kw):
-        rec["payload"] = json
-        rec["url"] = url
-        return resp if resp is not None else _FakeResp(ok=True)
-
-    async def fake_get_response_json(_resp):
-        return result
-
-    sglang_app.ng_request = fake_ng_request
-    sglang_app.get_response_json = fake_get_response_json
-    return rec
-
-
-def _run(coro):
-    return asyncio.run(coro)
-
-
-# ----------------------------- tests -----------------------------
-@skip_if_no_framework
-def test_chat_completions_happy_path_attaches_training_fields():
-    me = _make_self(prompt_ids=(1, 2, 3, 4, 5), return_token_ids=True, decoded="the answer")
-    result_json = {
-        "meta_info": {
-            "output_token_logprobs": [[-0.1, 10, "a"], [-0.2, 11, "b"]],
-            "finish_reason": {"type": "stop"},
-        }
+_GENERATE_RESULT = {
+    "meta_info": {
+        "finish_reason": {"type": "stop"},
+        "output_token_logprobs": [[-0.5, 10, "a"], [-0.25, 11, "b"]],
     }
-    rec = _patch_http(None, result=result_json, resp=_FakeResp(ok=True))
-    body = _FakeBody(temperature=0.7, max_tokens=16)
-    request = SimpleNamespace()  # no .session -> sid defaults to ""
-
-    out = _run(sglang_app.SGLangModel.chat_completions(me, request, body))
-
-    # the /generate payload uses input_ids + asks for logprobs
-    assert rec["url"].endswith("/generate")
-    assert rec["payload"]["input_ids"] == [1, 2, 3, 4, 5]
-    assert rec["payload"]["return_logprob"] is True
-    assert rec["payload"]["logprob_start_len"] == -1
-    assert rec["payload"]["sampling_params"]["max_new_tokens"] == 16
-
-    choice = out.choices[0]
-    assert choice.finish_reason == "stop"
-    assert choice.message.content == "the answer"
-    # raw token ids + logprobs are attached for training
-    assert list(choice.message.generation_token_ids) == [10, 11]
-    assert list(choice.message.generation_log_probs) == [-0.1, -0.2]
-    assert list(choice.message.prompt_token_ids) == [1, 2, 3, 4, 5]
+}
 
 
-@skip_if_no_framework
-def test_content_decoded_with_skip_special_tokens():
-    # regression: structured_outputs broke because content ended in a literal special token.
-    me = _make_self(decoded="{}")
-    _patch_http(None, result={"meta_info": {"output_token_logprobs": [[-0.1, 10, "x"]]}})
-    _run(sglang_app.SGLangModel.chat_completions(me, SimpleNamespace(), _FakeBody()))
-    assert me._tokenizer.decode_calls, "decode was not called"
-    assert me._tokenizer.decode_calls[0]["skip_special_tokens"] is True
+class TestGenerateTransport:
+    async def test_posts_input_ids_with_auth_header(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_generate_server(monkeypatch)
+        rec = _patch_http(monkeypatch, result=_GENERATE_RESULT)
 
+        res = await server.chat_completions(MagicMock(spec=[]), _Body())
 
-@skip_if_no_framework
-def test_no_training_fields_when_flag_off():
-    me = _make_self(return_token_ids=False)
-    _patch_http(None, result={"meta_info": {"output_token_logprobs": [[-0.1, 10, "x"]]}})
-    out = _run(sglang_app.SGLangModel.chat_completions(me, SimpleNamespace(), _FakeBody()))
-    msg = out.choices[0].message
-    assert getattr(msg, "generation_token_ids", None) is None
-    assert getattr(msg, "prompt_token_ids", None) is None
+        assert rec["url"] == "http://sglang-host:30000/generate"
+        assert rec["payload"]["input_ids"] == [1, 2, 3, 4, 5]
+        assert rec["payload"]["return_logprob"] is True
+        # SGLang's --api-key middleware guards /generate too.
+        assert rec["headers"] == {"Authorization": "Bearer dummy_key"}
 
+        message = res.choices[0].message
+        assert message.generation_token_ids == [10, 11]
+        assert message.generation_log_probs == [-0.5, -0.25]
 
-@skip_if_no_framework
-def test_length_finish_reason_mapped():
-    me = _make_self()
-    _patch_http(
-        None,
-        result={"meta_info": {"output_token_logprobs": [[-0.1, 10, "x"]], "finish_reason": {"type": "length"}}},
-    )
-    out = _run(sglang_app.SGLangModel.chat_completions(me, SimpleNamespace(), _FakeBody()))
-    assert out.choices[0].finish_reason == "length"
+    async def test_graded_content_drops_special_tokens(self, monkeypatch: MonkeyPatch) -> None:
+        tokenizer = _FakeTokenizer()
+        server = _make_generate_server(monkeypatch, tokenizer=tokenizer)
+        _patch_http(monkeypatch, result=_GENERATE_RESULT)
 
+        await server.chat_completions(MagicMock(spec=[]), _Body())
 
-@skip_if_no_framework
-def test_error_response_sets_response_content_and_raises():
-    # regression: a raw raise_for_status without response_content trips nemo_gym's middleware.
-    me = _make_self()
-    bad = _FakeResp(ok=False, status=400, body=b"input_ids out of range")
-    _patch_http(None, result=None, resp=bad)
-    raised = None
-    try:
-        _run(sglang_app.SGLangModel.chat_completions(me, SimpleNamespace(), _FakeBody()))
-    except Exception as e:  # noqa: BLE001 - we assert on the captured exception below
-        raised = e
-    assert raised is not None, "expected an exception on a non-ok SGLang response"
-    assert getattr(raised, "response_content", None) == b"input_ids out of range"
+        # Raw ids are kept for training, but the graded text must not carry a trailing
+        # special token (it breaks strict parsers like structured_outputs json.loads).
+        assert tokenizer.decode_calls[0]["skip_special_tokens"] is True
+        assert tokenizer.decode_calls[0]["token_ids"] == [10, 11]
 
+    async def test_overflowing_prompt_is_filterable_not_head_truncated(self, monkeypatch: MonkeyPatch) -> None:
+        """Head-truncating would drop the newest turn and the generation cue silently."""
+        server = _make_generate_server(monkeypatch, tokenizer=_FakeTokenizer(prompt_ids=range(50)), context_length=8)
+        rec = _patch_http(monkeypatch, result=_GENERATE_RESULT)
 
-if __name__ == "__main__":
-    if _IMPORT_ERR is not None:
-        print(f"SKIP test_app.py: {_IMPORT_ERR}")
-        sys.exit(0)
-    npass = nfail = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                npass += 1
-                print(f"PASS {name}")
-            except Exception as e:  # noqa: BLE001
-                nfail += 1
-                print(f"FAIL {name}: {e!r}")
-    print(f"\n{npass} passed, {nfail} failed")
-    sys.exit(1 if nfail else 0)
+        res = await server.chat_completions(MagicMock(spec=[]), _Body())
+
+        assert res.choices[0].finish_reason == "length"
+        assert not res.choices[0].message.content
+        assert rec == {}, "no /generate call should be made for an overflowing prompt"
+
+    async def test_tools_are_rendered_into_the_prompt(self, monkeypatch: MonkeyPatch) -> None:
+        tokenizer = _FakeTokenizer()
+        server = _make_generate_server(monkeypatch, tokenizer=tokenizer)
+        _patch_http(monkeypatch, result=_GENERATE_RESULT)
+        tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
+
+        await server.chat_completions(MagicMock(spec=[]), _Body(tools=tools))
+
+        assert tokenizer.template_calls[0]["tools"] == tools
+
+    async def test_abort_is_rejected(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_generate_server(monkeypatch)
+        _patch_http(monkeypatch, result={"meta_info": {"finish_reason": {"type": "abort"}}})
+
+        with raises(RuntimeError, match="abort"):
+            await server.chat_completions(MagicMock(spec=[]), _Body())
+
+    async def test_http_error_carries_response_content(self, monkeypatch: MonkeyPatch) -> None:
+        """nemo_gym's exception middleware asserts on `response_content` being present."""
+        server = _make_generate_server(monkeypatch)
+        _patch_http(monkeypatch, resp=_FakeResp(ok=False, status=400, body=b"boom"))
+
+        with raises(Exception) as excinfo:
+            await server.chat_completions(MagicMock(spec=[]), _Body())
+
+        assert getattr(excinfo.value, "response_content", None) == b"boom"

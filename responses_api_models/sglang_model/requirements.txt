@@ -1,2 +1,5 @@
 -e nemo-gym[dev] @ ../../
-transformers
+# Only used by transport="generate" (local prompt tokenization); imported lazily.
+# Lower bound: `normalize_token_ids` handles the dict/BatchEncoding return shape that
+# `apply_chat_template(tokenize=True)` grew in 4.44. Upper bound: 6.x may change it again.
+transformers>=4.44,<6

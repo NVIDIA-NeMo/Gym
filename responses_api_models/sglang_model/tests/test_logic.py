@@ -34,10 +34,14 @@ from responses_api_models.sglang_model._logic import (  # noqa: E402
     cap_to_context,
     extract_generated_tokens_and_logprobs,
     normalize_token_ids,
+    unsupported_sampling_params,
+    would_truncate,
 )
 
 
-MODEL_PATH = os.environ.get("SGLANG_MODEL_PATH", "/linnanw/justGRPO/asset/Nemotron-Labs-Diffusion-3B")
+# A stock, widely-available AR instruct model, so the parity tests back the general claim
+# rather than one custom fork. Override with SGLANG_MODEL_PATH to check a specific checkpoint.
+MODEL_PATH = os.environ.get("SGLANG_MODEL_PATH", "Qwen/Qwen2.5-1.5B-Instruct")
 
 # L6 tokenization-parity tests need the real diffusion-model tokenizer (a local path) + transformers,
 # and the chat-template ones additionally need jinja2. None of those are guaranteed in CI, so L6 SKIPS
@@ -217,6 +221,76 @@ def test_cap_does_not_mutate_input():
     sp_in = {"max_new_tokens": 2048}
     _, sp_out = cap_to_context(list(range(4000)), sp_in, 4096)
     assert sp_in["max_new_tokens"] == 2048 and sp_out["max_new_tokens"] == 95
+
+
+def test_cap_ctx_zero_is_noop():
+    # ctx falsy (0 or None) -> passthrough, no truncation/shrink
+    ids, sp = cap_to_context([1, 2, 3], {"max_new_tokens": 10}, 0)
+    assert ids == [1, 2, 3] and sp["max_new_tokens"] == 10
+    ids2, sp2 = cap_to_context(list(range(9999)), {"max_new_tokens": 10}, None)
+    assert len(ids2) == 9999 and sp2["max_new_tokens"] == 10
+
+
+def test_cap_rejects_context_too_small_to_generate():
+    # ctx == 1 previously produced prompt[:-1] and a NEGATIVE max_new_tokens, which SGLang
+    # rejects with an opaque 400. Fail loudly instead.
+    for ctx in (1,):
+        try:
+            cap_to_context([1, 2, 3], {"max_new_tokens": 10}, ctx)
+        except ValueError as e:
+            assert "too small" in str(e)
+        else:
+            raise AssertionError(f"expected ValueError for ctx={ctx}")
+    # ctx == 2 is the smallest workable window: empty prompt, exactly one generated token.
+    ids, sp = cap_to_context([1, 2, 3], {"max_new_tokens": 10}, 2)
+    assert ids == [] and sp["max_new_tokens"] == 1
+
+
+def test_would_truncate_flags_only_real_truncation():
+    assert would_truncate(list(range(4095)), 4096) is True
+    assert would_truncate(list(range(10)), 4096) is False
+    # disabled / degenerate windows are not "truncation"
+    assert would_truncate(list(range(10)), 0) is False
+    assert would_truncate(list(range(10)), 1) is False
+
+
+# ----------------------------- L1: sampling param coverage -----------------------------
+def test_sp_zero_max_tokens_is_honored_not_defaulted():
+    # `or`-chaining treated max_tokens=0 as absent and silently substituted the default.
+    assert build_sampling_params({"max_tokens": 0}, 1024)["max_new_tokens"] == 0
+    assert build_sampling_params({"max_completion_tokens": 0}, 1024)["max_new_tokens"] == 0
+
+
+def test_sp_forwards_penalties_and_min_p():
+    sp = build_sampling_params(
+        {"frequency_penalty": 0.5, "presence_penalty": 0.25, "repetition_penalty": 1.1, "min_p": 0.05}, 50
+    )
+    assert sp["frequency_penalty"] == 0.5 and sp["presence_penalty"] == 0.25
+    assert sp["repetition_penalty"] == 1.1 and sp["min_p"] == 0.05
+
+
+def test_unsupported_sampling_params_are_reported():
+    # These would otherwise be dropped silently, so the realized rollout distribution would
+    # differ from the configured recipe with nothing in the data to show it.
+    assert unsupported_sampling_params({"n": 4, "seed": 7}) == ["n", "seed"]
+    assert unsupported_sampling_params({"temperature": 0.7}) == []
+
+
+def test_extract_val_fallback_uses_output_ids_when_idx_empty():
+    # idx empty -> fall back to output_ids
+    r = {
+        "meta_info": {"output_token_logprobs_val": [-0.1, -0.2], "output_token_logprobs_idx": []},
+        "output_ids": [21, 22],
+    }
+    toks, lps = extract_generated_tokens_and_logprobs(r)
+    assert toks == [21, 22] and lps == [-0.1, -0.2]
+
+
+def test_extract_reads_a_chat_choice_not_just_a_generate_body():
+    # The chat transport hands the *choice* to the same parser; same meta_info shape.
+    choice = {"meta_info": {"output_token_logprobs": [[-0.5, 10, "a"], [-0.25, 11, "b"]]}}
+    toks, lps = extract_generated_tokens_and_logprobs(choice)
+    assert toks == [10, 11] and lps == [-0.5, -0.25]
 
 
 # ----------------------------- L6: tokenization parity (real tokenizer) -----------------------------

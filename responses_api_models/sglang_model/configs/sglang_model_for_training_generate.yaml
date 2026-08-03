@@ -1,0 +1,25 @@
+# Fallback policy model server for SGLang builds/forks WITHOUT chat-side TITO
+# (i.e. older than 0.5.13). Prefer configs/sglang_model_for_training.yaml when you can.
+#
+# Drives SGLang's native /generate and tokenizes the prompt locally. Known gaps vs. the
+# `chat` transport, all inherent to /generate rather than to this implementation:
+#   - tool calls are NOT parsed out of the generated text
+#   - the prompt is tokenized by a LOCAL copy of the chat template, so `model` must be the
+#     exact path/revision the SGLang server was launched with, or generation is silently
+#     conditioned on ids from the wrong template
+#   - sampling params SGLang's /generate does not accept (n, seed, response_format,
+#     logit_bias) are logged and dropped rather than honored
+#
+# base_url here is the BARE SGLang server url (NO /v1); the adapter appends /generate.
+# Keep context_length in sync with policy.max_total_sequence_length.
+policy_model:
+  responses_api_models:
+    sglang_model:
+      entrypoint: app.py
+      transport: generate
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: true
+      uses_reasoning_parser: false
+      context_length: 4096
