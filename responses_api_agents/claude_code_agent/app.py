@@ -489,13 +489,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         proc.kill()
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
+                output_items, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
                 run_metadata.update(
                     status="incomplete",
                     error_type="timeout",
                     duration_ms=(monotonic() - process_started_at) * 1000,
                 )
-                return [], model, run_metadata
+                return output_items, model, run_metadata
             except asyncio.CancelledError:
                 if proc.returncode is None:
                     with suppress(ProcessLookupError):
@@ -627,10 +627,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
         input_tokens = run_metadata.get("input_tokens", 0)
         output_tokens = run_metadata.get("output_tokens", 0)
+        run_status = str(run_metadata.get("status") or "incomplete")
+        failure_message = None
+        if run_status != "completed":
+            failure_message = str(run_metadata.get("error_type") or run_status)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
+            status="failed" if failure_message else "completed",
+            error=(
+                {"code": "server_error", "message": f"Claude Code failed: {failure_message}"}
+                if failure_message
+                else None
+            ),
             model=model_name,
             object="response",
             output=output_items,

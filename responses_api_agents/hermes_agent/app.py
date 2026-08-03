@@ -427,9 +427,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
             )
 
+        agent_error = result.get("error")
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
+            status="failed" if agent_error else "completed",
+            error=({"code": "server_error", "message": str(agent_error)} if agent_error else None),
             model=model_name,
             object="response",
             output=output_items,
