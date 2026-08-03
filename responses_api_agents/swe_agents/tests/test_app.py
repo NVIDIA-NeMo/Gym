@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -1676,6 +1677,15 @@ class TestSWEBenchWrapper:
         assert result.endswith("relative/path/file.txt")
         assert Path(result).is_absolute()
 
+    def test_results_root_moves_episode_state(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+        monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
+        config = _minimal_server_config().model_copy(update={"results_root": tmp_path / "scratch"})
+        wrapper = SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        assert wrapper._swe_bench_wrapper_server_config.base_results_dir.parent == tmp_path / "scratch"
+        assert (tmp_path / "scratch").is_dir()
+
 
 class TestSWEBenchWrapperFindContainer:
     def _create_wrapper_for_find(self, monkeypatch) -> SWEBenchWrapper:
@@ -1874,8 +1884,72 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             )
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "apptainer exec" in result
-            assert "--writable-tmpfs" in result
+            # The writable layer is a fresh TMPDIR-backed directory overlay
+            # (the session tmpfs is capped by sessiondir max size, which SWE
+            # working trees exceed).
+            assert '--overlay "$OVERLAY_DIR"' in result
             assert params.container in result
+
+    def test_sandbox_hardening_overlay_wrapper_and_script(self, monkeypatch, tmp_path) -> None:
+        """The writable layer is a fresh TMPDIR-backed directory overlay per
+        container execution, and the container script fixes /etc/hosts
+        non-fatally and grants git safe.directory."""
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+
+        commands = {
+            mode: wrapper._build_apptainer_command(
+                params,
+                ExecuteContainerCommandArgs(
+                    command=f"echo {mode}", expected_file_pattern="output*.jsonl", mode=mode, timeout=60
+                ),
+            )
+            for mode in ("agent", "eval")
+        }
+
+        for mode, cmd in commands.items():
+            assert f"apptainer_overlay_{mode}_" in cmd
+            assert '--overlay "$OVERLAY_DIR"' in cmd
+            assert "trap 'rm -rf \"$OVERLAY_DIR\"' EXIT TERM INT" in cmd
+            assert "--writable-tmpfs" not in cmd
+
+        script = (params.persistent_dir / "container_scripts" / "agent_script.sh").read_text()
+        assert "(echo '127.0.0.1 localhost' >>/etc/hosts 2>/dev/null || true)" in script
+        assert "echo '127.0.0.1 localhost' >/etc/hosts" not in script
+        assert "git config --global --add safe.directory '*'" in script
+
+    def test_overlay_upperdir_lives_and_dies_with_the_container(self, monkeypatch, tmp_path) -> None:
+        """Run the built command with a stub apptainer: the upperdir must
+        exist (fresh, under TMPDIR) while the container runs and be removed
+        when the shell exits."""
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+        cmd = wrapper._build_apptainer_command(
+            params,
+            ExecuteContainerCommandArgs(
+                command="echo hi", expected_file_pattern="output*.jsonl", mode="agent", timeout=60
+            ),
+        )
+
+        stub_bin = tmp_path / "stub_bin"
+        stub_bin.mkdir()
+        witness = tmp_path / "overlay_during_run.txt"
+        # argv: apptainer exec --overlay <dir> ... -> "$3" is the upperdir.
+        (stub_bin / "apptainer").write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$3" > {witness}\n[ -d "$3" ] && echo EXISTS >> {witness}\n'
+        )
+        (stub_bin / "apptainer").chmod(0o755)
+        scratch_tmp = tmp_path / "scratch_tmp"
+        scratch_tmp.mkdir()
+
+        env = {**os.environ, "PATH": f"{stub_bin}:{os.environ['PATH']}", "TMPDIR": str(scratch_tmp)}
+        result = subprocess.run(["/bin/sh", "-c", cmd], env=env, capture_output=True, text=True)
+
+        assert result.returncode == 0, result.stderr
+        overlay_path, exists_flag = witness.read_text().splitlines()
+        assert exists_flag == "EXISTS"
+        assert overlay_path.startswith(str(scratch_tmp))
+        assert not Path(overlay_path).exists()
 
     def test_eval_mode_swebench_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -2373,6 +2447,22 @@ class TestSWEBenchWrapperResponses:
             ):
                 with pytest.raises(RuntimeError, match="test error"):
                     await wrapper.responses(body)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("preserve", [False, True])
+    async def test_episode_scratch_reaped_only_when_preservation_off(self, monkeypatch, tmp_path, preserve) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        monkeypatch.setattr(wrapper.config, "preserve_episode_artifacts", preserve, raising=False)
+        params = _make_instance_config(str(tmp_path))
+        params.eval_private_dir.mkdir(parents=True, exist_ok=True)
+        (params.persistent_dir / "episode_artifact.txt").write_text("heavy")
+
+        monkeypatch.setattr(SWEBenchWrapper, "_setup_params", lambda self, body: (params, MagicMock()))
+        monkeypatch.setattr(SWEBenchWrapper, "_inner_responses", AsyncMock(return_value=MagicMock()))
+
+        await wrapper.responses(NeMoGymResponseCreateParamsNonStreaming(input=[]))
+
+        assert params.persistent_dir.exists() is preserve
 
 
 class TestSWEBenchWrapperRun:

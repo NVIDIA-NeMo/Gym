@@ -121,6 +121,25 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     container_formatter: str | list[str] = Field(
         default="docker://swebench/sweb.eval.x86_64.{instance_id}", description="Container path template"
     )
+    results_root: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Root directory for per-episode results/checkouts (repo working trees, trajectories, eval output). "
+            "Defaults to results/ next to the server. "
+            "Episode state is very large, so it is recommended to point this argument outside the "
+            "shared filesystem the server directory lives on."
+        ),
+    )
+    preserve_episode_artifacts: bool = Field(
+        default=True,
+        description=(
+            "Keep each successful episode's results directory after its /run completes. "
+            "Episode scratch is very large; long training runs may set this to False so completed "
+            "directories are reaped instead of accumulating until the filesystem fills mid-run "
+            "(failed episodes always keep their directory, including traceback.err)."
+        ),
+    )
+
     swebench_tests_timeout: int = Field(default=30 * 60, description="Timeout for running tests (seconds)")
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
@@ -2770,9 +2789,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         else:
             openhands_setup_dir = OpenHandsHarnessProcessor(config=self.config).setup()
 
+        results_root = Path(self.config.results_root) if self.config.results_root else workspace_root / "results"
+        results_root.mkdir(parents=True, exist_ok=True)
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
-            base_results_dir=workspace_root / "results" / f"swebench_results_{run_session_id}",
+            base_results_dir=results_root / f"swebench_results_{run_session_id}",
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
             openhands_setup_dir=openhands_setup_dir,
@@ -3016,9 +3037,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
         data_point = params.problem_info
 
-        # Fix localhost URLs not working sometimes
+        # Fix localhost URLs not working sometimes.
+        # Append non-fatally; a write to /etc/hosts can fail and abort the entire episode.
         container_commands = []
-        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
+        container_commands.append("(echo '127.0.0.1 localhost' >>/etc/hosts 2>/dev/null || true)")
+
+        # Under the overlay the repository .git can appear owned by a different uid.
+        container_commands.append("(git config --global --add safe.directory '*' 2>/dev/null || true)")
 
         # Apptainer uid namespacing makes the eval-image's `chmod` against
         # /var/run/postgresql fail with "Value too large for defined data
@@ -3326,9 +3351,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         env_args += "--env CHROME_BIN=/tmp/chrome-wrapper.sh "
         env_args += "--env CHROMIUM_BIN=/tmp/chrome-wrapper.sh "
 
+        # Back the container's writable layer with a directory overlay.
+        # The tmpfs layer is capped, but SWE working trees routinely exceed it.
+        # A `git reset --hard` call is often sufficient to kill the episode otherwise.
+        overlay_prefix = f"apptainer_overlay_{command.mode}_"
+
         # Launch Apptainer container and execute the script file
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f'OVERLAY_DIR="$(mktemp -d "${{TMPDIR:-/tmp}}/{overlay_prefix}XXXXXX")" && '
+            f"trap 'rm -rf \"$OVERLAY_DIR\"' EXIT TERM INT && "
+            f'apptainer exec --overlay "$OVERLAY_DIR" --cleanenv --pid --no-mount home,tmp,bind-paths '
             f"{env_args}"
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"
@@ -3528,7 +3560,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f.write(params.model_dump_json(indent=4))
 
         try:
-            return await self._inner_responses(params, dataset_processor)
+            response = await self._inner_responses(params, dataset_processor)
+            if not self.config.preserve_episode_artifacts:
+                rmtree(params.persistent_dir, ignore_errors=True)
+            return response
         except Exception as e:
             traceback_file = params.persistent_dir / "traceback.err"
             with traceback_file.open("w") as f:
