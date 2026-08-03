@@ -10,7 +10,7 @@ Execution-based text-to-SQL on BIRD dev, bound to the `bird_sql` resource server
 ## Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/birdbench/config.yaml]"
+gym eval prepare --benchmark birdbench
 ```
 
 This downloads the BIRD `dev.zip` (≈1.4 GB) via
@@ -22,9 +22,9 @@ and writes `data/birdbench_benchmark.jsonl`. Each row has
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/birdbench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark birdbench
 ```
 
 Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in
@@ -33,11 +33,11 @@ Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=birdbench_bird_sql_simple_agent \
-    +input_jsonl_fpath=benchmarks/birdbench/data/birdbench_benchmark.jsonl \
-    +output_jsonl_fpath=results/birdbench_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent birdbench_bird_sql_simple_agent \
+    --input benchmarks/birdbench/data/birdbench_benchmark.jsonl \
+    --output results/birdbench_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 For a 5-example smoke test against the resource server's `example.jsonl`,

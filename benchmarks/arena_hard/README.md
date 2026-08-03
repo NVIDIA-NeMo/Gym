@@ -15,7 +15,7 @@ for the judging protocol and metric details.
 ## Data
 
 Runtime download only — benchmark JSONL is not committed. Run
-[`prepare.py`](prepare.py) (or `ng_prepare_benchmark`) to populate
+[`prepare.py`](prepare.py) (or `gym eval prepare`) to populate
 `data/arena_hard_benchmark.jsonl`. The prepare script fetches
 questions and the baseline directly from the arena-hard-auto GitHub
 repo, joins by `uid`, and emits one row per question with `question`,
@@ -28,20 +28,20 @@ to pick the standard judge prompt.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/arena_hard/config.yaml]"
+gym eval prepare --benchmark arena_hard
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/arena_hard/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark arena_hard
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=arena_hard_arena_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/arena_hard/data/arena_hard_benchmark.jsonl \
-    +output_jsonl_fpath=results/arena_hard_rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic/default.yaml \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent arena_hard_arena_judge_simple_agent \
+    --input benchmarks/arena_hard/data/arena_hard_benchmark.jsonl \
+    --output results/arena_hard_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/prompts/generic/default.yaml
 ```
 
 ## Metrics

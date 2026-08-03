@@ -1,0 +1,8 @@
+-e nemo-gym[dev] @ ../..
+# The executed SciCode solutions + test helpers import these at runtime, so they must be in
+# this server's venv. scipy<1.14 keeps scipy.integrate.simps (removed in 1.14) and has cp312 wheels.
+scipy<1.14
+numpy
+matplotlib
+h5py
+sympy

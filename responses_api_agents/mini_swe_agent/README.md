@@ -100,26 +100,28 @@ For how to download images and convert to .sif, you can refer to https://github.
 
 ```bash
 # Download swe-gym data
-ng_download_dataset_from_gitlab \
-            +dataset_name=mini_swe_agent \
-            +version=0.0.1 \
-            +artifact_fpath=train.jsonl \
-            +output_fpath=data/train.jsonl
+gym dataset download --storage gitlab \
+            --name mini_swe_agent \
+            --revision 0.0.1 \
+            --artifact train.jsonl \
+            --output data/train.jsonl
 
 # Start server
-CONFIG_PATHS="resources_servers/mini_swe_agent/configs/mini_swe_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
-ng_run +config_paths=[$CONFIG_PATHS] \
+gym env start \
+        --resources-server mini_swe_agent \
+        --model-type openai_model & \
         '+mini_swe_simple_agent.responses_api_agents.mini_swe_agent.cache_dir_template=/path/to/images/xingyaoww_sweb.eval.x86_64.\{instance_id\}.sif' \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.run_golden=False \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.skip_if_exists=True \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.concurrency=16 \
         +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.step_timeout=300 \
-        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.eval_timeout=900 &
+        +mini_swe_simple_agent.responses_api_agents.mini_swe_agent.eval_timeout=900
 
 # Collect rollouts
-ng_collect_rollouts +agent_name=mini_swe_simple_agent \
-            +input_jsonl_fpath=data/train.jsonl \
-            +output_jsonl_fpath=results/mini_swe_agent_swe_gym.jsonl
+gym eval run --no-serve \
+            --agent mini_swe_simple_agent \
+            --input data/train.jsonl \
+            --output results/mini_swe_agent_swe_gym.jsonl
 ```
 
 ### Training Setup and Results

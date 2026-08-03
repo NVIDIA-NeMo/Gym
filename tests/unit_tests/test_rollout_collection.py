@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 from asyncio import Future
+from collections import Counter
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,17 +24,62 @@ import yaml
 
 import nemo_gym.rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
+    _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _expand_input_glob,
+    _failures_path_for,
+    _get_max_rollout_attempts,
     _rollout_request_debug_summary,
+    loads_jsonl_line,
 )
+
+
+@pytest.fixture
+def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    get_global_config_dict = MagicMock(return_value={})
+    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+    return get_global_config_dict
+
+
+class TestLoadsJsonlLine:
+    def test_parses_valid_line(self) -> None:
+        assert loads_jsonl_line('{"a": 1}', "f.jsonl", 1) == {"a": 1}
+
+    def test_malformed_line_raises_config_error_with_location(self) -> None:
+        with pytest.raises(ConfigError, match=r"Malformed JSON in 'f.jsonl' at line 3"):
+            loads_jsonl_line("{not json", "f.jsonl", 3)
+
+
+class TestGetMaxRolloutAttempts:
+    def test_default_when_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+    def test_default_when_empty(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "")
+        assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+    def test_valid_value(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "5")
+        assert _get_max_rollout_attempts() == 5
+
+    def test_non_integer_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "not-an-int")
+        assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+    def test_non_positive_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "0")
+        assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
 class TestRolloutCollection:
@@ -72,9 +118,9 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self, *args, **kwargs):
-                return mock_server_client
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
 
         async def fail_raise_for_status(_response):
             raise RuntimeError("boom")
@@ -87,7 +133,7 @@ class TestRolloutCollection:
         )
 
         with pytest.raises(RuntimeError, match="boom"):
-            await next(MockHelper().run_examples([row]))
+            await next(RolloutCollectionHelper().run_examples([row]))
 
         captured = capsys.readouterr()
         if request_debug_enabled:
@@ -149,6 +195,17 @@ class TestRolloutCollection:
         )
 
         with pytest.raises(ValueError, match="mutually exclusive"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_preprocess_rows_missing_input_raises_config_error(self, tmp_path: Path) -> None:
+        """A non-existent input file fails with a clean ConfigPathNotFoundError, not a raw FileNotFoundError."""
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(tmp_path / "does_not_exist.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+
+        with pytest.raises(ConfigPathNotFoundError, match="does_not_exist.jsonl.*--input"):
             RolloutCollectionHelper._preprocess_rows_from_config(None, config)
 
     def test_preprocess_rows_prompt_config_preserves_rcp_fields(self, tmp_path: Path) -> None:
@@ -258,6 +315,88 @@ class TestRolloutCollection:
             },
         ]
 
+    def test_preprocess_rows_stamps_skills_ref(self, tmp_path: Path) -> None:
+        """skills.path is a run-level knob: each row is stamped with skills_ref (path + hash +
+        metadata) without the source dataset carrying any skills field."""
+        skills_dir = tmp_path / "variant_a"
+        skill = skills_dir / "cot_enhanced"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: cot_enhanced\ndescription: Think step by step.\n---\n# Body\n")
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(2)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            skills={"path": str(skills_dir)},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert len(rows) == 2
+        for row in rows:
+            skills_ref = row["skills_ref"]
+            assert skills_ref["path"] == str(skills_dir)
+            assert len(skills_ref["hash"]) == 12
+            assert [s["name"] for s in skills_ref["skills"]] == ["cot_enhanced"]
+            assert skills_ref["skills"][0]["description"] == "Think step by step."
+
+    def test_preprocess_rows_no_skills_leaves_rows_clean(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert "skills_ref" not in rows[0]
+
+    def test_skills_ref_survives_resume_from_cache(self, tmp_path: Path) -> None:
+        """skills_ref is stamped once at preprocess, persisted to materialized inputs, and
+        re-read onto already-done rows on resume -- even after the source skill dir is gone.
+        Identity is byte-for-byte from the materialized cache, not recomputed at resume."""
+        import shutil
+
+        skills_dir = tmp_path / "variant_a"
+        skill = skills_dir / "cot_enhanced"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: cot_enhanced\ndescription: Think step by step.\n---\n# Body\n")
+
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "x": i}) for i in range(2)]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            skills={"path": str(skills_dir)},
+            resume_from_cache=True,
+        )
+
+        # Preprocess stamps skills_ref, then we persist exactly what a prior run would have written.
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        stamped_skills_ref = rows[0]["skills_ref"]
+        config.materialized_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+
+        # Only the first task's rollout is "done" in the main output jsonl.
+        done = {k: rows[0][k] for k in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME)} | {"reward": 1.0}
+        Path(config.output_jsonl_fpath).write_bytes(orjson.dumps(done) + b"\n")
+
+        # The source skill dir disappears before resume (e.g. an optimizer overwrote /tmp).
+        shutil.rmtree(skills_dir)
+
+        input_rows, resumed_rows, _results, _result_strs = RolloutCollectionHelper()._load_from_cache(config)
+
+        # The already-done row carries the original skills_ref read back from the cache.
+        assert resumed_rows[0]["skills_ref"] == stamped_skills_ref
+        # And the still-to-run rows do too, so the second pass stamps results identically.
+        assert all(r["skills_ref"] == stamped_skills_ref for r in input_rows)
+
     def test_preprocess_rows_num_repeats_add_seed_passes_pydantic_validation(self, tmp_path: Path) -> None:
         """Rows emitted with num_repeats_add_seed=True must round-trip through the strict
         NeMoGymResponseCreateParamsNonStreaming schema (extra='forbid'). Seed is passed via
@@ -289,7 +428,125 @@ class TestRolloutCollection:
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
 
-    async def test_run_from_config_sanity(self, tmp_path: Path) -> None:
+    def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:
+        """Dict-form num_repeats applies the per-agent value to each row."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2, "beta": 4},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        per_agent_counts = Counter(row[AGENT_REF_KEY_NAME]["name"] for row in rows)
+        assert per_agent_counts == Counter({"alpha": 2, "beta": 4})
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows if r[AGENT_REF_KEY_NAME]["name"] == "alpha"] == [0, 1]
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows if r[AGENT_REF_KEY_NAME]["name"] == "beta"] == [0, 1, 2, 3]
+
+    def test_preprocess_rows_num_repeats_dict_with_default(self, tmp_path: Path) -> None:
+        """`_default` key acts as the fallback for agents not explicitly listed."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 3, "_default": 1},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        per_agent_counts = Counter(row[AGENT_REF_KEY_NAME]["name"] for row in rows)
+        assert per_agent_counts == Counter({"alpha": 3, "beta": 1})
+
+    def test_preprocess_rows_num_repeats_dict_raises_on_missing_agent_no_default(self, tmp_path: Path) -> None:
+        """Dict form without `_default` raises if a row's agent is unlisted, and reports ALL
+        missing agents in one error so the user can fix them in one pass."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 1}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "gamma"}, "x": 2}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}, "x": 3}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2},
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        msg = str(exc_info.value)
+        # All missing agents reported in one shot, deduped:
+        assert "'beta'" in msg
+        assert "'gamma'" in msg
+
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    def test_preprocess_rows_num_repeats_rejects_zero_or_negative(self, tmp_path: Path, bad_value: int) -> None:
+        # int form
+        with pytest.raises(ValueError, match="num_repeats"):
+            RolloutCollectionConfig(
+                agent_name="my_agent",
+                input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                num_repeats=bad_value,
+            )
+        # dict form
+        with pytest.raises(ValueError, match="num_repeats dict"):
+            RolloutCollectionConfig(
+                agent_name="my_agent",
+                input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                num_repeats={"alpha": bad_value},
+            )
+
+    def test_num_repeats_null_coerces_to_one(self, tmp_path: Path) -> None:
+        # `--num-repeats null` (None) restores the pre-#1356 default of 1.
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats=None,
+        )
+        assert config.num_repeats == 1
+
+    def test_preprocess_rows_num_repeats_dict_unknown_agent_warns(self, tmp_path: Path) -> None:
+        """An agent listed in the dict that never appears in input rows warns (likely typo)."""
+        fpath = tmp_path / "input.jsonl"
+        samples = [json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}, "x": 0})]
+        fpath.write_text("\n".join(samples) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"alpha": 2, "alpah_typo": 3},
+        )
+
+        with pytest.warns(UserWarning, match="alpah_typo"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
+
+    async def test_run_from_config_sanity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        clear_captures = MagicMock()
+        merge_capture = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -334,6 +591,9 @@ class TestRolloutCollection:
                 return metrics_fpath
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+        empty_global_config.assert_called_once_with()
+        clear_captures.assert_not_called()
+        merge_capture.assert_not_called()
 
         expected_results = [
             {
@@ -403,7 +663,57 @@ class TestRolloutCollection:
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
-    async def test_run_from_config_sorted(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("resume_from_cache", [False, True])
+    async def test_run_from_config_replaces_stale_capture_before_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        row = {**source_row, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        input_fpath = tmp_path / "input.jsonl"
+        output_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=resume_from_cache,
+            disable_aggregation=True,
+        )
+        if resume_from_cache:
+            output_fpath.touch()
+            config.materialized_jsonl_fpath.write_bytes(orjson.dumps(row) + b"\n")
+        else:
+            input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+
+        store = CaptureStore(capture_dir)
+        store.record("0-0", {"model_call_id": "stale", "dialect": "responses", "request": {}, "response": {}})
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                assert example[TASK_INDEX_KEY_NAME] == 0 and example[ROLLOUT_INDEX_KEY_NAME] == 0
+                assert store.read("0-0") == []
+                store.record(
+                    "0-0",
+                    {"model_call_id": "fresh", "dialect": "responses", "request": {}, "response": {}},
+                )
+                future = Future()
+                future.set_result((example, {"response": {"usage": {}}}))
+                return [future]
+
+        results = await Helper().run_from_config(config)
+
+        assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["fresh"]
+        assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["fresh"]
+
+    async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -484,6 +794,120 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
+    async def test_run_from_config_aggregate_metrics_excludes_non_persisted_rows(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(3)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            limit=3,
+            num_repeats=1,
+        )
+
+        captured: dict[str, list[dict]] = {}
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(
+                self,
+                examples: list[dict],
+                *args,
+                **kwargs,
+            ):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    result = {
+                        "response": {"usage": {"abc usage": example["x"] + 1}},
+                        "case": f"case-{example['x']}",
+                    }
+                    if example["x"] == 1:
+                        result[NG_FAILURE_CLASS_KEY] = "verify_failed"
+                    elif example["x"] == 2:
+                        result[NG_NO_PERSIST_KEY] = True
+                    future.set_result((example, result))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                captured["results"] = results
+                captured["rows"] = rows
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_text("[]")
+                return metrics_fpath
+
+        actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert [result["case"] for result in actual_returned_results] == ["case-0", "case-1", "case-2"]
+        assert [result["case"] for result in captured["results"]] == ["case-0"]
+        assert [row["x"] for row in captured["rows"]] == [0]
+
+        with output_jsonl_fpath.open() as f:
+            actual_written_results = [json.loads(line) for line in f]
+        assert [result["case"] for result in actual_written_results] == ["case-0"]
+
+        failures_fpath = _failures_path_for(output_jsonl_fpath)
+        with failures_fpath.open() as f:
+            actual_failure_results = [json.loads(line) for line in f]
+        assert [result["case"] for result in actual_failure_results] == ["case-1"]
+        assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
+
+    async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+        )
+
+        materialized_rows = [
+            {
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                AGENT_REF_KEY_NAME: {"name": "my agent name"},
+                "x": task_index,
+            }
+            for task_index in (0, 1)
+        ]
+        config.materialized_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps(row) for row in materialized_rows) + b"\n")
+        cached_result = {
+            TASK_INDEX_KEY_NAME: 1,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            AGENT_REF_KEY_NAME: {"name": "my agent name"},
+            "case": "cached",
+        }
+        output_jsonl_fpath.write_bytes(orjson.dumps(cached_result) + b"\n")
+
+        captured: dict[str, list[dict]] = {}
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result((example, {"case": "new"}))
+                return [future]
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                captured["results"] = results
+                captured["rows"] = rows
+                return None
+
+        actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert [result["case"] for result in actual_returned_results] == ["new", "cached"]
+        assert [result["case"] for result in captured["results"]] == ["new", "cached"]
+        assert [row["x"] for row in captured["rows"]] == [0, 1]
+
     def test_load_from_cache(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         materialized_inputs_jsonl_fpath = tmp_path / "output_materialized_inputs.jsonl"
@@ -540,7 +964,7 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
-    async def test_call_aggregate_metrics(self, tmp_path: Path) -> None:
+    async def test_call_aggregate_metrics(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
 
         agg = AggregateMetrics(
@@ -557,11 +981,10 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=mock_response)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self):
-                return mock_server_client
-
-        helper = MockHelper()
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
 
         rows = [
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
@@ -570,7 +993,14 @@ class TestRolloutCollection:
             {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1},
         ]
         results = [
-            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 10}}},
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "response": {"usage": {"tokens": 10}},
+                "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
+                "ng_model_call_capture": {"calls": [{"request": "large"}]},
+            },
             {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 12}}},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 8}}},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 15}}},
@@ -599,9 +1029,13 @@ class TestRolloutCollection:
         )
         for item in sent_data:
             assert "responses_create_params" not in item
+            assert "ng_agent_observations" not in item
+            assert "ng_model_call_capture" not in item
             assert "usage" in item["response"]
 
-    async def test_call_aggregate_metrics_multiple_agents(self, tmp_path: Path) -> None:
+    async def test_call_aggregate_metrics_multiple_agents(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """Test _call_aggregate_metrics with multiple agents runs concurrently via as_completed."""
 
         agg_a = AggregateMetrics(
@@ -627,11 +1061,10 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(side_effect=mock_post)
 
-        class MockHelper(RolloutCollectionHelper):
-            def setup_server_client(self):
-                return mock_server_client
-
-        helper = MockHelper()
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
 
         rows = [
             {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
@@ -742,7 +1175,9 @@ class TestDisableAggregationAndCallerTaskIndex:
     the existing default-on aggregation + auto-numbering behaviour.
     """
 
-    async def test_run_from_config_disable_aggregation_skips_call(self, tmp_path: Path) -> None:
+    async def test_run_from_config_disable_aggregation_skips_call(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
         """When disable_aggregation=True, _call_aggregate_metrics MUST NOT run.
 
         Shows up in chunked-rollouts flows where the aggregation pass is deferred

@@ -53,9 +53,9 @@ jobs:
           echo "head_ref=$(cat preview-metadata/head_ref)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Generate preview URL
         id: generate-docs
@@ -64,6 +64,7 @@ jobs:
           HEAD_REF: ${{ steps.metadata.outputs.head_ref }}
         working-directory: ./fern
         run: |
+          npm run generate:library
           OUTPUT=$(npx -y fern-api@latest generate --docs --preview --id "$HEAD_REF" 2>&1)
           echo "$OUTPUT"
           URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()')

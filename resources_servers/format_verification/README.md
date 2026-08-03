@@ -26,63 +26,63 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for system diagrams and detailed field ma
 
 ### Freeform Formatting
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/format_verification/configs/freeform_formatting.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --model-type openai_model \
+    --resources-server format_verification/freeform_formatting
 ```
 
 Collect rollouts:
 ```bash
-ng_collect_rollouts \
-    +agent_name=freeform_formatting_simple_agent \
-    +input_jsonl_fpath=resources_servers/format_verification/data/ds2_freeform_formatting_train.jsonl \
-    +output_jsonl_fpath=results/freeform_formatting_rollouts.jsonl \
-    +resume_from_cache=True \
-    +num_samples_in_parallel=256
+gym eval run --no-serve \
+    --agent freeform_formatting_simple_agent \
+    --input resources_servers/format_verification/data/ds2_freeform_formatting_train.jsonl \
+    --output results/freeform_formatting_rollouts.jsonl \
+    --concurrency 256 \
+    --resume
 ```
 
 ### Citation Format
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/format_verification/configs/citation_format.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --model-type openai_model \
+    --resources-server format_verification/citation_format
 ```
 
 Collect rollouts:
 ```bash
-ng_collect_rollouts \
-    +agent_name=citation_format_simple_agent \
-    +input_jsonl_fpath=resources_servers/format_verification/data/ds3_citation_format_train.jsonl \
-    +output_jsonl_fpath=results/citation_format_rollouts.jsonl \
-    +resume_from_cache=True \
-    +num_samples_in_parallel=256
+gym eval run --no-serve \
+    --agent citation_format_simple_agent \
+    --input resources_servers/format_verification/data/ds3_citation_format_train.jsonl \
+    --output results/citation_format_rollouts.jsonl \
+    --concurrency 256 \
+    --resume
 ```
 
 ## Downloading Data
 
 ### Freeform Formatting
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/format_verification/configs/freeform_formatting.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/format_verification_freeform/ \
-    +mode=train_preparation \
-    +should_download=true
+gym dataset collate \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --resources-server format_verification/freeform_formatting \
+    --output-dir data/format_verification_freeform/ \
+    --mode train_preparation \
+    --download
 ```
 
 ### Citation Format
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
-resources_servers/format_verification/configs/citation_format.yaml"
-ng_prepare_data "+config_paths=[${config_paths}]" \
-    +output_dirpath=data/format_verification_citation/ \
-    +mode=train_preparation \
-    +should_download=true
+gym dataset collate \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
+    --resources-server format_verification/citation_format \
+    --output-dir data/format_verification_citation/ \
+    --mode train_preparation \
+    --download
 ```
 
 ## Testing
 ```bash
-ng_test +entrypoint=resources_servers/format_verification
+gym env test --resources-server format_verification
 ```
 
 ## Licensing

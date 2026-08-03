@@ -50,7 +50,7 @@ https://huggingface.co/settings/tokens, and set `hf_token` in `env.yaml`
 (see above).
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/labbench2_vlm/config.yaml]"
+gym eval prepare --benchmark labbench2_vlm
 ```
 
 Downloads the subtask splits from HuggingFace and media files (images,
@@ -82,10 +82,12 @@ prepared in its validation JSONL but is not included in `example.jsonl`.
 After changing `example.jsonl`, regenerate its static validation metrics:
 
 ```bash
-.venv/bin/ng_prepare_data \
-  "+config_paths=[resources_servers/labbench2_vlm/configs/labbench2_vlm.yaml,resources_servers/labbench2_vlm/configs/judge_model_openai.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
-  +mode=example_validation \
-  +output_dirpath=/tmp/labbench2_vlm_example_validation \
+.venv/bin/gym dataset collate \
+  --resources-server labbench2_vlm \
+  --config resources_servers/labbench2_vlm/configs/judge_model_openai.yaml \
+  --config responses_api_models/openai_model/configs/openai_model.yaml \
+  --mode example_validation \
+  --output-dir /tmp/labbench2_vlm_example_validation \
   +overwrite_metrics_conflicts=true
 ```
 
@@ -98,18 +100,21 @@ overwrite source data. The full config chain is required because
 
 ```bash
 # Start servers
-ng_run "+config_paths=[benchmarks/labbench2_vlm/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --benchmark labbench2_vlm \
+    --model-type openai_model
 
 # Collect rollouts
-ng_collect_rollouts \
-    "+config_paths=[benchmarks/labbench2_vlm/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
-    +agent_name=labbench2_vlm_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/labbench2_vlm/data/labbench2_vlm_benchmark.jsonl \
-    +output_jsonl_fpath=results/labbench2_vlm.jsonl
+gym eval run --no-serve \
+    --benchmark labbench2_vlm \
+    --model-type openai_model \
+    --agent labbench2_vlm_benchmark_simple_agent \
+    --input benchmarks/labbench2_vlm/data/labbench2_vlm_benchmark.jsonl \
+    --output results/labbench2_vlm.jsonl
 ```
 
 `+agent_name` and `+input_jsonl_fpath` are both required — rows in the
-prepared JSONL don't carry an `agent_ref`, and `ng_collect_rollouts` doesn't
+prepared JSONL don't carry an `agent_ref`, and `gym eval run --no-serve` doesn't
 read the path from the benchmark config.
 
 For **protocolqa2** as **extracted text** with a text-capable policy model, pass
@@ -124,20 +129,21 @@ PDFs as pages like other PDF tasks.
 
 ### One-shot alternative
 
-`ng_e2e_collect_rollouts` starts the server stack, preprocesses, and
-collects rollouts in a single command (don't run `ng_run` separately).
+`gym eval run` starts the server stack, preprocesses, and
+collects rollouts in a single command (don't run `gym env start` separately).
 Input path and agent ref are auto-derived from the `type: benchmark`
 dataset entry in the chained config:
 
 ```bash
-ng_e2e_collect_rollouts \
-    "+config_paths=[benchmarks/labbench2_vlm/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
-    ++split=benchmark \
-    ++output_jsonl_fpath=results/labbench2_vlm.jsonl \
-    +num_samples_in_parallel=16
+gym eval run \
+    --benchmark labbench2_vlm \
+    --model-type openai_model \
+    --split benchmark \
+    --output results/labbench2_vlm.jsonl \
+    --concurrency 16
 ```
 
-For a fast smoke test, add `+limit=10 +num_repeats=1`.
+For a fast smoke test, add `--limit 10 --num-repeats 1`.
 
 `num_repeats` defaults to 3. Bump higher for tighter variance on the
 judge-based reward.
@@ -145,14 +151,14 @@ judge-based reward.
 ## Throttling
 
 Each in-flight sample fans out to one policy call + one judge call, so the
-endpoints see roughly `2 × num_samples_in_parallel` concurrent requests.
+endpoints see roughly `2 × concurrency` concurrent requests.
 On a hosted endpoint you'll likely hit rate limits or socket errors
 (`Hit N global ClientOSError`) well before saturating your machine.
 
-Cap concurrency with `+num_samples_in_parallel=<N>`:
+Cap concurrency with `--concurrency <N>`:
 
 ```bash
-ng_collect_rollouts ... +num_samples_in_parallel=16
+gym eval run --no-serve ... --concurrency 16
 ```
 
 Start around 16 and bump up if it holds.

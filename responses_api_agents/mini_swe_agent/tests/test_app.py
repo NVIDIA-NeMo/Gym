@@ -30,6 +30,7 @@ from responses_api_agents.mini_swe_agent.app import (
     MiniSWEAgentRunRequest,
     MiniSWEAgentVerifyResponse,
 )
+from responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils
 
 
 DEFAULT_RUN_SWEGYM_RESULT = {
@@ -249,6 +250,31 @@ class TestApp:
         assert_run_response(response)
 
         assert_run_swegym_called(mock_to_thread)
+
+    def test_chat_cmp_to_responses_preserves_routed_experts(self) -> None:
+        routed_experts = [
+            [[0, 1]],
+            [[2, 3]],
+            [[4, 5]],
+        ]
+        messages = [
+            {"role": "user", "content": "Fix this."},
+            {"role": "assistant", "content": "Done."},
+        ]
+        responses = [
+            {
+                "provider_specific_fields": {
+                    "prompt_token_ids": [1, 2],
+                    "generation_token_ids": [3],
+                    "generation_log_probs": [-0.1],
+                    "routed_experts": routed_experts,
+                }
+            }
+        ]
+
+        output = MiniSWEAgentUtils.chat_cmp_to_responses(messages, responses)
+
+        assert output[1]["routed_experts"] == routed_experts
 
     @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")

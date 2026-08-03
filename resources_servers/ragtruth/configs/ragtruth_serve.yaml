@@ -1,0 +1,19 @@
+# Serve ONLY the ragtruth resources server (the /verify scorer), for driving
+# from nemo-evaluator via the gym:// environment adapter:
+#
+#   ng_run "+config_paths=[resources_servers/ragtruth/configs/ragtruth_serve.yaml]"
+#
+# RAGTruth needs no model server — verify() parses the model's JSON locally and
+# scores the binary hallucination verdict deterministically. nemo-evaluator owns
+# the policy model and generation; it POSTs the model's answer to this server's
+# /verify. See README.md.
+ragtruth:
+  resources_servers:
+    ragtruth:
+      entrypoint: app.py
+      host: 0.0.0.0
+      port: 8001
+      domain: knowledge
+      verified: false
+      description: RAGTruth case-level hallucination detection; reward = 1 when the model's binary verdict matches the gold label.
+      value: Improve faithfulness and grounding of generated text against supplied context.

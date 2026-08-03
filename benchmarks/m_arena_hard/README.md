@@ -22,7 +22,7 @@ it back into the prepared JSONL.
 ## Data
 
 Runtime download only — benchmark JSONL is not committed. Run
-[`prepare.py`](prepare.py) (or `ng_prepare_benchmark`) to populate
+[`prepare.py`](prepare.py) (or `gym eval prepare`) to populate
 `data/m_arena_hard_benchmark.jsonl`. The prepare script:
 
 1. Calls `datasets.load_dataset("CohereLabs/m-ArenaHard", lang, split="test")`
@@ -45,22 +45,22 @@ running `prepare.py`.
 
 ```bash
 # Prepare benchmark data (no baseline -> baseline_answer is empty string)
-ng_prepare_benchmark "+config_paths=[benchmarks/m_arena_hard/config.yaml]"
+gym eval prepare --benchmark m_arena_hard
 
 # Or call prepare.py directly with a baseline JSONL
 python benchmarks/m_arena_hard/prepare.py --baseline-file path/to/baselines.jsonl
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/m_arena_hard/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark m_arena_hard
 
 # Collecting rollouts
-ng_collect_rollouts \
-    +agent_name=m_arena_hard_arena_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/m_arena_hard/data/m_arena_hard_benchmark.jsonl \
-    +output_jsonl_fpath=results/m_arena_hard_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent m_arena_hard_arena_judge_simple_agent \
+    --input benchmarks/m_arena_hard/data/m_arena_hard_benchmark.jsonl \
+    --output results/m_arena_hard_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Metrics

@@ -5,7 +5,7 @@
 # responses_api_models instance named `judge_model`.
 #
 # Env vars are wrapped in `oc.select` so that config parsing succeeds even
-# when env.yaml hasn't been loaded (e.g. during `ng_list_benchmarks`). At
+# when env.yaml hasn't been loaded (e.g. during `gym list benchmarks`). At
 # runtime, set judge_base_url / judge_api_key / judge_model_name in env.yaml
 # (or on the CLI) — the real values will override the unset.* sentinels.
 judge_model:
