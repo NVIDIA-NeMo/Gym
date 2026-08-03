@@ -15,24 +15,28 @@
 import json
 from pathlib import Path
 from typing import Any, Dict
+from unittest.mock import AsyncMock, MagicMock
 
-from pytest import fixture
+from pytest import MonkeyPatch, fixture
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
 
 
 class TestOpenCodeSandboxedAgent:
-    def test_sanity(self) -> None:
-        OpenCodeSandboxedAgentConfig(
+    def _create_config(self) -> OpenCodeSandboxedAgentConfig:
+        return OpenCodeSandboxedAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -81,3 +85,82 @@ class TestOpenCodeSandboxedAgent:
         ]
 
         assert expected_usages == actual_usages
+
+    async def test_responses_sanity(self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch) -> None:
+        config = self._create_config()
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        sandbox_mock = AsyncMock()
+        monkeypatch.setattr(server, "_start_sandbox", sandbox_mock)
+        monkeypatch.setattr(server, "_create_opencode_config", lambda: dict())
+
+        sandbox_mock.return_value.exec.return_value = MagicMock()
+        sandbox_mock.return_value.exec.return_value.stdout = "my dir"
+
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
+            lambda self: json.dumps(opencode_export_test_data),
+        )
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
+        )
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
+
+        actual_response = await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "my session"}),
+            body=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "hello"}],
+            ),
+        )
+        expected_response = NeMoGymResponse(
+            id="resp_",
+            created_at=0.0,
+            error=None,
+            incomplete_details=None,
+            instructions=None,
+            metadata=None,
+            model="",
+            object="response",
+            output=[
+                NeMoGymResponseOutputMessage(
+                    id="msg_fc5cbdbdf001E8AO55w3vBALYm",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            annotations=[], text="Hello! How can I help you today?", type="output_text", logprobs=None
+                        )
+                    ],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ],
+            parallel_tool_calls=True,
+            temperature=None,
+            tool_choice="auto",
+            tools=[],
+            top_p=None,
+            background=None,
+            conversation=None,
+            max_output_tokens=None,
+            max_tool_calls=None,
+            previous_response_id=None,
+            prompt=None,
+            prompt_cache_key=None,
+            reasoning=None,
+            safety_identifier=None,
+            service_tier=None,
+            status=None,
+            text=None,
+            top_logprobs=None,
+            truncation=None,
+            usage=NeMoGymResponseUsage(
+                input_tokens=55,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7808),
+                output_tokens=10,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=7873,
+            ),
+            user=None,
+        )
+
+        assert expected_response == actual_response

@@ -217,7 +217,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            model=body.model,
+            model=body.model or self.config.model_server.name,
             object="response",
             # Assume only one input message. May change with a system/developer message later on.
             output=self._opencode_export_to_output_items(opencode_export)[1:],
