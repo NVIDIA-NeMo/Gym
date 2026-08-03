@@ -86,7 +86,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 # installed. nltk>=3.9 blocks imports that originate from nltk if the module
 # path falls inside the process CWD — which happens when the server venv lives
 # inside the repo root. Importing regex first sidesteps the check entirely.
-import regex
+import regex  # noqa: F401
 
 from fastapi import FastAPI
 from pydantic import ConfigDict
