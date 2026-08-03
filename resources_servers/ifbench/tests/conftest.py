@@ -13,6 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Pre-import packages that nltk pulls in during its init so they are already in
+# sys.modules before nltk's inisec.py finder is installed. This must happen here
+# (before ensure_ifbench() calls _ensure_nltk_data() → import nltk) so that the
+# punkt download inside _ensure_nltk_data() is not silently blocked.
+import defusedxml.ElementTree  # noqa: F401
+import regex  # noqa: F401
+
 from resources_servers.ifbench.setup_ifbench import ensure_ifbench
 
 
