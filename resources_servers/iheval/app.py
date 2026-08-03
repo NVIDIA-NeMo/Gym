@@ -82,6 +82,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
+# Pre-import regex so it's in sys.modules before nltk's inisec.py finder is
+# installed. nltk>=3.9 blocks imports that originate from nltk if the module
+# path falls inside the process CWD — which happens when the server venv lives
+# inside the repo root. Importing regex first sidesteps the check entirely.
+import regex  # noqa: E402
+
 from fastapi import FastAPI
 from pydantic import ConfigDict
 
