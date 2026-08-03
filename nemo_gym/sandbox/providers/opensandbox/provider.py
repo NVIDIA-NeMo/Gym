@@ -364,13 +364,9 @@ class OpenSandboxConnectionConfig:
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
-    # When true, give the SDK an httpx transport with connection keepalive
-    # disabled (max_keepalive_connections=0), so every request opens a fresh
-    # connection. Set this for cross-cluster/load-balanced paths (e.g. an istio
-    # east-west gateway fronted by an AWS NLB) where the LB silently reaps idle
-    # pooled connections: the SDK would otherwise reuse a reaped "zombie"
-    # connection and hang. Fresh connections cost a handshake per request but
-    # never reuse a dead socket. Harmless (slightly slower) on a direct path.
+    # Open a fresh connection per request. Set this behind a load balancer that
+    # silently reaps idle pooled connections, where reusing one hangs the SDK.
+    # Costs a handshake per request; otherwise harmless.
     disable_connection_pooling: bool = False
     keepalive_expiry_s: float | None = 3.0
     max_keepalive_connections: int = 20
@@ -482,17 +478,11 @@ class OpenSandboxOperationConfig:
     retry_max_delay_s: float = 15.0
     command_retries: int = 0
     close_timeout_s: float | None = 30.0
-    # When True, run exec via a background command plus short status/log polls
-    # instead of one long-lived SSE stream. The streaming path holds a single
-    # connection open for the whole command; if that connection traverses a
-    # load balancer with a max idle/stream duration (e.g. an AWS NLB on an
-    # istio east-west gateway), a command that runs a while can have its stream
-    # silently dropped, hanging the client. Background+poll issues only short
-    # requests, so no single connection must survive longer than the LB allows.
+    # Poll short status/log requests instead of holding one SSE stream open for
+    # the whole command. Set this behind a load balancer that caps stream
+    # duration, which would otherwise drop the stream and hang the client.
     background_exec: bool = False
-    # Poll interval starts at background_poll_initial_s and backs off toward
-    # background_poll_interval_s, so short commands are detected quickly while
-    # long ones do not spam requests.
+    # Backs off from initial to interval.
     background_poll_initial_s: float = 0.25
     background_poll_interval_s: float = 2.0
 
@@ -651,8 +641,6 @@ class OpenSandboxProvider:
         """Build the SDK transport with the configured pool limits."""
         import httpx
 
-        # disable_connection_pooling means "never reuse a connection", which is
-        # exactly a zero-sized keepalive pool.
         max_keepalive = (
             0 if self._connection.disable_connection_pooling else self._connection.max_keepalive_connections
         )
@@ -1091,13 +1079,9 @@ class OpenSandboxProvider:
 
             return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 
-        # Hard wall-clock backstop for the whole exec (submit + background poll +
-        # any retries). The inner poll-loop deadline / per-call timeouts bound the
-        # common cases and fire first with cleaner errors; this only catches
-        # pathological wedges (e.g. a request silently black-holed on a
-        # cross-cluster load balancer, or a status that never flips) so a single
-        # exec can never hang the task past ~2x its intended per-command budget.
-        # Raising TimeoutError lets Terminus-2 record a command timeout and move on.
+        # Backstop for the whole exec. The inner deadlines bound the common cases
+        # and fire first; this only catches wedges (a black-holed request, a
+        # status that never flips) that would otherwise hang the task forever.
         hard_cap_s = None if sdk_timeout_s is None else (2.0 * float(sdk_timeout_s) + 30.0)
         if hard_cap_s is None:
             return await _dispatch()
@@ -1121,13 +1105,9 @@ class OpenSandboxProvider:
     ) -> SandboxExecResult:
         """Run a command as a background execution polled via short requests.
 
-        Avoids holding one long-lived SSE stream open for the whole command,
-        which a load balancer between the client and the OpenSandbox server can
-        silently drop. Submit (short) -> poll status (short) -> read logs (short).
-
-        The background logs endpoint returns one combined stream, so unlike the
-        foreground path ``stdout`` carries both streams and ``stderr`` is set
-        only when the sandbox itself reports an error.
+        The logs endpoint returns one combined stream, so unlike the foreground
+        path ``stdout`` carries both streams and ``stderr`` is set only when the
+        sandbox itself reports an error.
         """
         _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
         background_opts = dict(opts_kwargs)
@@ -1145,18 +1125,14 @@ class OpenSandboxProvider:
             raise RuntimeError("OpenSandbox background command did not return an execution id")
 
         loop = asyncio.get_running_loop()
-        # execd enforces the command timeout server-side; give the poll loop a
-        # little headroom before giving up client-side.
+        # The server enforces the command timeout; leave the client headroom.
         deadline = loop.time() + float(total_timeout_s) + 60.0 if total_timeout_s is not None else None
         poll_timeout_s = (
             float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
         )
 
-        # Adaptive poll interval: poll fast at first so quick commands (the many
-        # short tmux keystrokes/pane-captures an agent issues) are detected almost
-        # immediately, then back off toward the configured max so a genuinely long
-        # command does not spam requests. Frequent early polls also keep the
-        # connection warm, reducing stale-connection reuse errors.
+        # Poll fast at first so the many short commands an agent issues are
+        # detected promptly, then back off so long ones do not spam requests.
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         status = None
         while True:

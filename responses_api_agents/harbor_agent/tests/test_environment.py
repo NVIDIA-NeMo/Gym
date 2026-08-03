@@ -243,11 +243,8 @@ class TestExec:
 
     @pytest.mark.asyncio
     async def test_exec_default_timeout_covers_verifier_budgets(self, tmp_path):
-        # Regression guard. Harbor's verifier calls exec() WITHOUT timeout_sec,
-        # so this default is what bounds verification for every benchmark. A
-        # small value silently truncates the verifier and scores the task 0
-        # instead of failing loudly (observed on Terminal-Bench 2.1, where 87 of
-        # 89 tasks declare a [verifier] timeout_sec above 600s).
+        # Harbor's verifier calls exec() without timeout_sec, so a small default
+        # silently truncates verification and scores the task 0.
         env = _make_environment(tmp_path, exec_shell=None)
         await env.start(force_build=False)
         await env.exec("true")
@@ -265,9 +262,7 @@ class TestExec:
         await env.start(force_build=False)
         await env.exec("tmux -V")
         command = _provider().exec_calls[-1]["command"]
-        # Width comes from the task's cpu count (4 in _make_environment) and
-        # the pin wraps the whole `bash -ic '...'` invocation so children
-        # (e.g. the tmux server) inherit the affinity.
+        # The pin must wrap the whole `bash -ic '...'` so children inherit it.
         assert command.startswith("__osb_w=4; ")
         assert command.endswith("$__osb_pin bash -ic 'tmux -V'")
         assert "taskset -c $__osb_s-$((__osb_s + __osb_w - 1))" in command
@@ -303,9 +298,8 @@ class TestExec:
 
         if shutil.which("sh") is None:
             pytest.skip("sh not available")
-        # The prefix must parse and run under plain POSIX sh (execd does not
-        # guarantee bash); with a huge width the fail-open branch must leave
-        # the command unpinned but still run it.
+        # Must run under plain POSIX sh; the huge width takes the fail-open
+        # branch, which still has to run the command.
         from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment import _cpu_pin_prefix
 
         script = f"{_cpu_pin_prefix(100000)} echo pinned-ok"

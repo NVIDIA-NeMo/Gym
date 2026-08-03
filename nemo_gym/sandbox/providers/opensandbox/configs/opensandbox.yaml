@@ -61,13 +61,10 @@ sandbox:
       # are usually mutating. Raise only for idempotent workloads.
       command_retries: 0
       close_timeout_s: 30
-      # `background_exec` runs the command in the background and polls
-      # status/logs instead of holding one SSE stream open. It exists for load
-      # balancers that cap long-lived streams, but it costs extra round trips
-      # per command, so foreground SSE stays the default.
+      # Short status/log polls instead of one long-lived SSE stream, for load
+      # balancers that cap stream duration. Costs extra round trips.
       background_exec: false
-      # Poll cadence when background_exec is enabled: fast at first (short tmux
-      # commands finish in <1s) then back off.
+      # Poll interval backs off from initial to interval.
       background_poll_initial_s: 0.25
       background_poll_interval_s: 2.0
     # Job attribution merged into every sandbox's metadata. OpenSandbox propagates

@@ -13,11 +13,8 @@
 # limitations under the License.
 """Harbor environment backed by the NeMo Gym sandbox API.
 
-This adapter lets any Harbor agent (e.g. Terminus-2) execute a task inside a
-sandbox managed by ``nemo_gym.sandbox`` — so every provider Gym supports
-(``opensandbox``, ``docker``, ``daytona``, ``apptainer``, ``ecs_fargate``, or a
-custom registration) becomes a Harbor execution backend without touching the
-harbor_agent server code. Select it purely via config:
+Makes every provider ``nemo_gym.sandbox`` supports a Harbor execution backend,
+selected purely via config:
 
     harbor_environment_import_path: "responses_api_agents.harbor_agent.\
 custom_envs.nemo_gym_sandbox.environment:NemoGymSandboxEnvironment"
@@ -26,10 +23,9 @@ custom_envs.nemo_gym_sandbox.environment:NemoGymSandboxEnvironment"
         opensandbox:
           connection: {domain: ..., api_key: ..., use_server_proxy: true}
 
-The task's ``docker_image`` must be a pullable image ref (Harbor-side image
-builds are not supported here). Logging directories are not mounted
-(``is_mounted == False``); Harbor downloads ``/logs`` from the sandbox at the
-end of the trial through :meth:`download_dir`.
+The task's ``docker_image`` must be a pullable image ref; Harbor-side image
+builds are not supported. Logging directories are not mounted, so Harbor
+downloads ``/logs`` at the end of the trial via :meth:`download_dir`.
 """
 
 import shlex
@@ -57,18 +53,15 @@ _TRANSFER_DIR = "/tmp"
 
 
 def _cpu_pin_prefix(width: int) -> str:
-    """Shell prefix that pins the following command to a random contiguous
+    """Shell prefix pinning the following command to a random contiguous
     ``width``-core block.
 
-    Sandbox containers see the host's full core count (cgroup cpu limits don't
-    shrink ``nproc``), so build tools fan out to e.g. 96 workers and get CFS
-    throttled. Pinning a) makes ``nproc`` report ``width`` inside the command
-    (tools right-size their parallelism) and b) spreads co-resident sandboxes
-    across different core blocks instead of all stacking on cores 0..width-1.
+    Containers see the host's full core count (cgroup cpu limits don't shrink
+    ``nproc``), so build tools fan out and get CFS throttled. A random block
+    also spreads co-resident sandboxes instead of stacking them on cores 0..n.
 
-    POSIX sh (execd runs commands through sh, not bash) and fail-open: no
-    ``taskset`` in the image, ``nproc`` <= width, or unreadable urandom leaves
-    ``$__osb_pin`` empty and the command runs unpinned.
+    Must be POSIX sh, and fails open: no ``taskset``, ``nproc`` <= width, or
+    unreadable urandom leaves the command unpinned.
     """
     return (
         f"__osb_w={width}; __osb_n=$(nproc 2>/dev/null || echo 0); "
@@ -94,37 +87,22 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         sandbox_ttl_s: Sandbox server-side TTL safety net (default 21600).
         sandbox_ready_timeout_s: Create/readiness timeout incl. image pull
             (default 900).
-        default_exec_timeout_s: Timeout applied when Harbor calls ``exec``
-            without ``timeout_sec`` (default 1800). This is a *per-command*
-            bound, not a trial bound: it caps how long a single sandbox exec
-            (submit + background poll) may run before the provider gives up and
-            raises ``TimeoutError`` (which Terminus-2 handles as a command
-            timeout).
+        default_exec_timeout_s: Per-command bound applied when Harbor calls
+            ``exec`` without ``timeout_sec`` (default 1800), not a trial bound.
 
-            Do not set this small. Harbor's **verifier** never passes
-            ``timeout_sec`` (``harbor.verifier.verifier`` calls
-            ``environment.exec(command=..., env=...)``), and neither does the
-            oracle agent, so this default is what bounds *verification* for
-            every benchmark. Terminus-2 is the exception, not the rule: it
-            omits ``timeout_sec`` only for short tmux plumbing and passes
-            ``command.duration_sec`` for real agent commands.
-
-            Benchmarks routinely declare multi-minute verification budgets --
-            across Terminal-Bench 2.1, 87 of 89 tasks declare a ``[verifier]
-            timeout_sec`` greater than 600 (median 900, max 12000). A default
-            below the task's own budget silently truncates verification and
-            scores the task 0 rather than failing loudly, which is a
-            correctness bug, not just a performance one. Keep this at or above
-            the largest per-command budget the benchmark expects; the
-            trial-level agent/verifier timeouts remain the outer bound.
+            Do not set this small. Harbor's verifier never passes
+            ``timeout_sec``, so this is what bounds verification for every
+            benchmark, and benchmarks routinely declare multi-minute budgets.
+            A default below the task's own budget silently truncates
+            verification and scores the task 0 rather than failing loudly.
         exec_shell: Shell prefix wrapped around every Harbor-issued command
             (default ``"bash -ic"``, matching Harbor's docker/daytona
             backends). Set to null to run commands verbatim.
         cpu_pin_enabled: Pin every Harbor-issued command to a random
             contiguous core block sized by the task's cpu count (default
-            False). The tmux server Terminus-2 starts is itself launched via
-            ``exec``, so the whole agent session inherits the affinity; the
-            verifier exec gets its own block. See ``_cpu_pin_prefix``.
+            False). Terminus-2's tmux server is itself launched via ``exec``,
+            so the whole agent session inherits the affinity. See
+            ``_cpu_pin_prefix``.
         image_rewrites: Ordered ``[{from: ..., to: ...}]`` prefix rewrites
             applied to the task's ``docker_image`` (see
             ``nemo_gym.sandbox.rewrite_image``).
@@ -173,9 +151,8 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
 
     @staticmethod
     def type() -> EnvironmentType:
-        # Harbor only calls this from validation error messages. The pinned
-        # harbor release has no member for external environments, so fall back
-        # to DOCKER purely for display.
+        # Only used in validation error messages, and the pinned harbor release
+        # has no member for external environments, so DOCKER is display-only.
         return getattr(EnvironmentType, "NEMO_GYM_SANDBOX", EnvironmentType.DOCKER)
 
     @property
@@ -267,9 +244,8 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         await sandbox.start()
         self._sandbox = sandbox
 
-        # /logs/{agent,verifier} are bind mounts in Harbor's Docker backend; here
-        # they must exist inside the sandbox so the agent and verifier can write
-        # to them (e.g. the verifier tees test output under /logs/verifier).
+        # Bind mounts in Harbor's Docker backend, so they must be created here
+        # for the agent and verifier to have somewhere to write.
         log_dirs = f"{EnvironmentPaths.agent_dir} {EnvironmentPaths.verifier_dir}"
         result = await self._sandbox.exec(f"mkdir -p {log_dirs}", timeout_s=60)
         if result.return_code != 0:
@@ -286,9 +262,8 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         if self._sandbox is None:
             return
         if not delete:
-            # Remote sandboxes are single-use; keeping them alive after the trial
-            # would leak cluster resources, so `delete=False` is intentionally not
-            # honored here.
+            # Remote sandboxes are single-use, so honoring delete=False would
+            # leak cluster resources.
             self.logger.debug(
                 "delete=False is ignored by NemoGymSandboxEnvironment; the sandbox is always terminated on stop()."
             )
@@ -303,9 +278,8 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         timeout_sec: int | None = None,
     ) -> ExecResult:
         timeout_s = timeout_sec if timeout_sec is not None else self._default_exec_timeout_s
-        # Match Harbor's docker/daytona backends, which run every agent/verifier
-        # command through an interactive bash so .bashrc-based task setups
-        # (conda, pyenv, custom PATH) behave identically.
+        # Harbor's docker/daytona backends use an interactive bash, so
+        # .bashrc-based task setups (conda, pyenv, PATH) must behave the same.
         if self._exec_shell:
             command = f"{self._exec_shell} {shlex.quote(command)}"
         if self._cpu_pin_enabled:

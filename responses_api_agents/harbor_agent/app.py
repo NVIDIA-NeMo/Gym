@@ -56,11 +56,9 @@ class HarborDatasetSourceConfig(BaseModel):
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int
 
-    # CPUs Ray reserves per Harbor-job task. Each job is I/O-bound (the work runs
-    # in a remote sandbox and on the model server, not on the driver), so a
-    # fractional value lets many more jobs run concurrently than the driver's
-    # physical CPU count. None keeps Ray's default of 1 CPU/task, which caps
-    # concurrency at (driver CPUs). Set e.g. 0.25 to run ~4x the CPU count.
+    # CPUs Ray reserves per Harbor job. Jobs are I/O-bound, so a fractional
+    # value runs far more of them than Ray's default of 1 CPU/task, which caps
+    # concurrency at the driver's CPU count.
     harbor_ray_task_num_cpus: Optional[float] = None
 
     # --- Harbor agent settings ---
@@ -277,10 +275,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if self.config.harbor_ray_task_num_cpus is not None:
                     runner = runner_ray_remote.options(num_cpus=self.config.harbor_ray_task_num_cpus)
                 future = runner.remote(_run_harbor_job_sync, params)
-                # Await the ObjectRef directly: to_thread(ray.get, ...) pins one of
-                # the default executor's 32 threads until THIS trial finishes, so
-                # completed trials queue behind long-running ones and results
-                # drain at ~32-at-a-time regardless of rollout concurrency.
+                # Await the ObjectRef directly; to_thread(ray.get, ...) would pin
+                # one executor thread per in-flight trial, so completed trials
+                # would queue behind long-running ones.
                 trial_dir_path = await future
                 trial_dir = Path(trial_dir_path)
 

@@ -228,8 +228,8 @@ env.yaml
 
 # Backup files
 *.backup
-# Local-only run logs: contain internal infrastructure identifiers and must
-# never be committed to this public repository.
+
+# Local run logs; contain internal infrastructure identifiers
 OPENSANDBOX_SSE_DROP_REPORT.md
 EXPERIMENT_LOG.md
 
