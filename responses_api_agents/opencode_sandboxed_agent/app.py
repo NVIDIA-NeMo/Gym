@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import sys
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -149,19 +150,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             env={"OPENCODE_CONFIG_CONTENT": json.dumps(self._create_opencode_config())},
         )
 
-        import sys
-
         print("STDOUT: ", result.stdout, file=sys.stderr)
         print("STDERR: ", result.stderr, file=sys.stderr)
 
-        pwd_result = await sandbox.exec(
-            command="pwd",
-        )
-        cwd = pwd_result.stdout
+        pwd_result = await sandbox.exec(command="pwd")
+        results_remote_fpath = Path(pwd_result.stdout) / export_fname
 
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
-        await sandbox.download(cwd / export_fname, results_dir / export_fname)
+        results_local_fpath = results_dir / export_fname
+        print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+        await sandbox.download(str(results_remote_fpath), results_local_fpath)
 
         await sandbox.stop()
 
