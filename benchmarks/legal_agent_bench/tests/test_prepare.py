@@ -120,7 +120,7 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     benchmark = BenchmarkConfig.from_config_path(CONFIG_FPATH, strict=False)
     assert benchmark is not None
     assert benchmark.name == "legal_agent_bench"
-    assert benchmark.agent_name == "legal_agent_bench_benchmark_harbor_agent"
+    assert benchmark.agent_name == "legal_agent_bench_benchmark_native_agent"
     assert benchmark.num_repeats == 1
     assert benchmark.dataset.prompt_config is None
     assert benchmark.dataset.jsonl_fpath == Path("benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl")
@@ -132,14 +132,35 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     )
     resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config)
     assert "legal_agent_bench" not in resolved
-    assert "legal_agent_bench_harbor_agent" not in resolved
+    assert "legal_agent_bench_native_agent" not in resolved
 
     resource = resolved.legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench
+    agent = resolved.legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent
+    assert agent.agent_server_module == "responses_api_agents.legal_agent_bench_native_agent.app"
+    assert agent.runtime_tasks_dir == resource.harbor_tasks_dir
+    assert agent.skills_dir == resource.harness_skills_dir
+    assert agent.agent_kwargs.max_turns == 60
+    assert len(agent.datasets) == 1
+    assert agent.datasets[0].type == "benchmark"
+
+
+def test_harbor_compatibility_variant_resolves() -> None:
+    config_path = BENCHMARK_DIR / "config_harbor.yaml"
+    benchmark = BenchmarkConfig.from_config_path(config_path, strict=False)
+    assert benchmark is not None
+    assert benchmark.name == "legal_agent_bench"
+    assert benchmark.agent_name == "legal_agent_bench_benchmark_harbor_agent"
+
+    initial_config = OmegaConf.merge(
+        OmegaConf.load(config_path),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+    )
+    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config)
+    resource = resolved.legal_agent_bench_benchmark_harbor_resources_server.resources_servers.legal_agent_bench
     agent = resolved.legal_agent_bench_benchmark_harbor_agent.responses_api_agents.harbor_agent
     assert agent.harbor_datasets.legal_agent_bench.local_dataset_path == resource.harbor_tasks_dir
     assert agent.harbor_agent_kwargs.skills_dir == resource.harness_skills_dir
     assert agent.harbor_agent_kwargs.max_turns == 60
-    assert len(agent.datasets) == 1
     assert agent.datasets[0].type == "benchmark"
 
 
@@ -189,6 +210,7 @@ def test_configurable_benchmark_variants_resolve(filename, expected_agent, expec
 @pytest.mark.parametrize(
     "agent_name",
     [
+        "legal_agent_bench_benchmark_native_agent",
         "legal_agent_bench_benchmark_harbor_agent",
         "legal_agent_bench_benchmark_hermes_agent",
         "legal_agent_bench_benchmark_claude_code_agent",

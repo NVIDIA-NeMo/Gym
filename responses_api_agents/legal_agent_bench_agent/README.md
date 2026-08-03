@@ -4,8 +4,8 @@ This task-driven Gym agent runs a configured Gym Responses API agent inside a
 Legal Agent Bench (LAB) sandbox. It keeps the benchmark task set, skills, and
 verifier fixed while allowing the agent harness and sandbox provider to vary.
 
-The committed configurations select Gym's Hermes, Claude Code, and Codex agents
-through:
+The default configuration selects LAB's direct Gym-native loop. Additional
+configurations select Gym's Hermes, Claude Code, and Codex agents through:
 
 - `agent_server_module`
 - `agent_server_class`
@@ -38,7 +38,10 @@ Agent source, documents, skills, runtime, and runner inputs are transferred
 through Gym's sandbox file API. The sandbox has no writable host mounts.
 
 Only the task instructions and public skill manuals are supplied to the
-configured agent. Its results are downloaded to a private temporary directory,
+configured agent. The native choice reproduces upstream LAB's model → function
+tools → tool results loop using Gym's Responses API; it uses LAB's canonical
+`bash`, `read`, `write`, `write_docx`, `edit`, `glob`, and `grep` tools. Its
+results are downloaded to a private temporary directory,
 the sandbox is destroyed, and links, devices, traversal paths, and other unsafe
 archive entries are rejected before Gym creates host artifacts. A fresh
 verifier-only sandbox then receives a separately staged, sanitized `lab-run`
@@ -64,7 +67,9 @@ and actual model-call access logging is enabled.
 
 Artifacts are written below
 `results/legal_agent_bench/<harness>_jobs/<model>/<YYYYMMDD-HHMMSS_hash>/<task_name>_<run_id>/`.
-For example, Hermes uses `results/legal_agent_bench/hermes_jobs`. The model
+For example, the default native loop uses
+`results/legal_agent_bench/native_jobs`, while Hermes uses
+`results/legal_agent_bench/hermes_jobs`. The model
 segment is the configured `policy_model_name`, normalized into one safe path
 segment. The task name is also normalized, and the run ID is an eight-character
 unique suffix. A session directory is created only when its first rollout starts.
@@ -74,7 +79,7 @@ top-level `run_summary.json`. The rollout response also includes direct paths
 for the summary, trajectory, stdout, stderr, output directory, and verifier
 report.
 
-For setup, four copy-paste smoke commands, and result inspection, see the
+For setup, five copy-paste smoke commands, and result inspection, see the
 [benchmark README](../../benchmarks/legal_agent_bench/README.md#test-the-various-harnesses).
 Run `gym` from an activated repository environment rather than prefixing
 server-starting commands with `uv run`.

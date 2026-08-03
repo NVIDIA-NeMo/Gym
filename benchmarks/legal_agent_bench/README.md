@@ -5,13 +5,15 @@ This benchmark registers the
 with Gym's benchmark catalog. Every variant evaluates the same 1,749 public
 Harvey LAB tasks with the same skills and verifier.
 
-This benchmark uses the Harbor integration by default. Three additional variants use the LAB-owned
-[configurable runner](../../responses_api_agents/legal_agent_bench_agent/README.md)
-with Gym's built-in agent harnesses:
+The unqualified benchmark uses a LAB-owned, Gym-native implementation of the
+upstream LAB model/tool loop. Four explicit variants run the same tasks through
+Harbor or one of Gym's built-in agent harnesses. All non-Harbor choices use the
+[configurable runner](../../responses_api_agents/legal_agent_bench_agent/README.md).
 
 | Benchmark | Agent |
 | --- | --- |
-| `legal_agent_bench` | Harbor (default) |
+| `legal_agent_bench` | LAB Gym-native loop (default) |
+| `legal_agent_bench/config_harbor` | Harbor compatibility integration |
 | `legal_agent_bench/config_hermes` | Hermes |
 | `legal_agent_bench/config_claude_code` | Claude Code |
 | `legal_agent_bench/config_codex` | Codex |
@@ -81,17 +83,18 @@ From the repository root, run:
 gym eval prepare --benchmark legal_agent_bench
 ```
 
-Preparation is shared by all four variants. It validates or prepares the task
+Preparation is shared by all five variants. It validates or prepares the task
 and skill caches, then writes the deterministic benchmark index to
 `benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl`.
 Repeated preparation reuses valid caches and does not download a second copy of
 LAB.
 
-Validate that all four configurations resolve before spending time on a
+Validate that all five configurations resolve before spending time on a
 rollout:
 
 ```bash
 gym env validate --model-type vllm_model --benchmark legal_agent_bench
+gym env validate --model-type vllm_model --benchmark legal_agent_bench/config_harbor
 gym env validate --model-type vllm_model --benchmark legal_agent_bench/config_hermes
 gym env validate --model-type vllm_model --benchmark legal_agent_bench/config_claude_code
 gym env validate --model-type vllm_model --benchmark legal_agent_bench/config_codex
@@ -99,18 +102,31 @@ gym env validate --model-type vllm_model --benchmark legal_agent_bench/config_co
 
 ## Test the various harnesses
 
-Run these one at a time for each harness you want to test. Each command starts the required Gym services, runs
-the first benchmark task, writes one JSONL result row, and stops the services.
+Run these one at a time for each harness you want to test. Each command starts
+the required Gym services, runs the first benchmark task, writes one JSONL
+result row, and stops the services.
 Alongside the path passed to `--output`, Gym writes
 `<output_stem>_materialized_inputs.jsonl` and
 `<output_stem>_aggregate_metrics.json`.
 
-Harbor:
+Gym-native LAB loop:
 
 ```bash
 gym eval run \
   --model-type vllm_model \
   --benchmark legal_agent_bench \
+  --split benchmark \
+  --output results/legal_agent_bench_native_smoke.jsonl \
+  --concurrency 1 \
+  --limit 1
+```
+
+Harbor compatibility integration:
+
+```bash
+gym eval run \
+  --model-type vllm_model \
+  --benchmark legal_agent_bench/config_harbor \
   --split benchmark \
   --output results/legal_agent_bench_harbor_smoke.jsonl \
   --concurrency 1 \
@@ -153,17 +169,20 @@ gym eval run \
   --limit 1
 ```
 
-Hermes uses chat completions. Claude Code and Codex use their respective CLI
-adapters against the configured OpenAI-compatible policy endpoint. The first
-run of each configurable harness provisions its pinned portable runtime, so it
-can be much slower than a cached run. The LAB runner disables Hermes's optional
-pricing and context-metadata lookups because Gym already supplies the model and
-its internal policy proxy does not expose `/models`; real model-call access
-logging is enabled.
+The default native loop sends LAB's canonical function tools through Gym's
+Responses API and executes them directly inside the task sandbox. Hermes uses
+chat completions. Claude Code and Codex use their respective CLI adapters
+against the configured OpenAI-compatible policy endpoint. The first run of
+each non-Harbor harness provisions its portable runtime, so it can be much
+slower than a cached run. The LAB runner disables Hermes's optional pricing and
+context-metadata lookups because Gym already supplies the model and its
+internal policy proxy does not expose `/models`; real model-call access logging
+is enabled.
 
-## Check a configurable result
+## Check a native or configurable result
 
-For Hermes, for example, inspect the result row and the persisted artifact bundle with:
+For the default native loop, inspect the result row and persisted artifact
+bundle with:
 
 ```bash
 jq '{
@@ -176,15 +195,16 @@ jq '{
   judge_error_count,
   verifier_error,
   artifact_dir
-}' results/legal_agent_bench_hermes_smoke.jsonl
+}' results/legal_agent_bench_native_smoke.jsonl
 
-ARTIFACT_DIR=$(jq -r '.artifact_dir' results/legal_agent_bench_hermes_smoke.jsonl)
+ARTIFACT_DIR=$(jq -r '.artifact_dir' results/legal_agent_bench_native_smoke.jsonl)
 jq . "$ARTIFACT_DIR/run_summary.json"
 jq . "$ARTIFACT_DIR/agent/trajectory.json"
 open "$ARTIFACT_DIR/verifier/report.html"  # macOS; use xdg-open on Linux
 ```
 
-Substitute the Claude Code or Codex output filename to inspect those runs.
+Substitute the Hermes, Claude Code, or Codex output filename to inspect those
+runs.
 A reliable completed rollout has `mask_sample: false`, no failure flags,
 `judge_error_count: 0`, and `verifier_error: 0`. Check `output_files` in
 `run_summary.json` for the deliverables. A `reward` of `0.0` can still be a
@@ -192,8 +212,9 @@ valid run: the default `full_task` reward requires every rubric criterion to
 pass, while `criteria_pass_rate` shows partial success.
 
 Harbor keeps its detailed trial files under
-`results/legal_agent_bench/harbor_jobs`; configurable variants use the
-corresponding `hermes_jobs`, `claude_code_jobs`, or `codex_jobs` directory.
+`results/legal_agent_bench/harbor_jobs`; the native and configurable variants
+use the corresponding `native_jobs`, `hermes_jobs`, `claude_code_jobs`, or
+`codex_jobs` directory.
 Their model directory comes from `policy_model_name`, with path separators and
 other unsafe characters normalized for the filesystem. A session directory is
 created only when its first rollout starts. Each configurable rollout is stored
@@ -220,7 +241,8 @@ gym eval run \
   +legal_agent_bench_benchmark_hermes_agent.responses_api_agents.legal_agent_bench_agent.concurrency=2
 ```
 
-Use the corresponding `legal_agent_bench_benchmark_claude_code_agent` or
+Use `legal_agent_bench_benchmark_native_agent` for the default native loop, or
+the corresponding `legal_agent_bench_benchmark_claude_code_agent` or
 `legal_agent_bench_benchmark_codex_agent` prefix for those variants. The
 agent-server default stays at `1`; changing only `--concurrency` leaves the
 server-side semaphore serial.
@@ -330,9 +352,15 @@ pass rate instead, add this override to `gym env start` or the one-shot
 ```
 
 This changes only the reported reward; it does not change the tasks, agent, or
-judge criteria.
+judge criteria. The command above uses the native default's resource-server
+prefix. For an explicit variant, replace
+`legal_agent_bench_benchmark_resources_server` with the corresponding
+`legal_agent_bench_benchmark_harbor_resources_server`,
+`legal_agent_bench_benchmark_hermes_resources_server`,
+`legal_agent_bench_benchmark_claude_code_resources_server`, or
+`legal_agent_bench_benchmark_codex_resources_server` prefix.
 
-For configurable variants, the rollout also reports `agent_failed`,
+For the native and configurable variants, the rollout also reports `agent_failed`,
 `model_connection_failed`, `agent_timed_out`, `verifier_failed`,
 `verifier_timed_out`, `sandbox_failed`, `task_failed`,
 `configuration_failed`, `judge_error_count`, and `verifier_error`.
@@ -346,9 +374,10 @@ task-loading, or judge failures set `mask_sample`; do not treat those zeroes as
 model-quality results.
 
 Configurable-runner artifacts are grouped by harness, model, dated session, and
-task. The default roots are `results/legal_agent_bench/hermes_jobs`,
+task. The default roots are `results/legal_agent_bench/native_jobs`,
+`results/legal_agent_bench/hermes_jobs`,
 `results/legal_agent_bench/claude_code_jobs`, and
-`results/legal_agent_bench/codex_jobs`. Harbor continues to use
+`results/legal_agent_bench/codex_jobs`. Harbor uses
 `results/legal_agent_bench/harbor_jobs`.
 
 Each configurable output row includes `artifact_dir`, `run_summary_path`,
@@ -368,7 +397,8 @@ Run the benchmark and resource-server tests with:
 uv run pytest -q \
   benchmarks/legal_agent_bench/tests \
   resources_servers/legal_agent_bench/tests \
-  responses_api_agents/legal_agent_bench_agent/tests
+  responses_api_agents/legal_agent_bench_agent/tests \
+  responses_api_agents/legal_agent_bench_native_agent/tests
 ```
 
 Generated indexes, collation metrics, Harbor jobs, source documents, and skills
