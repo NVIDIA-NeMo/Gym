@@ -467,10 +467,33 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
                 num_tool_calls += 1
-                if self.config.progress and output_function_call.name == "update_progress":
+                # The model can emit syntactically invalid JSON for `arguments` (seen on
+                # Inkling-Small: a call truncated mid-object). Parse once, up front, and
+                # treat a failure the same way a >=400 tool response is treated below —
+                # report it back to the model — instead of letting it raise out of this
+                # handler, which 500s the agent and kills the ENTIRE rollout collection
+                # over one bad call.
+                try:
+                    tool_args = json.loads(output_function_call.arguments)
+                    tool_args_error = None
+                except json.JSONDecodeError as e:
+                    tool_args = None
+                    tool_args_error = e
+
+                if tool_args_error is not None:
+                    print(
+                        f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
+                        f"status=bad_arguments_json error={tool_args_error}",
+                        flush=True,
+                    )
+                    tool_output = (
+                        f"Invalid JSON in the arguments of your '{output_function_call.name}' tool "
+                        f"call: {tool_args_error}. Re-issue the call with valid JSON arguments."
+                    )
+                elif self.config.progress and output_function_call.name == "update_progress":
                     # Board writes are handled by the agent itself — the board is
                     # per-trajectory agent state, not a resources-server tool.
-                    progress_board = str(json.loads(output_function_call.arguments).get("board", ""))
+                    progress_board = str(tool_args.get("board", ""))
                     if _ANSWER_COMMIT_RE.search(progress_board):
                         # Commit guard: the model wrote its final answer into the
                         # board instead of committing it as a message.
@@ -489,7 +512,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     api_response = await self.server_client.post(
                         server_name=self.config.resources_server.name,
                         url_path=f"/{output_function_call.name}",
-                        json=json.loads(output_function_call.arguments),
+                        json=tool_args,
                         cookies=resources_server_cookies,
                     )
                     # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
