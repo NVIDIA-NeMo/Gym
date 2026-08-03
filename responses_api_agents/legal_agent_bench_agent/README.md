@@ -1,8 +1,8 @@
 # Legal Agent Bench Configurable Agent
 
-This task-driven Gym agent runs a configured Gym Responses API agent inside the
-Legal Agent Bench (LAB) Docker environment. It keeps the benchmark task set,
-skills, and verifier fixed while allowing the agent harness to vary.
+This task-driven Gym agent runs a configured Gym Responses API agent inside a
+Legal Agent Bench (LAB) sandbox. It keeps the benchmark task set, skills, and
+verifier fixed while allowing the agent harness and sandbox provider to vary.
 
 The committed configurations select Gym's Hermes, Claude Code, and Codex agents
 through:
@@ -13,8 +13,9 @@ through:
 - `agent_kwargs`
 
 The runner also accepts the policy `model_server`, LAB runtime task and skill
-paths, concurrency and timeout settings, Docker network and model URL
-overrides, and a result directory. See `configs/` for complete examples.
+paths, concurrency and timeout settings, `sandbox_provider`, an optional
+`sandbox_image`, Docker platform, network and model URL overrides, and a result
+directory. See `configs/` for complete examples.
 Those configurations include the LAB `resources_only.yaml` definition so Gym
 starts one resource server and only the selected agent; the combined
 compatibility config is reserved for Harbor.
@@ -23,28 +24,35 @@ compatibility config is reserved for Harbor.
 
 For each rollout, the runner validates `instance_id`, builds or reuses the
 content-addressed LAB image, provisions a portable Linux runtime for the
-selected harness, and starts an agent-only Docker sandbox. Runtimes are
-immutable and content-addressed by their setup script, requirements, configured
-CLI pin, LAB image identity and architecture, Gym packaging metadata, and
-installed `nemo_gym` source. An interprocess lock and atomic publication
-prevent concurrent evaluations from rewriting a runtime that is being built or
-used.
+selected harness, and starts an agent-only sandbox. Runtimes are immutable and
+content-addressed by their setup script, requirements, configured CLI pin, LAB
+image identity and architecture, Gym packaging metadata, and installed
+`nemo_gym` source. An interprocess lock and atomic publication prevent
+concurrent evaluations from rewriting a runtime that is being built or used.
 
 Dependency provisioning exposes an explicit allowlist containing only the
 installer and required Gym package files. It never mounts the repository,
 `env.yaml`, task tests, judge credentials, or unrelated files.
 
-Only the task instructions and public skill manuals are supplied to the
-configured agent. After it exits, its container is destroyed before a fresh
-verifier-only sandbox starts. That sandbox receives the completed `lab-run`
-directory read-only, then receives the rubric tests and judge credentials.
-The verifier sees deliverables at `lab-run/output`, preserving LAB's contract
-without sharing a process namespace with the agent.
+Agent source, documents, skills, runtime, and runner inputs are transferred
+through Gym's sandbox file API. The sandbox has no writable host mounts.
 
-The runner translates derived host-loopback model URLs to
-`host.docker.internal` on Docker Desktop and registers the equivalent host
-gateway for Linux bridge networking. An explicit `sandbox_model_base_url` is
-used unchanged. Before importing the selected harness, the in-container runner
+Only the task instructions and public skill manuals are supplied to the
+configured agent. Its results are downloaded to a private temporary directory,
+the sandbox is destroyed, and links, devices, traversal paths, and other unsafe
+archive entries are rejected before Gym creates host artifacts. A fresh
+verifier-only sandbox then receives a separately staged, sanitized `lab-run`
+tree, rubric tests, and verifier-only judge credentials. The verifier sees
+deliverables at `lab-run/output`, preserving LAB's contract without sharing a
+process namespace or writable filesystem with the agent.
+
+The default provider is Docker. The runner translates derived host-loopback
+model URLs to `host.docker.internal` on Docker Desktop and registers the
+equivalent host gateway for Linux bridge networking. A named Gym provider can
+be selected through `sandbox_provider`; non-Docker providers require an
+immutable registry `sandbox_image` and an explicit reachable
+`sandbox_model_base_url`. Before importing the selected harness, the
+in-container runner
 performs a bounded TCP connectivity check and writes
 `runtime/runner_status.json`. Connectivity or harness failures set the
 `mask_sample` flag on the row, skip the judge, and are distinct from an ordinary zero-reward
@@ -65,7 +73,7 @@ for the summary, trajectory, stdout, stderr, output directory, and verifier
 report.
 
 For setup, four copy-paste smoke commands, and result inspection, see the
-[benchmark README](../../benchmarks/legal_agent_bench/README.md#smoke-test-every-harness).
+[benchmark README](../../benchmarks/legal_agent_bench/README.md#test-the-various-harnesses).
 Run `gym` from an activated repository environment rather than prefixing
 server-starting commands with `uv run`.
 
@@ -84,4 +92,5 @@ that inherits it. CLI versions belong in the harness configuration's
 `agent_kwargs`; provisioning derives its exact package specification from that
 pin and rejects unpinned Claude Code or Codex configurations.
 
-The runner is compatible with Docker only.
+Docker remains the zero-configuration local backend. Non-Docker providers
+require an immutable registry image and a model URL reachable from the sandbox.

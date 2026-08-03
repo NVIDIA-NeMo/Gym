@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +17,11 @@ from omegaconf import OmegaConf
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.legal_agent_bench_agent import app
+
+
+def _runtime_archive_worker(deps_dir: str) -> tuple[str, int]:
+    archive = app.ensure_runtime_archive(Path(deps_dir))
+    return str(archive), archive.stat().st_size
 
 
 def _config(**overrides) -> app.LegalAgentBenchAgentConfig:
@@ -283,9 +291,28 @@ def test_dependency_provisioning_uses_pin_and_invalidates_when_it_changes(monkey
     assert "CLAUDE_SPEC=@anthropic-ai/claude-code@2.1.212" in docker_runs[1]
 
 
+def test_runtime_archive_is_published_once_across_processes(tmp_path) -> None:
+    deps = tmp_path / "hermes_agent" / "recipe"
+    deps.mkdir(parents=True)
+    (deps / ".installed").write_text("recipe")
+    (deps / "runtime.py").write_text("VALUE = 1\n")
+    context = multiprocessing.get_context("fork")
+
+    with context.Pool(2) as pool:
+        results = pool.map(_runtime_archive_worker, [str(deps), str(deps)])
+
+    assert results[0] == results[1]
+    archive = Path(results[0][0])
+    assert archive.is_file()
+    with tarfile.open(archive, "r:gz") as contents:
+        assert "agent_deps_mount/runtime.py" in contents.getnames()
+
+
 def test_config_defaults_are_docker_and_single_concurrency() -> None:
     config = _config()
     assert config.concurrency == 1
+    assert config.sandbox_provider == {"docker": {}}
+    assert config.sandbox_image is None
     assert config.docker_network == "host"
     assert config.results_dir == "results/legal_agent_bench"
     assert config.agent_timeout_seconds == 10800
@@ -522,9 +549,9 @@ def test_linux_bridge_provider_registers_host_gateway(monkeypatch) -> None:
     runner = app.LegalAgentBenchAgent.model_construct(config=_config(docker_network=None))
     monkeypatch.setattr(app.sys, "platform", "linux")
 
-    provider = runner._provider()
+    provider = runner._provider_config()
 
-    assert provider._create_config.extra_run_args == [
+    assert provider["docker"]["create"]["extra_run_args"] == [
         "--add-host",
         "host.docker.internal:host-gateway",
     ]
@@ -637,7 +664,6 @@ async def test_run_classifies_bad_agent_configuration_without_sandbox_failure(mo
     runner = app.LegalAgentBenchAgent.model_construct(config=_config())
     runner._sem = app.asyncio.Semaphore(1)
     runner._session_results_dir = tmp_path / "results"
-    runner._session_results_dir.mkdir()
 
     async def ensure_image(_task):
         return "lab:image"
@@ -689,7 +715,49 @@ async def test_concurrent_image_requests_build_once(monkeypatch, tmp_path) -> No
     assert sum(call[1] == "build" for call in calls) == 1
 
 
-def test_sandbox_mounts_inputs_read_only_and_output_writable(monkeypatch, tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_two_run_requests_overlap_when_server_concurrency_is_two(monkeypatch, tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    skills = _skills(tmp_path)
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config(concurrency=2))
+    runner._sem = app.asyncio.Semaphore(2)
+    runner._session_results_dir = tmp_path / "results"
+    active = 0
+    maximum_active = 0
+    both_started = app.asyncio.Event()
+
+    async def ensure_image(_task):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if active == 2:
+            both_started.set()
+        await app.asyncio.wait_for(both_started.wait(), timeout=1)
+        active -= 1
+        return "lab:image"
+
+    async def stop_after_overlap(_image):
+        raise app.LegalAgentBenchConfigurationError("stop after overlap assertion")
+
+    monkeypatch.setattr(app, "resolve_task_dir", lambda runtime, instance: task)
+    monkeypatch.setattr(app, "resolve_repo_path", lambda path: skills)
+    monkeypatch.setattr(app, "compose_agent_input", lambda task_dir, skills_dir, params: params)
+    monkeypatch.setattr(runner, "_model_name", lambda: "policy")
+    monkeypatch.setattr(runner, "_ensure_image", ensure_image)
+    monkeypatch.setattr(runner, "_ensure_runtime", stop_after_overlap)
+    body = app.LegalAgentBenchRunRequest(
+        instance_id="legal_agent_bench::area__task",
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+
+    first, second = await app.asyncio.gather(runner.run(None, body), runner.run(None, body))
+
+    assert maximum_active == 2
+    assert first.configuration_failed is True
+    assert second.configuration_failed is True
+
+
+def test_agent_sandbox_has_no_host_mounts(monkeypatch, tmp_path) -> None:
     _root, task = _task_tree(tmp_path)
     skills = _skills(tmp_path)
     deps = tmp_path / "deps"
@@ -705,7 +773,8 @@ def test_sandbox_mounts_inputs_read_only_and_output_writable(monkeypatch, tmp_pa
         return SimpleNamespace()
 
     runner = app.LegalAgentBenchAgent.model_construct(config=_config())
-    monkeypatch.setattr(runner, "_provider", lambda: "docker-provider")
+    monkeypatch.setattr(runner, "_provider_config", lambda: {"docker": {}})
+    monkeypatch.setattr(runner, "_sandbox_metadata", lambda: {})
     monkeypatch.setattr(app, "AsyncSandbox", fake_sandbox)
 
     runner._agent_sandbox(
@@ -716,19 +785,11 @@ def test_sandbox_mounts_inputs_read_only_and_output_writable(monkeypatch, tmp_pa
         paths=paths,
     )
 
-    volumes = captured["spec"].provider_options["volumes"]
-    assert f"{paths['agent_source']}:/agent_source_mount:ro" in volumes
-    assert f"{task / 'documents'}:/workspace/vdr:ro" in volumes
-    assert f"{skills}:/workspace/skills:ro" in volumes
-    assert f"{deps}:/agent_deps_mount:ro" in volumes
-    assert f"{paths['output']}:/workspace/output" in volumes
-    assert str(app.PARENT_DIR) not in {volume.split(":", 1)[0] for volume in volumes}
-    assert all("resources_servers" not in volume for volume in volumes)
-    assert all("tests" not in volume for volume in volumes)
-    assert all("LAB_JUDGE" not in volume for volume in volumes)
+    assert captured["provider"] == {"docker": {}}
+    assert captured["spec"].provider_options == {}
 
 
-def test_verifier_sandbox_mounts_only_completed_lab_run(monkeypatch, tmp_path) -> None:
+def test_verifier_sandbox_has_no_host_mounts(monkeypatch, tmp_path) -> None:
     _root, task = _task_tree(tmp_path)
     paths = {"lab_run": tmp_path / "lab-run"}
     paths["lab_run"].mkdir()
@@ -740,13 +801,14 @@ def test_verifier_sandbox_mounts_only_completed_lab_run(monkeypatch, tmp_path) -
         return SimpleNamespace()
 
     runner = app.LegalAgentBenchAgent.model_construct(config=_config())
-    monkeypatch.setattr(runner, "_provider", lambda: "docker-provider")
+    monkeypatch.setattr(runner, "_provider_config", lambda: {"docker": {}})
+    monkeypatch.setattr(runner, "_sandbox_metadata", lambda: {})
     monkeypatch.setattr(app, "AsyncSandbox", fake_sandbox)
 
     runner._verifier_sandbox(image="lab:image", task_dir=task, paths=paths)
 
     assert captured["spec"].workdir == "/logs/agent/artifacts/lab-run/output"
-    assert captured["spec"].provider_options["volumes"] == [f"{paths['lab_run']}:/logs/agent/artifacts/lab-run:ro"]
+    assert captured["spec"].provider_options == {}
 
 
 @pytest.mark.asyncio
@@ -769,6 +831,8 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(monkeypa
             return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
         async def stop(self):
+            if self.phase == "agent":
+                assert not runner._session_results_dir.exists()
             events.append(f"{self.phase}:stop")
 
     agent_sandbox = PhaseSandbox("agent")
@@ -776,7 +840,6 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(monkeypa
     runner = app.LegalAgentBenchAgent.model_construct(config=_config())
     runner._sem = app.asyncio.Semaphore(1)
     runner._session_results_dir = tmp_path / "results"
-    runner._session_results_dir.mkdir()
 
     async def ensure_image(_task):
         return "lab:image"
@@ -790,7 +853,14 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(monkeypa
     async def run_verifier(sandbox, task_dir, paths):
         assert sandbox is verifier_sandbox
         assert events == ["agent:start", "agent:exec", "agent:stop", "verifier:start"]
-        return {"reward": 1.0, "criteria_pass_rate": 1.0}, False, None
+        assert runner._session_results_dir.is_dir()
+        return {"reward.json": b'{"reward": 1.0, "criteria_pass_rate": 1.0}'}, False, None
+
+    async def stage_agent(*args, **kwargs):
+        return None
+
+    async def collect_agent(*args, **kwargs):
+        return {}
 
     monkeypatch.setattr(app, "resolve_task_dir", lambda runtime, instance: task)
     monkeypatch.setattr(app, "resolve_repo_path", lambda path: skills)
@@ -802,6 +872,9 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(monkeypa
     monkeypatch.setattr(runner, "_model_url", lambda body: "http://model")
     monkeypatch.setattr(runner, "_model_name", lambda: "policy")
     monkeypatch.setattr(runner, "_agent_sandbox", lambda **kwargs: agent_sandbox)
+    monkeypatch.setattr(runner, "_stage_agent_sandbox", stage_agent)
+    monkeypatch.setattr(runner, "_collect_agent_sandbox", collect_agent)
+    monkeypatch.setattr(runner, "_materialize_agent_downloads", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner, "_verifier_sandbox", lambda **kwargs: verifier_sandbox)
     monkeypatch.setattr(runner, "_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner, "_stage_and_run_verifier", run_verifier)
@@ -815,6 +888,7 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(monkeypa
     assert events == ["agent:start", "agent:exec", "agent:stop", "verifier:start", "verifier:stop"]
     assert response.reward == 1.0
     assert response.sandbox_failed is False
+    assert Path(response.artifact_dir).is_dir()
     terminal_output = capsys.readouterr().out
     assert "LAB rollout artifacts:" in terminal_output
     assert "LAB rollout complete:" in terminal_output
@@ -861,6 +935,12 @@ async def test_model_connectivity_failure_is_masked_and_skips_verifier(monkeypat
             )
         )
 
+    async def stage_agent(*args, **kwargs):
+        return None
+
+    async def collect_agent(*args, **kwargs):
+        return {}
+
     monkeypatch.setattr(app, "resolve_task_dir", lambda runtime, instance: task)
     monkeypatch.setattr(app, "resolve_repo_path", lambda path: skills)
     monkeypatch.setattr(app, "compose_agent_input", lambda task_dir, skills_dir, params: params)
@@ -871,6 +951,9 @@ async def test_model_connectivity_failure_is_masked_and_skips_verifier(monkeypat
     monkeypatch.setattr(runner, "_model_url", lambda body: "http://model")
     monkeypatch.setattr(runner, "_model_name", lambda: "policy")
     monkeypatch.setattr(runner, "_agent_sandbox", lambda **kwargs: AgentSandbox())
+    monkeypatch.setattr(runner, "_stage_agent_sandbox", stage_agent)
+    monkeypatch.setattr(runner, "_collect_agent_sandbox", collect_agent)
+    monkeypatch.setattr(runner, "_materialize_agent_downloads", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         runner,
         "_verifier_sandbox",
@@ -927,6 +1010,8 @@ class _FakeSandbox:
         )()
 
     async def download(self, source, destination):
+        if self.reward is None:
+            raise FileNotFoundError(source)
         payload = self.reward if source.endswith("reward.json") else {"summary": "ok"}
         Path(destination).write_text(json.dumps(payload))
 
@@ -934,14 +1019,16 @@ class _FakeSandbox:
 @pytest.mark.asyncio
 async def test_verifier_is_staged_after_agent_and_receives_secrets_only_on_exec(tmp_path) -> None:
     _root, task = _task_tree(tmp_path)
-    paths = {"verifier": tmp_path / "verifier"}
+    paths = {"verifier": tmp_path / "verifier", "lab_run": tmp_path / "lab-run"}
     paths["verifier"].mkdir()
+    (paths["lab_run"] / "output").mkdir(parents=True)
     sandbox = _FakeSandbox({"reward": 1.0, "criteria_pass_rate": 1.0, "judge_error_count": 0})
     runner = app.LegalAgentBenchAgent.model_construct(config=_config())
 
-    reward, timed_out, failure = await runner._stage_and_run_verifier(sandbox, task, paths)
+    downloaded, timed_out, failure = await runner._stage_and_run_verifier(sandbox, task, paths)
+    reward = runner._materialize_verifier_downloads(paths, downloaded)
 
-    assert sandbox.uploaded == ["/tmp/legal-agent-bench-tests.tar.gz"]
+    assert sandbox.uploaded == ["/tmp/legal-agent-bench-verifier-input.tar.gz"]
     verifier_call = next(call for call in sandbox.exec_calls if "bash /tests/test.sh" in call[0])
     assert verifier_call[1]["env"]["LAB_JUDGE_API_KEY"] == "secret"  # pragma: allowlist secret
     assert reward["reward"] == 1.0
@@ -952,8 +1039,9 @@ async def test_verifier_is_staged_after_agent_and_receives_secrets_only_on_exec(
 @pytest.mark.asyncio
 async def test_missing_verifier_reward_returns_failure(tmp_path) -> None:
     _root, task = _task_tree(tmp_path)
-    paths = {"verifier": tmp_path / "verifier"}
+    paths = {"verifier": tmp_path / "verifier", "lab_run": tmp_path / "lab-run"}
     paths["verifier"].mkdir()
+    (paths["lab_run"] / "output").mkdir(parents=True)
     sandbox = _FakeSandbox(None, timed_out=True)
     runner = app.LegalAgentBenchAgent.model_construct(config=_config(verifier_timeout_seconds=1))
 
@@ -962,3 +1050,106 @@ async def test_missing_verifier_reward_returns_failure(tmp_path) -> None:
     assert reward == {}
     assert timed_out is True
     assert "reward.json" in failure
+
+
+@pytest.mark.parametrize("link_type", [tarfile.SYMTYPE, tarfile.LNKTYPE])
+def test_untrusted_output_archive_rejects_links_without_touching_host(tmp_path, link_type) -> None:
+    victim = tmp_path / "victim.txt"
+    victim.write_text("safe")
+    archive_path = tmp_path / "malicious.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        link = tarfile.TarInfo("stdout.log")
+        link.type = link_type
+        link.linkname = str(victim)
+        archive.addfile(link)
+
+    with pytest.raises(app.LegalAgentBenchArtifactError, match="links"):
+        app._extract_untrusted_archive(archive_path, tmp_path / "output")
+
+    assert victim.read_text() == "safe"
+
+
+def test_materialized_output_is_owned_by_invoking_user(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "memo.txt").write_text("complete")
+    archive_path = tmp_path / "output.tar.gz"
+    app._create_archive(archive_path, [(source, ".")])
+    output = tmp_path / "materialized"
+
+    app._extract_untrusted_archive(archive_path, output)
+
+    assert (output / "memo.txt").stat().st_uid == os.getuid()
+    assert (output / "memo.txt").stat().st_gid == os.getgid()
+
+
+def test_named_remote_provider_requires_immutable_image(tmp_path) -> None:
+    global_config = {
+        "sandbox": {
+            "default_metadata": {"sandbox-api": "remote"},
+            "remote": {"endpoint": "sandbox.internal"},
+        }
+    }
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(sandbox_provider="sandbox", sandbox_image="registry.example/lab:latest"),
+        server_client=SimpleNamespace(global_config_dict=global_config),
+    )
+
+    assert "remote" in runner._provider_config()
+    assert runner._sandbox_metadata() == {"sandbox-api": "remote"}
+    body = app.LegalAgentBenchRunRequest(
+        instance_id="legal_agent_bench::area__task",
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="sandbox_model_base_url"):
+        runner._model_url(body)
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="immutable"):
+        app.asyncio.run(runner._ensure_image(tmp_path))
+
+    runner.config.sandbox_image = "registry.example/lab@sha256:" + "a" * 64
+    assert app.asyncio.run(runner._ensure_image(tmp_path)) == runner.config.sandbox_image
+
+
+@pytest.mark.asyncio
+async def test_agent_staging_excludes_tests_and_judge_credentials(tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    skills = _skills(tmp_path)
+    deps = tmp_path / "cache" / "recipe"
+    deps.mkdir(parents=True)
+    (deps / ".installed").write_text("recipe")
+    paths = {"agent_source": tmp_path / "agent-source", "runtime": tmp_path / "runtime"}
+    for path in paths.values():
+        path.mkdir()
+    (paths["agent_source"] / "responses_api_agents" / "hermes_agent").mkdir(parents=True)
+    (paths["agent_source"] / "responses_api_agents" / "hermes_agent" / "app.py").write_text("VALUE = 1\n")
+    (paths["runtime"] / "runner.json").write_text("{}")
+
+    class CaptureSandbox:
+        def __init__(self):
+            self.members = {}
+            self.exec_commands = []
+
+        async def upload(self, source, destination):
+            with tarfile.open(source, "r:gz") as archive:
+                self.members[destination] = {member.name for member in archive.getmembers()}
+
+        async def exec(self, command, **kwargs):
+            self.exec_commands.append(command)
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    sandbox = CaptureSandbox()
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+
+    await runner._stage_agent_sandbox(
+        sandbox,
+        task_dir=task,
+        skills_dir=skills,
+        deps_dir=deps,
+        paths=paths,
+    )
+
+    staged = sandbox.members["/tmp/legal-agent-bench-agent-input.tar.gz"]
+    assert any(name.startswith("workspace/vdr") for name in staged)
+    assert any(name.startswith("workspace/skills") for name in staged)
+    assert not any("task.toml" in name or "/tests" in name or "LAB_JUDGE" in name for name in staged)
+    assert "chmod -R a+rX,a-w /agent_source_mount /agent_deps_mount" in sandbox.exec_commands[0]
