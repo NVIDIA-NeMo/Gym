@@ -229,6 +229,10 @@ env.yaml
 # Backup files
 *.backup
 
+# Local run logs; contain internal infrastructure identifiers
+OPENSANDBOX_SSE_DROP_REPORT.md
+EXPERIMENT_LOG.md
+
 # Claude Code agent runtime artifacts
 **/.claude_node/
 
