@@ -46,12 +46,19 @@ from resources_servers.legal_agent_bench.prepare import (
     resolve_repo_path,
     validate_harness_skills,
 )
+from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor.tools import (
+    get_all_tool_definitions,
+)
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PORTABLE_PYTHON_SH = PACKAGE_DIR / "setup_scripts" / "_portable_python.sh"
 DATASET_ALIAS = "legal_agent_bench"
 INITIAL_USER_PROMPT = "Please begin working on the task described in the system prompt."
+NATIVE_AGENT_MODULE = "responses_api_agents.legal_agent_bench_native_agent.app"
+LAB_SYSTEM_PROMPT = (
+    PARENT_DIR / "resources_servers" / "legal_agent_bench" / "vendor" / "harvey_labs" / "harness" / "system-prompt.md"
+).read_text(encoding="utf-8")
 AGENT_CLI_PINS = {
     "claude_code_agent": ("claude_code_version", "CLAUDE_SPEC", "@anthropic-ai/claude-code"),
     "codex_agent": ("codex_version", "CODEX_SPEC", "@openai/codex"),
@@ -119,6 +126,10 @@ os.environ["OUTPUT_DIR"] = "/workspace/output"
 os.environ["WORKSPACE_DIR"] = "/workspace/workspace"
 os.environ["SKILLS_DIR"] = "/workspace/skills"
 os.environ["HOME"] = "/workspace/workspace"
+# The inner runner receives its complete configuration below. Prevent Gym's
+# shared aiohttp client from invoking Hydra's CLI config loader in the output
+# directory when the native agent makes its first model request.
+os.environ.setdefault("NEMO_GYM_CONFIG_DICT", "{}")
 os.chdir("/workspace/output")
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -173,7 +184,15 @@ try:
         hermes_model_metadata.fetch_endpoint_model_metadata = empty_endpoint_model_metadata
         hermes_usage_pricing.fetch_endpoint_model_metadata = empty_endpoint_model_metadata
 
-    client = ServerClient.model_construct(global_config_dict={})
+    client = ServerClient.model_construct(
+        global_config_dict={
+            "policy_model": {
+                "responses_api_models": {
+                    "policy_model": {},
+                }
+            }
+        }
+    )
     client._build_server_base_url = lambda _cfg: model_url
 
     base = {
@@ -383,7 +402,8 @@ def _results_session_dir(
     timestamp: float,
     session_id: str,
 ) -> Path:
-    harness = agent_key(agent_server_module).removesuffix("_agent")
+    key = agent_key(agent_server_module)
+    harness = "native" if key == "legal_agent_bench_native_agent" else key.removesuffix("_agent")
     date = time.strftime("%Y%m%d", time.localtime(timestamp))
     clock = time.strftime("%H%M%S", time.localtime(timestamp))
     model = _results_segment(model_name, fallback="unknown_model")
@@ -668,10 +688,26 @@ def _load_skill_prompt(skills_dir: Path) -> str:
     return "".join(sections)
 
 
+def native_tool_definitions() -> list[dict[str, Any]]:
+    """Translate LAB's canonical tools to OpenAI Responses function tools."""
+    return [
+        {
+            "type": "function",
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+            "strict": False,
+        }
+        for tool in get_all_tool_definitions()
+    ]
+
+
 def compose_agent_input(
     task_dir: Path,
     skills_dir: Path,
     params: NeMoGymResponseCreateParamsNonStreaming,
+    *,
+    native: bool = False,
 ) -> NeMoGymResponseCreateParamsNonStreaming:
     try:
         task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
@@ -679,17 +715,23 @@ def compose_agent_input(
         instructions = task["instructions"]
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise LegalAgentBenchTaskError(f"Invalid LAB task configuration in {task_dir}: {exc}") from exc
-    system_prompt = (
-        GENERIC_HARNESS_PREAMBLE + _load_skill_prompt(skills_dir) + "\n\n## Task\n\n" + f"# {title}\n\n{instructions}"
-    )
-    return params.model_copy(
-        update={
-            "input": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": INITIAL_USER_PROMPT},
-            ]
-        }
-    )
+    preamble = LAB_SYSTEM_PROMPT if native else GENERIC_HARNESS_PREAMBLE
+    system_prompt = preamble + _load_skill_prompt(skills_dir) + "\n\n## Task\n\n" + f"# {title}\n\n{instructions}"
+    update: dict[str, Any] = {
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": INITIAL_USER_PROMPT},
+        ]
+    }
+    if native:
+        update.update(
+            {
+                "tools": native_tool_definitions(),
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
+            }
+        )
+    return params.model_copy(update=update)
 
 
 def _task_toml(task_dir: Path) -> dict[str, Any]:
@@ -1342,7 +1384,10 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 response = _empty_response(model_name)
                 task_dir = resolve_task_dir(self.config.runtime_tasks_dir, body.instance_id)
                 skills_dir = resolve_repo_path(self.config.skills_dir)
-                params = compose_agent_input(task_dir, skills_dir, params)
+                if self.config.agent_server_module == NATIVE_AGENT_MODULE:
+                    params = compose_agent_input(task_dir, skills_dir, params, native=True)
+                else:
+                    params = compose_agent_input(task_dir, skills_dir, params)
                 final_root = self._run_root(task_dir.name)
                 staging_temp = tempfile.TemporaryDirectory(prefix="legal-agent-bench-stage-")
                 staged_paths = self._paths_for_root(Path(staging_temp.name), create=True)

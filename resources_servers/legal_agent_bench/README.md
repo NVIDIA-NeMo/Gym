@@ -2,22 +2,25 @@
 
 This resource server runs the public Harvey
 [Legal Agent Benchmark (LAB)](https://github.com/harveyai/harvey-labs/tree/f46ef86e4788545622db25dcffa3aebb7a139929)
-through NeMo Gym. The compatibility configuration uses Harbor, and optional
-configurations run Gym's Hermes, Claude Code, or Codex harness through a
-LAB-owned Docker runner. The integration is pinned to upstream commit
+through NeMo Gym. The benchmark default is a direct Gym-native implementation
+of LAB's model/tool loop. Compatibility configurations run Harbor or Gym's
+Hermes, Claude Code, and Codex harnesses through the same LAB-owned sandbox
+runner. The integration is pinned to upstream commit
 `f46ef86e4788545622db25dcffa3aebb7a139929`: 1,749 tasks and the public
 `docx`, `pptx`, and `xlsx` skills.
 
 NeMo Gym schedules rollouts, the selected agent works with each task's
-documents inside Docker, and the task-local verifier scores every rubric
-criterion with an OpenAI-compatible judge model. The default configuration uses
-the Harbor agent harness, but it can easily be overriden through configuration
-settings.
+documents inside a sandbox, and the task-local verifier scores every rubric
+criterion with an OpenAI-compatible judge model. `--benchmark legal_agent_bench`
+selects the native loop; Harbor is available explicitly as
+`legal_agent_bench/config_harbor`.
 
 ## Requirements
 
 - Python 3.13.13 and [uv](https://docs.astral.sh/uv/)
-- Docker with a running daemon (the only supported container backend)
+- Docker with a running daemon for local execution and portable runtime
+  provisioning. ECS Fargate execution is also supported with an immutable
+  registry image; see the benchmark README.
 - An OpenAI-compatible policy endpoint and judge endpoint
 - At least 10 GB of free working space for preparation and the first Docker build
 
@@ -129,13 +132,14 @@ gym env test --resources-server legal_agent_bench
 
 ## Run and smoke test
 
-For the shortest copy-paste path that prepares and tests Harbor, Hermes, Claude
-Code, and Codex as benchmark variants, use the
-[benchmark README](../../benchmarks/legal_agent_bench/README.md#smoke-test-every-harness).
+For the shortest copy-paste path that prepares and tests the native loop,
+Harbor, Hermes, Claude Code, and Codex as benchmark variants, use the
+[benchmark README](../../benchmarks/legal_agent_bench/README.md#test-the-various-harnesses).
 The commands below describe the lower-level resource-server and standalone
 agent workflow.
 
-The default configuration starts the Harbor agent:
+The resource-server discovery config predates the benchmark wrapper and starts
+the Harbor compatibility agent:
 
 ```bash
 gym env start \
@@ -165,6 +169,7 @@ configurations and agent names are:
 | Config path | Direct-run agent |
 | --- | --- |
 | `resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml` | `legal_agent_bench_harbor_agent` |
+| `responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_native.yaml` | `legal_agent_bench_native_agent` |
 | `responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_hermes.yaml` | `legal_agent_bench_hermes_agent` |
 | `responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_claude_code.yaml` | `legal_agent_bench_claude_code_agent` |
 | `responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_codex.yaml` | `legal_agent_bench_codex_agent` |
@@ -173,26 +178,27 @@ The configurable files include
 `resources_servers/legal_agent_bench/configs/resources_only.yaml`, which starts
 the LAB resource server without also launching the compatibility Harbor agent.
 
-For example, start and run Hermes with:
+For example, start and run the Gym-native loop with:
 
 ```bash
 gym env start \
-  --config responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_hermes.yaml \
+  --config responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_native.yaml \
   --model-type vllm_model
 
 gym eval run --no-serve \
-  --config responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_hermes.yaml \
-  --agent legal_agent_bench_hermes_agent \
+  --config responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_native.yaml \
+  --agent legal_agent_bench_native_agent \
   --input resources_servers/legal_agent_bench/data/example.jsonl \
-  --output results/legal_agent_bench_hermes_smoke.jsonl \
+  --output results/legal_agent_bench_native_smoke.jsonl \
   --concurrency 1 \
   --limit 1
 ```
 
-Use the corresponding config and agent name for Claude Code or Codex. All
-three harnesses use the configured Gym policy endpoint. That endpoint must
-support the selected harness's protocol. Their CLI/runtime dependencies are
-pinned and provisioned into a portable cache on the first rollout.
+Use the corresponding config and agent name for Hermes, Claude Code, or Codex.
+All four non-Harbor choices use the configured Gym policy endpoint. That
+endpoint must support the selected harness's protocol. Their runtime
+dependencies are provisioned into a portable cache on the first rollout; CLI
+dependencies are pinned where applicable.
 
 The default `full_task` reward is LAB's official all-criteria score: a task
 earns `1.0` only when every criterion passes. For diagnostic partial credit,
@@ -231,6 +237,7 @@ The default paths are:
 - Credential-bearing runtime tasks: `data/runtime/harbor_tasks/legal_agent_bench`
 - Harbor jobs: `results/legal_agent_bench/harbor_jobs`
 - Configurable agent runtimes: `responses_api_agents/legal_agent_bench_agent/.deps`
+- Gym-native rollout artifacts: `results/legal_agent_bench/native_jobs`
 - Hermes rollout artifacts: `results/legal_agent_bench/hermes_jobs`
 - Claude Code rollout artifacts: `results/legal_agent_bench/claude_code_jobs`
 - Codex rollout artifacts: `results/legal_agent_bench/codex_jobs`
@@ -264,10 +271,10 @@ sees only its selected Gym package and public task inputs, while the verifier
 starts after that container is destroyed and receives the completed LAB run
 read-only.
 
-To inspect a configurable smoke run:
+To inspect a native or configurable smoke run:
 
 ```bash
-ARTIFACT_DIR=$(jq -r '.artifact_dir' results/legal_agent_bench_hermes_smoke.jsonl)
+ARTIFACT_DIR=$(jq -r '.artifact_dir' results/legal_agent_bench_native_smoke.jsonl)
 jq . "$ARTIFACT_DIR/run_summary.json"
 jq . "$ARTIFACT_DIR/agent/trajectory.json"
 open "$ARTIFACT_DIR/verifier/report.html"  # macOS; use xdg-open on Linux

@@ -112,6 +112,7 @@ def _successful_response(text: str = "Done") -> app.NeMoGymResponse:
 @pytest.mark.parametrize(
     ("module", "expected"),
     [
+        ("responses_api_agents.legal_agent_bench_native_agent.app", "legal_agent_bench_native_agent"),
         ("responses_api_agents.hermes_agent.app", "hermes_agent"),
         ("responses_api_agents.claude_code_agent.app", "claude_code_agent"),
         ("responses_api_agents.codex_agent.app", "codex_agent"),
@@ -129,6 +130,7 @@ def test_agent_key_rejects_invalid_modules(module) -> None:
 
 def test_all_supported_agents_have_dependency_scripts() -> None:
     for module in (
+        "responses_api_agents.legal_agent_bench_native_agent.app",
         "responses_api_agents.hermes_agent.app",
         "responses_api_agents.claude_code_agent.app",
         "responses_api_agents.codex_agent.app",
@@ -324,6 +326,7 @@ def test_config_defaults_are_docker_and_single_concurrency() -> None:
 @pytest.mark.parametrize(
     ("module", "job_dir"),
     [
+        ("responses_api_agents.legal_agent_bench_native_agent.app", "native_jobs"),
         ("responses_api_agents.hermes_agent.app", "hermes_jobs"),
         ("responses_api_agents.claude_code_agent.app", "claude_code_jobs"),
         ("responses_api_agents.codex_agent.app", "codex_jobs"),
@@ -417,6 +420,28 @@ def test_compose_agent_input_uses_task_and_skills_without_rubric(monkeypatch, tm
     assert result.input[1]["content"] == app.INITIAL_USER_PROMPT
 
 
+def test_native_agent_input_uses_upstream_prompt_and_canonical_tools(monkeypatch, tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    skills = _skills(tmp_path)
+    monkeypatch.setattr(app, "validate_harness_skills", lambda path: Path(path))
+
+    result = app.compose_agent_input(
+        task,
+        skills,
+        NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        native=True,
+    )
+
+    system = result.input[0]["content"]
+    assert system.startswith(app.LAB_SYSTEM_PROMPT)
+    assert "Write a memo." in system
+    assert '"criteria"' not in system
+    assert '"id": "1"' not in system
+    assert [tool["name"] for tool in result.tools] == ["bash", "read", "write", "write_docx", "edit", "glob", "grep"]
+    assert all(tool["type"] == "function" and tool["strict"] is False for tool in result.tools)
+    assert result.parallel_tool_calls is False
+
+
 def test_verifier_credentials_are_read_separately_from_sandbox_resources(tmp_path) -> None:
     _root, task = _task_tree(tmp_path)
     assert app._verifier_env(task) == {
@@ -466,6 +491,8 @@ def test_runner_config_preserves_dynamic_agent_configuration(tmp_path) -> None:
     assert "socket.create_connection" in (tmp_path / "agent_runner.py").read_text()
     assert 'os.environ.get("LAB_POLICY_MODEL_URL", runner["model_url"])' in (tmp_path / "agent_runner.py").read_text()
     assert "runner_status.json" in (tmp_path / "agent_runner.py").read_text()
+    assert '"responses_api_models"' in (tmp_path / "agent_runner.py").read_text()
+    assert 'os.environ.setdefault("NEMO_GYM_CONFIG_DICT", "{}")' in (tmp_path / "agent_runner.py").read_text()
     assert "hermes_model_metadata.fetch_endpoint_model_metadata" in (tmp_path / "agent_runner.py").read_text()
     assert "hermes_usage_pricing.fetch_endpoint_model_metadata" in (tmp_path / "agent_runner.py").read_text()
 
