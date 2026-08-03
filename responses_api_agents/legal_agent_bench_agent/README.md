@@ -22,15 +22,17 @@ compatibility config is reserved for Harbor.
 ## Execution boundary
 
 For each rollout, the runner validates `instance_id`, builds or reuses the
-content-addressed LAB image, provisions a cached portable Linux runtime for the
-selected harness inside that image, and starts an agent-only Docker sandbox.
-Provisioning selects ARM64 or x86-64 dependencies from the container
-architecture, so the host does not need to execute container binaries. The
-runtime cache is invalidated by changes to its setup script, requirements,
-configured CLI pin, LAB image, Gym packaging metadata, or installed `nemo_gym`
-source. Only the selected Gym agent package, source documents, skills, and
-portable dependencies are mounted read-only; the repository and LAB task cache
-are not mounted. Output and scratch directories are writable.
+content-addressed LAB image, provisions a portable Linux runtime for the
+selected harness, and starts an agent-only Docker sandbox. Runtimes are
+immutable and content-addressed by their setup script, requirements, configured
+CLI pin, LAB image identity and architecture, Gym packaging metadata, and
+installed `nemo_gym` source. An interprocess lock and atomic publication
+prevent concurrent evaluations from rewriting a runtime that is being built or
+used.
+
+Dependency provisioning exposes an explicit allowlist containing only the
+installer and required Gym package files. It never mounts the repository,
+`env.yaml`, task tests, judge credentials, or unrelated files.
 
 Only the task instructions and public skill manuals are supplied to the
 configured agent. After it exits, its container is destroyed before a fresh

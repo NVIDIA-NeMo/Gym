@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
@@ -317,6 +318,7 @@ def ensure_agent_runtime(
     image: str,
     docker_network: Optional[str],
     timeout_seconds: int,
+    docker_platform: Optional[str] = None,
 ) -> Path:
     key = agent_key(agent_server_module)
     script = resolve_agent_setup_script(agent_server_module)
@@ -325,6 +327,12 @@ def ensure_agent_runtime(
     docker = shutil.which("docker")
     if not docker:
         raise FileNotFoundError("Docker CLI is required to provision Legal Agent Bench agent dependencies")
+    if docker_platform:
+        subprocess.run(
+            [docker, "pull", "--platform", docker_platform, image],
+            check=True,
+            timeout=timeout_seconds,
+        )
     image_info = subprocess.run(
         [docker, "image", "inspect", "--format", "{{.Id}}:{{.Os}}/{{.Architecture}}", image],
         check=True,
@@ -338,45 +346,83 @@ def ensure_agent_runtime(
             script,
             requirements,
             PARENT_DIR / "pyproject.toml",
+            PARENT_DIR / "README.md",
             PARENT_DIR / "nemo_gym",
         ],
         values=[image_info, json.dumps(runtime_env, sort_keys=True)],
     )
-    deps_dir = PACKAGE_DIR / ".deps" / key
+    cache_root = PACKAGE_DIR / ".deps" / key
+    deps_dir = cache_root / recipe
     sentinel = deps_dir / ".installed"
     if sentinel.is_file() and sentinel.read_text().strip() == recipe:
         return deps_dir
 
-    if deps_dir.exists():
-        shutil.rmtree(deps_dir)
-    deps_dir.mkdir(parents=True)
-    env = {
-        "PORTABLE_PYTHON_SH": (
-            "/nemo_gym_mount/responses_api_agents/legal_agent_bench_agent/setup_scripts/_portable_python.sh"
-        ),
-        "DEPS_DIR": "/agent_deps",
-        "NEMO_GYM_ROOT": "/nemo_gym_mount",
-        "HOME": "/tmp",
-        **runtime_env,
-    }
-    command = [
-        docker,
-        "run",
-        "--rm",
-        "--user",
-        f"{os.getuid()}:{os.getgid()}",
-        "--volume",
-        f"{PARENT_DIR}:/nemo_gym_mount:ro",
-        "--volume",
-        f"{deps_dir}:/agent_deps",
-    ]
-    if docker_network:
-        command.extend(["--network", docker_network])
-    for name, value in env.items():
-        command.extend(["--env", f"{name}={value}"])
-    command.extend([image, "bash", f"/nemo_gym_mount/{script.relative_to(PARENT_DIR).as_posix()}"])
-    subprocess.run(command, check=True, timeout=timeout_seconds)
-    sentinel.write_text(recipe)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    lock_root = PACKAGE_DIR / ".deps" / ".locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_root / f"{key}-{recipe}.lock"
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            if sentinel.is_file() and sentinel.read_text().strip() == recipe:
+                return deps_dir
+
+            with tempfile.TemporaryDirectory(prefix=f".{recipe}-bundle-", dir=cache_root) as bundle_raw:
+                bundle = Path(bundle_raw)
+                shutil.copy2(PARENT_DIR / "pyproject.toml", bundle / "pyproject.toml")
+                shutil.copy2(PARENT_DIR / "README.md", bundle / "README.md")
+                shutil.copytree(PARENT_DIR / "nemo_gym", bundle / "nemo_gym")
+                staged_agent = bundle / "responses_api_agents" / key
+                (staged_agent / "scripts").mkdir(parents=True)
+                shutil.copy2(requirements, staged_agent / "requirements.txt")
+                shutil.copy2(script, staged_agent / "scripts" / script.name)
+                staged_setup = bundle / "responses_api_agents" / "legal_agent_bench_agent" / "setup_scripts"
+                staged_setup.mkdir(parents=True)
+                shutil.copy2(PORTABLE_PYTHON_SH, staged_setup / PORTABLE_PYTHON_SH.name)
+
+                build_dir = Path(tempfile.mkdtemp(prefix=f".{recipe}-build-", dir=cache_root))
+                try:
+                    env = {
+                        "PORTABLE_PYTHON_SH": (
+                            "/nemo_gym_mount/responses_api_agents/legal_agent_bench_agent/"
+                            "setup_scripts/_portable_python.sh"
+                        ),
+                        "DEPS_DIR": "/agent_deps",
+                        "NEMO_GYM_ROOT": "/nemo_gym_mount",
+                        "HOME": "/tmp",
+                        **runtime_env,
+                    }
+                    command = [
+                        docker,
+                        "run",
+                        "--rm",
+                        "--user",
+                        f"{os.getuid()}:{os.getgid()}",
+                        "--volume",
+                        f"{bundle}:/nemo_gym_mount:ro",
+                        "--volume",
+                        f"{build_dir}:/agent_deps",
+                    ]
+                    if docker_platform:
+                        command.extend(["--platform", docker_platform])
+                    if docker_network:
+                        command.extend(["--network", docker_network])
+                    for name, value in env.items():
+                        command.extend(["--env", f"{name}={value}"])
+                    command.extend(
+                        [image, "bash", f"/nemo_gym_mount/responses_api_agents/{key}/scripts/{script.name}"]
+                    )
+                    subprocess.run(command, check=True, timeout=timeout_seconds)
+                    (build_dir / ".installed").write_text(recipe)
+                    if deps_dir.exists():
+                        shutil.rmtree(build_dir)
+                    else:
+                        build_dir.replace(deps_dir)
+                finally:
+                    if build_dir.exists():
+                        shutil.rmtree(build_dir)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     return deps_dir
 
 
