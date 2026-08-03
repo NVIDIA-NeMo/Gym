@@ -1079,10 +1079,12 @@ class OpenSandboxProvider:
 
             return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 
-        # Backstop for the whole exec. The inner deadlines bound the common cases
-        # and fire first; this only catches wedges (a black-holed request, a
-        # status that never flips) that would otherwise hang the task forever.
-        hard_cap_s = None if sdk_timeout_s is None else (2.0 * float(sdk_timeout_s) + 30.0)
+        # Backstop for wedges (a black-holed request, a status that never flips)
+        # the inner deadlines miss. Background exec polls, so its sdk_timeout_s
+        # bounds one request rather than the command: an uncapped background
+        # command has to stay uncapped.
+        cap_basis = None if (self._operations.background_exec and timeout_s is None) else sdk_timeout_s
+        hard_cap_s = None if cap_basis is None else (2.0 * float(cap_basis) + 30.0)
         if hard_cap_s is None:
             return await _dispatch()
         try:

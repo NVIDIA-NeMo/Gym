@@ -700,8 +700,11 @@ async def test_exec_hard_cap_converts_wait_for_timeout(monkeypatch: pytest.Monke
         await provider.exec(handle, "sleep 999", timeout_s=30)
 
 
-async def test_exec_background_without_timeout_skips_hard_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no per-command timeout and no connection request timeout, exec runs uncapped."""
+@pytest.mark.parametrize("request_timeout_s", [None, 5])
+async def test_exec_background_without_timeout_skips_hard_cap(
+    monkeypatch: pytest.MonkeyPatch, request_timeout_s: int | None
+) -> None:
+    """An uncapped background command stays uncapped; request_timeout_s bounds one poll."""
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
@@ -733,8 +736,17 @@ async def test_exec_background_without_timeout_skips_hard_cap(monkeypatch: pytes
     )
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
 
+    wait_for_timeouts: list[float | None] = []
+    real_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable: Any, timeout: float | None = None) -> Any:
+        wait_for_timeouts.append(timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", recording_wait_for)
+
     provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"request_timeout_s": None},
+        connection={"request_timeout_s": request_timeout_s},
         probe={"command": None},
         operations={"background_exec": True, "background_poll_interval_s": 0.01},
     )
@@ -745,6 +757,9 @@ async def test_exec_background_without_timeout_skips_hard_cap(monkeypatch: pytes
     result = await provider.exec(handle, "echo hi")
 
     assert result == opensandbox_provider.SandboxExecResult(stdout="ok", stderr=None, return_code=0, error_type=None)
+    if request_timeout_s is not None:
+        # The per-poll timeout must not become the whole command's hard cap.
+        assert 2.0 * request_timeout_s + 30.0 not in wait_for_timeouts
 
 
 async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
