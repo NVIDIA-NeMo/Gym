@@ -99,7 +99,9 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 
 runner = json.loads(Path("/trajectories_mount/runner.json").read_text())
-model_url = runner["model_url"].rstrip("/")
+# ECS Fargate injects this value after resolving the host-side policy URL through
+# its SSH reverse tunnel. Other providers use the URL persisted in runner.json.
+model_url = os.environ.get("LAB_POLICY_MODEL_URL", runner["model_url"]).rstrip("/")
 model_url_v1 = model_url if model_url.endswith("/v1") else model_url + "/v1"
 status_path = Path("/trajectories_mount/runner_status.json")
 
@@ -552,6 +554,16 @@ def sandbox_model_url(
     return urlunsplit(parsed._replace(netloc=f"{userinfo}host.docker.internal{port}"))
 
 
+def host_tunnel_model_url(model_url: str) -> str:
+    """Translate wildcard listeners into a concrete host endpoint for an ECS reverse tunnel."""
+    parsed = urlsplit(model_url)
+    if (parsed.hostname or "").lower() not in {"0.0.0.0", "::"}:
+        return model_url
+    userinfo = parsed.netloc.rsplit("@", 1)[0] + "@" if "@" in parsed.netloc else ""
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return urlunsplit(parsed._replace(netloc=f"{userinfo}127.0.0.1{port}"))
+
+
 def _response_output_text(response: NeMoGymResponse) -> str:
     parts: list[str] = []
     for item in response.output:
@@ -784,7 +796,8 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
     def _model_url(self, body: LegalAgentBenchRunRequest) -> str:
         if self.config.sandbox_model_base_url:
             return self.config.sandbox_model_base_url
-        if _provider_name(self._provider_config()) != "docker":
+        provider_name = _provider_name(self._provider_config())
+        if provider_name not in {"docker", "ecs_fargate"}:
             raise LegalAgentBenchConfigurationError(
                 "Non-Docker LAB sandboxes require sandbox_model_base_url reachable from the provider"
             )
@@ -800,7 +813,22 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
             ) from exc
         rollout_id = self.rollout_id_from_run(body)
         prefixed_url = apply_rollout_prefix(base_url, rollout_id) if rollout_id else base_url
-        return sandbox_model_url(prefixed_url, docker_network=self.config.docker_network)
+        if provider_name == "docker":
+            return sandbox_model_url(prefixed_url, docker_network=self.config.docker_network)
+        return host_tunnel_model_url(prefixed_url)
+
+    def _agent_provider_options(self, model_url: str) -> dict[str, Any]:
+        """Return provider-specific routing without exposing policy credentials to the sandbox."""
+        if _provider_name(self._provider_config()) != "ecs_fargate" or self.config.sandbox_model_base_url:
+            return {}
+        return {
+            "outside_endpoints": [
+                {
+                    "url": model_url,
+                    "env_var": "LAB_POLICY_MODEL_URL",
+                }
+            ]
+        }
 
     def _model_name(self) -> str:
         global_config = getattr(getattr(self, "server_client", None), "global_config_dict", None)
@@ -917,6 +945,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         skills_dir: Path,
         deps_dir: Path,
         paths: dict[str, Path],
+        model_url: str,
     ) -> AsyncSandbox:
         return AsyncSandbox(
             self._provider_config(),
@@ -926,6 +955,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 workdir="/workspace/output",
                 resources=_sandbox_resources(task_dir),
                 metadata=self._sandbox_metadata(),
+                provider_options=self._agent_provider_options(model_url),
             ),
         )
 
@@ -1285,7 +1315,8 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 image = await self._ensure_image(task_dir)
                 deps_dir = await self._ensure_runtime(image)
                 self._stage_agent_source(staged_paths)
-                self._write_runner_config(staged_paths, params, self._model_url(body))
+                model_url = self._model_url(body)
+                self._write_runner_config(staged_paths, params, model_url)
 
                 sandbox = self._agent_sandbox(
                     image=image,
@@ -1293,6 +1324,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                     skills_dir=skills_dir,
                     deps_dir=deps_dir,
                     paths=staged_paths,
+                    model_url=model_url,
                 )
                 await sandbox.start()
                 await self._stage_agent_sandbox(

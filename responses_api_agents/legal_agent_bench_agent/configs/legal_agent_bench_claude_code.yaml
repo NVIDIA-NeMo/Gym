@@ -19,6 +19,11 @@ legal_agent_bench_claude_code_agent:
       concurrency: 1
       agent_timeout_seconds: 10800
       verifier_timeout_seconds: 3600
+      sandbox_provider:
+        docker: {}
+      sandbox_image: null
+      runtime_docker_platform: null
+      sandbox_model_base_url: null
       agent_server_module: responses_api_agents.claude_code_agent.app
       agent_server_class: ClaudeCodeAgent
       agent_config_class: ClaudeCodeAgentConfig
