@@ -25,6 +25,7 @@ judge_model: ${oc.env:PINCHBENCH_JUDGE_MODEL,null}
 judge_base_url: ${oc.env:PINCHBENCH_JUDGE_BASE_URL,null}
 judge_api_key: ${oc.env:PINCHBENCH_JUDGE_API_KEY,null}
 brave_api_key: ${oc.env:PINCHBENCH_BRAVE_API_KEY,null}
+tavily_api_key: ${oc.env:PINCHBENCH_TAVILY_API_KEY,null}
 
 # `_inherit_from` keeps this benchmark isolated from the generic agent instance
 # above, so overriding the dataset list here does not mutate `pinchbench_agent`.
