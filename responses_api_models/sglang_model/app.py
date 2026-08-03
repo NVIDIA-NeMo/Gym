@@ -32,6 +32,7 @@ the training-class upgrade in `postprocess_assistant_message_dict`) is inherited
 
 The pure request/response transforms live in `_logic.py` (unit-tested in tests/).
 """
+
 import os
 import sys
 from time import time
@@ -48,8 +49,11 @@ from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
+)
+from nemo_gym.server_utils import (
     request as ng_request,
 )
+
 
 try:
     from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
@@ -57,13 +61,14 @@ except ImportError:  # ensure the Gym repo root is importable for the cross-serv
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
+from transformers import AutoTokenizer
+
 from responses_api_models.sglang_model._logic import (
     build_sampling_params,
     cap_to_context,
     extract_generated_tokens_and_logprobs,
     normalize_token_ids,
 )
-from transformers import AutoTokenizer
 
 
 class SGLangModelConfig(VLLMModelConfig):

@@ -17,6 +17,7 @@
 Split out from app.py so it can be unit-tested without importing nemo_gym / the server
 framework (which is only available inside the per-server venv). No third-party imports.
 """
+
 from typing import Any, Dict, List, Tuple
 
 
@@ -52,9 +53,7 @@ def extract_generated_tokens_and_logprobs(
     if val:
         new = idx if idx else ids
         if len(new) != len(val):
-            raise RuntimeError(
-                f"SGLang mismatched gen logprob fields: {len(new)} ids vs {len(val)} logprobs"
-            )
+            raise RuntimeError(f"SGLang mismatched gen logprob fields: {len(new)} ids vs {len(val)} logprobs")
         return [int(x) for x in new], [float(x) for x in val]
 
     raise RuntimeError(
@@ -80,11 +79,7 @@ def normalize_token_ids(rendered: Any) -> List[int]:
 
 def build_sampling_params(body_dict: Dict[str, Any], default_max_new_tokens: int) -> Dict[str, Any]:
     """Map OpenAI chat-completion params to SGLang sampling_params."""
-    max_new = (
-        body_dict.get("max_completion_tokens")
-        or body_dict.get("max_tokens")
-        or default_max_new_tokens
-    )
+    max_new = body_dict.get("max_completion_tokens") or body_dict.get("max_tokens") or default_max_new_tokens
     sp: Dict[str, Any] = {
         "temperature": body_dict.get("temperature", 1.0),
         "top_p": body_dict.get("top_p", 1.0),
