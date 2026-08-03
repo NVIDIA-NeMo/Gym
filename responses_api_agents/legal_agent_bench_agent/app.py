@@ -56,6 +56,33 @@ AGENT_CLI_PINS = {
     "claude_code_agent": ("claude_code_version", "CLAUDE_SPEC", "@anthropic-ai/claude-code"),
     "codex_agent": ("codex_version", "CODEX_SPEC", "@openai/codex"),
 }
+CODEX_MODEL_CATALOG_PATH = "/trajectories_mount/codex_model_catalog.json"
+CODEX_MODEL_CATALOG = {
+    "models": [
+        {
+            "slug": "gym-policy-model",
+            "display_name": "Gym policy model",
+            "description": "Model selected by the configured Gym policy server.",
+            "supported_reasoning_levels": [],
+            "shell_type": "default",
+            "visibility": "none",
+            "supported_in_api": True,
+            "priority": 99,
+            "availability_nux": None,
+            "upgrade": None,
+            "base_instructions": "",
+            "supports_reasoning_summaries": True,
+            "support_verbosity": False,
+            "default_verbosity": None,
+            "apply_patch_tool_type": None,
+            "truncation_policy": {"mode": "bytes", "limit": 10_000},
+            "supports_parallel_tool_calls": False,
+            "context_window": 272_000,
+            "max_context_window": 272_000,
+            "experimental_supported_tools": [],
+        }
+    ]
+}
 
 GENERIC_HARNESS_PREAMBLE = """\
 You are an AI agent running in an automated Legal Agent Bench evaluation.
@@ -899,11 +926,18 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         model_url: str,
     ) -> None:
         (paths["runtime"] / "agent_runner.py").write_text(_RUNNER_SOURCE)
+        agent_kwargs = dict(self.config.agent_kwargs)
+        if agent_key(self.config.agent_server_module) == "codex_agent":
+            extra_config = dict(agent_kwargs.get("extra_config") or {})
+            if "model_catalog_json" not in extra_config:
+                (paths["runtime"] / "codex_model_catalog.json").write_text(json.dumps(CODEX_MODEL_CATALOG, indent=2))
+                extra_config["model_catalog_json"] = CODEX_MODEL_CATALOG_PATH
+            agent_kwargs["extra_config"] = extra_config
         runner = {
             "agent_server_module": self.config.agent_server_module,
             "agent_server_class": self.config.agent_server_class,
             "agent_config_class": self.config.agent_config_class,
-            "agent_kwargs": self.config.agent_kwargs,
+            "agent_kwargs": agent_kwargs,
             "model_url": model_url,
             "model_connect_timeout_seconds": self.config.model_connect_timeout_seconds,
             "disable_endpoint_metadata_probe": agent_key(self.config.agent_server_module) == "hermes_agent",
