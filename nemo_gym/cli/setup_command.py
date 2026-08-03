@@ -113,8 +113,14 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
+    venv_marker_fpath = venv_path / ".nemo_gym_venv_complete"
     skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
-    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
+    should_skip_venv_setup = (
+        bool(skip_venv_if_present)
+        and venv_python_fpath.exists()
+        and venv_activate_fpath.exists()
+        and venv_marker_fpath.exists()
+    )
 
     # explicitly set python path if specified. In Google colab, gym env start fails due to uv pip install falls back to system python (/usr) without this and errors.
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
@@ -169,7 +175,11 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        env_setup_cmd = (
+            f"rm -f {venv_marker_fpath} && "
+            f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd} && "
+            f"touch {venv_marker_fpath}"
+        )
 
     return f"cd {dir_path} && {env_setup_cmd}"
 
