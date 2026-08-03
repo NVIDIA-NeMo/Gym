@@ -482,7 +482,10 @@ def prefetch(
         # Serial execution reduces uv cache size (same reasoning as dry_run in RunHelper.start).
         setup_cmd = setup_env_command(dir_path, global_config_dict, top_level_path)
         process = run_command(setup_cmd, dir_path, server_name=top_level_path)
-        process.communicate()
+        returncode = process.wait()
+        if returncode != 0:
+            print(f"ERROR: prefetch failed for {dir_path} (exit {returncode})")
+            raise SystemExit(returncode)
 
     print("Prefetch complete.")
 
