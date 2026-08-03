@@ -80,6 +80,16 @@ def test_task_env_gateway_mode():
     assert env["BRAVE_API_KEY"] == "brave-key"
 
 
+def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
+    agent = make_agent(openclaw_provider_timeout_seconds=14400)
+    wrapper = agent._write_direct_exec_wrapper(tmp_path)
+    wrapper_text = wrapper.read_text()
+
+    assert 'custom_provider["timeoutSeconds"] = provider_timeout_s' in wrapper_text
+    assert 'defaults["timeoutSeconds"] = provider_timeout_s' in wrapper_text
+    assert 'agent["timeoutSeconds"] = provider_timeout_s' in wrapper_text
+
+
 def test_build_spec_from_config():
     agent = make_agent(
         sandbox_spec={

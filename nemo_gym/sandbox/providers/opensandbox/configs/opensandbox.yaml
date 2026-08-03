@@ -26,10 +26,25 @@ sandbox:
       protocol: http
       request_timeout_s: 300
       use_server_proxy: true
+      # Must stay below the server's keep-alive idle timeout (uvicorn: ~5s),
+      # else pooled sockets are reused after the server has closed them.
+      keepalive_expiry_s: 3.0
+      # 0 disables connection reuse.
+      max_keepalive_connections: 20
+      # null for no cap.
+      max_connections: 100
+      connect_retries: 2
+      # "aiohttp" routes through the optional httpx-aiohttp bridge, falling
+      # back to httpx with a warning when it is not installed.
+      transport_backend: httpx
     create:
       request_timeout_s: 1200
-      timeout_s: 1200
-      skip_health_check: true
+      # Must exceed the spec's ready_timeout_s (1200 for mini_swe_agent_2): this
+      # bounds the whole create call, which now includes the readiness wait.
+      timeout_s: 1500
+      # Skipping the check lets the first command race a pod whose exec daemon
+      # is not listening yet, which returns a 502 and kills the rollout.
+      skip_health_check: false
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0
@@ -42,5 +57,27 @@ sandbox:
       retries: 5
       retry_delay_s: 1.0
       retry_max_delay_s: 45.0
+      # A retried command the server already started runs twice; agent commands
+      # are usually mutating. Raise only for idempotent workloads.
       command_retries: 0
       close_timeout_s: 30
+    # Job attribution merged into every sandbox's metadata. OpenSandbox propagates
+    # metadata as Kubernetes labels on the sandbox resources, so sandboxes are
+    # attributable both via the OpenSandbox list API and at the cluster level, e.g.
+    # `kubectl get pods -l nemo-gym.nvidia.com/team=my-team`. Unset fields auto-detect
+    # from NEMO_GYM_TEAM / NEMO_GYM_USER / NEMO_GYM_WORKLOAD, then Slurm job env vars
+    # (SLURM_JOB_ACCOUNT / SLURM_JOB_USER / SLURM_JOB_NAME), then the OS login name for
+    # `user` ("root" is ignored) and the gym CLI's NEMO_GYM_CONFIG_PATH server instance
+    # name for `workload`; unresolvable fields are omitted. `run` scopes sandboxes to one
+    # launch of the creating process (NEMO_GYM_RUN_ID, else generated per process and
+    # logged) so an interrupted run's sandboxes can be listed and cleaned up exactly.
+    # Explicit sandbox_spec.metadata and default_metadata keys always win over
+    # attribution keys.
+    attribution:
+      enabled: true
+      # Kubernetes prefixed-key namespace for the injected label keys; "" for bare keys.
+      key_prefix: nemo-gym.nvidia.com/
+      # team: my-team
+      # user: my-user
+      # workload: my-benchmark
+      # run: my-run-id
