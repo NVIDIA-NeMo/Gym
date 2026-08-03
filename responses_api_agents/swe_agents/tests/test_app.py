@@ -933,6 +933,41 @@ class TestOpenHandsHarnessProcessor:
             processor.get_run_command()
             assert "CAMEL_CASE_TOOL_NAMES=true" in self._read_agent_script(config)
 
+    def _reuse_processor(self) -> OpenHandsHarnessProcessor:
+        return OpenHandsHarnessProcessor(config=_minimal_server_config())
+
+    def _fake_openhands_dir(self, tmp_path: Path, probe_script: str) -> Path:
+        openhands_dir = tmp_path / "OpenHands"
+        bin_dir = openhands_dir / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        python = bin_dir / "python"
+        python.write_text(probe_script)
+        python.chmod(0o755)
+        return openhands_dir
+
+    @pytest.mark.parametrize(
+        ("probe_script", "reusable"),
+        [
+            (None, False),  # no setup at all
+            ("#!/bin/sh\nexit 0\n", True),  # healthy venv
+            ("#!/bin/sh\nexit 1\n", False),  # interpreter exists but the probe fails -> rebuild
+        ],
+    )
+    def test_setup_reuse_gate(self, tmp_path, probe_script, reusable) -> None:
+        """A pre-existing setup is reused only when its venv passes the
+        runtime probe: publishing a corpse makes every subsequent episode
+        fail after the agent has done its real work."""
+        openhands_dir = self._fake_openhands_dir(tmp_path, probe_script) if probe_script else tmp_path / "OpenHands"
+
+        assert self._reuse_processor()._existing_setup_is_reusable(openhands_dir) is reusable
+
+    def test_probe_reports_the_last_stderr_line(self, tmp_path) -> None:
+        openhands_dir = self._fake_openhands_dir(
+            tmp_path, "#!/bin/sh\necho 'ModuleNotFoundError: No module named wandb' >&2\nexit 1\n"
+        )
+        failure = self._reuse_processor()._probe_openhands_venv(openhands_dir)
+        assert failure is not None and "ModuleNotFoundError" in failure
+
 
 ########################################
 # Workspace path + user-message resolver tests
