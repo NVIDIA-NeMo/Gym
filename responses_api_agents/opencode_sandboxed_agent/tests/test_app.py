@@ -21,8 +21,11 @@ from pytest import fixture
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
 )
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
 
@@ -60,3 +63,17 @@ class TestOpenCodeSandboxedAgent:
         ]
 
         assert expected_output_items == actual_output_items
+
+    def test_opencode_export_to_usages(self, opencode_export_test_data: Dict[str, Any]) -> None:
+        actual_usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, opencode_export_test_data)
+        expected_usages = [
+            NeMoGymResponseUsage(
+                input_tokens=55,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7808),
+                output_tokens=10,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=7873,
+            )
+        ]
+
+        assert expected_usages == actual_usages
