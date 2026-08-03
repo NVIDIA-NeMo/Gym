@@ -458,6 +458,7 @@ def prefetch(
 
     top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
+    seen_dirs: set = set()
     for top_level_path in top_level_paths:
         server_config_dict = global_config_dict[top_level_path]
         if not isinstance(server_config_dict, DictConfig):
@@ -476,6 +477,10 @@ def prefetch(
             continue
 
         dir_path = _resolve_server_dir(Path(first_key, second_key))
+        if dir_path in seen_dirs:
+            print(f"Skipping duplicate: {dir_path}")
+            continue
+        seen_dirs.add(dir_path)
         print(f"Pre-warming venv for: {dir_path}")
 
         # Run only the setup (venv creation + dep install) — no server start.
