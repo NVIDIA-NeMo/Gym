@@ -203,11 +203,16 @@ class ProofWithJudgeResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class ProofWithJudgeVerifyRequest(BaseVerifyRequest):
-    problem: str = ""
+    # Force a 422 error if the problem is empty.
+    problem: str
 
 
 class ProofWithJudgeVerifyResponse(BaseVerifyResponse):
-    pass
+    # None represents no failure.
+    # A format reason means the policy failed to follow the format and received an automatic 0.
+    # "judge_unparseable" means that the judge itself failed to produce a parseable score.
+    # Distinguishing between these cases is needed for judge error-proofing.
+    failure_reason: Optional[str] = None
 
 
 class IncorrectGroupCoordinator(BaseModel):
@@ -231,7 +236,7 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
     )
 
     async def verify(self, body: ProofWithJudgeVerifyRequest) -> ProofWithJudgeVerifyResponse:
-        problem = getattr(body, "problem", "") or (body.model_dump().get("problem") or "")
+        problem = body.problem
         full_response = self._extract_assistant_text(body.response)
         if not full_response:
             reward, details = 0.0, {"r_format": 0.0, "reason": "empty_response", "judge_generated_tokens": 0}
@@ -248,7 +253,7 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
                 reward=reward,
                 details=details,
             )
-        return ProofWithJudgeVerifyResponse(**body.model_dump(), reward=reward)
+        return ProofWithJudgeVerifyResponse(**body.model_dump(), reward=reward, failure_reason=details.get("reason"))
 
     async def _append_log_jsonl(
         self,
@@ -460,22 +465,29 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
             beta=beta,
         )
         verifier_response, verifier_generated_tokens = verifier_result
-        r_y = extract_boxed_score(verifier_response) or 0.0
+        r_y_score = extract_boxed_score(verifier_response)
+        # Distinguish between 0 score and unparseable score.
+        r_y = r_y_score if r_y_score is not None else 0.0
+        judge_unparseable = r_y_score is None
 
         if beta == 0:
-            return alpha * r_y, {
+            details = {
                 "r_y": r_y,
                 "s_prime": s_prime,
                 "judge_generated_tokens": verifier_generated_tokens,
                 "verifier_generated_tokens": verifier_generated_tokens,
                 "verifier_response": verifier_response,
             }
+            if judge_unparseable:
+                details["reason"] = "judge_unparseable"
+            return alpha * r_y, details
 
         assert meta_result is not None
         meta_response, meta_generated_tokens = meta_result
-        r_meta = extract_boxed_score(meta_response) or 0.0
+        r_meta_score = extract_boxed_score(meta_response)
+        r_meta = r_meta_score if r_meta_score is not None else 0.0
         r_z = (1.0 - abs(s_prime - r_y)) * r_meta
-        return alpha * r_y + beta * r_z, {
+        details = {
             "judge_generated_tokens": verifier_generated_tokens + meta_generated_tokens,
             "r_y": r_y,
             "r_meta": r_meta,
@@ -485,6 +497,9 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
             "verifier_response": verifier_response,
             "meta_response": meta_response,
         }
+        if judge_unparseable or r_meta_score is None:
+            details["reason"] = "judge_unparseable"
+        return alpha * r_y + beta * r_z, details
 
 
 if __name__ == "__main__":
