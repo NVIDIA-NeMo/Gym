@@ -487,6 +487,49 @@ def test_runner_config_keeps_endpoint_metadata_for_non_hermes_harnesses(tmp_path
     assert payload["disable_endpoint_metadata_probe"] is False
 
 
+def test_runner_config_stages_default_codex_model_catalog(tmp_path) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(
+            agent_server_module="responses_api_agents.codex_agent.app",
+            agent_server_class="CodexAgent",
+            agent_config_class="CodexAgentConfig",
+        )
+    )
+
+    runner._write_runner_config(
+        {"runtime": tmp_path},
+        NeMoGymResponseCreateParamsNonStreaming(input="Do the work"),
+        "http://model.internal:8000",
+    )
+
+    payload = json.loads((tmp_path / "runner.json").read_text())
+    assert payload["agent_kwargs"]["extra_config"]["model_catalog_json"] == app.CODEX_MODEL_CATALOG_PATH
+    catalog = json.loads((tmp_path / "codex_model_catalog.json").read_text())
+    assert catalog["models"][0]["slug"] == "gym-policy-model"
+    assert catalog["models"][0]["base_instructions"] == ""
+
+
+def test_runner_config_preserves_explicit_codex_model_catalog(tmp_path) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(
+            agent_server_module="responses_api_agents.codex_agent.app",
+            agent_server_class="CodexAgent",
+            agent_config_class="CodexAgentConfig",
+            agent_kwargs={"extra_config": {"model_catalog_json": "/custom/catalog.json"}},
+        )
+    )
+
+    runner._write_runner_config(
+        {"runtime": tmp_path},
+        NeMoGymResponseCreateParamsNonStreaming(input="Do the work"),
+        "http://model.internal:8000",
+    )
+
+    payload = json.loads((tmp_path / "runner.json").read_text())
+    assert payload["agent_kwargs"]["extra_config"]["model_catalog_json"] == "/custom/catalog.json"
+    assert not (tmp_path / "codex_model_catalog.json").exists()
+
+
 def test_stage_agent_source_copies_only_selected_runtime_package(monkeypatch, tmp_path) -> None:
     repository = tmp_path / "repository"
     package = repository / "responses_api_agents" / "hermes_agent"
