@@ -40,6 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
@@ -143,7 +144,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     if part["type"] != "text":
                         continue
 
-                    message_parts.append(ResponseInputTextParam(text=part["text"]))
+                    message_parts.append(ResponseInputTextParam(text=part["text"], type="input_text"))
 
                 messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
             elif message["info"]["role"] == "assistant":
@@ -152,9 +153,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     if part["type"] != "text":
                         continue
 
-                    message_parts.append(ResponseInputTextParam(text=part["text"]))
+                    message_parts.append(
+                        NeMoGymResponseOutputText(annotations=[], text=part["text"], type="output_text")
+                    )
 
-                messages.append(NeMoGymResponseOutputMessage(id=message["id"], content=message_parts))
+                messages.append(NeMoGymResponseOutputMessage(id=message["info"]["id"], content=message_parts))
             else:
                 raise NotImplementedError(message)
 
@@ -216,7 +219,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=body.model,
             object="response",
-            output=self._opencode_export_to_output_items(opencode_export),
+            # Assume only one input message. May change with a system/developer message later on.
+            output=self._opencode_export_to_output_items(opencode_export)[1:],
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
