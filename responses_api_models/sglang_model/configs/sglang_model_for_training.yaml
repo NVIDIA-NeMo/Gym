@@ -1,0 +1,13 @@
+# SGLang-backed policy model server for RL training.
+# Mirrors responses_api_models/vllm_model/configs/vllm_model_for_training.yaml but
+# drives SGLang's native /generate (token ids + logprobs) instead of /v1/chat/completions.
+# base_url here is the BARE SGLang server url (no /v1); the adapter appends /generate.
+policy_model:
+  responses_api_models:
+    sglang_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: true
+      uses_reasoning_parser: false
