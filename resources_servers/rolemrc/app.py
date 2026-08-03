@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 # sys.modules before nltk's inisec.py finder is installed. nltk>=3.9 blocks any
 # import originating from nltk if the module path falls inside the process CWD —
 # which happens in CI where the server venv lives inside the repo root.
-import defusedxml  # noqa: F401
+import defusedxml.ElementTree  # noqa: F401
 import regex  # noqa: F401
 from fastapi import FastAPI
 from pydantic import ConfigDict, PrivateAttr
