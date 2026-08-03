@@ -18,7 +18,7 @@ from typing import Any, Dict
 
 from pytest import fixture
 
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseInputTokensDetails,
@@ -38,6 +38,10 @@ class TestOpenCodeSandboxedAgent:
             entrypoint="",
             name="",
             resources_server=ResourcesServerRef(type="resources_servers", name=""),
+            model_server=ModelServerRef(type="responses_api_models", name=""),
+            opencode_version="",
+            sandbox_provider="",
+            sandbox_config=dict(),
         )
 
     @fixture
