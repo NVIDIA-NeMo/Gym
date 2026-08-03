@@ -261,8 +261,9 @@ Each configurable output row includes `artifact_dir`, `run_summary_path`,
 `verifier_report_path`, and `output_dir`. The inspection commands above use
 these paths.
 
-The agent-server log also prints the artifact directory when the rollout is
-created and again when it completes or fails.
+The agent-server log prints the artifact directory after the agent sandbox has
+stopped and its downloaded files pass validation, then again when verification
+completes or the rollout fails.
 
 ## Test
 
