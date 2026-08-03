@@ -135,7 +135,12 @@ def test_dependency_runtime_cache_is_harness_and_recipe_specific(monkeypatch, tm
     portable.write_text("portable-v1")
     script = tmp_path / "hermes_agent_deps.sh"
     script.write_text("hermes-v1")
+    agent_dir = tmp_path / "responses_api_agents" / "hermes_agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "requirements.txt").write_text("nemo-gym\n")
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'nemo-gym'\n")
+    (tmp_path / "README.md").write_text("# Gym\n")
+    (tmp_path / "env.yaml").write_text("judge_key: must-not-be-mounted\n")
     (tmp_path / "nemo_gym").mkdir()
     (tmp_path / "nemo_gym" / "runtime.py").write_text("VERSION = 1\n")
     calls = []
@@ -191,10 +196,15 @@ def test_dependency_runtime_cache_is_harness_and_recipe_specific(monkeypatch, tm
         timeout_seconds=60,
     )
 
-    assert first == second == third == fourth == fifth == package_dir / ".deps" / "hermes_agent"
+    assert first == second
+    assert len({first, third, fourth, fifth}) == 4
+    assert all(path.parent == package_dir / ".deps" / "hermes_agent" for path in (first, third, fourth, fifth))
+    assert all(path.is_dir() for path in (first, third, fourth, fifth))
     docker_runs = [call for call in calls if call[0][1] == "run"]
     assert len(docker_runs) == 4
-    assert f"{first}:/agent_deps" in docker_runs[0][0]
+    mounted_sources = [arg.split(":", 1)[0] for arg in docker_runs[0][0] if ":/nemo_gym_mount:ro" in arg]
+    assert mounted_sources and mounted_sources[0] != str(tmp_path)
+    assert "env.yaml" not in " ".join(docker_runs[0][0])
     assert "--network" in docker_runs[0][0]
 
 
@@ -241,6 +251,7 @@ def test_dependency_provisioning_uses_pin_and_invalidates_when_it_changes(monkey
     agent_dir.mkdir(parents=True)
     (agent_dir / "requirements.txt").write_text("nemo-gym\n")
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'nemo-gym'\n")
+    (tmp_path / "README.md").write_text("# Gym\n")
     (tmp_path / "nemo_gym").mkdir()
     (tmp_path / "nemo_gym" / "runtime.py").write_text("VERSION = 1\n")
     calls = []
