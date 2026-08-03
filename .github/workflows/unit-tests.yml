@@ -29,6 +29,11 @@ env:
   # Pin uv: 0.11.20 has a resolver regression that silently drops pinned deps from
   # `uv pip install -r requirements.txt`. 0.11.19 is the latest known-good version.
   UV_INSTALL_URL: "https://astral.sh/uv/0.11.19/install.sh"
+  # nltk>=3.9 blocks imports from CWD via inisec.py. Server venvs live inside the repo
+  # root, so site-packages appear to be "in the CWD" and get blocked. Setting
+  # PYTHONSAFEPATH=1 prevents Python from injecting CWD into sys.path, which is the fix
+  # nltk's own error message recommends.
+  PYTHONSAFEPATH: "1"
 
 jobs:
   detect:
