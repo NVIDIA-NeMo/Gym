@@ -73,6 +73,7 @@ ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
 FROM hermetic AS release
 
+ARG NEMO_GYM_PREFETCH_SERVERS=""
 ARG NEMO_GYM_COMMIT
 ARG NVIDIA_BUILD_ID
 ARG NVIDIA_BUILD_REF
@@ -90,6 +91,29 @@ COPY --from=nemo-gym --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
 # Install the nemo-gym project itself along with the vllm extra.
 RUN UV_LINK_MODE=symlink uv sync --locked --extra vllm
+
+# Optional: pre-warm per-server venvs at build time so they are ready at runtime.
+# Pass --build-arg NEMO_GYM_PREFETCH_SERVERS="<space-separated relative paths>"
+# e.g. "responses_api_models/local_vllm_model responses_api_models/genrm_model"
+RUN <<"EOF" bash -exu
+if [[ -n "${NEMO_GYM_PREFETCH_SERVERS:-}" ]]; then
+    for server_dir in ${NEMO_GYM_PREFETCH_SERVERS}; do
+        full_path="/opt/nemo-gym/${server_dir}"
+        if [[ ! -d "${full_path}" ]]; then
+            echo "ERROR: server directory not found: ${full_path}"
+            exit 1
+        fi
+        echo "Pre-warming venv for: ${server_dir}"
+        pushd "${full_path}"
+        uv venv --seed .venv
+        # Mirror gym env start: use uv pip install -e . so setup.py install_requires
+        # is evaluated (deps like vllm live there, not in pyproject.toml).
+        # Pass --python explicitly so uv targets .venv, not UV_PROJECT_ENVIRONMENT.
+        uv pip install --python .venv/bin/python -e .
+        popd
+    done
+fi
+EOF
 
 ENTRYPOINT ["gym"]
 CMD ["--help"]
