@@ -206,8 +206,24 @@ configurable runner's top-level flags.
 ## Run a larger evaluation
 
 Remove `--limit 1` from the desired smoke command. Choose a new output filename
-and increase `--concurrency` only after confirming that Docker, the policy
-endpoint, and the judge endpoint can sustain it.
+and increase client and agent-server concurrency together only after confirming
+that the sandbox backend, policy endpoint, and judge endpoint can sustain it.
+For example, a two-way Hermes run uses both settings:
+
+```bash
+gym eval run \
+  --model-type vllm_model \
+  --benchmark legal_agent_bench/config_hermes \
+  --split benchmark \
+  --output results/legal_agent_bench_hermes.jsonl \
+  --concurrency 2 \
+  +legal_agent_bench_benchmark_hermes_agent.responses_api_agents.legal_agent_bench_agent.concurrency=2
+```
+
+Use the corresponding `legal_agent_bench_benchmark_claude_code_agent` or
+`legal_agent_bench_benchmark_codex_agent` prefix for those variants. The
+agent-server default stays at `1`; changing only `--concurrency` leaves the
+server-side semaphore serial.
 
 ## Use ECS Fargate
 
