@@ -348,13 +348,27 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
 
 @dataclass(frozen=True)
 class OpenSandboxConnectionConfig:
-    """OpenSandbox server connection settings."""
+    """OpenSandbox server connection settings.
+
+    ``keepalive_expiry_s`` must stay below the server's own keep-alive idle
+    timeout (uvicorn defaults to 5s), or pooled sockets are reused after the
+    server has closed them; null falls back to the SDK's default transport.
+    ``transport_backend`` is "httpx" or "aiohttp" (via the optional
+    ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
+    The pool is shared, so ``max_connections`` also caps in-flight sandbox
+    operations per process; null means no cap.
+    """
 
     domain: str | None = None
     api_key: str | None = None
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
+    keepalive_expiry_s: float | None = 3.0
+    max_keepalive_connections: int = 20
+    max_connections: int | None = 100
+    connect_retries: int = 2
+    transport_backend: str = "httpx"
 
 
 @dataclass(frozen=True)
@@ -488,6 +502,9 @@ class OpenSandboxProviderOptions:
     volumes: tuple[Mapping[str, Any], ...] = ()
     skip_health_check: bool | None = None
     extensions: Mapping[str, str] = field(default_factory=dict)
+    # Scheduling requests (same keys as SandboxSpec.resources, which become the
+    # limits). Unset, the server applies the single resources map as both.
+    resource_requests: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any] | None) -> "OpenSandboxProviderOptions":
@@ -522,6 +539,9 @@ class OpenSandboxProviderOptions:
         extensions = options.get("extensions", {})
         if not isinstance(extensions, Mapping):
             raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
+        resource_requests = options.get("resource_requests")
+        if resource_requests is not None and not isinstance(resource_requests, Mapping):
+            raise TypeError("OpenSandbox provider option 'resource_requests' must be a mapping")
 
         return cls(
             image_auth=dict(image_auth) if image_auth is not None else None,
@@ -530,6 +550,7 @@ class OpenSandboxProviderOptions:
             volumes=tuple(dict(volume) for volume in volumes),
             skip_health_check=skip_health_check,
             extensions=_string_map(dict(extensions)),
+            resource_requests=dict(resource_requests) if resource_requests is not None else None,
         )
 
 
@@ -552,6 +573,10 @@ class OpenSandboxProvider:
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
         self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
+        # Shared injected transport. The SDK never closes transports it did not
+        # create, so the provider owns this one: built once, reused by every
+        # ConnectionConfig, closed in aclose().
+        self._transport: Any | None = None
 
     def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
         """Add the configured default image pull policy to SDK create extensions."""
@@ -587,11 +612,42 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+        if self._connection.keepalive_expiry_s is not None:
+            kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
+
+    def _get_transport(self) -> Any:
+        """Return the provider-owned shared transport, building it on first use."""
+        if self._transport is None:
+            self._transport = self._build_transport()
+        return self._transport
+
+    def _build_transport(self) -> Any:
+        """Build the SDK transport with the configured pool limits."""
+        import httpx
+
+        limits = httpx.Limits(
+            max_connections=self._connection.max_connections,
+            max_keepalive_connections=self._connection.max_keepalive_connections,
+            keepalive_expiry=self._connection.keepalive_expiry_s,
+        )
+        if self._connection.transport_backend == "aiohttp":
+            try:
+                from httpx_aiohttp import AiohttpTransport
+
+                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
+            except ImportError:
+                LOGGER.warning(
+                    "connection.transport_backend=aiohttp requested but httpx-aiohttp "
+                    "is not installed; falling back to the httpx transport"
+                )
+        return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
 
     async def aclose(self) -> None:
         """Close provider-owned resources."""
-        return None
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            await transport.aclose()
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for reattaching to this sandbox by id.
@@ -809,6 +865,8 @@ class OpenSandboxProvider:
             "extensions": self._resolve_extensions(options.extensions),
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
+        if options.resource_requests is not None:
+            kwargs["resource_requests"] = _resource_map(SandboxResources.from_mapping(options.resource_requests))
         if spec.image is not None:
             kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
         if options.snapshot_id is not None:
