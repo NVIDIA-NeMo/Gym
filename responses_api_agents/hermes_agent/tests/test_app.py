@@ -336,3 +336,36 @@ class TestRolloutCorrelation:
         assert response.usage.input_tokens == 12
         assert response.usage.output_tokens == 3
         assert response.usage.total_tokens == 15
+
+    def test_partial_output_preserves_trajectory_and_marks_response_failed(self, monkeypatch) -> None:
+        import nemo_gym.base_responses_api_agent as base_agent
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(), server_client=server_client)
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+
+        class _StubAIAgent:
+            def __init__(self, **kwargs) -> None:
+                self._build_api_kwargs = lambda _messages: {}
+                self.compression_enabled = True
+
+            def run_conversation(self, *args, **kwargs) -> dict:
+                return {
+                    "messages": [{"role": "assistant", "content": "partial answer"}],
+                    "error": "model stream disconnected",
+                    "prompt_tokens": 12,
+                    "output_tokens": 3,
+                    "total_tokens": 15,
+                }
+
+        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        response = asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        assert response.output
+        assert response.status == "failed"
+        assert response.error is not None
+        assert "stream disconnected" in response.error.message

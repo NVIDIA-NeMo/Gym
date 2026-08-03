@@ -560,6 +560,21 @@ def test_real_agent_activity_is_not_treated_as_an_infrastructure_failure() -> No
     )
 
 
+def test_partial_response_with_harness_error_is_an_agent_failure() -> None:
+    response = app.NeMoGymResponse.model_validate(
+        {
+            **_successful_response().model_dump(mode="json"),
+            "status": "failed",
+            "error": {"code": "server_error", "message": "adapter failed after partial output"},
+        }
+    )
+
+    failure = app.agent_response_failure(response, "responses_api_agents.codex_agent.app")
+
+    assert failure is not None
+    assert "adapter failed after partial output" in failure
+
+
 def test_response_masks_harness_and_verifier_failures() -> None:
     runner = app.LegalAgentBenchAgent.model_construct(config=_config())
     params = NeMoGymResponseCreateParamsNonStreaming(input=[])
