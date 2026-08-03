@@ -84,3 +84,16 @@ def test_not_executed_routes_apart_from_the_other_failures():
     assert _classify_task_failure(SandboxKilledError("x")) == "kill_shaped"
     assert _classify_task_failure(TimeoutError("x")) == "timeout_exceeded"
     assert _classify_task_failure(RuntimeError("x")) == "legitimate"
+
+
+def test_a_model_name_that_yields_an_unresolvable_agent_id_is_refused():
+    with pytest.raises(ValueError, match="agent id"):
+        make_agent(model_name="a" * 60)
+
+
+def test_a_workable_model_name_is_accepted():
+    assert make_agent(model_name="a" * 58).config.model_name
+
+
+def test_the_agent_id_limit_is_configurable():
+    assert make_agent(model_name="a" * 60, max_agent_id_length=128).config.model_name
