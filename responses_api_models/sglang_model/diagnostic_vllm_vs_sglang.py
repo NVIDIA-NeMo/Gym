@@ -56,6 +56,14 @@ try:
 except Exception as e:  # nemo_gym / vllm_model not importable here
     _IMPORT_ERR = e
 
+# sglang_model's pure request/response logic is framework-free (no nemo_gym / transformers needed),
+# so we can demonstrate the fix for each requirement right here.
+from responses_api_models.sglang_model._logic import (  # noqa: E402
+    cap_to_context,
+    extract_generated_tokens_and_logprobs,
+    normalize_token_ids,
+)
+
 
 # ----------------------------- fakes (drive the real chat_completions) -----------------------------
 class _FakeBody:
@@ -193,6 +201,42 @@ SCENARIOS = [
 ]
 
 
+# ----------------------------- the fix: sglang_model's approach -----------------------------
+def fix_2_token_ids_native_generate():
+    """#2 FIXED: SGLang native /generate returns (token_id, logprob) pairs directly -> integer ids;
+    no `token_id:NNN` string convention to parse."""
+    result = {"meta_info": {"output_token_logprobs": [[-0.1, 10, "He"], [-0.2, 11, "llo"]]}}
+    ids, lps = extract_generated_tokens_and_logprobs(result)
+    ok = ids == [10, 11] and all(isinstance(x, int) for x in ids)
+    return ok, f"native /generate -> generation_token_ids={ids} (ints), logprobs={lps}; no token_id: parsing"
+
+
+def fix_2_prompt_ids_local_tokenizer():
+    """#2 FIXED: prompt ids come from the local HF chat template; normalize_token_ids flattens the
+    transformers return shapes -> no dependency on a vLLM /tokenize endpoint."""
+    ids = normalize_token_ids({"input_ids": [5, 6, 7]})  # transformers 5.x dict/BatchEncoding return
+    ok = ids == [5, 6, 7] and all(isinstance(x, int) for x in ids)
+    return ok, f"local chat-template tokenize -> prompt_token_ids={ids} (no server /tokenize call)"
+
+
+def fix_4_overflow_prevented():
+    """#4 FIXED: cap_to_context shrinks the request client-side so input+gen stays strictly under
+    ctx -> /generate never overflows; no dependency on matching a server-specific error string.
+    Shown on the worst case: a prompt longer than the entire context."""
+    ctx = 4096
+    ids, sp = cap_to_context(list(range(5000)), {"max_new_tokens": 4000}, ctx)  # prompt > ctx
+    total = len(ids) + sp["max_new_tokens"]
+    ok = total < ctx and sp["max_new_tokens"] >= 1
+    return ok, f"cap_to_context -> input={len(ids)} + max_new_tokens={sp['max_new_tokens']} = {total} < ctx={ctx} (≥1 gen, no overflow)"
+
+
+FIXES = [
+    ("#2 token-ids", fix_2_token_ids_native_generate),
+    ("#2 prompt-ids", fix_2_prompt_ids_local_tokenizer),
+    ("#4 overflow", fix_4_overflow_prevented),
+]
+
+
 def main():
     if _IMPORT_ERR is not None:
         print(f"SKIP diagnostic: vllm_model/nemo_gym not importable here: {_IMPORT_ERR}")
@@ -201,18 +245,30 @@ def main():
     print("DIAGNOSTIC: can the existing vllm_model serve SGLang? (drives real VLLMModel.chat_completions)")
     print("=" * 96)
     all_as_expected = True
+
+    print("\n### PROBLEM: existing vllm_model pointed at SGLang ###")
     for req, shape, expectation, fn in SCENARIOS:
         as_expected, detail = fn()
         # CONTROL expects ok==True; EXPECTED BREAK expects the break to be observed (fn returns True when broken)
         verdict = "OK" if as_expected else "!! UNEXPECTED !!"
         all_as_expected = all_as_expected and as_expected
-        print(f"\n[{req:13}] {shape:14} {expectation:22} -> {verdict}")
+        print(f"\n[{req:13}] {shape:14} {expectation:24} -> {verdict}")
         print(f"    {detail}")
+
+    print("\n### FIX: sglang_model (native /generate token-in/out, local tokenize, cap_to_context) ###")
+    for req, fn in FIXES:
+        ok, detail = fn()
+        all_as_expected = all_as_expected and ok
+        print(f"\n[{req:13}] sglang_model   {'FIXED' if ok else 'NOT FIXED':24} -> {'OK' if ok else '!! FAIL !!'}")
+        print(f"    {detail}")
+
     print("\n" + "-" * 96)
     print("CONCLUSION: vllm_model recovers token-ids via the vLLM `token_id:NNN` logprob convention +")
     print("a vLLM `/tokenize` endpoint, and detects overflow via vLLM's 400 message — none of which")
-    print("SGLang provides. => a dedicated sglang_model (native /generate, token-in/out, cap_to_context)")
-    print("is required. #3 (Responses<->ChatCompletions converter) is reused unchanged; #1 (multi-turn")
+    print("SGLang provides (#2 silently corrupts token-ids, #4 mis-detects overflow). The fix is the")
+    print("sglang_model server: native /generate (token-in/out) gives integer ids directly, the prompt")
+    print("is tokenized locally, and cap_to_context prevents overflow client-side — all demonstrated")
+    print("above. #3 (Responses<->ChatCompletions converter) is reused unchanged; #1 (multi-turn")
     print("on-policy retokenization) is a nemo_rl-worker concern, out of scope for the Gym model server.")
     print("-" * 96)
     return 0 if all_as_expected else 1

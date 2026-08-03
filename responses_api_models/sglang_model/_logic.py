@@ -95,15 +95,21 @@ def build_sampling_params(body_dict: Dict[str, Any], default_max_new_tokens: int
 def cap_to_context(
     prompt_token_ids: List[int], sampling_params: Dict[str, Any], ctx: int
 ) -> Tuple[List[int], Dict[str, Any]]:
-    """Keep the prompt under the context window and shrink max_new_tokens so
-    input_len + max_new_tokens < ctx (SGLang /generate 400s otherwise). Mirrors nemo_rl's
-    SGLang worker. Returns the (possibly truncated) ids and (possibly adjusted) params;
+    """Keep the request within the context window: guarantee input_len + max_new_tokens < ctx
+    while always leaving room for at least one generated token (SGLang /generate errors when a
+    request exceeds the context). If the prompt alone is too long it is truncated. Mirrors
+    nemo_rl's SGLang worker. Returns the (possibly truncated) ids and (possibly adjusted) params;
     does not mutate the inputs.
     """
-    if ctx and len(prompt_token_ids) >= ctx:
-        prompt_token_ids = prompt_token_ids[: ctx - 1]
-    if ctx:
-        room = max(1, ctx - len(prompt_token_ids) - 1)
-        if sampling_params["max_new_tokens"] > room:
-            sampling_params = {**sampling_params, "max_new_tokens": room}
+    if not ctx:
+        return prompt_token_ids, sampling_params
+    # Cap the prompt at ctx-2 so that input + (>=1 generated token) <= ctx-1 < ctx. (A ctx-1
+    # truncation combined with a max(1, ...) floor on `room` could yield input+gen == ctx, which
+    # violates the bound and can overflow the context.)
+    max_prompt_len = ctx - 2
+    if len(prompt_token_ids) > max_prompt_len:
+        prompt_token_ids = prompt_token_ids[:max_prompt_len]
+    room = ctx - 1 - len(prompt_token_ids)  # >= 1 (since len <= ctx-2); input + room == ctx-1 < ctx
+    if sampling_params["max_new_tokens"] > room:
+        sampling_params = {**sampling_params, "max_new_tokens": room}
     return prompt_token_ids, sampling_params
