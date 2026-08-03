@@ -1124,6 +1124,10 @@ class OpenSandboxProvider:
         Avoids holding one long-lived SSE stream open for the whole command,
         which a load balancer between the client and the OpenSandbox server can
         silently drop. Submit (short) -> poll status (short) -> read logs (short).
+
+        The background logs endpoint returns one combined stream, so unlike the
+        foreground path ``stdout`` carries both streams and ``stderr`` is set
+        only when the sandbox itself reports an error.
         """
         _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
         background_opts = dict(opts_kwargs)
