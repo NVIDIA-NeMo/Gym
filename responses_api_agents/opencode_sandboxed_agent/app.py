@@ -194,9 +194,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         """
         print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
 
+        opencode_config_content = json.dumps(self._create_opencode_config())
+        print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
+
         result = await sandbox.exec(
             command=command,
-            env={"OPENCODE_CONFIG_CONTENT": json.dumps(self._create_opencode_config())},
+            env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
         )
 
         print("STDOUT: ", result.stdout, file=sys.stderr)
