@@ -1655,6 +1655,45 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             return legacy_dir
         return self.setup_root / "swe_openhands_setup" / _repo_slug(self.config.agent_framework_repo) / commit
 
+    def _probe_openhands_venv(self, openhands_dir: Path) -> Optional[str]:
+        """Probe an existing OpenHands venv's deps; return None if healthy, else the failure."""
+        venv_python = openhands_dir / ".venv" / "bin" / "python"
+        probe = subprocess_run(
+            [
+                str(venv_python),
+                "-c",
+                (
+                    "from importlib.metadata import version; "
+                    "from packaging.version import Version; "
+                    "assert Version(version('jinja2')) >= Version('3.1.3'); "
+                    "assert Version(version('pyjwt')) >= Version('2.9'); "
+                    "assert Version(version('sqlalchemy')) >= Version('2.0.40'); "
+                    "assert Version(version('flask')) >= Version('2.2'); "
+                    "import datasets, wandb"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONNOUSERSITE": "1"},
+        )
+        if probe.returncode == 0:
+            return None
+        return " ".join(probe.stderr.strip().splitlines()[-1:]) or f"exit code {probe.returncode}"
+
+    def _existing_setup_is_reusable(self, openhands_dir: Path) -> bool:
+        """Whether a pre-existing OpenHands checkout can be reused as-is."""
+        if not (openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists()):
+            return False
+        probe_failure = self._probe_openhands_venv(openhands_dir)
+        if probe_failure is not None:
+            print(
+                f"OpenHands venv at {openhands_dir} failed its runtime probe ({probe_failure}); "
+                "rebuilding the setup instead of reusing it",
+                flush=True,
+            )
+            return False
+        return True
+
     def setup(self) -> Path:
         repo = self.config.agent_framework_repo
         ref = self.config.agent_framework_commit
@@ -1678,7 +1717,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             openhands_dir = setup_dir / "OpenHands"
             miniforge_dir = setup_dir / "miniforge3"
 
-            if self._openhands_tree_valid(setup_dir):
+            if self._existing_setup_is_reusable(openhands_dir):
                 print(f"OpenHands already set up at {setup_dir}", flush=True)
                 self._sync_openhands_to_commit(openhands_dir, commit)
                 return setup_dir
