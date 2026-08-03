@@ -166,9 +166,7 @@ class _FakeResp:
 
 
 def _make_generate_server(monkeypatch: MonkeyPatch, tokenizer=None, **overrides: Any) -> SGLangModel:
-    server = _make_server(
-        monkeypatch, transport="generate", base_url="http://sglang-host:30000", **overrides
-    )
+    server = _make_server(monkeypatch, transport="generate", base_url="http://sglang-host:30000", **overrides)
     server._tokenizer = tokenizer or _FakeTokenizer()
     server._sglang_urls = ["http://sglang-host:30000"]
     return server

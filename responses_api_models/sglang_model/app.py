@@ -71,6 +71,7 @@ from responses_api_models.sglang_model._logic import (
 )
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
+
 # Chat-side TITO (`return_meta_info` / `return_prompt_token_ids` on /v1/chat/completions)
 # landed in the sglang-miles sync series and is present in the 0.5.13 release tree.
 MIN_SGLANG_VERSION_FOR_CHAT_TRANSPORT = "0.5.13"
