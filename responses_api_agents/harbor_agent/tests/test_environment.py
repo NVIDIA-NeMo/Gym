@@ -171,6 +171,18 @@ class TestStartStop:
         assert spec.provider_options == {"resource_requests": {"cpu": 0.25, "memory_mib": 1024}}
 
     @pytest.mark.asyncio
+    async def test_start_honours_harbor_resource_overrides(self, tmp_path):
+        # Harbor's base constructor applies override_* onto task_env_config, which
+        # is what the spec reads. If that ever stops happening the sandbox silently
+        # keeps the task's own smaller limits and disk-heavy tasks get evicted.
+        env = _make_environment(tmp_path, override_cpus=8, override_memory_mb=16384, override_storage_mb=30720)
+        await env.start(force_build=False)
+        resources = _provider().created_specs[0].resources
+        assert resources.cpu == 8.0
+        assert resources.memory_mib == 16384
+        assert resources.disk_gib == 30
+
+    @pytest.mark.asyncio
     async def test_start_applies_image_rewrites(self, tmp_path):
         env = _make_environment(
             tmp_path,
