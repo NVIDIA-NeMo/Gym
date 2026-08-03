@@ -48,11 +48,13 @@ process namespace or writable filesystem with the agent.
 
 The default provider is Docker. The runner translates derived host-loopback
 model URLs to `host.docker.internal` on Docker Desktop and registers the
-equivalent host gateway for Linux bridge networking. A named Gym provider can
-be selected through `sandbox_provider`; non-Docker providers require an
-immutable registry `sandbox_image` and an explicit reachable
-`sandbox_model_base_url`. Before importing the selected harness, the
-in-container runner
+equivalent host gateway for Linux bridge networking. Gym's ECS Fargate provider
+can be selected through `sandbox_provider`; non-Docker providers require an
+immutable registry `sandbox_image`. ECS uses
+Gym's provider-native SSH reverse tunnel to expose the rollout-scoped policy
+proxy as `LAB_POLICY_MODEL_URL`, keeping model credentials out of the sandbox.
+An explicit `sandbox_model_base_url` is used unchanged and disables that ECS
+tunnel. Before importing the selected harness, the in-container runner
 performs a bounded TCP connectivity check and writes
 `runtime/runner_status.json`. Connectivity or harness failures set the
 `mask_sample` flag on the row, skip the judge, and are distinct from an ordinary zero-reward
@@ -92,5 +94,5 @@ that inherits it. CLI versions belong in the harness configuration's
 `agent_kwargs`; provisioning derives its exact package specification from that
 pin and rejects unpinned Claude Code or Codex configurations.
 
-Docker remains the zero-configuration local backend. Non-Docker providers
-require an immutable registry image and a model URL reachable from the sandbox.
+Docker remains the zero-configuration local backend. See the benchmark README
+for ECS Fargate requirements and provider overrides.

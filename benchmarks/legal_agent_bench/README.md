@@ -24,7 +24,9 @@ agent during dataset collation.
 ## Requirements
 
 - Python 3.12 and the repository environment installed with `uv`
-- Docker with a running daemon
+- Docker with a running daemon for the default local backend and portable
+  harness provisioning
+- The `sandbox` dependency extra when using ECS Fargate
 - Authorized OpenAI-compatible policy and judge endpoints in the root
   `env.yaml`
 - At least 10 GB of free working space
@@ -54,6 +56,12 @@ uv venv --python 3.12
 source .venv/bin/activate
 uv sync --extra dev
 docker info >/dev/null
+```
+
+For a remote sandbox provider, also install its dependencies with:
+
+```bash
+uv sync --extra dev --extra sandbox
 ```
 
 Configure the policy and judge endpoints in the gitignored root `env.yaml` as
@@ -201,6 +209,77 @@ Remove `--limit 1` from the desired smoke command. Choose a new output filename
 and increase `--concurrency` only after confirming that Docker, the policy
 endpoint, and the judge endpoint can sustain it.
 
+## Use ECS Fargate
+
+Gym's native `ecs_fargate` provider can run the native, Hermes, Claude Code,
+or Codex LAB variants without changing their agent loops. The reference ECS
+infrastructure is discovered from `/<ssm_project>/ecs-sandbox/config` in SSM;
+`ssm_project` defaults to `harbor`. Configure an AWS profile locally and export
+the profile and region before starting Gym:
+
+```bash
+export AWS_PROFILE=gym-ecs
+export AWS_REGION=us-east-1
+export AWS_DEFAULT_REGION="$AWS_REGION"
+```
+
+The orchestrator must be able to reach the ECS task SSH sidecar on TCP port
+`52222`. The SSM configuration must provide the cluster, subnets, security
+groups, task roles, ECR repository, S3 staging bucket, and SSH-sidecar key
+ARNs. Install the `sandbox` dependency extra as shown above.
+
+Build the shared LAB environment for `linux/amd64`, push it to ECR, and use its
+immutable digest. The prepared LAB tasks currently share this environment:
+
+```bash
+LAB_ENV_DIR=resources_servers/legal_agent_bench/data/runtime/harbor_tasks/legal_agent_bench/antitrust-competition__analyze-antitrust-hsr-strategy/environment
+ECR_REPOSITORY=<account>.dkr.ecr.<region>.amazonaws.com/<repository>
+ECR_REGISTRY=${ECR_REPOSITORY%%/*}
+ECR_REPOSITORY_NAME=${ECR_REPOSITORY#*/}
+LAB_IMAGE_TAG=legal-agent-bench-smoke
+
+aws ecr get-login-password --region "$AWS_REGION" |
+  docker login --username AWS --password-stdin "$ECR_REGISTRY"
+docker buildx build \
+  --platform linux/amd64 \
+  --tag "$ECR_REPOSITORY:$LAB_IMAGE_TAG" \
+  --push \
+  "$LAB_ENV_DIR"
+LAB_IMAGE_DIGEST=$(aws ecr describe-images \
+  --region "$AWS_REGION" \
+  --repository-name "$ECR_REPOSITORY_NAME" \
+  --image-ids "imageTag=$LAB_IMAGE_TAG" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text)
+export LAB_ECS_IMAGE="$ECR_REPOSITORY@$LAB_IMAGE_DIGEST"
+docker pull --platform linux/amd64 "$LAB_ECS_IMAGE"
+```
+
+Run one native smoke through ECS:
+
+```bash
+gym eval run \
+  --model-type vllm_model \
+  --benchmark legal_agent_bench \
+  --config nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml \
+  --split benchmark \
+  --output results/legal_agent_bench_native_ecs_smoke.jsonl \
+  --concurrency 1 \
+  --limit 1 \
+  +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.sandbox_provider=sandbox \
+  "+legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.sandbox_image=${LAB_ECS_IMAGE}" \
+  +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.runtime_docker_platform=linux/amd64
+```
+
+ECS tunnels the rollout-scoped Gym policy-model URL into the agent task, so
+model credentials remain in Gym and `sandbox_model_base_url` is unnecessary.
+An explicit `sandbox_model_base_url` still bypasses the tunnel when the endpoint
+is already reachable from the task. The verifier contacts the configured judge
+endpoint directly, so that endpoint must be reachable from the Fargate VPC.
+Each completed rollout creates one agent task followed by one verifier task;
+both are stopped during cleanup. Artifacts use the same local paths documented
+above.
+
 ## Manage servers separately
 
 To manage the servers separately, start the desired variant first:
@@ -244,7 +323,7 @@ For configurable variants, the rollout also reports `agent_failed`,
 `task_failed` identifies an unsafe, unknown, incomplete, or malformed task;
 `configuration_failed` identifies an invalid harness selection or missing
 required pin. The runner checks policy-model connectivity from inside the
-Docker sandbox before starting the harness. A connectivity or harness failure
+selected sandbox before starting the harness. A connectivity or harness failure
 is masked and is not sent to the judge. A normal model/task result can still
 receive zero reward without those flags. Infrastructure, configuration,
 task-loading, or judge failures set `mask_sample`; do not treat those zeroes as

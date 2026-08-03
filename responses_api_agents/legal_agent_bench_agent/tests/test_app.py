@@ -464,6 +464,7 @@ def test_runner_config_preserves_dynamic_agent_configuration(tmp_path) -> None:
     assert "inspect.signature(agent.responses)" in (tmp_path / "agent_runner.py").read_text()
     assert "SimpleNamespace(path_params={})" in (tmp_path / "agent_runner.py").read_text()
     assert "socket.create_connection" in (tmp_path / "agent_runner.py").read_text()
+    assert 'os.environ.get("LAB_POLICY_MODEL_URL", runner["model_url"])' in (tmp_path / "agent_runner.py").read_text()
     assert "runner_status.json" in (tmp_path / "agent_runner.py").read_text()
     assert "hermes_model_metadata.fetch_endpoint_model_metadata" in (tmp_path / "agent_runner.py").read_text()
     assert "hermes_usage_pricing.fetch_endpoint_model_metadata" in (tmp_path / "agent_runner.py").read_text()
@@ -524,6 +525,30 @@ def test_model_url_uses_override_without_server_lookup() -> None:
     )
 
     assert runner._model_url(body) == "http://host.docker.internal:9000"
+
+
+def test_ecs_model_url_uses_host_policy_proxy_for_reverse_tunnel(monkeypatch) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(
+            sandbox_provider={
+                "ecs_fargate": {
+                    "region": "us-east-1",
+                    "cluster": "test",
+                }
+            }
+        ),
+        server_client=SimpleNamespace(
+            global_config_dict={},
+            _build_server_base_url=lambda _config: "http://0.0.0.0:16300",
+        ),
+    )
+    monkeypatch.setattr(app, "get_first_server_config_dict", lambda *_args: {})
+    body = app.LegalAgentBenchRunRequest(
+        instance_id="legal_agent_bench::area__task",
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+
+    assert runner._model_url(body) == "http://127.0.0.1:16300"
 
 
 @pytest.mark.parametrize(
@@ -783,9 +808,80 @@ def test_agent_sandbox_has_no_host_mounts(monkeypatch, tmp_path) -> None:
         skills_dir=skills,
         deps_dir=deps,
         paths=paths,
+        model_url="http://model",
     )
 
     assert captured["provider"] == {"docker": {}}
+    assert captured["spec"].provider_options == {}
+
+
+def test_ecs_agent_sandbox_tunnels_derived_policy_model_url(monkeypatch, tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    skills = _skills(tmp_path)
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    paths = {name: tmp_path / name for name in ("runtime", "agent_source", "agent", "output", "workspace")}
+    for path in paths.values():
+        path.mkdir()
+    captured = {}
+
+    def fake_sandbox(provider, spec):
+        captured["provider"] = provider
+        captured["spec"] = spec
+        return SimpleNamespace()
+
+    provider = {"ecs_fargate": {"region": "us-east-1", "cluster": "test"}}
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config(sandbox_provider=provider))
+    monkeypatch.setattr(runner, "_sandbox_metadata", lambda: {})
+    monkeypatch.setattr(app, "AsyncSandbox", fake_sandbox)
+
+    runner._agent_sandbox(
+        image="registry.example/lab@sha256:" + "a" * 64,
+        task_dir=task,
+        skills_dir=skills,
+        deps_dir=deps,
+        paths=paths,
+        model_url="http://127.0.0.1:16300/rollout/run-1",
+    )
+
+    assert captured["provider"] == provider
+    assert captured["spec"].provider_options == {
+        "outside_endpoints": [
+            {
+                "url": "http://127.0.0.1:16300/rollout/run-1",
+                "env_var": "LAB_POLICY_MODEL_URL",
+            }
+        ]
+    }
+
+
+def test_ecs_agent_sandbox_uses_explicit_reachable_model_url_without_tunnel(monkeypatch, tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    captured = {}
+
+    def fake_sandbox(provider, spec):
+        captured["spec"] = spec
+        return SimpleNamespace()
+
+    provider = {"ecs_fargate": {"region": "us-east-1", "cluster": "test"}}
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(
+            sandbox_provider=provider,
+            sandbox_model_base_url="https://model.example/v1",
+        )
+    )
+    monkeypatch.setattr(runner, "_sandbox_metadata", lambda: {})
+    monkeypatch.setattr(app, "AsyncSandbox", fake_sandbox)
+
+    runner._agent_sandbox(
+        image="registry.example/lab@sha256:" + "a" * 64,
+        task_dir=task,
+        skills_dir=tmp_path / "skills",
+        deps_dir=tmp_path / "deps",
+        paths={},
+        model_url="https://model.example/v1",
+    )
+
     assert captured["spec"].provider_options == {}
 
 
