@@ -95,6 +95,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return sandbox
 
+    def _create_opencode_config(self) -> Dict[str, Any]:
+        return {
+            "model": "nemo_gym/dummy_model",
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+                "nemo_gym": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
+                        "apiKey": "dummy_key",
+                    },
+                    "models": {
+                        "dummy_model": {},  # TODO @bxyu-nvidia: Propogate sampling params here.
+                    },
+                }
+            },
+        }
+
     async def responses(
         self,
         request: Request,
@@ -123,25 +141,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && opencode export $OPENCODE_SESSION_ID
         """
 
-        config = {
-            "model": "nemo_gym/dummy_model",
-            "$schema": "https://opencode.ai/config.json",
-            "provider": {
-                "nemo_gym": {
-                    "npm": "@ai-sdk/openai-compatible",
-                    "options": {
-                        "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
-                        "apiKey": "dummy_key",
-                    },
-                    "models": {
-                        "dummy_model": {},  # TODO @bxyu-nvidia: Propogate sampling params here.
-                    },
-                }
-            },
-        }
         result = await sandbox.exec(
             command=command,
-            env={"OPENCODE_CONFIG_CONTENT": json.dumps(config)},
+            env={"OPENCODE_CONFIG_CONTENT": json.dumps(self._create_opencode_config())},
         )
         import sys
 
