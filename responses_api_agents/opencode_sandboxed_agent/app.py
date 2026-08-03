@@ -60,6 +60,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
 
+    debug: bool = False
+
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     pass
@@ -192,18 +194,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && session_id=$(opencode session list --format json | jq -r '.[0].id') \
         && opencode export $session_id > {export_fname}
         """
-        print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
 
         opencode_config_content = json.dumps(self._create_opencode_config())
-        print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
+        if self.config.debug:
+            print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
+            print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
         result = await sandbox.exec(
             command=command,
             env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
         )
-
-        print("STDOUT: ", result.stdout, file=sys.stderr)
-        print("STDERR: ", result.stderr, file=sys.stderr)
+        if self.config.debug:
+            print("STDOUT: ", result.stdout, file=sys.stderr)
+            print("STDERR: ", result.stderr, file=sys.stderr)
 
         pwd_result = await sandbox.exec(command="pwd")
         results_remote_fpath = Path(pwd_result.stdout) / export_fname
@@ -211,7 +214,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
-        print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+        if self.config.debug:
+            print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
         await sandbox.download(str(results_remote_fpath), results_local_fpath)
 
         await sandbox.stop()
