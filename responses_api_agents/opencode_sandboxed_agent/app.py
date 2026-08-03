@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+from pathlib import Path
 from shlex import quote
 from time import time
 from typing import Any, Dict
@@ -42,7 +43,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import get_response_json, get_server_url, raise_for_status
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
 
 
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
@@ -133,23 +134,35 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         assert query, body.input
 
+        export_fname = "export.json"
         command = f"""
         echo "Shell: $SHELL" \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && opencode run {quote(query)} \
         && session_id=$(opencode session list --format json | jq -r '.[0].id') \
-        && opencode export $session_id
+        && opencode export $session_id > {export_fname}
         """
 
         result = await sandbox.exec(
             command=command,
             env={"OPENCODE_CONFIG_CONTENT": json.dumps(self._create_opencode_config())},
         )
+
         import sys
 
         print("STDOUT: ", result.stdout, file=sys.stderr)
         print("STDERR: ", result.stderr, file=sys.stderr)
+
+        pwd_result = await sandbox.exec(
+            command="pwd",
+        )
+        cwd = pwd_result.stdout
+
+        results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
+        results_dir.mkdir(parents=True, exist_ok=True)
+        await sandbox.download(cwd / export_fname, results_dir / export_fname)
+
         await sandbox.stop()
 
         body = body.model_copy(deep=True)
