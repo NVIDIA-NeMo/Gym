@@ -360,6 +360,24 @@ class NeMoGymResponseUsage(ResponseUsage):
     input_tokens_details: NeMoGymResponseInputTokensDetails
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
+    @classmethod
+    def sum_from_list(cls, usages: "NeMoGymResponseUsage") -> "NeMoGymResponseUsage":
+        final_usage = NeMoGymResponseUsage(
+            input_tokens=0,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens=0,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=0,
+        )
+        for usage in usages:
+            final_usage.input_tokens += usage.input_tokens
+            final_usage.input_tokens_details.cached_tokens += usage.input_tokens_details.cached_tokens
+            final_usage.output_tokens += usage.output_tokens
+            final_usage.output_tokens_details.reasoning_tokens += usage.output_tokens_details.reasoning_tokens
+            final_usage.total_tokens += usage.total_tokens
+
+        return final_usage
+
 
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]

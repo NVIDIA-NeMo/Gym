@@ -18,10 +18,11 @@ import sys
 from pathlib import Path
 from shlex import quote
 from time import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 from uuid import uuid4
 
 from fastapi import Request
+from openai.types.responses import ResponseInputTextParam
 from pydantic import Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -37,8 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
+    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
@@ -115,6 +115,40 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             },
         }
 
+    def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
+        usages: List[NeMoGymResponseUsage] = []
+        for message in opencode_export["messages"]:
+            token_info = message["info"].get("tokens")
+            if not token_info:
+                continue
+
+            usage = NeMoGymResponseUsage(
+                input_tokens=token_info["input"],
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=token_info["cache"]["read"]),
+                output_tokens=token_info["output"],
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_info["reasoning"]),
+                total_tokens=token_info["total"],
+            )
+            usages.append(usage)
+
+        return usages
+
+    def _opencode_export_to_output_items(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
+        messages = []
+        for message in opencode_export["messages"]:
+            if message["info"]["role"] == "user":
+                message_parts = []
+                for part in message["parts"]:
+                    message_parts.append(ResponseInputTextParam(text=part[""]))
+
+                messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
+            elif message["info"]["role"] == "assistant":
+                pass
+            else:
+                raise NotImplementedError(message["info"]["role"])
+
+        return messages
+
     async def responses(
         self,
         request: Request,
@@ -164,49 +198,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         await sandbox.stop()
 
-        body = body.model_copy(deep=True)
-        if isinstance(body.input, str):
-            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
-
-        user_message, input_system = None, None
-        system_parts = [p for p in [self.config.system_prompt, input_system] if p]
-        system_prompt = "\n\n".join(system_parts) if system_parts else None
-
-        output_items, usage, model_name = await self._run_opencode(user_message, system_prompt)
-
-        if not any(
-            getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            for item in output_items
-        ):
-            output_items.append(
-                NeMoGymResponseOutputMessage(
-                    id=f"msg_{uuid4().hex}",
-                    content=[NeMoGymResponseOutputText(text="", annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            )
-
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
+        opencode_export = json.loads(results_local_fpath.read_text())
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            model=model_name,
+            model=body.model,
             object="response",
-            output=output_items,
+            output=self._opencode_export_to_output_items(opencode_export),
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
-            usage=NeMoGymResponseUsage(
-                input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-                output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=input_tokens + output_tokens,
-            ),
+            usage=NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export)),
         )
 
     async def run(
