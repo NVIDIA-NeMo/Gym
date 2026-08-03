@@ -192,6 +192,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && session_id=$(opencode session list --format json | jq -r '.[0].id') \
         && opencode export $session_id > {export_fname}
         """
+        print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
 
         result = await sandbox.exec(
             command=command,
