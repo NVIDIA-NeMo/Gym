@@ -231,19 +231,40 @@ class GymAgentHarnessProcessor(BaseModel):
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             print(f"Agent deps already at {deps_dir}", flush=True)
             return deps_dir
-        if not script.exists():
-            print(f"No setup script for {self._agent_key}, skipping deps install", flush=True)
+
+        deps_dir.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = deps_dir.parent / f".{deps_dir.name}.lockdir"
+        while True:
+            try:
+                lock_path.mkdir(exist_ok=False)
+                break
+            except FileExistsError:
+                if time.time() - lock_path.stat().st_mtime > 3600:
+                    shutil.rmtree(lock_path, ignore_errors=True)
+                    continue
+                time.sleep(5)
+
+        try:
+            if sentinel.exists() and sentinel.read_text().strip() == recipe:
+                print(f"Agent deps already at {deps_dir}", flush=True)
+                return deps_dir
+
+            if not script.exists():
+                print(f"No setup script for {self._agent_key}, skipping deps install", flush=True)
+                deps_dir.mkdir(parents=True, exist_ok=True)
+                sentinel.write_text(recipe)
+                return deps_dir
+
             deps_dir.mkdir(parents=True, exist_ok=True)
+            proc = Popen(
+                f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
+                shell=True,
+            )
+            assert proc.wait() == 0, f"Agent deps setup failed ({script})"
             sentinel.write_text(recipe)
             return deps_dir
-
-        deps_dir.mkdir(parents=True, exist_ok=True)
-        proc = Popen(
-            f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}", shell=True
-        )
-        assert proc.wait() == 0, f"Agent deps setup failed ({script})"
-        sentinel.write_text(recipe)
-        return deps_dir
+        finally:
+            shutil.rmtree(lock_path, ignore_errors=True)
 
     def get_run_command(self) -> str:
         """Write instruction.txt and agent_runner.py; return the shell command to run the agent."""
