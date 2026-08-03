@@ -1143,12 +1143,7 @@ class OpenSandboxProvider:
                 timeout_s=poll_timeout_s,
                 retries=self._operations.retries,
             )
-            if not hasattr(status, "running"):
-                raise RuntimeError(
-                    "OpenSandbox background command status has no 'running' field, so the poll loop cannot "
-                    f"tell when the command finished; execution_id={execution_id!r}"
-                )
-            if not status.running:
+            if not getattr(status, "running", False):
                 break
             if deadline is not None and loop.time() >= deadline:
                 raise TimeoutError(
@@ -1157,6 +1152,13 @@ class OpenSandboxProvider:
                 )
             await asyncio.sleep(poll_interval)
             poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
+
+        # A renamed SDK field must not degrade silently: a missing `running`
+        # ends the poll loop immediately, and a missing `exit_code` would score
+        # a failed command as a success.
+        for field in ("running", "exit_code"):
+            if not hasattr(status, field):
+                raise RuntimeError(f"OpenSandbox status has no {field!r} field; execution_id={execution_id!r}")
 
         logs = await self._await_sdk_operation(
             lambda: handle.raw.commands.get_background_command_logs(execution_id),
@@ -1175,11 +1177,6 @@ class OpenSandboxProvider:
         elif status_error is not None:
             return_code = 125
             error_type = "sandbox"
-        elif not hasattr(status, "exit_code"):
-            raise RuntimeError(
-                "OpenSandbox background command status has no 'exit_code' field, so a failed command cannot "
-                f"be told from a successful one; execution_id={execution_id!r}"
-            )
         else:
             return_code = 0
 

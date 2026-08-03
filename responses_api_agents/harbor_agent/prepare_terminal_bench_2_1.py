@@ -13,15 +13,12 @@
 # limitations under the License.
 """Prepare the Terminal-Bench 2.1 input JSONL for the harbor agent.
 
-Emits one Gym row per task (``instance_id: "terminal_bench::<task>"``) from a
-checkout of the terminal-bench-2-1 tasks repository, pinned for
-reproducibility. The same checkout's ``tasks/`` directory is what
-``harbor_datasets.terminal_bench.local_dataset_path`` must point at (via
-``TERMINAL_BENCH_2_1_TASKS_DIR``) in
-``configs/harbor_agent_opensandbox.yaml``.
+Emits one Gym row per task from a pinned checkout of the terminal-bench-2-1
+tasks repository. That checkout's ``tasks/`` directory is what
+``TERMINAL_BENCH_2_1_TASKS_DIR`` must point at.
 
-The per-row sampling parameters mirror the Qwen3.6 model-card Terminal-Bench
-setup (thinking mode: temperature 1.0, top_p 0.95); adjust for other models.
+Sampling parameters mirror the Qwen3.6 model-card Terminal-Bench setup
+(thinking mode); adjust for other models.
 """
 
 import json

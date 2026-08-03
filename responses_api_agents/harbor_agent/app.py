@@ -282,19 +282,13 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 trial_dir = Path(trial_dir_path)
 
                 def _read_trial_files():
-                    with open(trial_dir / "result.json", "r") as f:
-                        result = json.load(f)
-                    traj = None
-                    trajectory_path = trial_dir / "agent" / "trajectory.json"
-                    if trajectory_path.exists():
-                        with open(trajectory_path, "r") as f:
-                            traj = json.load(f)
-                    flags = {}
+                    traj_path = trial_dir / "agent" / "trajectory.json"
                     flags_path = trial_dir / "agent" / "agent_error_flags.json"
-                    if flags_path.exists():
-                        with open(flags_path, "r") as f:
-                            flags = json.load(f)
-                    return result, traj, flags
+                    return (
+                        json.loads((trial_dir / "result.json").read_text()),
+                        json.loads(traj_path.read_text()) if traj_path.exists() else None,
+                        json.loads(flags_path.read_text()) if flags_path.exists() else {},
+                    )
 
                 # Trajectories can be many MB; parse off the event loop.
                 trial_result, trajectory, agent_error_flags = await asyncio.to_thread(_read_trial_files)
