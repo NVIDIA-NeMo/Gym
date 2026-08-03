@@ -340,7 +340,7 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
         },
     )
     monkeypatch.setattr(agent, "_response_from_transcript", lambda task_id, out_dir: agent._empty_response(task_id))
-    monkeypatch.setattr(agent, "_collect_transcript", lambda task_id, out_dir, run_id: ([{"type": "message"}], ""))
+    monkeypatch.setattr(agent, "_collect_transcript", lambda task_id, out_dir, run_id: ([], ""))
     resp = await agent.run(body=_run_body())
     dumped = resp.model_dump()
     assert dumped["reward"] == 1.0

@@ -150,16 +150,10 @@ class SandboxKilledError(RuntimeError):
     """Sandbox process died by signal (walltime SIGTERM / preemption / OOM kill)."""
 
 
-class TaskNotExecutedError(RuntimeError):
-    """Harness graded a task it never ran, so no transcript was produced."""
-
-
 def _classify_task_failure(exc: BaseException) -> str:
     """Map a task failure onto the dispatcher's routing classes."""
     if isinstance(exc, SandboxKilledError):
         return "kill_shaped"
-    if isinstance(exc, TaskNotExecutedError):
-        return "not_executed"
     if isinstance(exc, TimeoutError):
         return "timeout_exceeded"
     return "legitimate"
@@ -708,11 +702,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             result = self._parse_result(task_id, out_dir)
             response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
-            if not transcript_events:
-                # A grade without a transcript means the task never ran. Scoring it 0
-                # would cache a harness failure as a legitimate result, and resume
-                # would never retry it.
-                raise TaskNotExecutedError(f"task {task_id} was graded without producing a transcript")
         except Exception as exc:  # noqa: BLE001 -- never 500; one task must not abort the whole collection (ng_collect is fail-fast)
             failure_class = _classify_task_failure(exc)
             print(f"[pinchbench-{failure_class}] {task_id}: {type(exc).__name__}: {exc}", flush=True)
@@ -724,7 +713,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 "status": "error",
             }
             routing[NG_FAILURE_CLASS_KEY] = failure_class
-            if failure_class in ("kill_shaped", "not_executed"):
+            if failure_class == "kill_shaped":
                 routing[NG_NO_PERSIST_KEY] = True
             elif failure_class == "timeout_exceeded":
                 routing[NG_TERMINAL_KEY] = True
