@@ -69,7 +69,7 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
 
-    def _start_sandbox(self) -> AsyncSandbox:
+    async def _start_sandbox(self) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -118,7 +118,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        sandbox = self._start_sandbox()
+        sandbox = await self._start_sandbox()
 
         query = None
         # This can be modified to handle system/developer prompts too.
