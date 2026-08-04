@@ -736,6 +736,30 @@ class TestApp:
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
 
+    def test_modern_reasoning_field_omits_legacy_alias(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = True
+        server.config.emit_legacy_reasoning_content = False
+        server._converter.uses_reasoning_parser = True
+
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "<think>private reasoning</think>visible answer",
+                }
+            ]
+        }
+        result = server._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert result["messages"] == [
+            {
+                "role": "assistant",
+                "content": "visible answer",
+                "reasoning": "private reasoning",
+            }
+        ]
+
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         app = server.setup_webserver()

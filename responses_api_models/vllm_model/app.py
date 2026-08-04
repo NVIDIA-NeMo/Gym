@@ -152,6 +152,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Older vLLM releases consume ``reasoning_content`` while vLLM >=0.16
+    # consumes ``reasoning``. Historically Gym emitted both aliases. Some
+    # modern Rust frontends deserialize both names into one field and reject a
+    # message containing both as a duplicate. Keep the legacy alias by default;
+    # modern endpoints can disable only it.
+    emit_legacy_reasoning_content: bool = True
     # Keep reconstructed assistant history byte-for-byte in ``content`` for
     # models whose validated direct-vLLM contract includes <think> tags.
     # Response parsing remains controlled independently by
@@ -449,7 +455,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
                     if reasoning_matches and self.config.uses_interleaved_reasoning:
-                        message_dict["reasoning_content"] = reasoning_matches[0]
+                        if self.config.emit_legacy_reasoning_content:
+                            message_dict["reasoning_content"] = reasoning_matches[0]
 
                         # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
                         # Starting with vLLM 0.16.0, the `reasoning_content` field has been deprecated in favor of just `reasoning`
@@ -467,7 +474,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
                         if reasoning_matches and self.config.uses_interleaved_reasoning:
-                            message_dict["reasoning_content"] = reasoning_matches[0]
+                            if self.config.emit_legacy_reasoning_content:
+                                message_dict["reasoning_content"] = reasoning_matches[0]
                             # See the TODO wrt reasoning_content above
                             message_dict["reasoning"] = reasoning_matches[0]
                 elif not content:
