@@ -388,6 +388,7 @@ async def score_with_rubric_structured(
     formatting_retries: int = 3,
     deliverable_content_blocks: list[dict] | None = None,
     include_raw_responses: bool = False,
+    request_trace_id: str | None = None,
 ) -> tuple[float, dict | None]:
     """Score a deliverable using structured tagged output format.
 
@@ -479,6 +480,8 @@ async def score_with_rubric_structured(
             {"model": judge.model, "messages": messages, "temperature": 0.3, "max_tokens": 65535},
             judge.create_overrides,
         )
+        if request_trace_id:
+            create_kwargs["user"] = f"{request_trace_id}/trial_{trial_num}"
 
         for retry in range(formatting_retries):
             try:

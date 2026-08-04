@@ -17,6 +17,7 @@ from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -30,6 +31,7 @@ from nemo_gym.base_responses_api_model import (
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     SimpleModelServer,
     SimpleModelServerConfig,
 )
@@ -63,22 +65,115 @@ def _response_data() -> dict:
 
 
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
+    def _setup_server(
+        self,
+        max_concurrent_requests=None,
+        drop_input_reasoning_items=False,
+        openai_base_url="https://api.openai.com/v1",
+        **config_overrides,
+    ):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
-            openai_base_url="https://api.openai.com/v1",
+            openai_base_url=openai_base_url,
             openai_api_key="dummy_key",  # pragma: allowlist secret
             openai_model="dummy_model",
             entrypoint="",
             name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
             drop_input_reasoning_items=drop_input_reasoning_items,
+            **config_overrides,
         )
         return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
         self._setup_server()
+
+    def test_multiple_endpoints_round_robin(self) -> None:
+        server = self._setup_server(openai_base_url=["https://judge-1/v1", "https://judge-2/v1"])
+        clients = [MagicMock(spec=NeMoGymAsyncOpenAI), MagicMock(spec=NeMoGymAsyncOpenAI)]
+        server._clients = clients
+
+        assert [server._resolve_client() for _ in range(5)] == [
+            clients[0],
+            clients[1],
+            clients[0],
+            clients[1],
+            clients[0],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_retryable_failure_quarantines_and_fails_over(self, capsys: pytest.CaptureFixture[str]) -> None:
+        server = self._setup_server(
+            openai_base_url=["https://judge-1/v1", "https://judge-2/v1"],
+            endpoint_failover_enabled=True,
+            endpoint_failure_cooldown_seconds=60,
+        )
+        first = MagicMock(spec=NeMoGymAsyncOpenAI)
+        first.create_chat_completion = AsyncMock(side_effect=asyncio.TimeoutError("judge stalled"))
+        second = MagicMock(spec=NeMoGymAsyncOpenAI)
+        second.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-failover",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "index": 0,
+                        "message": {"content": "OK", "role": "assistant"},
+                    }
+                ],
+                "created": 1753983922,
+                "model": "dummy_model",
+                "object": "chat.completion",
+            }
+        )
+        server._clients = [first, second]
+
+        response = await server.chat_completions(
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "user", "content": "grade this"}],
+                user="task-7/repeat_2/trial_1",
+            )
+        )
+
+        assert response.choices[0].message.content == "OK"
+        assert first.create_chat_completion.await_count == 1
+        assert second.create_chat_completion.await_count == 1
+        assert server._quarantined_until[0] > 0
+        logs = capsys.readouterr().out
+        assert "trace_id=task-7/repeat_2/trial_1" in logs
+        assert "endpoint_idx=0" in logs and "event=quarantined" in logs
+        assert "endpoint_idx=1" in logs and "event=success" in logs
+
+    @pytest.mark.asyncio
+    async def test_nonretryable_http_error_does_not_fail_over(self) -> None:
+        server = self._setup_server(
+            openai_base_url=["https://judge-1/v1", "https://judge-2/v1"],
+            endpoint_failover_enabled=True,
+        )
+        first = MagicMock(spec=NeMoGymAsyncOpenAI)
+        first.create_chat_completion = AsyncMock(
+            side_effect=ClientResponseError(
+                request_info=MagicMock(),
+                history=(),
+                status=400,
+                message="bad request",
+            )
+        )
+        second = MagicMock(spec=NeMoGymAsyncOpenAI)
+        second.create_chat_completion = AsyncMock()
+        server._clients = [first, second]
+
+        with pytest.raises(ClientResponseError):
+            await server.chat_completions(
+                NeMoGymChatCompletionCreateParamsNonStreaming(
+                    messages=[{"role": "user", "content": "grade this"}],
+                    user="task-8/repeat_0/trial_1",
+                )
+            )
+
+        assert second.create_chat_completion.await_count == 0
+        assert server._quarantined_until == [0.0, 0.0]
 
     async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()

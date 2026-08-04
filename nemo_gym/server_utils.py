@@ -221,7 +221,7 @@ async def request(
     while True:
         try:
             return await client.request(method=method, url=url, **kwargs)
-        except ServerDisconnectedError:
+        except ServerDisconnectedError as e:
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             retries += 1
@@ -232,8 +232,10 @@ async def request(
                     flush=True,
                 )
 
+            if not _internal and retries >= MAX_NUM_TRIES:
+                raise e
             await asyncio.sleep(0.5)
-        except ClientOSError:
+        except ClientOSError as e:
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             retries += 1
@@ -244,6 +246,8 @@ async def request(
                     flush=True,
                 )
 
+            if not _internal and retries >= MAX_NUM_TRIES:
+                raise e
             await asyncio.sleep(0.5)
         except Exception as e:
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:

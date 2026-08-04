@@ -149,6 +149,20 @@ class TestServerUtils:
         )
         assert "my mock response" == actual_response
 
+    async def test_external_disconnect_retries_are_bounded(self, monkeypatch: MonkeyPatch) -> None:
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=nemo_gym.server_utils.ServerDisconnectedError())
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+
+        with raises(nemo_gym.server_utils.ServerDisconnectedError):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="http://dead-judge/v1/chat/completions",
+            )
+
+        assert client.request.await_count == nemo_gym.server_utils.MAX_NUM_TRIES
+
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.setenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, "my_server")

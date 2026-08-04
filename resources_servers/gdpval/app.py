@@ -570,6 +570,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if self.config.rubric_scoring_mode == "structured":
             from resources_servers.gdpval.scoring import score_with_rubric_structured
 
+            repeat_label = Path(body.deliverables_dir).name if body.deliverables_dir else "repeat_unknown"
             reward, judge_result = await score_with_rubric_structured(
                 deliverable_text=deliverable_text,
                 rubric_json=body.rubric_json,
@@ -581,6 +582,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 formatting_retries=self.config.rubric_structured_formatting_retries,
                 deliverable_content_blocks=deliverable_content_blocks,
                 include_raw_responses=self.config.persist_raw_judge_responses,
+                request_trace_id=f"{body.task_id}/{repeat_label}",
             )
         elif deliverable_content_blocks:
             from resources_servers.gdpval.scoring import score_with_rubric_visual
