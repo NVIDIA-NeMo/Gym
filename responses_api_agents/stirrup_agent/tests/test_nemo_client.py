@@ -59,7 +59,7 @@ async def test_generate_forwards_configured_sampling_kwargs() -> None:
     ``max_completion_tokens`` should land on the wire request_kwargs."""
     client = DynamicMaxTokensChatCompletionsClient(
         model="m",
-        context_window_tokens=10_000,
+        context_window_tokens=131_072,
         base_url="http://test",
         api_key="k",
         temperature=0.42,
@@ -88,7 +88,7 @@ async def test_generate_restores_tool_result_messages_for_openai_payload() -> No
     """Normal model calls must use provider-valid tool-call history."""
     client = DynamicMaxTokensChatCompletionsClient(
         model="m",
-        context_window_tokens=10_000,
+        context_window_tokens=131_072,
         base_url="http://test",
         api_key="k",
     )
@@ -163,7 +163,7 @@ def test_defaults_match_pre_lift_behaviour() -> None:
     deployments that don't set the new config fields are unaffected."""
     client = DynamicMaxTokensChatCompletionsClient(
         model="m",
-        context_window_tokens=10_000,
+        context_window_tokens=131_072,
         base_url="http://test",
         api_key="k",
     )
