@@ -56,6 +56,13 @@ from nemo_gym.server_utils import (
 
 OPENSANDBOX_PROVIDER_NAME = "opensandbox"
 OPENSANDBOX_API_KEY_ENV = "OPENSANDBOX_API_KEY"  # pragma: allowlist secret
+E2B_PROVIDER_NAME = "e2b"
+E2B_API_KEY_ENV = "E2B_API_KEY"  # pragma: allowlist secret
+
+_SANDBOX_API_KEY_ENV_BY_PROVIDER = {
+    OPENSANDBOX_PROVIDER_NAME: OPENSANDBOX_API_KEY_ENV,
+    E2B_PROVIDER_NAME: E2B_API_KEY_ENV,
+}
 
 
 class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
@@ -152,10 +159,13 @@ def _responses_create_params_to_model_kwargs(
     return model_kwargs
 
 
-def _opensandbox_connection(provider: dict[str, Any] | None) -> dict[str, Any] | None:
+def _sandbox_provider_connection(
+    provider: dict[str, Any] | None,
+    provider_name: str,
+) -> dict[str, Any] | None:
     if provider is None:
         return None
-    provider_config = provider.get(OPENSANDBOX_PROVIDER_NAME)
+    provider_config = provider.get(provider_name)
     if not isinstance(provider_config, dict):
         return None
     connection = provider_config.get("connection")
@@ -166,26 +176,39 @@ def _opensandbox_connection(provider: dict[str, Any] | None) -> dict[str, Any] |
 
 def _sandbox_provider_for_config_dump(provider: dict[str, Any]) -> dict[str, Any]:
     provider_for_disk = deepcopy(provider)
-    connection = _opensandbox_connection(provider_for_disk)
-    if connection is not None:
-        connection.pop("api_key", None)
+    for provider_name in _SANDBOX_API_KEY_ENV_BY_PROVIDER:
+        connection = _sandbox_provider_connection(provider_for_disk, provider_name)
+        if connection is not None:
+            connection.pop("api_key", None)
     return provider_for_disk
 
 
 def _sandbox_runtime_env(provider: dict[str, Any] | None) -> dict[str, Any]:
     runtime_env: dict[str, Any] = {"py_executable": sys.executable}
-    connection = _opensandbox_connection(provider)
-    if connection is None:
-        return runtime_env
-    api_key = connection.get("api_key")
-    if api_key:
-        runtime_env["env_vars"] = {OPENSANDBOX_API_KEY_ENV: str(api_key)}
+    env_vars: dict[str, str] = {}
+    for provider_name, env_name in _SANDBOX_API_KEY_ENV_BY_PROVIDER.items():
+        connection = _sandbox_provider_connection(provider, provider_name)
+        api_key = connection.get("api_key") if connection is not None else None
+        if (
+            provider_name == E2B_PROVIDER_NAME
+            and not api_key
+            and provider is not None
+            and isinstance(provider.get(provider_name), dict)
+        ):
+            # E2B's public SDK reads E2B_API_KEY directly. Preserve that
+            # fallback when an inline config omits connection.api_key.
+            api_key = os.getenv(env_name)
+        if api_key:
+            env_vars[env_name] = str(api_key)
+    if env_vars:
+        runtime_env["env_vars"] = env_vars
     return runtime_env
 
 
 def _restore_sandbox_provider_secrets(config: dict[str, Any]) -> None:
     provider = config.get("environment", {}).get("provider")
-    connection = _opensandbox_connection(provider if isinstance(provider, dict) else None)
+    provider = provider if isinstance(provider, dict) else None
+    connection = _sandbox_provider_connection(provider, OPENSANDBOX_PROVIDER_NAME)
     if connection is None or connection.get("api_key"):
         return
     api_key = os.getenv(OPENSANDBOX_API_KEY_ENV)

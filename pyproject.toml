@@ -253,6 +253,14 @@ sandbox = [
     # License: Apache 2.0 https://pypi.org/project/daytona/
     "daytona>=0.179.0",
 
+    # E2B SDK: used by the E2B sandbox provider for create/exec/kill and file operations.
+    # Also drives any e2b-compatible gateway via connection.api_url/sandbox_url.
+    # Lower bound 2.36.0: provider traffic attribution, current template APIs, and stream-open timeout semantics.
+    # Upper bound <3.0.0: the provider depends on the E2B 2.x SDK contract.
+    # Updated: Tue Aug 04, 2026 with e2b>=2.36.0,<3.0.0
+    # License: MIT https://github.com/e2b-dev/E2B/blob/e2b@2.36.0/packages/python-sdk/LICENSE
+    "e2b>=2.36.0,<3.0.0",
+
     # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
     # CodeBuild/S3/SSM/Secrets Manager calls.
     # Updated: Tue Jun 03, 2026 with boto3>=1.34

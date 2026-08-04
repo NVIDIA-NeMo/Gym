@@ -47,6 +47,7 @@ except ModuleNotFoundError as exc:
 
 from responses_api_agents.mini_swe_agent_2 import app as mini_swe_app_module
 from responses_api_agents.mini_swe_agent_2.app import (
+    E2B_API_KEY_ENV,
     OPENSANDBOX_API_KEY_ENV,
     MiniSWEAgent,
     MiniSWEAgentConfig,
@@ -56,6 +57,7 @@ from responses_api_agents.mini_swe_agent_2.app import (
     _json_dict_from_metadata,
     _message_content_to_text,
     _responses_create_params_to_model_kwargs,
+    _restore_sandbox_provider_secrets,
     _run_mini_swe_v2,
     _sandbox_provider_for_config_dump,
     _sandbox_runtime_env,
@@ -373,6 +375,32 @@ class TestApp:
         assert provider["opensandbox"]["connection"]["api_key"] == "fixture-value"  # pragma: allowlist secret
         assert _sandbox_runtime_env(provider)["env_vars"] == {
             OPENSANDBOX_API_KEY_ENV: "fixture-value"  # pragma: allowlist secret
+        }
+
+    def test_e2b_sandbox_provider_secret_is_kept_out_of_config_dump(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = {
+            "e2b": {
+                "connection": {
+                    "api_url": "https://gateway.example",
+                    "api_key": "fixture-value",  # pragma: allowlist secret
+                }
+            }
+        }
+
+        provider_for_disk = _sandbox_provider_for_config_dump(provider)
+        connection_for_disk = provider_for_disk["e2b"]["connection"]
+        assert connection_for_disk == {"api_url": "https://gateway.example"}
+        assert provider["e2b"]["connection"]["api_key"] == "fixture-value"  # pragma: allowlist secret
+        assert _sandbox_runtime_env(provider)["env_vars"] == {
+            E2B_API_KEY_ENV: "fixture-value"  # pragma: allowlist secret
+        }
+
+        config = {"environment": {"provider": provider_for_disk}}
+        monkeypatch.setenv(E2B_API_KEY_ENV, "worker-value")  # pragma: allowlist secret
+        _restore_sandbox_provider_secrets(config)
+        assert "api_key" not in connection_for_disk
+        assert _sandbox_runtime_env(provider_for_disk)["env_vars"] == {
+            E2B_API_KEY_ENV: "worker-value"  # pragma: allowlist secret
         }
 
     def test_split_trajectory_and_resolution_helpers_cover_edge_cases(self) -> None:
@@ -806,6 +834,45 @@ class TestApp:
             "repetition_penalty": 1.0,
             "chat_template_kwargs": {"enable_thinking": True},
         }
+
+    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
+    async def test_run_keeps_e2b_api_key_out_of_worker_config(
+        self,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = create_test_config()
+        config.sandbox_provider = {
+            "e2b": {
+                "connection": {
+                    "api_url": "https://gateway.example",
+                    "api_key": "fixture-value",  # pragma: allowlist secret
+                },
+                "create": {"template": "base"},
+            }
+        }
+        server = MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_config_path_mock(mock_get_config_path)
+        setup_run_mini_swe_mock(mock_runner_ray_remote)
+
+        await server.run(create_run_request())
+
+        runtime_env = mock_runner_ray_remote.options.call_args.kwargs["runtime_env"]
+        assert runtime_env["env_vars"] == {E2B_API_KEY_ENV: "fixture-value"}  # pragma: allowlist secret
+        params = mock_runner_ray_remote.options.return_value.remote.call_args.args[1]
+        generated_provider = yaml.safe_load(Path(params["config"]).read_text())["environment"]["provider"]
+        assert generated_provider["e2b"]["connection"] == {"api_url": "https://gateway.example"}
+        assert generated_provider["e2b"]["create"] == {"template": "base"}
 
     @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
