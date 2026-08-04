@@ -1,5 +1,4 @@
 config_paths:
-- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 - responses_api_agents/opencode_sandboxed_agent/configs/opencode_agent.yaml
 - resources_servers/swebench/configs/swebench.yaml
 
