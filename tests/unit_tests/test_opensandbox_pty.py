@@ -510,8 +510,8 @@ async def test_provider_attach_pty_reuses_endpoint(monkeypatch: pytest.MonkeyPat
     await session.close()
 
 
-async def test_attach_rejected_before_connected_raises_and_cleans_up() -> None:
-    # A second attach without takeover is closed 1008 before any connected frame.
+async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
+    # The session we created is torn down when the socket is rejected.
     ws = FakeWs([], close_code=1008)
     ws.closed = True
     client = FakeHttpClient(ws=ws)
@@ -615,4 +615,99 @@ async def test_provider_aclose_closes_live_pty_sessions(monkeypatch: pytest.Monk
     await provider.aclose()
     assert client.closed, "aclose must close PTY-owned aiohttp clients"
     assert ws.closed
+    await session.close()
+
+
+async def test_attach_never_deletes_a_session_it_did_not_create() -> None:
+    from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+
+    # A rejected non-takeover attach must not destroy the holder's session.
+    ws = FakeWs([], close_code=1008)
+    ws.closed = True
+    client = FakeHttpClient(ws=ws)
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await attach_pty_session(
+            client=client,  # type: ignore[arg-type]
+            base_url="http://server/base",
+            headers={},
+            session_id="s-9",
+            takeover=False,
+            request_timeout_s=5.0,
+        )
+    assert client.closed
+    assert client.delete_calls == [], "attach must not DELETE a session it did not create"
+
+    # Closing a successfully attached session leaves it alive for its owner.
+    ws2 = FakeWs([CONNECTED])
+    client2 = FakeHttpClient(ws=ws2)
+    session = await attach_pty_session(
+        client=client2,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        session_id="s-9",
+        request_timeout_s=5.0,
+    )
+    await session.close()
+    assert client2.closed and ws2.closed
+    assert client2.delete_calls == [], "detaching must not end the session"
+
+
+async def test_initial_resize_failure_closes_session_and_client() -> None:
+    ws = FakeWs([CONNECTED])
+
+    async def boom(_: Any) -> None:
+        raise ConnectionResetError("gone")
+
+    ws.send_str = boom  # type: ignore[assignment]
+    client = FakeHttpClient(ws=ws)
+    with pytest.raises(SandboxPtyError, match="connection lost"):
+        await open_pty_session(
+            client=client,  # type: ignore[arg-type]
+            base_url="http://s/b",
+            headers={},
+            spec=SandboxPtySpec(rows=50, cols=200),
+            request_timeout_s=5.0,
+        )
+    assert client.closed
+    assert ws.closed
+    assert client.delete_calls[0][0] == "http://s/b/pty/s-1"
+
+
+async def test_error_frame_wins_over_close_code() -> None:
+    session, ws, _ = await _session_over(
+        [CONNECTED, _text({"type": "error", "code": "STDIN_WRITE_FAILED", "error": "boom"})],
+        close_code=4001,
+    )
+    ws.closed = True
+    with pytest.raises(SandboxPtyError, match="STDIN_WRITE_FAILED"):
+        await session.read()
+    with pytest.raises(SandboxPtyError, match="STDIN_WRITE_FAILED"):
+        await session.wait_exit()
+    await session.close()
+
+
+async def test_wait_exit_survives_close_after_exit() -> None:
+    session, ws, _ = await _session_over([CONNECTED, _text({"type": "exit", "exit_code": 4})])
+    ws.closed = True
+    assert await session.wait_exit() == 4
+    await session.close()
+    assert await session.wait_exit() == 4, "close must not clobber a recorded exit code"
+
+
+async def test_close_unblocks_a_pending_reader() -> None:
+    session, ws, _ = await _session_over([CONNECTED])
+    reader = asyncio.create_task(session.read())
+    await asyncio.sleep(0.01)
+    await session.close()
+    with pytest.raises(SandboxPtyError):
+        await asyncio.wait_for(reader, timeout=1)
+
+
+async def test_stderr_survives_bare_channel_frames() -> None:
+    session, ws, _ = await _session_over(
+        [CONNECTED, _binary(b"\x02"), _binary(b"\x02E"), _text({"type": "exit", "exit_code": 0})]
+    )
+    ws.closed = True
+    assert await session.read_stderr() == b"E"
+    assert await session.read_stderr() == b""
     await session.close()

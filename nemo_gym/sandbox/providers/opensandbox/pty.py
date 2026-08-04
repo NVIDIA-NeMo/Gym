@@ -77,6 +77,7 @@ class OpenSandboxPtySession:
         session_url: str,
         headers: dict[str, str],
         request_timeout_s: float | None,
+        owned: bool = True,
     ) -> None:
         self._client = client
         self._ws = ws
@@ -84,6 +85,9 @@ class OpenSandboxPtySession:
         self._session_url = session_url
         self._headers = headers
         self._request_timeout_s = request_timeout_s
+        # Attached sessions belong to whoever created them: closing one detaches
+        # rather than ending it.
+        self._owned = owned
         self.mode: str | None = None
         self._output: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._stderr: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -214,14 +218,15 @@ class OpenSandboxPtySession:
         await asyncio.gather(self._pump_task, return_exceptions=True)
         try:
             await self._ws.close()
-            try:
-                await self._client.delete(
-                    self._session_url,
-                    headers=self._headers,
-                    timeout=aiohttp.ClientTimeout(total=self._request_timeout_s),
-                )
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                pass
+            if self._owned:
+                try:
+                    await self._client.delete(
+                        self._session_url,
+                        headers=self._headers,
+                        timeout=aiohttp.ClientTimeout(total=self._request_timeout_s),
+                    )
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
         finally:
             await self._client.close()
 
@@ -351,6 +356,7 @@ async def attach_pty_session(
         session_id=session_id,
         headers=headers,
         request_timeout_s=request_timeout_s,
+        owned=False,
     )
 
 
@@ -377,6 +383,7 @@ async def _start_session(
     session_id: str,
     headers: dict[str, str],
     request_timeout_s: float | None,
+    owned: bool = True,
 ) -> OpenSandboxPtySession:
     session = OpenSandboxPtySession(
         client=client,
@@ -385,6 +392,7 @@ async def _start_session(
         session_url=f"{base_url}/pty/{session_id}",
         headers=headers,
         request_timeout_s=request_timeout_s,
+        owned=owned,
     )
     try:
         await session._wait_connected(request_timeout_s)

@@ -1520,3 +1520,54 @@ async def test_pty_attach_requires_capability() -> None:
     with pytest.raises(NotImplementedError, match="does not support re-attaching PTY sessions"):
         await plain.pty.attach("s-1")
     await plain.stop()
+
+
+async def test_pty_exec_marker_edges() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    class ScriptedSession:
+        """Replies with a scripted marker line, optionally split across chunks."""
+
+        def __init__(self, reply: str, *, split: bool = False) -> None:
+            self._reply = reply
+            self._split = split
+            self._chunks: list[bytes] = []
+            self.closed = False
+
+        async def write(self, data: bytes) -> None:
+            quoted = data.decode().split("'")
+            token = quoted[3] + quoted[5]
+            line = f"{token}:{self._reply}\r\n".encode()
+            self._chunks = [line[:8], line[8:]] if self._split else [line]
+
+        async def read(self, *, timeout_s: float | None = None) -> bytes:
+            return self._chunks.pop(0) if self._chunks else b""
+
+        async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
+            raise TimeoutError
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class Provider(PlainSandboxProvider):
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> object:
+            raise AssertionError("must not create a session")
+
+    sandbox = AsyncSandbox(Provider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    # A non-numeric status falls back to -1 rather than raising.
+    assert (await sandbox.pty.exec("x", session=ScriptedSession("x"))).return_code == -1
+    # The marker is found even when it straddles two chunks.
+    assert (await sandbox.pty.exec("x", session=ScriptedSession("7", split=True))).return_code == 7
+
+    class HangingSession(ScriptedSession):
+        async def read(self, *, timeout_s: float | None = None) -> bytes:
+            await asyncio.sleep(3600)
+            return b""
+
+    caller_owned = HangingSession("0")
+    with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+        await sandbox.pty.exec("sleep", session=caller_owned, timeout_s=0.05)
+    assert not caller_owned.closed, "pty.exec must not close a session it did not open"
+    await sandbox.stop()
