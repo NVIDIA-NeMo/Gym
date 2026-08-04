@@ -275,6 +275,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = await self._start_sandbox()
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
+        # For propagating the sandbox handle
+        cookies[self.get_session_middleware_key()] = request.session[SESSION_ID_KEY]
+
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path=self.url_path_for_run("/v1/responses", body),
