@@ -132,7 +132,7 @@ class DockerContainer(BaseModel):
 
 # TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
 # They can possibly even omitted once this graduates to core infra.
-class SWEBenchSeedSessionRequest(BaseSeedSessionRequest):
+class SWEBenchSeedSessionRequest(SWEBenchVerifyRequest, BaseSeedSessionRequest):
     sandbox_spec: Optional[Dict[str, Any]] = None
 
 
@@ -170,7 +170,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         return eval_sandbox
 
-    async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(self, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         return await super().seed_session(body)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
