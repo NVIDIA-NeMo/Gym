@@ -3667,6 +3667,108 @@ class TestSwitchyardSpawnsOnAgentNode:
         assert records and sessions, "capture must be readable without any proxy URL"
 
 
+class TestSpawnProfileEnv:
+    """The spawn env carries every ${VAR} the shipped routing profile references."""
+
+    @staticmethod
+    def _policy_cfg() -> str:
+        return shlex.quote(
+            OmegaConf.to_yaml(
+                OmegaConf.create(
+                    {"policy_base_url": ["http://gen:8000/v1"], "policy_model_name": "/ckpts/policy/hf"}
+                )
+            )
+        )
+
+    async def _spawn_env(self, monkeypatch, tmpdir: str, **overrides) -> dict:
+        params = _make_instance_config(
+            tmpdir,
+            ng_global_config_dict_str=self._policy_cfg(),
+            switchyard_spawn_routing_profile="/tmp/profile.yaml",
+            agent_framework="opencode",
+            opencode_source="opencode",
+            **overrides,
+        )
+        captured = {}
+
+        async def fake_exec(*argv, **kwargs):
+            captured["env"] = kwargs["env"]
+            return MagicMock()
+
+        monkeypatch.delenv("SWITCHYARD_VLLM_BASE_URL", raising=False)
+        monkeypatch.delenv("SWITCHYARD_POLICY_MODEL", raising=False)
+        monkeypatch.setattr(swe_app.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(swe_app, "_wait_switchyard_ready_local", AsyncMock())
+        await swe_app._spawn_switchyard_local(params)
+        return captured["env"]
+
+    async def test_endpoint_and_model_derived_from_run_config(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = await self._spawn_env(monkeypatch, tmpdir)
+        assert env["SWITCHYARD_VLLM_BASE_URL"] == "http://gen:8000/v1"
+        assert env["SWITCHYARD_POLICY_MODEL"] == "/ckpts/policy/hf"
+
+    async def test_round_robin_backend_wins_over_derived_url(self, monkeypatch) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = await self._spawn_env(monkeypatch, tmpdir, switchyard_backend_url="http://rr:1/v1")
+        assert env["SWITCHYARD_VLLM_BASE_URL"] == "http://rr:1/v1"
+
+    async def test_parsers_and_pythonpath_from_config_fields(self, monkeypatch) -> None:
+        monkeypatch.setenv("PYTHONPATH", "/existing")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = await self._spawn_env(
+                monkeypatch,
+                tmpdir,
+                switchyard_tool_parser="qwen3_coder",
+                switchyard_reasoning_parser="nano_v3",
+                switchyard_parser_pythonpath="/opt/vllm",
+            )
+        assert env["SWITCHYARD_TOOL_PARSER"] == "qwen3_coder"
+        assert env["SWITCHYARD_REASONING_PARSER"] == "nano_v3"
+        assert env["PYTHONPATH"] == "/opt/vllm:/existing"
+
+    async def test_unset_fields_leave_env_untouched(self, monkeypatch) -> None:
+        monkeypatch.setenv("PYTHONPATH", "/existing")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = await self._spawn_env(monkeypatch, tmpdir)
+        assert "SWITCHYARD_TOOL_PARSER" not in env
+        assert "SWITCHYARD_REASONING_PARSER" not in env
+        assert env["PYTHONPATH"] == "/existing"
+
+
+class TestShippedSwitchyardProfile:
+    """The default profile stays in lockstep with what the spawn env exports."""
+
+    _PROFILE_PATH = Path(swe_app.__file__).parent / "switchyard_profile.yaml"
+
+    def test_env_refs_match_spawn_exports(self) -> None:
+        import re
+
+        refs = set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", self._PROFILE_PATH.read_text()))
+        assert refs == {
+            "SWITCHYARD_VLLM_BASE_URL",
+            "SWITCHYARD_POLICY_MODEL",
+            "SWITCHYARD_TOOL_PARSER",
+            "SWITCHYARD_REASONING_PARSER",
+        }
+
+    def test_routes_are_aliases_with_injection_and_numeric_sampling(self) -> None:
+        import yaml
+
+        loaded = yaml.safe_load(self._PROFILE_PATH.read_text())
+        # Dispatch is exact-match on the request's model id; upstream opencode
+        # POSTs "default", the OpenHands fork POSTs the model server's name.
+        assert loaded["routes"]["default"] == loaded["routes"]["policy_model"]
+        route = loaded["routes"]["default"]
+        assert route["token_capture_engine"] == "vllm"
+        assert route["token_injection"] is True
+        assert route["injection_transport"] == "prefix_chat"
+        # Env interpolation is string-only: numeric sampling params must stay
+        # literals or the trainer's on-policy assert sees strings.
+        assert isinstance(route["extra_body"]["temperature"], float)
+        assert isinstance(route["extra_body"]["top_p"], float)
+
+
 def _write_full_record(rl_log_dir: Path, session_id: str, parent_id, turn: int, history: list) -> list:
     """One complete capture record (the shape Switchyard writes); returns new history."""
     generation = [100 + turn, 101 + turn]

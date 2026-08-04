@@ -196,7 +196,9 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     switchyard_spawn_routing_profile: Optional[str] = Field(
         default=None,
         description=(
-            "Path to a Switchyard routing-profiles YAML. When set, one dedicated token-capture Switchyard "
+            "Path to a Switchyard routing-profiles YAML; the shipped swe_agents/switchyard_profile.yaml "
+            "works for any deployment (endpoint, model, and parsers resolve from env vars this server "
+            "exports at spawn). When set, one dedicated token-capture Switchyard "
             "instance is spawned per agent run on a free port (stateful token injection requires every "
             "call of a session to reach the same process) and torn down after trace retrieval in run(). "
             "Records land under the run's persistent_dir, and retrieval reads them from there, so a "
@@ -210,6 +212,31 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
             "Host advertised to agent containers for spawned Switchyard instances (the instance binds "
             "0.0.0.0). Defaults to this node's hostname, which peer nodes resolve on Slurm clusters. "
             "Set explicitly when containers must use a specific routable IP."
+        ),
+    )
+    switchyard_tool_parser: Optional[str] = Field(
+        default=None,
+        description=(
+            "vLLM tool-call parser for the served model family (e.g. 'qwen3_coder'), exported as "
+            "${SWITCHYARD_TOOL_PARSER} to the spawned instance. Required by profiles that reference "
+            "that variable — the shipped switchyard_profile.yaml does."
+        ),
+    )
+    switchyard_reasoning_parser: Optional[str] = Field(
+        default=None,
+        description=(
+            "vLLM reasoning parser for the served model family (e.g. 'nano_v3'), exported as "
+            "${SWITCHYARD_REASONING_PARSER} to the spawned instance. Required by profiles that "
+            "reference that variable — the shipped switchyard_profile.yaml does."
+        ),
+    )
+    switchyard_parser_pythonpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Colon-separated paths prepended to the spawned instance's PYTHONPATH so Switchyard's "
+            "parsers can import the serving vLLM. Deployment-specific (e.g. the training container's "
+            "/opt/nemo-rl/3rdparty/vllm:/opt/nemo_rl_venv/lib/python3.12/site-packages); unset leaves "
+            "PYTHONPATH untouched."
         ),
     )
 
@@ -2606,6 +2633,26 @@ async def _spawn_switchyard_local(params: SWEBenchWrapperInstanceConfig) -> Tupl
     env = dict(os.environ)
     if params.switchyard_backend_url:
         env["SWITCHYARD_VLLM_BASE_URL"] = params.switchyard_backend_url
+
+    # Everything the routing profile references via ${...} must be in the child's
+    # env: endpoint and model derived from the run's config (same source the gym
+    # vllm_model server reads), parsers and vLLM import paths from config fields.
+    cfg = OmegaConf.create(shlex.split(params.ng_global_config_dict_str)[0])
+    if not env.get("SWITCHYARD_VLLM_BASE_URL"):
+        urls = [u for u in (cfg.get("policy_base_url") or []) if u]
+        if urls:
+            env["SWITCHYARD_VLLM_BASE_URL"] = str(urls[0])
+    if not env.get("SWITCHYARD_POLICY_MODEL"):
+        model = cfg.get("policy_model_name")
+        if model:
+            env["SWITCHYARD_POLICY_MODEL"] = str(model)
+    if params.switchyard_tool_parser:
+        env["SWITCHYARD_TOOL_PARSER"] = params.switchyard_tool_parser
+    if params.switchyard_reasoning_parser:
+        env["SWITCHYARD_REASONING_PARSER"] = params.switchyard_reasoning_parser
+    if params.switchyard_parser_pythonpath:
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = params.switchyard_parser_pythonpath + (f":{existing}" if existing else "")
 
     # The gym venv's bin dir is on PATH for the server process but not for this Ray
     # task, so resolve the CLI next to the interpreter running the task instead.
