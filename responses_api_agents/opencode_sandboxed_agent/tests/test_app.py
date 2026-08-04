@@ -30,7 +30,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
@@ -56,12 +58,16 @@ class TestOpenCodeSandboxedAgent:
         test_data_path = Path(__file__).parent / "opencode_export_test_data.json"
         return json.loads(test_data_path.read_text())
 
-    def test_opencode_export_to_output_items(self, opencode_export_test_data: Dict[str, Any]) -> None:
+    def test_opencode_export_to_output_items(
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+
         actual_output_items = OpenCodeSandboxedAgent._opencode_export_to_output_items(None, opencode_export_test_data)
         expected_output_items = [
             NeMoGymEasyInputMessage(content=[{"text": "hello", "type": "input_text"}], role="user", type="message"),
             NeMoGymResponseOutputMessage(
-                id="msg_fc5cbdbdf001E8AO55w3vBALYm",
+                id="msg_",
                 content=[
                     NeMoGymResponseOutputText(
                         annotations=[], text="Hello! How can I help you today?", type="output_text", logprobs=None
@@ -71,19 +77,16 @@ class TestOpenCodeSandboxedAgent:
                 status="completed",
                 type="message",
             ),
-            NeMoGymResponseOutputMessage(
-                id="msg_fcac0a57e001U3oznWiAigQPlo",
-                content=[
-                    NeMoGymResponseOutputText(
-                        annotations=[],
-                        text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
-                        type="output_text",
-                        logprobs=None,
+            NeMoGymResponseReasoningItem(
+                id="rs_",
+                summary=[
+                    NeMoGymSummary(
+                        text="Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.",
+                        type="summary_text",
                     )
                 ],
-                role="assistant",
-                status="completed",
-                type="message",
+                type="reasoning",
+                encrypted_content=None,
             ),
             NeMoGymResponseFunctionToolCall(
                 arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
@@ -143,6 +146,7 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
 
         actual_response = await server.responses(
@@ -162,7 +166,7 @@ class TestOpenCodeSandboxedAgent:
             object="response",
             output=[
                 NeMoGymResponseOutputMessage(
-                    id="msg_fc5cbdbdf001E8AO55w3vBALYm",
+                    id="msg_",
                     content=[
                         NeMoGymResponseOutputText(
                             annotations=[], text="Hello! How can I help you today?", type="output_text", logprobs=None
@@ -172,19 +176,16 @@ class TestOpenCodeSandboxedAgent:
                     status="completed",
                     type="message",
                 ),
-                NeMoGymResponseOutputMessage(
-                    id="msg_fcac0a57e001U3oznWiAigQPlo",
-                    content=[
-                        NeMoGymResponseOutputText(
-                            annotations=[],
-                            text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
-                            type="output_text",
-                            logprobs=None,
+                NeMoGymResponseReasoningItem(
+                    id="rs_",
+                    summary=[
+                        NeMoGymSummary(
+                            text="Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.",
+                            type="summary_text",
                         )
                     ],
-                    role="assistant",
-                    status="completed",
-                    type="message",
+                    type="reasoning",
+                    encrypted_content=None,
                 ),
                 NeMoGymResponseFunctionToolCall(
                     arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',

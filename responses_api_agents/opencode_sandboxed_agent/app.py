@@ -41,8 +41,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
@@ -188,16 +186,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
                 messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
             elif message["info"]["role"] == "assistant":
+                from nemo_gym.responses_converter import ResponsesConverter
+
+                converter = ResponsesConverter(return_token_id_information=True)
                 for part in message["parts"]:
                     if part["type"] == "text":
-                        messages.append(
-                            NeMoGymResponseOutputMessage(
-                                id=message["info"]["id"],
-                                content=[
-                                    NeMoGymResponseOutputText(annotations=[], text=part["text"], type="output_text")
-                                ],
-                            )
+                        output_items = converter.postprocess_assistant_message_dict(
+                            message_dict={
+                                "content": part["text"],
+                                "role": "assistant",
+                            }
                         )
+                        messages.extend(output_items)
                     elif part["type"] == "tool":
                         messages.append(
                             NeMoGymResponseFunctionToolCall(
