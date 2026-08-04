@@ -80,6 +80,11 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
 
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+
+        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+
     async def _start_sandbox(self) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
@@ -178,7 +183,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        sandbox = await self._start_sandbox()
+        sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
 
         query = None
         # This can be modified to handle system/developer prompts too.
@@ -268,6 +273,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
+        # TODO @bxyu-nvidia: Once connected to SWE Bench resources server, put this behind a flag if /seed_session doesn't return a sandbox.
+        sandbox = await self._start_sandbox()
+        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
+
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path=self.url_path_for_run("/v1/responses", body),
@@ -288,6 +297,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
+
+        self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(await get_response_json(verify_response))
 
 
