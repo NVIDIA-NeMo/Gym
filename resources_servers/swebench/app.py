@@ -197,6 +197,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
         # This may be overfit and needs to be config'd or detected.
+        # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
+        # For now, the activation is put on the harness side.
         await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
 
         return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
