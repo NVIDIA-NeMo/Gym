@@ -201,11 +201,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                                 output=part["state"]["output"],
                             )
                         )
-                    elif part["type"] in ("step-finish", "step-start"):
+                    elif part["type"] in ("step-finish", "step-start", "patch"):
                         pass
                     else:
                         # @bxyu-nvidia: Defensive raise in case we're missing something.
-                        raise NotImplementedError(message)
+                        raise NotImplementedError(part)
             else:
                 # @bxyu-nvidia: Defensive raise in case we're missing something.
                 raise NotImplementedError(message)
