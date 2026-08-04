@@ -95,8 +95,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
         if sandbox_id:
-            sandbox = AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
-            await sandbox.connect({})
+            sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
             return sandbox
 
         if self.config.debug:
