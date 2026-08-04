@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from openai.types.responses.response_output_item import (
     McpApprovalRequest,
@@ -21,6 +23,7 @@ from openai.types.responses.response_output_item import (
 from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
+    MAX_RATE_LIMIT_TRIES,
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -47,6 +50,24 @@ def _response_with_output(output: list) -> dict:
 class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    async def test_rate_limit_retries_are_bounded(self) -> None:
+        response = MagicMock(status=429)
+        response.content.read = AsyncMock(return_value=b"still rate limited")
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+        with (
+            patch("nemo_gym.openai_utils.request", AsyncMock(return_value=response)) as request_mock,
+            patch("nemo_gym.openai_utils.sleep", AsyncMock()),
+            patch(
+                "nemo_gym.openai_utils.raise_for_status",
+                AsyncMock(side_effect=RuntimeError("rate limit exhausted")),
+            ),
+            pytest.raises(RuntimeError, match="rate limit exhausted"),
+        ):
+            await client._request_with_retry(url="https://api.openai.com/v1/test", method="POST")
+
+        assert request_mock.await_count == MAX_RATE_LIMIT_TRIES
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

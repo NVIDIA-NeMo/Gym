@@ -32,11 +32,13 @@ from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _expand_input_glob,
+    _failure_is_terminal,
     _failures_path_for,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
@@ -80,6 +82,20 @@ class TestGetMaxRolloutAttempts:
     def test_non_positive_falls_back_to_default(self, monkeypatch) -> None:
         monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "0")
         assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+    def test_legacy_timeout_terminal_flag_is_ignored(self) -> None:
+        assert not _failure_is_terminal(
+            {
+                NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                NG_TERMINAL_KEY: True,
+            }
+        )
+        assert _failure_is_terminal(
+            {
+                NG_FAILURE_CLASS_KEY: "skipped",
+                NG_TERMINAL_KEY: True,
+            }
+        )
 
 
 class TestRolloutCollection:

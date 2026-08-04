@@ -67,7 +67,7 @@ from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
-    NG_TERMINAL_KEY,
+    _failure_is_terminal,
     _get_max_rollout_attempts,
 )
 from resources_servers.gdpval.multistage_elo import (
@@ -698,8 +698,9 @@ def load_gated_keys(
 
     Mirrors ``_load_from_cache`` with the stage dimension added: a stage-row is
     gated if it is a success (main jsonl), a terminal sidecar failure
-    (``_ng_failure_terminal``), or has hit ``_get_max_rollout_attempts`` attempts
-    in the sidecar. Everything else is re-dispatched.
+    (``_ng_failure_terminal``, excluding legacy timeout rows), or has hit
+    ``_get_max_rollout_attempts`` attempts in the sidecar. Everything else is
+    re-dispatched.
     """
     gated: Dict[int, set[Tuple[Any, Any]]] = {
         index: {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in rows}
@@ -723,7 +724,7 @@ def load_gated_keys(
                 continue
             key = (int(fr.get("stage_index", 0) or 0), fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
             attempts[key] = attempts.get(key, 0) + 1
-            if fr.get(NG_TERMINAL_KEY):
+            if _failure_is_terminal(fr):
                 terminal.add(key)
 
     for key in attempts:

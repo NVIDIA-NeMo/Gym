@@ -555,6 +555,9 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
+# Rate limits are transient, so retry them more than ordinary server errors,
+# but remain bounded so a persistently overloaded endpoint eventually fails.
+MAX_RATE_LIMIT_TRIES = 30
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -591,9 +594,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                # Give rate limits extra attempts without allowing the previous
+                # unbounded ``tries += 1; max_num_tries += 1`` loop.
                 if response.status in RATE_LIMIT_ERROR_CODES:
-                    max_num_tries += 1
+                    max_num_tries = min(max_num_tries + 1, MAX_RATE_LIMIT_TRIES)
 
                 content = (await response.content.read()).decode()
                 kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
