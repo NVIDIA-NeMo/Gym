@@ -25,12 +25,10 @@ async def main():
     with open(global_config_dict["benchmark_jsonl"]) as f:
         first_example = json.loads(next(f))
 
-    first_example = first_example["responses_create_params"]
-
     server_client = ServerClient.load_from_global_config()
     result = await server_client.post(
         server_name="opencode_sandboxed_agent",
-        url_path="/v1/responses",
+        url_path="/run",
         json=first_example,
     )
     print(json.dumps(await result.json(), indent=4))
