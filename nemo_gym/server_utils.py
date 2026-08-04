@@ -61,6 +61,8 @@ from nemo_gym.config_types import (
     BaseServerConfig,
 )
 from nemo_gym.global_config import (
+    # Re-exported: global_config owns this value, but re-exporting here for backwards compatibility
+    DEFAULT_HEAD_SERVER_PORT,  # noqa: F401
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -282,8 +284,6 @@ Response content: {content}""")
 async def get_response_json(response: ClientResponse) -> Any:
     return orjson.loads(await response.read())
 
-
-DEFAULT_HEAD_SERVER_PORT = 11000
 
 ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
 

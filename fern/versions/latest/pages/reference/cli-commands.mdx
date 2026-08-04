@@ -517,7 +517,7 @@ NeMo Gym Server Status:
 {
     'server_type': 'resources_servers',
     'name': 'example_single_tool_call',
-    'port': 58117,
+    'port': 5117,
     'pid': 89904,
     'uptime_seconds': '0d 0h 0m 41.5s',
 }
@@ -706,7 +706,7 @@ Servers that report `unsupported` or `unknown` cause the command to abort unless
 gym eval reverify \
     --config my_resources_server.yaml \
     "++head_server.host=127.0.0.1" \
-    "++head_server.port=9500" \
+    "++head_server.port=5998" \
     --inputs results/rollouts_materialized_inputs.jsonl \
     --rollouts results/rollouts.jsonl \
     --output results/rollouts_reverified.jsonl

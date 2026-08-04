@@ -34,7 +34,9 @@ Configuration is loaded from multiple sources in order of priority (later source
 2. Local `env.yaml` file (for sensitive values like API keys)
 3. Command-line arguments (highest priority)
 
-**Port allocation**: Users can explicitly specify `host` and `port` in their config. If not provided, the framework automatically allocates ports from available system ports, tracking used ports to prevent conflicts.
+**Port allocation**: Users can explicitly specify `host` and `port` in their config. If not provided, the framework automatically allocates a port from `port_range_low` to `port_range_high` (default 5000 to 5999), tracking used ports to prevent conflicts.
+
+The default band sits below the OS ephemeral port range, which the kernel draws from for outgoing connections. A port in that range can be taken between the time the framework probes it and the time the server binds it, and startup then fails with `EADDRINUSE`. Where that range starts varies by OS and is configurable, so the band stays low. Set `port_range_low` and `port_range_high` to move Gym elsewhere, and keep the head server port inside the band.
 
 ### Phase 3: Initialize Ray
 
@@ -48,7 +50,7 @@ Servers are started in two stages:
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
 flowchart TB
     Main["Main Process<br/>gym env start"]
-    Head["Head Server<br/>Port 11000"]
+    Head["Head Server<br/>Port 5999"]
     Model["Model Server<br/>Own venv + port"]
     Agent["Agent Server<br/>Own venv + port"]
     Resources["Resources Server<br/>Own venv + port"]
