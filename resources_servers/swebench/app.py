@@ -189,6 +189,10 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(test_spec)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
+        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
+        # This may be overfit and needs to be config'd or detected.
+        await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
+
         return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:

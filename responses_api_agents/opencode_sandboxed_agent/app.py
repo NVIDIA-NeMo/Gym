@@ -238,12 +238,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         command = f"""
         echo "Shell: $SHELL" \
-        && source /opt/miniconda3/bin/activate \
-        && conda activate testbed \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && echo $PATH \
-        && printenv \
         && opencode run {opencode_debug_str} {quote(query)}
         """
 
