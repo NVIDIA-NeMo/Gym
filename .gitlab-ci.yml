@@ -2,16 +2,77 @@
 # SPDX-License-Identifier: Apache-2.0
 
 stages:
+  - cherry-pick
   - test
   - report
 
-# This file is mirrored from GitHub but is active only for internal merge requests.
+# This file is mirrored from GitHub but is active on the internal GitLab mirror only:
+#   push to main          → cherry-pick-to-nv-internal-main (AUT-1078)
+#   MR → nv-internal-main → gym-cpu-ci + gym-cpu-ci-junit   (gym-ci-contract)
 workflow:
   rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
     - if: >-
         $CI_PIPELINE_SOURCE == "merge_request_event" &&
         $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "nv-internal-main"
     - when: never
+
+# On every push to main, cherry-pick the commit into nv-internal-main and open a GitLab MR.
+# The resulting MR triggers gym-cpu-ci below, running the full CPU CI suite via NeMo CI.
+cherry-pick-to-nv-internal-main:
+  stage: cherry-pick
+  image: alpine:latest
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "0"
+    TARGET_BRANCH: "nv-internal-main"
+  before_script:
+    - apk add --no-cache git curl jq
+    - git config --global user.email "nemo-bot@nvidia.com"
+    - git config --global user.name "NeMo Bot"
+    - git remote set-url origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+  script:
+    - CHERRY_PICK_BRANCH="cherry-pick-to-${TARGET_BRANCH}/${CI_COMMIT_SHORT_SHA}"
+    - git fetch origin "${TARGET_BRANCH}"
+    - git checkout -b "${CHERRY_PICK_BRANCH}" "origin/${TARGET_BRANCH}"
+    - |
+      if ! git cherry-pick -x "${CI_COMMIT_SHA}"; then
+        echo "ERROR: Cherry-pick of ${CI_COMMIT_SHA} into ${TARGET_BRANCH} failed." >&2
+        echo "Resolve manually: git cherry-pick -x ${CI_COMMIT_SHA}" >&2
+        git cherry-pick --abort
+        exit 1
+      fi
+    - git push origin "${CHERRY_PICK_BRANCH}"
+    - |
+      COMMIT_TITLE=$(git log -1 --format="%s" "${CI_COMMIT_SHA}")
+      PAYLOAD=$(jq -n \
+        --arg source_branch "${CHERRY_PICK_BRANCH}" \
+        --arg target_branch "${TARGET_BRANCH}" \
+        --arg title "cp: ${COMMIT_TITLE}" \
+        --arg description "Automated cherry-pick of \`${CI_COMMIT_SHA}\` from \`main\` into \`${TARGET_BRANCH}\`.
+
+      Source pipeline: ${CI_PIPELINE_URL}" \
+        --argjson remove_source_branch true \
+        '{
+          source_branch: $source_branch,
+          target_branch: $target_branch,
+          title: $title,
+          description: $description,
+          remove_source_branch: $remove_source_branch
+        }')
+
+      RESPONSE=$(curl --fail --silent --show-error \
+        --request POST \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --header "Content-Type: application/json" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests" \
+        --data "${PAYLOAD}")
+
+      MR_IID=$(echo "${RESPONSE}" | jq -r '.iid')
+      MR_URL=$(echo "${RESPONSE}" | jq -r '.web_url')
+      echo "Created MR !${MR_IID}: ${MR_URL}"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
 
 variables:
   NEMO_CI_REF: "main"
