@@ -78,6 +78,22 @@ def test_task_env_gateway_mode():
     assert env["MODEL_NAME"] == "vendor/model"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
     assert env["BRAVE_API_KEY"] == "brave-key"
+    assert env["MODEL_BASE_URL"] == "http://endpoint/v1"
+
+
+def test_task_env_model_base_url_override():
+    env = make_agent(max_turns=10)._task_env("task_x", model_base_url="http://127.0.0.1:9999/v1")
+    assert env["MODEL_BASE_URL"] == "http://127.0.0.1:9999/v1"
+    assert make_agent(max_turns=10).config.max_turns == 10
+
+
+def test_build_spec_uses_model_base_url_override():
+    agent = make_agent(
+        max_turns=3,
+        sandbox_spec={"image": "/sif/pinchbench.sif"},
+    )
+    spec = agent._build_spec("task_x", model_base_url="http://127.0.0.1:4242/v1")
+    assert spec.env["MODEL_BASE_URL"] == "http://127.0.0.1:4242/v1"
 
 
 def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
