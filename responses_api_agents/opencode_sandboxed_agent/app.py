@@ -134,7 +134,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=token_info["cache"]["read"]),
                 output_tokens=token_info["output"],
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_info["reasoning"]),
-                total_tokens=token_info["total"],
+                total_tokens=token_info.get("total", 0),  # Somehow total may be missing
             )
             usages.append(usage)
 
