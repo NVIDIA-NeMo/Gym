@@ -1,0 +1,43 @@
+config_paths:
+  - resources_servers/legal_agent_bench/configs/resources_only.yaml
+
+legal_agent_bench_native_agent:
+  responses_api_agents:
+    legal_agent_bench_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Legal Agent Bench with its direct Gym-native tool loop.
+      value: Evaluate legal-document agents without an external agent harness.
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      runtime_tasks_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harbor_tasks_dir}
+      skills_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harness_skills_dir}
+      concurrency: 1
+      agent_timeout_seconds: 10800
+      verifier_timeout_seconds: 3600
+      sandbox_provider:
+        docker: {}
+      sandbox_image: null
+      runtime_docker_platform: null
+      sandbox_model_base_url: null
+      agent_server_module: responses_api_agents.legal_agent_bench_native_agent.app
+      agent_server_class: LegalAgentBenchNativeAgent
+      agent_config_class: LegalAgentBenchNativeAgentConfig
+      agent_kwargs:
+        max_turns: 60
+        shell_timeout: 60
+        model_timeout_seconds: 1800
+        max_output_chars: 16384
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/legal_agent_bench/data/example.jsonl
+          license: MIT
+        - name: legal_agent_bench
+          type: validation
+          jsonl_fpath: resources_servers/legal_agent_bench/data/generated/all.jsonl
+          license: MIT

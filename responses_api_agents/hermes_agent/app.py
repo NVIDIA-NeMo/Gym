@@ -50,6 +50,32 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
+def _usage_from_result(result: dict[str, Any]) -> NeMoGymResponseUsage:
+    """Map Hermes' cumulative session counters to the Responses API usage schema."""
+
+    def token_count(key: str) -> int:
+        try:
+            return max(0, int(result.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    cache_read_tokens = token_count("cache_read_tokens")
+    cache_write_tokens = token_count("cache_write_tokens")
+    input_tokens = token_count("prompt_tokens")
+    if input_tokens == 0:
+        input_tokens = token_count("input_tokens") + cache_read_tokens + cache_write_tokens
+    output_tokens = token_count("output_tokens") or token_count("completion_tokens")
+    total_tokens = token_count("total_tokens") or input_tokens + output_tokens
+
+    return NeMoGymResponseUsage(
+        input_tokens=input_tokens,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cache_read_tokens),
+        output_tokens=output_tokens,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_count("reasoning_tokens")),
+        total_tokens=total_tokens,
+    )
+
+
 def _trajectory_to_output_items(messages, n_input):
     output_items = []
     for item in messages[n_input:]:
@@ -358,22 +384,19 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
             )
 
+        agent_error = result.get("error")
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
+            status="failed" if agent_error else "completed",
+            error=({"code": "server_error", "message": str(agent_error)} if agent_error else None),
             model=model_name,
             object="response",
             output=output_items,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
-            usage=NeMoGymResponseUsage(
-                input_tokens=0,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-                output_tokens=0,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=0,
-            ),
+            usage=_usage_from_result(result),
         )
 
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:

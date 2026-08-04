@@ -15,7 +15,6 @@ from resources_servers.legal_agent_bench.prepare import EXPECTED_TASK_COUNT, IND
 BENCHMARK_DIR = Path(__file__).resolve().parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "legal_agent_bench_benchmark.jsonl"
-BENCHMARK_AGENT_NAME = "legal_agent_bench_benchmark_harbor_agent"
 
 
 def _render_benchmark_index(source_index: Path) -> str:
@@ -31,10 +30,7 @@ def _render_benchmark_index(source_index: Path) -> str:
             if not isinstance(row, dict):
                 raise ValueError(f"LAB task index line {line_number} must contain a JSON object")
 
-            row["agent_ref"] = {
-                "name": BENCHMARK_AGENT_NAME,
-                "type": "responses_api_agents",
-            }
+            row.pop("agent_ref", None)
             rendered_rows.append(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
     if len(rendered_rows) != EXPECTED_TASK_COUNT:

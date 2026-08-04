@@ -106,6 +106,10 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     # Keep Docker runtime images between trials (maps to EnvironmentConfig.delete=False).
     harbor_no_delete: bool = True
 
+    # Harbor normally proceeds to verification after an agent timeout. Benchmarks
+    # that cannot score partial agent output can opt out through a trial hook.
+    harbor_skip_verification_on_agent_failure: bool = False
+
     # --- Model routing ---
     # NeMo Gym model server reference used to resolve Harbor model base URL.
     model_server: ModelServerRef
@@ -129,7 +133,13 @@ def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
     return None
 
 
-async def run_harbor_job(job_config_dict: dict) -> str:
+async def _stop_verification_after_agent_failure(event: Any) -> None:
+    result = event.result
+    if result is not None and result.exception_info is not None:
+        raise RuntimeError(f"Skipping verification after agent failure: {result.exception_info.exception_type}")
+
+
+async def run_harbor_job(job_config_dict: dict, skip_verification_on_agent_failure: bool = False) -> str:
     """Runs a single Harbor Job and returns the *absolute* trial directory path.
 
     The trial directory contains:
@@ -159,6 +169,8 @@ async def run_harbor_job(job_config_dict: dict) -> str:
 
     config = JobConfig(**job_config_dict)
     job = Job(config)
+    if skip_verification_on_agent_failure:
+        job.on_verification_started(_stop_verification_after_agent_failure)
 
     job_error = None
     try:
@@ -184,7 +196,7 @@ async def run_harbor_job(job_config_dict: dict) -> str:
 _RAY_WORKER_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 
-def _run_harbor_job_sync(job_config_dict: dict) -> str:
+def _run_harbor_job_sync(job_config_dict: dict, skip_verification_on_agent_failure: bool = False) -> str:
     """Synchronous wrapper for run_harbor_job for use in Ray remote.
 
     Ray workers are long-lived processes. Reusing a single event loop per worker
@@ -195,7 +207,9 @@ def _run_harbor_job_sync(job_config_dict: dict) -> str:
     if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
         _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
         asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
-    return _RAY_WORKER_EVENT_LOOP.run_until_complete(run_harbor_job(job_config_dict))
+    return _RAY_WORKER_EVENT_LOOP.run_until_complete(
+        run_harbor_job(job_config_dict, skip_verification_on_agent_failure)
+    )
 
 
 @ray.remote(
@@ -265,6 +279,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             try:
                 params = dict(
                     job_config_dict=job_config_dict,
+                    skip_verification_on_agent_failure=self.config.harbor_skip_verification_on_agent_failure,
                 )
                 future = runner_ray_remote.remote(_run_harbor_job_sync, params)
                 trial_dir_path = await asyncio.to_thread(ray.get, future)
@@ -292,6 +307,39 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 verifier_result = trial_result.get("verifier_result")
                 reward = HarborAgentUtils.extract_reward(verifier_result)
 
+                failure_fields = {}
+                if self.config.harbor_skip_verification_on_agent_failure:
+                    exception_info = trial_result.get("exception_info") or {}
+                    agent_metadata = (trial_result.get("agent_result") or {}).get("metadata") or {}
+                    failed_during_agent_phase = bool(
+                        exception_info
+                        and trial_result.get("agent_execution") is not None
+                        and trial_result.get("verifier") is None
+                    )
+                    agent_timed_out = bool(
+                        exception_info.get("exception_type") == "AgentTimeoutError"
+                        or agent_metadata.get("agent_timed_out", False)
+                    )
+                    agent_failed = bool(
+                        agent_metadata.get("agent_failed", False) or failed_during_agent_phase or agent_timed_out
+                    )
+                    model_connection_failed = bool(agent_metadata.get("model_connection_failed", False))
+                    failure_reason = agent_metadata.get("model_error")
+                    if agent_timed_out:
+                        failure_reason = exception_info.get("exception_message") or failure_reason
+                    elif agent_failed and not failure_reason:
+                        failure_reason = exception_info.get("exception_message")
+                    mask_sample = bool(agent_failed or model_connection_failed or agent_timed_out)
+                    failure_fields = {
+                        "mask_sample": mask_sample,
+                        "agent_failed": agent_failed,
+                        "model_connection_failed": model_connection_failed,
+                        "agent_timed_out": agent_timed_out,
+                        "failure_reason": failure_reason,
+                    }
+                    if mask_sample:
+                        reward = 0.0
+
                 # Convert Harbor outputs to NeMo Gym response items:
                 # keep rich trajectory details, then overlay rollout token details when present.
                 output_items = HarborAgentUtils.trial_result_to_responses(trial_result, trajectory)
@@ -311,6 +359,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 input_messages = []
                 usage = None
                 reward = 0.0
+                failure_fields = {}
+                if self.config.harbor_skip_verification_on_agent_failure:
+                    failure_fields = {
+                        "mask_sample": True,
+                        "agent_failed": True,
+                        "model_connection_failed": False,
+                        "agent_timed_out": False,
+                        "failure_reason": str(e),
+                    }
 
             response = HarborAgentUtils.get_default_response_object()
             response["model"] = policy_model_name
@@ -336,6 +393,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 agent_timeout_error=int(
                     ((trial_result or {}).get("exception_info") or {}).get("exception_type") == "AgentTimeoutError"
                 ),
+                **failure_fields,
             )
 
             # Save result to disk (folder = run_id, file = task name)

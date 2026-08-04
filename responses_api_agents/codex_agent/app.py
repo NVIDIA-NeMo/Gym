@@ -463,8 +463,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         mcp_servers: Optional[dict[str, Any]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-    ) -> tuple[str, str]:
-        """Run ``codex exec --json`` and return (stdout, model_name).
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Run ``codex exec --json`` and return stdout, model name, and process outcome.
 
         When ``rollout_id`` is set and a model server is configured, the per-rollout capture prefix
         is applied to the provider base_url so the CLI's streaming /v1/responses calls correlate to
@@ -509,15 +509,29 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
             except asyncio.TimeoutError:
                 _kill_process_group(proc)
-                await proc.communicate()
+                stdout, stderr = await proc.communicate()
                 LOG.warning("codex timed out after %ds", self.config.timeout)
-                return "", model
+                return (
+                    stdout.decode(errors="replace"),
+                    model,
+                    {
+                        "status": "failed",
+                        "error_type": "timeout",
+                        "stderr": stderr.decode(errors="replace"),
+                    },
+                )
 
+            outcome = {"status": "completed", "return_code": proc.returncode}
             if proc.returncode not in (0, None):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+                outcome.update(
+                    status="failed",
+                    error_type=f"process_exit_{proc.returncode}",
+                    stderr=stderr.decode(errors="replace"),
+                )
 
             LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
-            return stdout.decode(errors="replace"), model
+            return stdout.decode(errors="replace"), model, outcome
         finally:
             if codex_home is not None:
                 shutil.rmtree(codex_home, ignore_errors=True)
@@ -572,7 +586,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        stdout, model_name = await self._run_codex(
+        stdout, model_name, run_metadata = await self._run_codex(
             user_message,
             system_prompt=system_prompt,
             mcp_servers=mcp_servers,
@@ -583,6 +597,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         if usage.get("errors"):
             LOG.warning("codex reported errors: %s", usage["errors"])
+            run_metadata.update(
+                status="failed",
+                error_type="stream_error",
+                stderr="; ".join(str(error) for error in usage["errors"]),
+            )
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -601,10 +620,20 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
+        failure_message = None
+        if run_metadata.get("status") != "completed":
+            failure_message = str(run_metadata.get("error_type") or "codex_failed")
+            stderr = str(run_metadata.get("stderr") or "").strip()
+            if stderr:
+                failure_message = f"{failure_message}: {stderr[-1000:]}"
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
+            status="failed" if failure_message else "completed",
+            error=(
+                {"code": "server_error", "message": f"Codex failed: {failure_message}"} if failure_message else None
+            ),
             model=model_name,
             object="response",
             output=output_items,

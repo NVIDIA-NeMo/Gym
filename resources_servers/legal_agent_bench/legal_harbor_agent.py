@@ -58,6 +58,10 @@ SYSTEM_PROMPT_PATH = _VENDOR_ROOT / "harness" / "system-prompt.md"
 SYSTEM_PROMPT_PREAMBLE = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
+class LegalAgentBenchHarnessError(RuntimeError):
+    """The LAB Harbor harness failed after preserving its partial artifacts."""
+
+
 class HarborToolExecutor:
     """Execute LAB tools inside a Harbor environment."""
 
@@ -310,8 +314,11 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             model_name=self.model,
             agent_name=self.name(),
         )
+        agent_failed = bool(result.get("model_error"))
         _write_agent_error_flags(Path(self.logs_dir), metrics)
         _populate_context(context, result, metrics, task_id, self.agent_id, artifact_dir)
+        if agent_failed:
+            raise LegalAgentBenchHarnessError(result["model_error"])
 
     async def _hydrate_environment(self, environment: BaseEnvironment, docs_dir: Path) -> None:
         validate_harness_skills(self.skills_dir)
@@ -391,6 +398,9 @@ async def _run_agent_async(
     finished_cleanly = False
     context_overflow = False
     model_error = None
+    model_error_type = None
+    model_connection_failed = False
+    agent_timed_out = False
     empty_response_count = 0
     start_time = time.time()
 
@@ -404,10 +414,13 @@ async def _run_agent_async(
             except Exception as exc:
                 err_msg = str(exc)
                 _log_model_error(transcript_file, turn_count, exc)
+                model_error = err_msg
+                model_error_type = type(exc).__name__
+                agent_timed_out = isinstance(exc, TimeoutError)
+                model_connection_failed = isinstance(exc, (ConnectionError, OSError)) and not agent_timed_out
                 if _is_context_overflow_error(err_msg):
                     context_overflow = True
                     break
-                model_error = err_msg
                 break
 
             messages.append(response.message)
@@ -453,6 +466,9 @@ async def _run_agent_async(
         "finished_cleanly": (not context_overflow and finished_cleanly),
         "context_overflow": context_overflow,
         "model_error": model_error,
+        "model_error_type": model_error_type,
+        "model_connection_failed": model_connection_failed,
+        "agent_timed_out": agent_timed_out,
         "tool_metrics": tool_executor.get_metrics(),
     }
 
@@ -717,6 +733,9 @@ def _populate_context(
         "lab_run_id": metrics["run_id"],
         "artifact_dir": str(artifact_dir),
         "finished_cleanly": metrics["finished_cleanly"],
+        "agent_failed": bool(result.get("model_error")),
+        "model_connection_failed": bool(result.get("model_connection_failed")),
+        "agent_timed_out": bool(result.get("agent_timed_out")),
         "model_error": metrics.get("model_error"),
         "turn_count": metrics["turn_count"],
         "tool_metrics": {

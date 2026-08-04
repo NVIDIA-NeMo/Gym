@@ -311,7 +311,7 @@ class TestRunForwardsSkillsPath:
 
     def test_skills_ref_path_forwarded(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default"))
+        run_codex = AsyncMock(return_value=("", "codex-default", {"status": "completed"}))
         body = CodexAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": []},
@@ -325,7 +325,7 @@ class TestRunForwardsSkillsPath:
 
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default"))
+        run_codex = AsyncMock(return_value=("", "codex-default", {"status": "completed"}))
         body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
 
         self._run(agent, body, run_codex)
@@ -365,7 +365,7 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
+            stdout, model, outcome = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
 
         assert captured["cmd"][0] == "codex"
         assert captured["cmd"][-1] == "hello"
@@ -375,6 +375,7 @@ class TestRunCodex:
         assert captured["start_new_session"] is True
         assert captured["config_during_run"]["developer_instructions"] == "be terse"
         assert captured["cwd_exists_during_run"] is True
+        assert outcome["status"] == "completed"
         # per-run home and scratch cwd are removed after the run (no leakage between rollouts)
         assert not Path(captured["codex_home"]).exists()
         assert not Path(captured["scratch_cwd"]).exists()
@@ -446,11 +447,12 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.codex_agent.app.asyncio.wait_for", fake_wait_for),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello"))
+            stdout, model, outcome = asyncio.run(agent._run_codex("hello"))
 
         assert stdout == ""
         assert killed["called"] is True
         assert model == "codex-default"
+        assert outcome["error_type"] == "timeout"
 
 
 class TestRolloutMCPServers:
@@ -518,9 +520,13 @@ class TestRolloutMCPServers:
             captured["instruction"] = instruction
             captured["mcp_servers"] = mcp_servers
             captured["config"] = agent._build_config("http://x/v1", mcp_servers=mcp_servers)
-            return _item_completed(
-                {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
-            ), "codex-default"
+            return (
+                _item_completed(
+                    {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
+                ),
+                "codex-default",
+                {"status": "completed"},
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
@@ -563,7 +569,11 @@ class TestRolloutMCPServers:
 
         async def fake_run_codex(instruction, system_prompt=None, mcp_servers=None, **kwargs):
             captured["mcp_servers"] = mcp_servers
-            return _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}), "codex-default"
+            return (
+                _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}),
+                "codex-default",
+                {"status": "completed"},
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
@@ -855,3 +865,24 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
         assert inner["sandbox_mode"] == "danger-full-access"
+
+
+def test_partial_codex_output_preserves_trajectory_and_marks_response_failed() -> None:
+    agent = _make_agent()
+    stdout = "\n".join(
+        [
+            _item_completed({"id": "msg-1", "type": "agent_message", "text": "partial answer"}),
+            json.dumps({"type": "turn.failed", "error": {"message": "stream disconnected"}}),
+        ]
+    )
+
+    async def fake_run_codex(*args, **kwargs):
+        return stdout, "codex-default", {"status": "completed"}
+
+    object.__setattr__(agent, "_run_codex", fake_run_codex)
+    response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="perform the task")))
+
+    assert response.output
+    assert response.status == "failed"
+    assert response.error is not None
+    assert "stream_error" in response.error.message
