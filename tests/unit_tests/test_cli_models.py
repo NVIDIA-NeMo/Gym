@@ -86,9 +86,9 @@ class TestListModels:
             list_models()
         payload = json.loads(capsys.readouterr().out)
         expected = [
-            {"model": "my_model", "model_group": "my_model"},
-            {"model": "my_model/some_other_flavor", "model_group": "my_model"},
-            {"model": "another_model", "model_group": "another_model"},
+            {"name": "my_model", "model": "my_model", "model_group": "my_model"},
+            {"name": "my_model/some_other_flavor", "model": "my_model/some_other_flavor", "model_group": "my_model"},
+            {"name": "another_model", "model": "another_model", "model_group": "another_model"},
         ]
         assert len(payload) == len(expected)
         for row in expected:

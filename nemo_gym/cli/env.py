@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import shlex
+import sys
 from glob import glob
 from os import makedirs
 from os.path import exists
@@ -1077,9 +1078,10 @@ def pip_list():  # pragma: no cover
     && source .venv/bin/activate \\
     && {pip_list_cmd}"""
 
-    print(f"  Package list for: {config.entrypoint}")
-    print(f"Virtual environment: {venv_path.absolute()}")
-    print("-" * 72)
+    # To stderr so stdout carries only `uv pip list` output, which `--json` (+format=json) pipes into jq.
+    print(f"  Package list for: {config.entrypoint}", file=sys.stderr)
+    print(f"Virtual environment: {venv_path.absolute()}", file=sys.stderr)
+    print("-" * 72, file=sys.stderr)
 
     proc = run_command(command, dir_path)
     return_code = proc.wait()
