@@ -24,15 +24,16 @@ independently.  Provides three scoring modes:
 
 from __future__ import annotations
 
-import os
 import asyncio
 import json
+import os
 import random
 import re
 from pathlib import Path
 from typing import Any, Optional
 
 from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwargs, sample_judge
+
 
 # The SDK default is 600s with 2 silent retries, so one slow request (a
 # multi-page PDF rasterised to images) burns 30 minutes and then surfaces as a
