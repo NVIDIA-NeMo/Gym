@@ -83,7 +83,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
 
     async def _start_sandbox(self) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
@@ -183,8 +183,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        print("INNER COOKIES:", request.cookies)
-        sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
+        sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
         # This can be modified to handle system/developer prompts too.
@@ -274,11 +273,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         # TODO @bxyu-nvidia: Once connected to SWE Bench resources server, put this behind a flag if /seed_session doesn't return a sandbox.
         sandbox = await self._start_sandbox()
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
+        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
-        # For propagating the sandbox handle
-        cookies[self.get_session_middleware_key()] = request.session[SESSION_ID_KEY]
-        print("COOKIES:", cookies)
+        # Propagating the sandbox handle
+        cookies["sandbox_id"] = request.session[SESSION_ID_KEY]
 
         response = await self.server_client.post(
             server_name=self.config.name,
@@ -303,7 +301,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         # TODO @bxyu-nvidia: Check if sandbox stop is idempotent
         await sandbox.stop()
-        self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+        self._sandbox_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
 
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(await get_response_json(verify_response))
 
