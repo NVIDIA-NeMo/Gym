@@ -320,7 +320,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
+        cookies = cookies | seed_session_response.cookies
 
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
@@ -338,7 +338,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(response)
-        cookies = response.cookies
+        cookies = cookies | response.cookies
 
         verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(
             body.model_dump() | {"response": await get_response_json(response)}
