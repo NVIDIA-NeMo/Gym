@@ -167,9 +167,26 @@ def _read_pptx(fpath: Path) -> str:
 # PDF conversion for visual judging (Gemini 3 Pro)
 # ---------------------------------------------------------------------------
 
-OFFICE_EXTS = {".docx", ".pptx", ".xlsx"}
-TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".yaml", ".yml", ".py", ".sh", ".log"}
+OOXML_EXTS = {".docx", ".pptx", ".xlsx"}
+# LibreOffice renders these like OOXML; preconvert.py already converts them.
+LEGACY_OFFICE_EXTS = {".doc", ".ppt", ".xls"}
+OFFICE_EXTS = OOXML_EXTS | LEGACY_OFFICE_EXTS
+TEXT_EXTS = (
+    {".txt", ".md", ".rst", ".csv", ".tsv", ".json", ".jsonl", ".xml", ".html", ".htm", ".svg"}
+    | {".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties", ".env"}
+    | {".py", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".sql", ".r", ".tex", ".ipynb"}
+    | {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".css", ".scss", ".less"}
+    | {".java", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cc", ".cs", ".kt", ".swift"}
+    | {".rb", ".php", ".pl", ".lua", ".scala", ".jl", ".m", ".log", ".diff", ".patch"}
+)
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}
+
+# Derived, so it cannot drift from the branches below.
+HANDLED_EXTS = TEXT_EXTS | OFFICE_EXTS | IMAGE_EXTS | AUDIO_EXTS | VIDEO_EXTS | {".pdf"}
+
+TEXT_SNIFF_BYTES = 8192
+MAX_TEXT_CHARS_PER_FILE = 20_000
+MAX_ARCHIVE_MEMBERS = 200
 # Audio/video (AUDIO_EXTS / VIDEO_EXTS, imported above) are only passed through
 # when the judge is AV-capable (e.g. MiniMax M3); image-only judges can't decode
 # them, so they are otherwise skipped. Every extension in those sets needs an
@@ -205,6 +222,53 @@ MIME_TYPES = {
     ".mpg": "video/mpeg",
     ".3gp": "video/3gpp",
 }
+
+
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n / 1024:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+def _sniffs_as_text(fpath: Path) -> bool:
+    """True if an unknown-extension file looks like text (Makefile, Dockerfile, ...)."""
+    try:
+        with fpath.open("rb") as fh:
+            chunk = fh.read(TEXT_SNIFF_BYTES)
+    except OSError:
+        return False
+    if not chunk or b"\x00" in chunk:
+        return False
+    text = chunk.decode("utf-8", errors="replace")
+    ctrl = sum(1 for ch in text if ord(ch) < 32 and ch not in "\t\n\r\f\v")
+    if (text.count("�") + ctrl) / len(text) < 0.01:
+        return True
+    # cp1252/latin-1 is still text; only control characters make it binary.
+    return ctrl / len(text) < 0.01
+
+
+def _archive_manifest(fpath: Path) -> str | None:
+    """Member listing, or None if not a readable archive."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(fpath) as zf:
+            names = zf.namelist()
+    except Exception:
+        return None
+    shown = names[:MAX_ARCHIVE_MEMBERS]
+    lines = "\n".join(f"  {n}" for n in shown)
+    if len(names) > len(shown):
+        lines += f"\n  ... and {len(names) - len(shown)} more member(s)"
+    return f"{len(names)} member(s):\n{lines}"
+
+
+def _truncated(text: str) -> str:
+    if len(text) <= MAX_TEXT_CHARS_PER_FILE:
+        return text
+    return text[:MAX_TEXT_CHARS_PER_FILE] + f"\n[... truncated at {MAX_TEXT_CHARS_PER_FILE:,} characters]"
 
 
 def _convert_office_to_pdf(fpath: Path) -> Path | None:
@@ -343,7 +407,8 @@ def convert_deliverables_to_content_blocks(
     *audio_capable* / *video_capable* forward audio / video files (respectively)
     to judges that read that modality — tracked SEPARATELY because MiniMax-M3
     reads video but not audio (a video-only judge keeps video, skips audio). An
-    unreadable modality's file is skipped. The AV block dialect follows
+    unreadable modality's file is still announced by name and size rather than
+    dropped. The AV block dialect follows
     *media_mode*: ``native_pdf`` (frontier judges, e.g. Gemini) uses an
     ``image_url`` data URL, while ``images_and_text`` (self-hosted vLLM judges)
     uses the standard ``video_url`` / ``input_audio`` content types vLLM routes to
@@ -368,7 +433,11 @@ def convert_deliverables_to_content_blocks(
             if ext in TEXT_EXTS:
                 text = fpath.read_text(encoding="utf-8", errors="replace").strip()
                 if text:
-                    blocks.append({"type": "text", "text": f"\n{fpath.name}:\n{text}"})
+                    blocks.append({"type": "text", "text": f"\n{fpath.name}:\n{_truncated(text)}"})
+                else:
+                    blocks.append(
+                        {"type": "text", "text": f"\n{fpath.name}: [present but EMPTY (0 bytes of content)]"}
+                    )
 
             elif ext in OFFICE_EXTS:
                 pdf_path = _convert_office_to_pdf(fpath)
@@ -437,12 +506,48 @@ def convert_deliverables_to_content_blocks(
                 # (images_and_text) need the standard video_url / input_audio types,
                 # which vLLM routes to the media tower.
                 is_video = ext in VIDEO_EXTS
+                file_type = "VIDEO" if is_video else "AUDIO"
                 if video_capable if is_video else audio_capable:
                     mime = MIME_TYPES.get(ext, "application/octet-stream")
                     data = fpath.read_bytes()
-                    file_type = "VIDEO" if is_video else "AUDIO"
                     blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
                     blocks.append(_av_block(mime, data, ext=ext, file_type=file_type, openai_native=images_and_text))
+                else:
+                    # Gating is correct; emitting nothing is not -- the judge
+                    # then grades against a file it believes was never produced.
+                    size = fpath.stat().st_size
+                    blocks.append(
+                        {
+                            "type": "text",
+                            "text": (
+                                f"\n{fpath.name}: [{file_type} deliverable, {_human_size(size)} "
+                                f"({size:,} bytes) — present on disk, but this judge cannot decode "
+                                f"{file_type.lower()}. Do NOT treat it as missing or unproduced. Grade the "
+                                f"criteria that do not require {'viewing' if is_video else 'listening'}; "
+                                f"mark the rest unverifiable rather than unmet.]"
+                            ),
+                        }
+                    )
+
+            else:
+                # Any allowlist lags reality; an unlisted extension used to emit
+                # nothing, so the judge scored it as never produced.
+                size = fpath.stat().st_size
+                if size == 0:
+                    body = "[present but EMPTY (0 bytes)]"
+                elif _sniffs_as_text(fpath):
+                    text = fpath.read_text(encoding="utf-8", errors="replace").strip()
+                    body = f"\n{_truncated(text)}" if text else "[present but EMPTY (0 bytes of content)]"
+                else:
+                    manifest = _archive_manifest(fpath)
+                    if manifest is not None:
+                        body = f"[archive, {_human_size(size)} — NOT missing] {manifest}"
+                    else:
+                        body = (
+                            f"[deliverable present, {_human_size(size)} ({size:,} bytes) — NOT missing; "
+                            f"content not extractable in this format]"
+                        )
+                blocks.append({"type": "text", "text": f"\n{fpath.name}: {body}"})
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 
