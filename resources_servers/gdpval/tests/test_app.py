@@ -28,6 +28,7 @@ from resources_servers.gdpval.app import (
     GDPValResourcesServerConfig,
     GDPValVerifyRequest,
     _iter_ref_repeat_dirs,
+    _safe_output_text,
 )
 
 
@@ -100,6 +101,55 @@ class TestIterRefRepeatDirs:
 
     def test_missing_dir_returns_empty(self, tmp_path) -> None:
         assert _iter_ref_repeat_dirs(tmp_path / "does-not-exist") == []
+
+
+class TestJudgeArtifactIsolation:
+    def test_private_stirrup_artifacts_are_not_deliverables(self, tmp_path) -> None:
+        from responses_api_agents.stirrup_agent.file_reader import (
+            convert_deliverables_to_content_blocks,
+            read_deliverable_files,
+        )
+
+        (tmp_path / "final_report.txt").write_text("PUBLIC FINAL REPORT")
+        private_files = {
+            "finish_params.json": "PRIVATE FINISH PARAMS",
+            "history.json": "PRIVATE TRAJECTORY",
+            "history.pkl": "PRIVATE PICKLE",
+            "metadata.json": "PRIVATE METADATA",
+        }
+        for name, secret in private_files.items():
+            (tmp_path / name).write_text(secret)
+
+        extracted = read_deliverable_files(str(tmp_path))
+        blocks = convert_deliverables_to_content_blocks(str(tmp_path))
+        rendered_blocks = repr(blocks)
+
+        assert "PUBLIC FINAL REPORT" in extracted
+        assert "PUBLIC FINAL REPORT" in rendered_blocks
+        for name, secret in private_files.items():
+            assert name not in extracted
+            assert secret not in extracted
+            assert name not in rendered_blocks
+            assert secret not in rendered_blocks
+
+    def test_text_fallback_uses_only_final_assistant_message(self) -> None:
+        request = _verify_request(deliverable_text="PRIVATE EARLIER TRAJECTORY")
+        final_message = NeMoGymResponseOutputMessage(
+            id="msg-final",
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[
+                NeMoGymResponseOutputText(
+                    type="output_text",
+                    text="PUBLIC FINAL ANSWER",
+                    annotations=[],
+                )
+            ],
+        )
+        response = request.response.model_copy(update={"output": [*request.response.output, final_message]})
+
+        assert _safe_output_text(response) == "PUBLIC FINAL ANSWER"
 
 
 class TestApp:

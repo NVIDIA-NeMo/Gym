@@ -83,11 +83,16 @@ def _iter_ref_repeat_dirs(task_dir: Path) -> List[Path]:
 
 
 def _safe_output_text(response: Any) -> str:
-    """Extract concatenated assistant text from a response without relying on
+    """Extract only the final assistant text from a response without relying on
     ``response.output_text`` — that property raises ``AttributeError`` when
     ``output[*].content`` contains raw strings (e.g. input messages carried
-    through by the Stirrup agent)."""
-    parts: List[str] = []
+    through by the Stirrup agent).
+
+    Stirrup responses retain the complete assistant/tool trajectory for cache,
+    audit, and SFT. The rubric judge must not receive that trajectory when it
+    falls back to response text because no final deliverable file is readable.
+    """
+    assistant_messages: List[str] = []
     output = getattr(response, "output", None) or []
     for item in output:
         d = item.model_dump() if hasattr(item, "model_dump") else dict(item)
@@ -96,15 +101,19 @@ def _safe_output_text(response: Any) -> str:
         if d.get("role") and d.get("role") != "assistant":
             continue
         content = d.get("content") or []
+        parts: List[str] = []
         if isinstance(content, str):
             parts.append(content)
-            continue
-        for c in content:
-            if isinstance(c, str):
-                parts.append(c)
-            elif isinstance(c, dict) and c.get("type") == "output_text":
-                parts.append(c.get("text") or "")
-    return "\n".join(p for p in parts if p)
+        else:
+            for c in content:
+                if isinstance(c, str):
+                    parts.append(c)
+                elif isinstance(c, dict) and c.get("type") == "output_text":
+                    parts.append(c.get("text") or "")
+        message = "\n".join(p for p in parts if p)
+        if message:
+            assistant_messages.append(message)
+    return assistant_messages[-1] if assistant_messages else ""
 
 
 class ReferenceModelConfig(BaseModel):
