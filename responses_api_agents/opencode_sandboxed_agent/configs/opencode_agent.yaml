@@ -16,6 +16,8 @@ opencode_sandboxed_agent:
           edit: allow
           webfetch: allow
 
+      sandbox_timeout: 1800  # 30 min default for harness execution
+
       sandbox_provider: sandbox
       sandbox_config:
         ttl_s: 18000

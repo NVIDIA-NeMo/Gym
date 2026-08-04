@@ -59,6 +59,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
+    sandbox_timeout: float
 
     debug: bool = False
 
@@ -216,6 +217,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
         result = await sandbox.exec(
             command=command,
+            timeout_s=self.config.sandbox_timeout,
             env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
         )
         if self.config.debug:
