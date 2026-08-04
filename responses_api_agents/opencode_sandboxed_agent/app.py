@@ -141,9 +141,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         "dummy_model": {
                             # TODO @bxyu-nvidia: Propogate sampling params here.
                             "limit": {
-                                "context": None,
-                                "output": None,
-                                "input": None,
+                                "context": 0,
+                                "output": 0,
+                                "input": 0,
                             },
                         },
                     },
