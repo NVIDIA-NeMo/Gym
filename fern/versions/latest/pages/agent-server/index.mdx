@@ -1,9 +1,20 @@
 ---
 title: "Configure Agents"
-description: ""
+description: "The Agent server holds an environment's agent harness. Use a built-in agent, an agent that wraps an external harness, or your own."
 position: 1
 ---
-The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.
+
+An environment is made of four parts: a dataset, an agent harness, a verifier, and per-task state. The Agent server is where the harness lives.
+
+A harness decides how a model interacts with the world: how many turns it gets, what its system prompt says, which tools it can reach, how tool results are fed back, when it stops, and what scaffolding (planning, compaction, sub-agents) sits between the model and the task. The Agent server does not run an LLM itself. It is orchestration code that delegates text generation to the Model server and tool execution, state, and scoring to the Resources server.
+
+## Why the Harness Is Its Own Server
+
+Because the harness is a separate server rather than part of the dataset or the verifier, it can be changed independently of the rest of the environment:
+
+- Run several harnesses against one environment, with the dataset and verifier held fixed.
+- Run one harness across many environments. The Agent server references a Resources server by name, so switching benchmarks is a config change.
+- Use the same environment for evaluation and training. A harness that reports token IDs and log probabilities produces rollouts a training framework can consume, and nothing else about the environment changes.
 
 ## Rollout Lifecycle
 
@@ -44,12 +55,28 @@ class Agent:
         return conversation
 ```
 
-## Existing Agents
+An agent that wraps an external harness replaces the middle phase with the harness's own loop. The outer shape is the same: NeMo Gym seeds the session, verifies the finished trajectory, and reports the reward.
 
-See [Integrate Existing Agents](/agent-server/integrate-existing-agents) to use a built-in NeMo Gym agent, wrap an external agent harness, or decide when tool logic belongs in the Agent server versus the Resources server.
+## Choosing an Agent
 
-## Server Configuration
-<Note>
-[Agent Server Fields](/reference/configuration#agent-server-fields) for server configuration syntax and fields.
+There are three options. Use a built-in NeMo Gym agent — `simple_agent` handles multi-step tool calling against any Resources server. Use one of the agents that wraps an external harness, such as a coding CLI, an agent framework, or a benchmark's own scaffold; these need configuration but no code. Or keep your agent in your own repo and expose an endpoint that follows the OpenAI Responses contract, and let `remote_agent` drive the loop against it.
 
-</Note>
+<Cards>
+
+<Card title="Integrate Existing Agents" href="/agent-server/integrate-existing-agents">
+Built-in and external agents, how each external harness is wrapped, and what a wrapper needs to support training.
+</Card>
+
+<Card title="Drive a Remote Agent" href="/agent-server/remote-agent">
+The `remote_agent` contract, an end-to-end quickstart, configuration fields, and failure handling.
+</Card>
+
+<Card title="Agent Skills" href="/agent-server/agent-skills">
+Set [Agent Skills](https://agentskills.io/specification) per run, separately from the dataset.
+</Card>
+
+<Card title="Agent Server Fields" href="/reference/configuration#agent-server-fields">
+Configuration syntax for wiring an agent to its Resources server and Model server.
+</Card>
+
+</Cards>
