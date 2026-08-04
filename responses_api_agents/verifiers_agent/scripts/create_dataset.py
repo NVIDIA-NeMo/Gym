@@ -11,95 +11,63 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from __future__ import annotations
+
+# /// script
+# dependencies = ["verifiers==0.2.2.dev78"]
+# ///
 
 import argparse
 import json
-import logging
+import sys
+from itertools import islice
 from pathlib import Path
 
-import verifiers as vf
+import verifiers.v1 as vf
 
 
-logger = logging.getLogger(__name__)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def load_verifiers_dataset(vf_env: vf.Environment, n: int = -1, seed: int | None = None) -> list[dict]:
-    try:
-        dataset = vf_env.get_dataset(n=n, seed=seed)
-    except ValueError:
-        try:
-            dataset = vf_env.get_eval_dataset(n=n, seed=seed)
-        except ValueError:
-            dataset = None
-        for attr in ["dataset", "train_dataset", "eval_dataset"]:
-            ds = getattr(vf_env, attr, None)
-            if ds is not None:
-                dataset = ds
-                logger.info(f"Found dataset in vf_env.{attr}")
-                break
-        if dataset is None:
-            raise ValueError("Environment does not have a dataset")
-        if seed is not None:
-            dataset = dataset.shuffle(seed=seed)
-        if n > 0:
-            dataset = dataset.select(range(min(n, len(dataset))))
-
-    return [
-        {
-            "prompt": dataset["prompt"][i],
-            "example_id": dataset["example_id"][i],
-            **({"task": dataset["task"][i]} if "task" in dataset.column_names else {}),
-            **({"answer": dataset["answer"][i]} if "answer" in dataset.column_names else {}),
-            **({"info": dataset["info"][i]} if "info" in dataset.column_names else {}),
-        }
-        for i in range(len(dataset))
-    ]
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Create JSONL dataset from verifiers environment")
-    parser.add_argument("--env-id", required=True, help="Verifiers environment ID (e.g., pmpp, math-env-rlm)")
-    parser.add_argument("--env-args", default="{}", help="JSON string of environment arguments")
-    parser.add_argument("--size", type=int, default=-1, help="Number of examples (-1 for all)")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for shuffling")
-    parser.add_argument("--output", required=True, help="Output JSONL file path")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Export a Verifiers V1 taskset to Gym JSONL")
+    parser.add_argument("--taskset", required=True)
+    parser.add_argument("--taskset-config", default="{}", help="Additional taskset config as JSON")
+    parser.add_argument("--size", type=int, default=-1)
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    env_args = json.loads(args.env_args)
-
-    print(f"Loading verifiers environment: {args.env_id}")
-    env = vf.load_environment(args.env_id, **env_args)
-
-    print(f"Getting dataset (size={args.size}, seed={args.seed})")
-    dataset_rows = load_verifiers_dataset(env, n=args.size, seed=args.seed)
-
-    print(f"Dataset has {len(dataset_rows)} examples")
-
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, "w") as f:
-        for i, row in enumerate(dataset_rows):
-            output_row = {
-                "task_idx": i,
-                "vf_env_id": args.env_id,
-                "responses_create_params": {
-                    "input": row["prompt"],
-                },
+    config = vf.taskset_config_type(args.taskset).model_validate(
+        {**json.loads(args.taskset_config), "id": args.taskset}
+    )
+    stop = None if args.size < 0 else args.offset + args.size
+    rows = []
+    for task_idx, task in enumerate(
+        islice(vf.load_taskset(config), args.offset, stop),
+        start=args.offset,
+    ):
+        data = task.data.model_dump(mode="json")
+        params = {"input": data.get("prompt") or ""}
+        if data.get("system_prompt"):
+            params["instructions"] = data["system_prompt"]
+        rows.append(
+            {
+                "task_idx": task_idx,
+                "responses_create_params": params,
                 "agent_ref": {
                     "type": "responses_api_agents",
                     "name": "verifiers_agent",
                 },
-                "question": row["prompt"][-1]["content"] if row["prompt"] else "",
-                "answer": row.get("answer", ""),
-                "task": row.get("task", ""),
-                "example_id": row["example_id"],
-                "info": row.get("info", {}),
             }
-            f.write(json.dumps(output_row) + "\n")
+        )
 
-    print(f"Wrote {len(dataset_rows)} examples to {output_path}")
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        "".join(f"{json.dumps(row, separators=(',', ':'))}\n" for row in rows),
+        encoding="utf-8",
+    )
+    print(f"Wrote {len(rows)} tasks to {output}")
 
 
 if __name__ == "__main__":

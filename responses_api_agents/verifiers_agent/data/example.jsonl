@@ -1,0 +1,1 @@
+{"task_idx":0,"responses_create_params":{"input":"Reverse the word `stressed`. Reply with only the reversed word."},"agent_ref":{"type":"responses_api_agents","name":"verifiers_agent"}}

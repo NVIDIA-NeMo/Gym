@@ -1,127 +1,59 @@
-# Description
+# Verifiers V1 agent
 
-This agent enables running Prime Intellect [verifiers](https://github.com/PrimeIntellect-ai/verifiers) environments, including many in Prime Intellect's [Environments Hub](https://app.primeintellect.ai/dashboard/environments?ex_sort=by_sections) in NeMo Gym. 
+This agent runs a single-agent [Verifiers V1](https://github.com/PrimeIntellect-ai/verifiers)
+taskset and harness inside its NeMo Gym server process. Verifiers owns the harness, tools,
+task lifecycle, trace, and scoring; NeMo Gym owns the policy model and rollout collection.
 
-## Install Gym
+The component has its own virtual environment, so its Verifiers and OpenAI versions do not
+change the Gym head server's dependencies.
 
-```
-git clone https://github.com/NVIDIA-NeMo/Gym
-cd Gym
-uv venv; source .venv/bin/activate; uv sync
-```
+## Example
 
-## Test acereason-math example 
+The included taskset asks the model to reverse a word and scores the exact answer. Configure
+the policy model in `env.yaml`, then run:
 
-First set `env.yaml`, for example for a vLLM served model:
-```
-policy_base_url: "http://localhost:8000/v1"
-policy_api_key: EMPTY
-policy_model_name: "Qwen/Qwen3-4B-Instruct-2507"
-```
-
-```
-# start nemo gym servers
+```bash
 gym env start \
-    --config responses_api_agents/verifiers_agent/configs/acereason-math.yaml \
-    --model-type vllm_model
+  --config responses_api_agents/verifiers_agent/configs/example.yaml \
+  --model-type vllm_model
 
-# generate a rollout
 gym eval run --no-serve \
-    --agent verifiers_agent \
-    --input responses_api_agents/verifiers_agent/data/acereason-math-example.jsonl \
-    --output responses_api_agents/verifiers_agent/data/acereason-math-example-rollouts.jsonl \
-    --limit 1
-
-# view the rollout
-tail -n 1 responses_api_agents/verifiers_agent/data/acereason-math-example-rollouts.jsonl | jq | less
+  --agent verifiers_agent \
+  --input responses_api_agents/verifiers_agent/data/example.jsonl \
+  --output responses_api_agents/verifiers_agent/data/example-rollouts.jsonl \
+  --limit 1
 ```
 
+The `verifiers` block in `configs/example.yaml` is a normal single-agent V1 environment config.
+Change its `taskset` and `agent.harness` fields to use another installed V1 taskset or harness.
+The agent loads the taskset once, keeps the V1 serving resources alive with the Gym server,
+and runs the task selected by each row's `task_idx`.
 
-## Testing new prime environments from environments hub
+## Export a taskset
 
-Some examples: `primeintellect/acereason-math`, `primeintellect/ascii-tree` and `primeintellect/alphabet-sort`.
+Generate Gym rows in the same order as the configured V1 taskset:
 
-### Install an environment
-```
-# deactivate the main nemo gym virtual environment
-deactivate
-
-# create a separate venv for installing prime environments
-# (avoids dependency conflicts with the Gym or server venvs)
-# for example, use ~/prime_venv
-mkdir -p /path/to/prime_venv && cd /path/to/prime_venv
-uv venv && source .venv/bin/activate
-
-# install prime CLI and the environment
-uv pip install tool prime
-prime env install primeintellect/ascii-tree
+```bash
+uv run responses_api_agents/verifiers_agent/scripts/create_dataset.py \
+  --taskset example_taskset \
+  --size 1 \
+  --output responses_api_agents/verifiers_agent/data/tasks.jsonl
 ```
 
-### Create dataset
-```
-# navigate to the verifiers_agent directory (with the prime venv still active)
-cd <gym-root>/responses_api_agents/verifiers_agent
-python3 scripts/create_dataset.py --env-id primeintellect/ascii-tree --size 5 --output data/ascii-tree-example.jsonl
-```
+Install any taskset-specific dependency in this component's `requirements.txt`, then use the
+same taskset config in the export command and the agent YAML. Pass the pinned package to the
+isolated exporter with `uv run --with package==version ...`. Hub tasksets can be addressed by
+their pinned `org/name@version` identifier. Rows refer to tasks by index, so export and rollout
+collection must load the same taskset version, config, and order.
 
-### Update agent server requirements
-```
--e nemo-gym[dev] @ ../../
-verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@main
---extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
-ascii-tree
-```
-### Update agent config
-Create `configs/ascii-tree.yaml`, primarily updating env id, and any other env specific args: 
-```
-verifiers_agent:
-  responses_api_agents:
-    verifiers_agent:
-      entrypoint: app.py
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      model_name: ""
-      vf_env_id: ascii-tree
-      vf_env_args: {}
-      group_size: 1
-      max_concurrent_generation: -1
-      max_concurrent_scoring: -1
-      max_tokens: 8192
-      temperature: 1.0
-      top_p: 1.0
+The integration intentionally runs one V1 rollout per Gym row. V1 multi-agent environments and
+group rewards are not supported. Responses harnesses preserve Gym's native output items,
+including token IDs, log probabilities, and routed-expert payloads. Chat Completions and
+Anthropic Messages harnesses remain useful for evaluation, but V1 does not retain their native
+training fields in the trace.
 
-```
+## Licensing
 
-```
-# return to Gym/ root and activate Gym/ virtual environment
-cd ../../
-deactivate
-source .venv/bin/activate
-
-# start nemo gym servers
-gym env start \
-    --config responses_api_agents/verifiers_agent/configs/ascii-tree.yaml \
-    --model-type vllm_model
-
-# generate a rollout
-gym eval run --no-serve \
-    --agent verifiers_agent \
-    --input responses_api_agents/verifiers_agent/data/ascii-tree-example.jsonl \
-    --output responses_api_agents/verifiers_agent/data/ascii-tree-example-rollouts.jsonl \
-    --limit 1
-```
-
-## Integration notes
-
-The patch to include prompt and generation token ids for preventing retokenization error when training with NeMo RL has been upstreamed into verifiers' `NeMoRLChatCompletionsClient`. We currently track verifiers `main` (`git+https://github.com/PrimeIntellect-ai/verifiers.git@main`) for this support; once verifiers `0.1.13` is released, the requirements pin will move to that tagged version.
-
-For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `gym env start` after any environment changes to ensure the pinned version of verifiers is used.
-
-# Licensing information
 Code: Apache 2.0
-Data: N/A
 
-Dependencies
-- nemo_gym: Apache 2.0
-- verifiers: Apache 2.0
+Data: N/A

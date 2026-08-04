@@ -12,336 +12,177 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 import json
-import logging
-import traceback
+from contextlib import asynccontextmanager
+from time import time
 from typing import Any
 
-import verifiers as vf
-from fastapi import Body, Request, Response
-from openai import AsyncOpenAI
-from pydantic import ConfigDict, Field
-from verifiers.clients import NeMoRLChatCompletionsClient
+import verifiers.v1 as vf
+from fastapi import Body, FastAPI, HTTPException
+from pydantic import ConfigDict, Field, PrivateAttr
+from verifiers.v1.dialects.chat import message_to_wire
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseOutputText,
+from nemo_gym.base_responses_api_agent import (
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
 )
-
-
-logger = logging.getLogger(__name__)
-
-
-def _as_dict(msg: Any) -> dict:
-    if isinstance(msg, dict):
-        return msg
-    return {k: getattr(msg, k, None) for k in ("role", "content", "tool_calls", "tool_call_id", "tokens")}
-
-
-def _text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if content is None:
-        return ""
-    return json.dumps(content, default=str)
-
-
-def _tok_kwargs(tokens: dict | None) -> dict:
-    if not tokens:
-        return {}
-    kwargs = {
-        "prompt_token_ids": tokens.get("prompt_ids", []),
-        "generation_token_ids": tokens.get("completion_ids", []),
-        "generation_log_probs": tokens.get("completion_logprobs", []),
-    }
-    routed_experts = tokens.get("routed_experts")
-    if routed_experts is not None:
-        kwargs["routed_experts"] = routed_experts
-    return kwargs
-
-
-def _normalize_tool_call(tool_call: Any) -> dict:
-    if isinstance(tool_call, str):
-        try:
-            return json.loads(tool_call)
-        except json.JSONDecodeError:
-            return {"arguments": tool_call}
-    return tool_call
-
-
-def _build_tool_result_item(msg: dict, raw: Any) -> dict:
-    call_id = msg.get("tool_call_id") or f"call_{id(raw)}"
-    return NeMoGymFunctionCallOutput(
-        call_id=call_id,
-        id=call_id,
-        output=_text(msg.get("content")),
-        status="completed",
-    ).model_dump()
-
-
-def _build_function_call_item(tool_call: Any, tokens: dict | None) -> dict:
-    tc = _normalize_tool_call(tool_call)
-    function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-    call_id = tc.get("id") or tc.get("call_id") or f"call_{id(tool_call)}"
-    name = tc.get("name") or function.get("name", "")
-    arguments = _text(tc.get("arguments") or function.get("arguments") or "{}")
-
-    cls = NeMoGymResponseFunctionToolCallForTraining if tokens else NeMoGymResponseFunctionToolCall
-    return cls(
-        id=call_id,
-        call_id=call_id,
-        name=name,
-        arguments=arguments,
-        status="completed",
-        **_tok_kwargs(tokens),
-    ).model_dump()
-
-
-def _build_message_item(raw: Any, body: str, tokens: dict | None) -> dict:
-    cls = NeMoGymResponseOutputMessageForTraining if tokens else NeMoGymResponseOutputMessage
-    return cls(
-        id=f"msg_{id(raw)}",
-        content=[NeMoGymResponseOutputText(text=body, annotations=[])],
-        **_tok_kwargs(tokens),
-    ).model_dump()
-
-
-def _build_assistant_items(msg: dict, raw: Any, tokens: dict | None) -> list[dict]:
-    tool_calls = msg.get("tool_calls") or []
-    body = _text(msg.get("content"))
-    items: list[dict] = []
-
-    if body:
-        items.append(_build_message_item(raw, body, tokens if not tool_calls else None))
-
-    for i, tool_call in enumerate(tool_calls):
-        is_last = i == len(tool_calls) - 1
-        items.append(_build_function_call_item(tool_call, tokens if is_last else None))
-
-    if not items:
-        items.append(_build_message_item(raw, "", tokens))
-
-    return items
-
-
-class VerifiersNeMoGymResponse(NeMoGymResponse):
-    env_id: str
-    group_id: str
-    output: list[dict[str, Any]]
-    reward: float
-    metrics: dict[str, Any] = Field(default_factory=dict)
-    parallel_tool_calls: bool = True
-    tool_choice: str = "auto"
-    tools: list = Field(default_factory=list)
-
-
-class VerifiersAgentVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-    response: VerifiersNeMoGymResponse
-    reward: float
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import POLICY_MODEL_NAME_KEY_NAME
+from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.responses_converter import ResponsesConverter
 
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
-    model_name: str = Field(default="", description="Model name")
-
-    vf_env_id: str = Field(default="", description="Verifiers environment ID")
-    vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
-
-    max_tokens: int = Field(default=8192, description="Max tokens for generation")
-
-    # nemo rl generation_config overrides these
-    temperature: float = Field(default=1.0)
-    top_p: float = Field(default=1.0)
+    verifiers: vf.SingleAgentEnvConfig
+    max_tokens: int = 8192
+    temperature: float = 1.0
+    top_p: float = 1.0
 
 
 class VerifiersAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
-    task_idx: int
-    vf_env_id: str | None = Field(default=None, description="Verifiers environment ID")
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
-        default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(input=[])
-    )
-    answer: str = Field(default="", description="Expected answer from dataset")
-    task: str = Field(default="default", description="Task type from dataset")
-    example_id: int | str = Field(default=0, description="Example ID from dataset")
-    info: dict = Field(default_factory=dict, description="Extra info from dataset")
+    task_idx: int = Field(ge=0)
+
+
+class VerifiersNeMoGymResponse(NeMoGymResponse):
+    reward: float
+    metrics: dict[str, float] = Field(default_factory=dict)
+
+
+class VerifiersAgentVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
+    response: VerifiersNeMoGymResponse
+    metrics: dict[str, float] = Field(default_factory=dict)
 
 
 class VerifiersAgent(SimpleResponsesAPIAgent):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
+    _env: vf.SingleAgentEnv = PrivateAttr()
+    _tasks: list[vf.Task] = PrivateAttr()
+    _converter: ResponsesConverter = PrivateAttr()
 
-    envs_cache: dict[str, Any] = Field(default_factory=dict)
-    client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        self._env = vf.SingleAgentEnv(self.config.verifiers)
+        self._tasks = list(self._env.taskset)
+        self._converter = ResponsesConverter(return_token_id_information=True)
 
-    def _get_env(self, vf_env_id: str) -> vf.Environment:
-        if vf_env_id not in self.envs_cache:
-            self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
-        return self.envs_cache[vf_env_id]
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        # A V1 rollout needs task_idx, which is part of Gym's /run request.
+        app.router.routes[:] = [
+            route for route in app.router.routes if not getattr(route, "path", "").endswith("/v1/responses")
+        ]
+        parent_lifespan = app.router.lifespan_context
 
-    def _get_client(self) -> NeMoRLChatCompletionsClient:
-        cache_key = self.config.model_server.name
-        if cache_key not in self.client_cache:
-            server_config_dict = get_first_server_config_dict(
-                self.server_client.global_config_dict,
-                self.config.model_server.name,
-            )
-            model_server_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            async with parent_lifespan(app), self._env.serving():
+                yield
 
-            if not model_server_url.endswith("/v1"):
-                model_server_url = model_server_url.rstrip("/") + "/v1"
-
-            openai_client = AsyncOpenAI(
-                base_url=model_server_url,
-                api_key="EMPTY",  # pragma: allowlist secret
-            )
-            self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
-
-        return self.client_cache[cache_key]
-
-    def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
-        assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
-
-        output: list[dict] = []
-        assist_idx = 0
-        for raw in rollout_output.get("completion") or []:
-            msg = _as_dict(raw)
-            role = msg.get("role", "user")
-
-            if role == "tool":
-                output.append(_build_tool_result_item(msg, raw))
-            elif role == "assistant":
-                tokens = assistant_tokens[assist_idx] if assist_idx < len(assistant_tokens) else None
-                assist_idx += 1
-                output.extend(_build_assistant_items(msg, raw, tokens))
-            else:
-                output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
-
-        if not any(item.get("generation_token_ids") for item in output):
-            err = rollout_output.get("error") or {}
-            err_msg = err.get("error") or err.get("error_chain_repr") or "unknown (no error info on rollout_output)"
-            logger.warning(
-                "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
-                "Underlying error: %s",
-                err_msg,
-            )
-            output.append(
-                NeMoGymResponseOutputMessageForTraining(
-                    id="msg_empty",
-                    content=[NeMoGymResponseOutputText(text="", annotations=[])],
-                    prompt_token_ids=[0],
-                    generation_token_ids=[0],
-                    generation_log_probs=[0.0],
-                ).model_dump()
-            )
-
-        return output
-
-    @staticmethod
-    def _collect_assistant_tokens(trajectory: list) -> list[dict | None]:
-        tokens_per_turn: list[dict | None] = []
-        for step in trajectory:
-            if not isinstance(step, dict):
-                continue
-            step_tokens = step.get("tokens")
-            for m in step.get("completion") or []:
-                if _as_dict(m).get("role") == "assistant":
-                    tokens_per_turn.append(step_tokens)
-        return tokens_per_turn
+        app.router.lifespan_context = lifespan
+        return app
 
     async def responses(
         self,
-        request: Request,
-        response: Response,
         body: VerifiersAgentRunRequest = Body(),
     ) -> VerifiersNeMoGymResponse:
+        params = body.responses_create_params
         try:
-            vf_env_id = body.vf_env_id or self.config.vf_env_id
-            if not vf_env_id:
-                raise ValueError("vf_env_id must be set on the request or in the agent config")
-            vf_env = self._get_env(vf_env_id)
-            task_idx = body.task_idx
+            task = self._tasks[body.task_idx]
+        except IndexError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"task_idx {body.task_idx} is out of range for {len(self._tasks)} tasks",
+            ) from None
 
-            prompt_messages = []
-            for item in body.responses_create_params.input or []:
-                if hasattr(item, "role") and hasattr(item, "content"):
-                    prompt_messages.append({"role": item.role, "content": item.content})
-                elif isinstance(item, dict):
-                    prompt_messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
+        sampling = json.loads((params.metadata or {}).get("extra_body", "{}"))
+        sampling.update(
+            max_tokens=params.max_output_tokens if params.max_output_tokens is not None else self.config.max_tokens,
+            temperature=params.temperature if params.temperature is not None else self.config.temperature,
+            top_p=params.top_p if params.top_p is not None else self.config.top_p,
+        )
+        model = str(
+            self.server_client.global_config_dict.get(POLICY_MODEL_NAME_KEY_NAME)
+            or params.model
+            or self.config.model_server.name
+        )
+        context = vf.ModelContext(
+            model=model,
+            client=vf.EvalClientConfig(
+                base_url=self.resolve_model_base_url(
+                    self.config.model_server.name,
+                    self.rollout_id_from_run(body),
+                ),
+                api_key_var="NEMO_GYM_API_KEY",
+            ),
+            sampling=vf.SamplingConfig.model_validate(sampling),
+        )
+        episode = await self._env.run_slot(self._env.slots(task)[0], context)
+        if not episode.ok:
+            error = episode.last_error or (episode.traces[-1].last_error if episode.traces else None)
+            raise RuntimeError(error.message if error else "Verifiers rollout failed")
 
-            rollout_input = vf.RolloutInput(
-                prompt=prompt_messages,
-                answer=body.answer,
-                info=body.info,
-                example_id=body.example_id,
-            )
+        trace = episode.traces[0]
+        branch = trace.branches[-1]
+        calls = iter(branch.calls)
+        input_items, output = [], []
+        items = input_items
+        for node in branch.nodes:
+            message = node.message
+            if node.sampled:
+                items = output
+                call = next(calls, None)
+                if call and call.endpoint == "/responses" and message.provider_state:
+                    items.extend(message.provider_state)
+                    continue
+            wire = message_to_wire(message)
+            if isinstance(message, vf.AssistantMessage) and message.reasoning_content:
+                wire["content"] = f"<think>{message.reasoning_content}</think>{message.content or ''}"
+            items.extend(self._converter.chat_completions_messages_to_responses_items([wire]))
 
-            client = self._get_client()
-
-            # prefer NeMo RL generation config set in responses_create_params
-            # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
-            sampling_args = {
-                "max_tokens": self.config.max_tokens,
-                "temperature": getattr(body.responses_create_params, "temperature", None) or self.config.temperature,
-                "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
+        tools = [
+            {
+                "type": "function",
+                **tool.model_dump(exclude_none=True),
+                "strict": bool(tool.strict),
             }
-            outputs = await vf_env.run_group(
-                group_inputs=[rollout_input],
-                client=client,
-                model=self.config.model_name,
-                sampling_args=sampling_args,
-                state_columns=["trajectory"],
-            )
+            for tool in trace.tools or []
+        ]
+        params = params.model_copy(update={"input": input_items, "instructions": None, "tools": tools})
+        body.responses_create_params = params
 
-            rollout_output = outputs[0]
-            reward = rollout_output.get("reward", 0.0) or 0.0
-            metrics = rollout_output.get("metrics", {}) or {}
-
-            output = self._convert_trajectory_to_output(rollout_output)
-
-            return VerifiersNeMoGymResponse(
-                id=f"verifiers-{vf_env_id}-{task_idx}",
-                created_at=0,
-                model=self.config.model_name,
-                object="response",
-                output=output,
-                env_id=vf_env_id,
-                group_id=str(task_idx),
-                reward=reward,
-                metrics=metrics,
-            )
-        except Exception as e:
-            logger.error(f"Exception in responses(): {type(e).__name__}: {e}")
-            logger.error(f"Traceback:\n{traceback.format_exc()}")
-            raise
+        return VerifiersNeMoGymResponse(
+            id=f"resp_{trace.id}",
+            created_at=int(time()),
+            model=next(
+                (call.model for call in reversed(trace.calls) if call.model),
+                model,
+            ),
+            object="response",
+            output=output,
+            parallel_tool_calls=params.parallel_tool_calls,
+            tool_choice=params.tool_choice or "auto",
+            tools=tools,
+            reward=trace.reward,
+            metrics={name: value for name, value in trace.metrics.items() if value is not None},
+        )
 
     async def run(
         self,
-        request: Request,
-        response: Response,
         body: VerifiersAgentRunRequest = Body(),
     ) -> VerifiersAgentVerifyResponse:
-        resp = await self.responses(request, response, body)
-
+        result = await self.responses(body)
         return VerifiersAgentVerifyResponse(
             responses_create_params=body.responses_create_params,
-            response=resp,
-            reward=resp.reward,
+            response=result,
+            reward=result.reward,
+            metrics=result.metrics,
+            **{f"vf/{name}": value for name, value in result.metrics.items()},
         )
 
 
