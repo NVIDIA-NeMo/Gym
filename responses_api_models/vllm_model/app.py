@@ -183,7 +183,6 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        print("Hit in Responses", body)
         if self.config.is_responses_native:
             return await self._responses_native(request, body)
 
@@ -454,7 +453,6 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        print("Hit in Chat Completions", body)
         if self.config.use_completions_api:
             return await self._chat_completions_via_completions_api(request, body)
 
