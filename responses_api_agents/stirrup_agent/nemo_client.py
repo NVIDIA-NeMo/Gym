@@ -197,7 +197,6 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
     def __init__(
         self,
         *args: Any,
-        context_window_tokens: int,
         model_id: Optional[str] = None,
         completion_token_buffer: int = 1000,
         temperature: float = 1.0,
@@ -206,7 +205,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         max_completion_tokens_cap: int = _DEFAULT_MAX_COMPLETION_TOKENS_CAP,
         **kwargs: Any,
     ) -> None:
-        super().__init__(*args, context_window_tokens=context_window_tokens, **kwargs)
+        super().__init__(*args, **kwargs)
         self._completion_token_buffer = completion_token_buffer
         self._temperature = temperature
         self._top_p = top_p
@@ -308,7 +307,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
     ) -> AssistantMessage:
         provider_messages = to_provider_openai_messages(messages)
         input_tokens = self._count_input_tokens(provider_messages, tools)
-        context_window = self._context_window_tokens
+        context_window = self._max_tokens
         dynamic_max = max(
             context_window - input_tokens - self._completion_token_buffer,
             _MIN_COMPLETION_TOKENS,

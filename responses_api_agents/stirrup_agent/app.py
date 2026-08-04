@@ -455,7 +455,7 @@ async def _run_stirrup_agent(
         model=model_name,
         base_url=model_base_url,
         api_key=api_key,
-        context_window_tokens=max_tokens,
+        max_tokens=max_tokens,
         model_id=model_id,
         completion_token_buffer=completion_token_buffer,
         temperature=temperature,
