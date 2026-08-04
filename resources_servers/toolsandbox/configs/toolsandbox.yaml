@@ -1,0 +1,73 @@
+# Standalone gym config for the ToolSandbox benchmark.
+#
+# Brings up the ToolSandbox resources server (holds per-episode sandbox state,
+# runs the internal user simulator + Python execution environment, and scores
+# via /verify) together with the toolsandbox_agent harness that drives the
+# multi-turn conversation with the policy model under test.
+#
+# Run alongside a model server that provides `policy_model`, e.g.:
+#
+#   gym env start \
+#     --config resources_servers/toolsandbox/configs/toolsandbox.yaml \
+#     --model-type openai_model
+#
+# then collect rollouts:
+#
+#   gym eval run --no-serve --agent toolsandbox_agent \
+#     --input resources_servers/toolsandbox/data/example.jsonl \
+#     --output results/toolsandbox_rollouts.jsonl --num-repeats 1
+#
+# The user simulator defaults to the same `policy_model` server (like tau2).
+# Point `user_model_server` at a dedicated, stronger model for less bias.
+toolsandbox:
+  resources_servers:
+    toolsandbox:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: ToolSandbox multi-turn tool-use benchmark; reward is the milestone similarity in [0, 1] (0 if a minefield is hit).
+      value: Improve stateful, multi-turn tool-calling and user-interaction capability.
+      user_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Model id sent in the user-sim chat-completions request. Leave unset for
+      # OpenAI-compatible servers that override the model; set it to the served
+      # model name for vLLM.
+      # user_model_name: gpt-4o
+#      user_temperature: 0.0
+#      user_top_p: 1.0
+#      user_max_tokens: 2048
+#      user_enable_thinking: false
+      # max_messages: 30      # override per-scenario message cap (default: scenario's own)
+      preferred_tool_backend: default
+      test_mode: false
+
+toolsandbox_agent:
+  responses_api_agents:
+    toolsandbox_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: toolsandbox
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 30
+      # Emit a single flat trajectory (list of output items), not per-step
+      # transition snapshots. response.output is consumed as a flat list;
+      # transitions (list-of-lists) break downstream text extraction.
+      return_transitions: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/toolsandbox/data/example.jsonl
+        # Apple/ToolSandbox scenarios are CC-BY-NC 4.0, which is not in
+        # nemo_gym's allowed license enum; TBD until the correct value exists.
+        license: TBD
+      # Full scenario set: one row per scenario index. Regenerate with
+      #   python resources_servers/toolsandbox/prepare_toolsandbox.py
+      - name: test
+        type: validation
+        jsonl_fpath: resources_servers/toolsandbox/data/test_toolsandbox.jsonl
+        # See note above: CC-BY-NC 4.0 upstream, marked TBD pending an enum value.
+        license: TBD

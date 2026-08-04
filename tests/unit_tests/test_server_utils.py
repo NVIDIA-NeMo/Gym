@@ -338,3 +338,40 @@ class TestServerUtils:
                 pass
 
         TestSimpleServer.run_webserver()
+
+    def test_setup_session_middleware_idempotent(self) -> None:
+        from fastapi import FastAPI, Request
+        from fastapi.testclient import TestClient
+        from starlette.middleware.sessions import SessionMiddleware
+
+        from nemo_gym.config_types import BaseRunServerInstanceConfig
+        from nemo_gym.server_utils import SESSION_ID_KEY
+
+        class TestSimpleServer(SimpleServer):
+            def setup_webserver(self):
+                assert False
+
+        server = TestSimpleServer(
+            config=BaseRunServerInstanceConfig(name="my_server", host="", port=0, entrypoint=""),
+            server_client=ServerClient(
+                head_server_config=BaseServerConfig(host="", port=0),
+                global_config_dict=DictConfig({}),
+            ),
+        )
+
+        app = FastAPI()
+        server.setup_session_middleware(app)
+        server.setup_session_middleware(app)
+
+        session_middlewares = [m for m in app.user_middleware if m.cls is SessionMiddleware]
+        assert 1 == len(session_middlewares)
+        assert 2 == len(app.user_middleware)
+
+        @app.get("/session")
+        async def get_session(request: Request) -> dict:
+            return {"session_id": request.session[SESSION_ID_KEY]}
+
+        with TestClient(app) as client:
+            response = client.get("/session")
+            assert response.json()["session_id"]
+            assert 1 == len(response.headers.get_list("set-cookie"))

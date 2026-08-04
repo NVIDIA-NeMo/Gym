@@ -2,6 +2,8 @@
 
 Runs Claude Code CLI (`claude -p`) as a NeMo Gym agent server.
 
+Docs: [Anthropic Messages](https://docs.nvidia.com/nemo/gym/main/model-server/anthropic-messages) — how every Gym model server exposes `/v1/messages`, and how to wire this agent to any `model_server`.
+
 ## Quick start
 
 ### env.yaml
@@ -196,5 +198,6 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 ## Limitations
 
 - Eval only for now. Token IDs and logprobs are not wired up yet.
-- Does not go through Gym's model server. Token counts come from Claude Code's own usage reporting.
-- `turns_used` counts assistant messages right now, not tool calls.
+- With `model_server`, model calls go through Gym and can be captured. Direct Anthropic or
+  `anthropic_base_url` runs bypass Gym capture.
+- `turns_used` counts assistant messages, not tool calls.

@@ -108,7 +108,10 @@ asyncio.run(main())
 For an end-to-end agent run, add this provider config to `mini_swe_agent_2`'s config paths — the agent config is unchanged:
 
 ```bash
-ng_run "+config_paths=[responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml, nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml, <MODEL_CONFIG>]"
+gym env start \
+    --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+    --config nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml \
+    --config <MODEL_CONFIG>
 ```
 
 ## Troubleshooting

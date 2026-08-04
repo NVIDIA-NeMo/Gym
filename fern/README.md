@@ -2,7 +2,7 @@
 
 This directory holds the Fern MDX source for the NeMo Gym documentation site at **[docs.nvidia.com/nemo/gym](https://docs.nvidia.com/nemo/gym)**.
 
-All new pages and edits should land here. The Sphinx tree under `../docs/` is preserved for reference but is no longer the source of truth for the published site.
+All new pages and edits should land here. The retired Sphinx tree has been removed; legacy Sphinx URLs are handled by redirects in `docs.yml`.
 
 ## Quick links
 
@@ -10,7 +10,7 @@ All new pages and edits should land here. The Sphinx tree under `../docs/` is pr
 |---|---|
 | Published site | https://docs.nvidia.com/nemo/gym |
 | Fern dashboard | https://dashboard.buildwithfern.com (NVIDIA org) |
-| Skill for agents | [`../.claude/skills/nemo-gym-docs/SKILL.md`](../.claude/skills/nemo-gym-docs/SKILL.md) |
+| Skill for agents | [`../.agents/skills/nemo-gym-docs/SKILL.md`](../.agents/skills/nemo-gym-docs/SKILL.md) |
 | CI workflows | [`../.github/workflows/fern-docs-*.yml`](../.github/workflows/) |
 | Make targets | [`../Makefile`](../Makefile) |
 
@@ -19,7 +19,7 @@ All new pages and edits should land here. The Sphinx tree under `../docs/` is pr
 First time on this machine (run from the repo root):
 
 ```bash
-# 1. Install the Fern CLI globally (one-time)
+# 1. Install Node.js 22+, then install the Fern CLI globally (one-time)
 npm install -g fern-api
 # or use it ad-hoc via:  npx -y fern-api@latest <subcommand>
 
@@ -166,7 +166,7 @@ When the next GA cuts (for example, `v0.4.0`):
 4. Keep the `/latest` redirect rules in `docs.yml` pointed at the intended legacy target, currently `/main`
 5. `versions/latest/pages/` keeps moving forward as the bleeding-edge tree
 
-See [`../.claude/skills/nemo-gym-docs/SKILL.md`](../.claude/skills/nemo-gym-docs/SKILL.md) for the same procedure framed for an agent.
+See [`../.agents/skills/nemo-gym-docs/SKILL.md`](../.agents/skills/nemo-gym-docs/SKILL.md) for the same procedure framed for an agent.
 
 ## CI and publishing
 
@@ -175,7 +175,7 @@ See [`../.claude/skills/nemo-gym-docs/SKILL.md`](../.claude/skills/nemo-gym-docs
 | `fern-docs-ci.yml` | `push: pull-request/[0-9]+` (FW-CI mirror) | `fern check` on PRs |
 | `fern-docs-preview-build.yml` | `pull_request` | Untrusted half: collect `fern/` artifact (no secrets) |
 | `fern-docs-preview-comment.yml` | `workflow_run` after build | Trusted half: build preview with `DOCS_FERN_TOKEN`, post 🌿 comment |
-| `publish-fern-docs.yml` | push to `main` (`fern/**` or `docs/**`), `docs/v*` tag, or manual | Publish to docs.nvidia.com/nemo/gym |
+| `publish-fern-docs.yml` | push to `main` (`fern/**`), `docs/v*` tag, or manual | Publish to docs.nvidia.com/nemo/gym |
 
 Required org secret: **`DOCS_FERN_TOKEN`** (issued via `fern token` on a privileged dashboard account).
 
