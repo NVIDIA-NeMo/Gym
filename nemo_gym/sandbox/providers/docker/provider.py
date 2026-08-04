@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import math
 import os
@@ -32,6 +33,7 @@ from typing import Any
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -123,12 +125,17 @@ class DockerCreateConfig:
     pids_limit: int | None = None
     extra_run_args: list[str] = field(default_factory=list)
     apply_resource_limits: bool = True
+    publish_host: str = "127.0.0.1"
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
             raise ValueError("create.start_timeout_s must be > 0")
         if self.pids_limit is not None and self.pids_limit <= 0:
             raise ValueError("create.pids_limit must be > 0")
+        try:
+            ipaddress.ip_address(self.publish_host)
+        except ValueError as exc:
+            raise ValueError("create.publish_host must be an IPv4 or IPv6 address") from exc
 
 
 @dataclass(frozen=True)
@@ -174,6 +181,7 @@ class _DockerContainer:
     image: str
     shell: str = "sh"
     env: dict[str, str] = field(default_factory=dict)
+    published_ports: tuple[int, ...] = ()
 
 
 def _normalize_image(image: str) -> str:
@@ -193,6 +201,32 @@ def _resource_limit_flags(resources: SandboxResources) -> list[str]:
 
 def _resource_passthrough_flags(resources: SandboxResources) -> list[str]:
     return ["--gpus", str(resources.gpu)] if resources.gpu else []
+
+
+def _publish_arg(host: str, port: int) -> str:
+    formatted_host = f"[{host}]" if ":" in host else host
+    return f"{formatted_host}::{port}/tcp"
+
+
+def _parse_port_binding(binding: str) -> tuple[str, int]:
+    """Parse one ``docker port`` binding such as ``127.0.0.1:49153``."""
+
+    value = binding.strip()
+    if not value or ":" not in value:
+        raise ValueError(f"invalid Docker port binding: {binding!r}")
+    host, raw_port = value.rsplit(":", 1)
+    host = host.strip("[]")
+    if not host:
+        host = "0.0.0.0"
+    port = int(raw_port)
+    if port < 1 or port > 65535:
+        raise ValueError(f"invalid Docker host port: {port}")
+    return host, port
+
+
+def _http_endpoint(host: str, port: int) -> str:
+    formatted_host = f"[{host}]" if ":" in host else host
+    return f"http://{formatted_host}:{port}"
 
 
 def _to_sandbox_status(state: str | None) -> SandboxStatus:
@@ -294,6 +328,8 @@ class DockerProvider:
             argv += ["--security-opt", opt]
         if cfg.pids_limit is not None:
             argv += ["--pids-limit", str(cfg.pids_limit)]
+        for port in spec.ports:
+            argv += ["--publish", _publish_arg(cfg.publish_host, port)]
         for vol in volumes:
             argv += ["-v", vol]
         argv += list(cfg.extra_run_args) + per_sandbox_args
@@ -321,7 +357,12 @@ class DockerProvider:
         handle = SandboxHandle(
             sandbox_id=name,
             provider_name=self.name,
-            raw=_DockerContainer(name=name, image=image, env=dict(spec.env)),
+            raw=_DockerContainer(
+                name=name,
+                image=image,
+                env=dict(spec.env),
+                published_ports=tuple(spec.ports),
+            ),
         )
         try:
             await self._verify_created_handle(handle)  # readiness via default sh (printf works there)
@@ -467,6 +508,37 @@ class DockerProvider:
         if code != 0:
             return SandboxStatus.STOPPED if _is_missing_container(err) else SandboxStatus.UNKNOWN
         return _to_sandbox_status(out.strip())
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a dynamically-published TCP port through the Docker daemon."""
+
+        inst = handle.raw
+        if port not in inst.published_ports:
+            raise ValueError(
+                f"Sandbox port {port} was not declared in SandboxSpec.ports; "
+                f"declared ports: {list(inst.published_ports)!r}"
+            )
+        try:
+            code, out, err = await self._run(
+                [self._binary, "port", inst.name, f"{port}/tcp"],
+                timeout_s=self._exec_config.default_timeout_s,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(f"Timed out resolving Docker sandbox port {port}") from exc
+        if code != 0:
+            raise RuntimeError(f"docker port failed (code={code}) for {inst.name!r} port {port}: {err.strip()}")
+
+        bindings = [line.strip() for line in out.splitlines() if line.strip()]
+        if not bindings:
+            raise RuntimeError(f"Docker returned no host binding for sandbox port {port}")
+        preferred = next((binding for binding in bindings if binding.startswith("127.0.0.1:")), bindings[0])
+        try:
+            host, host_port = _parse_port_binding(preferred)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Docker returned an invalid host binding for sandbox port {port}") from exc
+        if host in {"0.0.0.0", "::"}:
+            host = self._create_config.publish_host
+        return SandboxEndpoint(endpoint=_http_endpoint(host, host_port))
 
     async def close(self, handle: SandboxHandle) -> None:
         """Force-remove the container (already-gone counts as success)."""
