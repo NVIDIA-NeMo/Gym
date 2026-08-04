@@ -244,9 +244,10 @@ sandbox = [
     "tenacity>=9.1.4",
 
     # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
-    # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
+    # Lower bound 0.1.15: first version exposing separate `resource_requests` on Sandbox.create.
+    # Updated: Thu Jul 30, 2026 with opensandbox>=0.1.15
     # License: Apache 2.0
-    "opensandbox>=0.1.9",
+    "opensandbox>=0.1.15",
 
     # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
     # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
