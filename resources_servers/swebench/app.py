@@ -143,6 +143,11 @@ class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
 class SwebenchResourcesServer(SimpleResourcesServer):
     config: SwebenchResourcesServerConfig
 
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+
+        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
@@ -170,8 +175,21 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         return eval_sandbox
 
-    async def seed_session(self, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
-        return await super().seed_session(body)
+    def _make_test_spec(self, body: SWEBenchVerifyRequest) -> TestSpec:
+        return make_test_spec(
+            # This accepts a SWEbenchInstance which is identically our body.
+            body.model_dump(),
+            namespace="swebench",  # Dockerhub namespace
+            instance_image_tag=LATEST,
+            env_image_tag=LATEST,
+        )
+
+    async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
+        test_spec = self._make_test_spec(body)
+        eval_sandbox = await self._create_sandbox(test_spec)
+        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+
+        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -195,13 +213,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         5. Restrict number of turns - same as interleaved thinking, we could add in Responses API model proxy
         """
 
-        test_spec = make_test_spec(
-            # This accepts a SWEbenchInstance which is identically our body.
-            body.model_dump(),
-            namespace="swebench",  # Dockerhub namespace
-            instance_image_tag=LATEST,
-            env_image_tag=LATEST,
-        )
+        test_spec = self._make_test_spec(body)
 
         start_time = time()
         eval_sandbox = await self._create_sandbox(test_spec)
