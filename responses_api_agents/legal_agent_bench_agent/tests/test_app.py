@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import sys
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,6 +162,12 @@ def test_dependency_runtime_cache_is_harness_and_recipe_specific(monkeypatch, tm
     monkeypatch.setattr(app, "resolve_agent_setup_script", lambda module: script)
 
     def fake_run(args, **kwargs):
+        if len(args) > 1 and args[1] == "run":
+            mounted_bundle = next(
+                Path(arg.split(":", 1)[0]) for arg in args if ":/nemo_gym_mount:ro" in arg
+            )
+            assert mounted_bundle != tmp_path
+            assert not (mounted_bundle / "env.yaml").exists()
         calls.append((args, kwargs))
         return SimpleNamespace(stdout="sha256:image:linux/arm64\n")
 
@@ -250,6 +257,15 @@ def test_agent_runtime_env_rejects_missing_harness_pin(module, field) -> None:
         app.agent_runtime_env(module, {})
 
 
+@pytest.mark.parametrize("version", ["latest", "next", "^1.2.3", "1.2", "1.2.3 || 2.0.0"])
+def test_agent_runtime_env_rejects_non_exact_harness_pin(version) -> None:
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="exact npm version"):
+        app.agent_runtime_env(
+            "responses_api_agents.codex_agent.app",
+            {"codex_version": version},
+        )
+
+
 def test_dependency_provisioning_uses_pin_and_invalidates_when_it_changes(monkeypatch, tmp_path) -> None:
     package_dir = tmp_path / "legal_agent_bench_agent"
     package_dir.mkdir()
@@ -308,6 +324,60 @@ def test_runtime_archive_is_published_once_across_processes(tmp_path) -> None:
     assert archive.is_file()
     with tarfile.open(archive, "r:gz") as contents:
         assert "agent_deps_mount/runtime.py" in contents.getnames()
+    assert app.ensure_runtime_archive(deps) == archive
+
+
+def test_archive_helpers_reject_missing_unsafe_and_nonregular_inputs(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        app._create_archive(tmp_path / "missing.tar.gz", [(tmp_path / "absent", "input")])
+
+    traversal = tarfile.TarInfo("../outside")
+    with pytest.raises(app.LegalAgentBenchArtifactError, match="Unsafe"):
+        app._validate_archive_member(traversal)
+
+    device = tarfile.TarInfo("device")
+    device.type = tarfile.CHRTYPE
+    with pytest.raises(app.LegalAgentBenchArtifactError, match="regular files"):
+        app._validate_archive_member(device)
+
+    with pytest.raises(app.LegalAgentBenchArtifactError, match="regular downloaded file"):
+        app._copy_downloaded_file(tmp_path, tmp_path / "copy")
+
+
+def test_provider_and_installer_validation_rejects_ambiguous_or_missing_configuration(monkeypatch, tmp_path) -> None:
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="exactly one provider"):
+        app._provider_name({"docker": {}, "ecs_fargate": {}})
+
+    monkeypatch.setattr(app, "PARENT_DIR", tmp_path)
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="requires dependency setup script"):
+        app.resolve_agent_setup_script("responses_api_agents.hermes_agent.app")
+
+
+def test_recipe_hash_ignores_transient_bytecode(tmp_path) -> None:
+    package = tmp_path / "package"
+    (package / "__pycache__").mkdir(parents=True)
+    (package / "app.py").write_text("VALUE = 1\n")
+    bytecode = package / "__pycache__" / "app.pyc"
+    bytecode.write_bytes(b"first")
+    first = app._recipe_hash([package])
+
+    bytecode.write_bytes(b"second")
+
+    assert app._recipe_hash([package]) == first
+
+
+def test_runtime_provisioning_requires_docker(monkeypatch) -> None:
+    monkeypatch.setattr(app, "resolve_agent_setup_script", lambda _module: Path("installer.sh"))
+    monkeypatch.setattr(app.shutil, "which", lambda _name: None)
+
+    with pytest.raises(FileNotFoundError, match="Docker CLI"):
+        app.ensure_agent_runtime(
+            "responses_api_agents.hermes_agent.app",
+            agent_kwargs={},
+            image="lab:image",
+            docker_network="host",
+            timeout_seconds=60,
+        )
 
 
 def test_config_defaults_are_docker_and_single_concurrency() -> None:
@@ -412,12 +482,13 @@ def test_compose_agent_input_uses_task_and_skills_without_rubric(monkeypatch, tm
 
     assert result.temperature == 0.5
     assert len(result.input) == 2
-    system = result.input[0]["content"]
+    serialized = result.model_dump(mode="json", warnings="error")
+    system = serialized["input"][0]["content"]
     assert "Write a memo." in system
     assert "Skill: docx" in system
     assert "/workspace/vdr" in system
     assert "criteria" not in system
-    assert result.input[1]["content"] == app.INITIAL_USER_PROMPT
+    assert serialized["input"][1]["content"] == app.INITIAL_USER_PROMPT
 
 
 def test_native_agent_input_uses_upstream_prompt_and_canonical_tools(monkeypatch, tmp_path) -> None:
@@ -432,7 +503,8 @@ def test_native_agent_input_uses_upstream_prompt_and_canonical_tools(monkeypatch
         native=True,
     )
 
-    system = result.input[0]["content"]
+    serialized = result.model_dump(mode="json", warnings="error")
+    system = serialized["input"][0]["content"]
     assert system.startswith(app.LAB_SYSTEM_PROMPT)
     assert "Write a memo." in system
     assert '"criteria"' not in system
@@ -733,6 +805,37 @@ def test_response_masks_harness_and_verifier_failures() -> None:
     assert response.mask_sample is True
 
 
+@pytest.mark.parametrize(
+    "reward_data",
+    [
+        {"reward": float("nan")},
+        {"criteria_pass_rate": 1.1},
+        {"judge_error_count": "not-a-number"},
+        {"verifier_error": -1},
+    ],
+)
+def test_response_masks_malformed_verifier_metrics_instead_of_raising(reward_data) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+    body = app.LegalAgentBenchRunRequest(
+        instance_id="legal_agent_bench::area__task",
+        responses_create_params=params,
+    )
+
+    response = runner._response(
+        body=body,
+        params=params,
+        response=_successful_response(),
+        reward_data=reward_data,
+        paths=None,
+    )
+
+    assert response.reward == 0.0
+    assert response.verifier_failed is True
+    assert response.mask_sample is True
+    assert response.failure_reason.startswith("Invalid verifier")
+
+
 @pytest.mark.asyncio
 async def test_run_classifies_invalid_task_without_sandbox_failure(monkeypatch) -> None:
     runner = app.LegalAgentBenchAgent.model_construct(config=_config())
@@ -978,7 +1081,16 @@ def test_verifier_sandbox_has_no_host_mounts(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(monkeypatch, tmp_path, capsys) -> None:
+@pytest.mark.parametrize(
+    ("reward_blob", "expected_reward", "expected_verifier_failed"),
+    [
+        (b'{"reward": 1.0, "criteria_pass_rate": 1.0}', 1.0, False),
+        (b'{"reward": "invalid", "criteria_pass_rate": 1.0}', 0.0, True),
+    ],
+)
+async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(
+    monkeypatch, tmp_path, capsys, reward_blob, expected_reward, expected_verifier_failed
+) -> None:
     _root, task = _task_tree(tmp_path)
     skills = _skills(tmp_path)
     deps = tmp_path / "deps"
@@ -1020,7 +1132,7 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(monkeypa
         assert sandbox is verifier_sandbox
         assert events == ["agent:start", "agent:exec", "agent:stop", "verifier:start"]
         assert runner._session_results_dir.is_dir()
-        return {"reward.json": b'{"reward": 1.0, "criteria_pass_rate": 1.0}'}, False, None
+        return {"reward.json": reward_blob}, False, None
 
     async def stage_agent(*args, **kwargs):
         return None
@@ -1052,12 +1164,14 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(monkeypa
     response = await runner.run(None, body)
 
     assert events == ["agent:start", "agent:exec", "agent:stop", "verifier:start", "verifier:stop"]
-    assert response.reward == 1.0
+    assert response.reward == expected_reward
+    assert response.verifier_failed is expected_verifier_failed
     assert response.sandbox_failed is False
     assert Path(response.artifact_dir).is_dir()
     terminal_output = capsys.readouterr().out
     assert "LAB rollout artifacts:" in terminal_output
-    assert "LAB rollout complete:" in terminal_output
+    expected_terminal_status = "failed" if expected_verifier_failed else "complete"
+    assert f"LAB rollout {expected_terminal_status}:" in terminal_output
 
 
 @pytest.mark.asyncio
@@ -1276,6 +1390,27 @@ def test_named_remote_provider_requires_immutable_image(tmp_path) -> None:
     assert app.asyncio.run(runner._ensure_image(tmp_path)) == runner.config.sandbox_image
 
 
+@pytest.mark.parametrize(
+    "image",
+    [
+        "registry.example/lab@sha256:",
+        "registry.example/lab@sha256:abc123",
+        "registry.example/lab@sha512:" + "a" * 128,
+        "registry.example/lab:latest@sha256:" + "g" * 64,
+    ],
+)
+def test_named_remote_provider_rejects_incomplete_or_invalid_digest(image, tmp_path) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(
+            sandbox_provider={"ecs_fargate": {"region": "us-east-1"}},
+            sandbox_image=image,
+        )
+    )
+
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="complete immutable"):
+        app.asyncio.run(runner._ensure_image(tmp_path))
+
+
 @pytest.mark.asyncio
 async def test_agent_staging_excludes_tests_and_judge_credentials(tmp_path) -> None:
     _root, task = _task_tree(tmp_path)
@@ -1319,3 +1454,222 @@ async def test_agent_staging_excludes_tests_and_judge_credentials(tmp_path) -> N
     assert any(name.startswith("workspace/skills") for name in staged)
     assert not any("task.toml" in name or "/tests" in name or "LAB_JUDGE" in name for name in staged)
     assert "chmod -R a+rX,a-w /agent_source_mount /agent_deps_mount" in sandbox.exec_commands[0]
+
+
+@pytest.mark.asyncio
+async def test_run_process_returns_output_and_terminates_on_timeout(tmp_path) -> None:
+    code, stdout, stderr = await app._run_process(
+        [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
+        cwd=tmp_path,
+        timeout=5,
+    )
+    assert (code, stdout.strip(), stderr.strip()) == (0, "out", "err")
+
+    with pytest.raises(TimeoutError, match="Command timed out"):
+        await app._run_process(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            cwd=tmp_path,
+            timeout=0.01,
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_is_provisioned_once_per_agent_instance(monkeypatch, tmp_path) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+    runner._runtime_lock = app.asyncio.Lock()
+    runner._deps_dir = None
+    calls = []
+
+    def provision(*args, **kwargs):
+        calls.append((args, kwargs))
+        return tmp_path / "deps"
+
+    monkeypatch.setattr(app, "ensure_agent_runtime", provision)
+
+    first, second = await app.asyncio.gather(runner._ensure_runtime("lab:image"), runner._ensure_runtime("lab:image"))
+
+    assert first == second == tmp_path / "deps"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_docker_image_resolution_handles_missing_cached_and_failed_builds(monkeypatch, tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+    runner._image_lock = app.asyncio.Lock()
+
+    monkeypatch.setattr(app.shutil, "which", lambda _name: None)
+    with pytest.raises(FileNotFoundError, match="Docker CLI"):
+        await runner._ensure_image(task)
+
+    monkeypatch.setattr(app.shutil, "which", lambda _name: "/usr/bin/docker")
+
+    async def cached(*args, **kwargs):
+        return 0, "", ""
+
+    monkeypatch.setattr(app, "_run_process", cached)
+    assert await runner._ensure_image(task) == (
+        f"{runner.config.image_repository}:" + app._environment_hash(task / "environment")[:16]
+    )
+
+    async def failed_build(args, **kwargs):
+        return (1, "", "missing") if args[1] == "image" else (1, "", "build exploded")
+
+    monkeypatch.setattr(app, "_run_process", failed_build)
+    with pytest.raises(RuntimeError, match="build exploded"):
+        await runner._ensure_image(task)
+
+
+def test_model_url_reports_server_lookup_failures_and_routes_docker(monkeypatch) -> None:
+    body = app.LegalAgentBenchRunRequest(
+        instance_id="legal_agent_bench::area__task",
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(),
+        server_client=SimpleNamespace(global_config_dict={}),
+    )
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="Unable to resolve policy model"):
+        runner._model_url(body)
+
+    runner.server_client = SimpleNamespace(
+        global_config_dict={"policy_model": {}},
+        _build_server_base_url=lambda _config: "http://127.0.0.1:8000",
+    )
+    monkeypatch.setattr(app, "get_first_server_config_dict", lambda *_args: {})
+    monkeypatch.setattr(app.LegalAgentBenchAgent, "rollout_id_from_run", lambda _self, _body: None)
+    assert runner._model_url(body).startswith("http://host.docker.internal:8000")
+
+
+@pytest.mark.asyncio
+async def test_remote_provider_requires_an_image_and_missing_agent_source_is_configuration_error(tmp_path) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(sandbox_provider={"ecs_fargate": {"region": "us-east-1"}})
+    )
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="require sandbox_image"):
+        await runner._ensure_image(tmp_path)
+
+    paths = runner._paths_for_root(tmp_path / "staging", create=True)
+    runner.config.agent_server_module = "responses_api_agents.nonexistent_agent.app"
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="source not found"):
+        runner._stage_agent_source(paths)
+
+
+def test_failure_detection_covers_empty_and_zero_activity_responses() -> None:
+    empty = app._empty_response("policy")
+    assert app.agent_response_failure(empty, "responses_api_agents.codex_agent.app") == (
+        "Agent produced an empty trajectory"
+    )
+
+    silent = _successful_response("")
+    silent.usage.total_tokens = 0
+    assert app.agent_response_failure(silent, "responses_api_agents.codex_agent.app") == (
+        "codex_agent produced no model activity"
+    )
+
+    assert app.host_tunnel_model_url("https://model.example/v1") == "https://model.example/v1"
+
+
+def test_task_prompt_and_skills_report_invalid_source_files(tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    skills = _skills(tmp_path)
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+    (task / "task.json").write_text("not json")
+    with pytest.raises(app.LegalAgentBenchTaskError, match="Invalid LAB task configuration"):
+        app.compose_agent_input(task, skills, params)
+
+    (task / "task.toml").write_text("not = [valid")
+    with pytest.raises(app.LegalAgentBenchTaskError, match="Invalid LAB task.toml"):
+        app._task_toml(task)
+
+    (skills / app.REQUIRED_SKILLS[0] / "SKILL.md").unlink()
+    with pytest.raises(app.LegalAgentBenchConfigurationError, match="Invalid LAB skills configuration"):
+        app._load_skill_prompt(skills)
+
+
+@pytest.mark.asyncio
+async def test_agent_staging_and_collection_surface_sandbox_failures(tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    skills = _skills(tmp_path)
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    (deps / "runtime.py").write_text("pass\n")
+    paths = app.LegalAgentBenchAgent._paths_for_root(tmp_path / "staged", create=True)
+    (paths["agent_source"] / "app.py").write_text("pass\n")
+
+    class Sandbox:
+        async def upload(self, source, destination):
+            return None
+
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=1, stdout="", stderr="sandbox command failed")
+
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+    with pytest.raises(RuntimeError, match="sandbox command failed"):
+        await runner._stage_agent_sandbox(Sandbox(), task_dir=task, skills_dir=skills, deps_dir=deps, paths=paths)
+
+    with pytest.raises(RuntimeError, match="sandbox command failed"):
+        await runner._collect_agent_sandbox(Sandbox(), tmp_path / "downloads")
+
+
+@pytest.mark.asyncio
+async def test_agent_collection_and_materialization_preserve_optional_files(tmp_path) -> None:
+    download_dir = tmp_path / "downloads"
+    download_dir.mkdir()
+    output_source = tmp_path / "output-source"
+    output_source.mkdir()
+    (output_source / "memo.txt").write_text("complete")
+
+    class Sandbox:
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+        async def download(self, source, destination):
+            destination = Path(destination)
+            if source.endswith("response.json"):
+                destination.write_text(_successful_response().model_dump_json())
+            elif source.endswith("runner_status.json"):
+                raise FileNotFoundError(source)
+            else:
+                app._create_archive(destination, [(output_source, ".")])
+
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+    downloads = await runner._collect_agent_sandbox(Sandbox(), download_dir)
+    paths = runner._paths_for_root(tmp_path / "result", create=True)
+    runner._materialize_agent_downloads(paths, downloads, stdout="stdout", stderr="stderr")
+
+    assert set(downloads) == {"response.json", "output.tar.gz"}
+    assert (paths["runtime"] / "response.json").is_file()
+    assert (paths["output"] / "memo.txt").read_text() == "complete"
+    assert (paths["agent"] / "stdout.log").read_text() == "stdout"
+
+    with pytest.raises(app.LegalAgentBenchArtifactError, match="output archive"):
+        runner._materialize_agent_downloads(paths, {}, stdout="", stderr="")
+
+
+def test_verifier_materialization_rejects_bad_reward_before_writing_files(tmp_path) -> None:
+    paths = {"verifier": tmp_path / "verifier"}
+    paths["verifier"].mkdir()
+
+    with pytest.raises(app.LegalAgentBenchArtifactError, match="expected an object"):
+        app.LegalAgentBenchAgent._materialize_verifier_downloads(
+            paths,
+            {"reward.json": b"[]", "report.html": b"untrusted"},
+        )
+    assert list(paths["verifier"].iterdir()) == []
+
+    with pytest.raises(app.LegalAgentBenchArtifactError, match="Invalid verifier reward.json"):
+        app.LegalAgentBenchAgent._materialize_verifier_downloads(paths, {"reward.json": b"not-json"})
+
+
+def test_runner_status_reports_invalid_json_and_nonobject(tmp_path) -> None:
+    paths = {"runtime": tmp_path}
+    assert app.LegalAgentBenchAgent._runner_status(paths) == {}
+
+    status = tmp_path / "runner_status.json"
+    status.write_text("not-json")
+    assert app.LegalAgentBenchAgent._runner_status(paths)["ok"] is False
+
+    status.write_text("[]")
+    assert app.LegalAgentBenchAgent._runner_status(paths)["error"].endswith("expected an object")
