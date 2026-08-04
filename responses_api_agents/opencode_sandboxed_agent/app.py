@@ -185,12 +185,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         assert query, body.input
 
+        opencode_debug_str = ""
+        if self.config.debug:
+            opencode_debug_str = "--print-logs --log-level DEBUG"
+
         export_fname = "export.json"
         command = f"""
         echo "Shell: $SHELL" \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run --print-logs --log-level DEBUG {quote(query)} \
+        && opencode run {opencode_debug_str} {quote(query)} \
         && session_id=$(opencode session list --format json | jq -r '.[0].id') \
         && opencode export $session_id > {export_fname}
         """
