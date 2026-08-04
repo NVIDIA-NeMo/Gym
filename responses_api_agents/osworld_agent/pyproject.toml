@@ -69,3 +69,6 @@ nemo-gym = { path = "../..", editable = true }
 # not load SurferH, so keep those optional pieces outside the runtime while
 # supplying opencv-python-headless explicitly above.
 exclude-dependencies = ["opencv-python", "opencv-contrib-python", "agp-client"]
+# osworld pins torch<2.6 but torchvision 0.20.x (for torch 2.5.x) has no cp313
+# wheels. Override to 2.12.0 which has cp313 wheels for both torch and torchvision.
+override-dependencies = ["torch>=2.12.0", "torchvision>=0.27.0"]
