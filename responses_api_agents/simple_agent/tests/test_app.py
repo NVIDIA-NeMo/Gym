@@ -15,9 +15,12 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, call
 
+import orjson
+import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -26,13 +29,39 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
     SimpleAgent,
     SimpleAgentConfig,
+    SimpleAgentRunRequest,
 )
+
+
+def _make_agent(
+    observability_enabled: bool, agent_type: type[SimpleAgent] = SimpleAgent
+) -> tuple[SimpleAgent, MagicMock]:
+    config = SimpleAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="simple",
+        model_server=ModelServerRef(type="responses_api_models", name="model"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+    )
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {"observability_enabled": observability_enabled}
+    return agent_type(config=config, server_client=server_client), server_client
+
+
+def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
+    response = MagicMock(status=status, cookies={}, ok=status < 400)
+    response.read = AsyncMock(return_value=json.dumps(payload or {}))
+    response.content.read = AsyncMock(return_value=content.encode())
+    return response
 
 
 class TestApp:
@@ -163,6 +192,178 @@ class TestApp:
             "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict
+
+    @pytest.mark.parametrize("resolved", [False, None])
+    async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
+        server, server_client = _make_agent(True)
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_payloads = iter(
+            (
+                response_base
+                | {
+                    "id": "resp-tool",
+                    "output": [
+                        {
+                            "id": "reasoning-1",
+                            "summary": [{"text": "look up the answer", "type": "summary_text"}],
+                            "status": "completed",
+                            "type": "reasoning",
+                        },
+                        {
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "lookup",
+                            "arguments": '{"q":"x"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        },
+                    ],
+                },
+                response_base
+                | {
+                    "id": "resp-final",
+                    "created_at": 2.0,
+                    "output": [
+                        {
+                            "id": "msg-1",
+                            "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
+                    ],
+                },
+            )
+        )
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(next(model_payloads))
+            if url_path == "/lookup":
+                return _mock_response(status=422, content="bad input")
+            assert url_path == "/verify"
+            result = kwargs["json"] | {"reward": 0.0}
+            if resolved is not None:
+                result["resolved"] = resolved
+            return _mock_response(result)
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "question"}]},
+                "instance_id": 0,
+                "_ng_task_index": 4,
+                "_ng_rollout_index": 1,
+            }
+        )
+        request = MagicMock()
+        request.cookies = {}
+        result = await server.run(request, body)
+
+        result_data = result.model_dump(mode="json")
+        result_data["ng_model_call_capture"] = {
+            "calls": [
+                {
+                    "model_call_id": f"model-call-{index}",
+                    "response_id": response_id,
+                    "request": {"input": f"model-visible-input-{index}"},
+                    "response": {"status": "completed", "output": f"model-visible-output-{index}"},
+                }
+                for index, response_id in enumerate(("resp-tool", "resp-final"), start=1)
+            ]
+        }
+        row = {TASK_INDEX_KEY_NAME: 4, ROLLOUT_INDEX_KEY_NAME: 1, "instance_id": 0}
+        _attach_trajectory_record(row, result_data)
+        serialized = orjson.loads(orjson.dumps(result_data))
+        trajectory = TrajectoryRecord.model_validate(serialized["ng_trajectory"])
+
+        assert trajectory.schema_version == "1.0"
+        assert [call.response_metadata.response_id for call in trajectory.model_calls] == ["resp-tool", "resp-final"]
+        assert all(call.response_metadata.response_status == "completed" for call in trajectory.model_calls)
+        assert trajectory.model_calls[0].request == {"input": "model-visible-input-1"}
+        assert trajectory.model_calls[0].response == {"status": "completed", "output": "model-visible-output-1"}
+        assert trajectory.invocations[0].conversation[-1].type == "message"
+        turns = trajectory.turns
+        assert [(turn.task_id, turn.rollout_id, turn.turn_no, turn.step_count) for turn in turns] == [
+            ("0", "4-1", 1, 1),
+            ("0", "4-1", 2, 1),
+        ]
+        assert all(turn.timestamp > 0 for turn in turns)
+        assert [turn.model_calls[0].response_id for turn in turns] == ["resp-tool", "resp-final"]
+        assert turns[0].model_dump(mode="json")["question"] == [
+            {"role": "user", "content": "question", "type": "message"}
+        ]
+        assert [item["type"] for item in turns[1].model_dump(mode="json")["question"]] == [
+            "message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+        ]
+        assert [item["type"] for item in turns[0].model_dump(mode="json")["answer"]] == ["function_call"]
+        assert turns[0].reasoning_content[0]["summary"][0]["text"] == "look up the answer"
+        assert turns[-1].resolved is resolved
+        assert ("resolution_unavailable" in {gap.code for gap in trajectory.gaps}) is (resolved is None)
+        [tool] = trajectory.tool_calls
+        assert (tool.output, tool.status, tool.error_type) == ("bad input", "failed", "http_422")
+        assert tool.started_at is not None and tool.completed_at is not None and tool.duration_ms is not None
+
+    @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, True)))
+    async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
+        agent_type = SimpleAgent
+        if override_responses:
+
+            async def overridden_responses(*args, **kwargs):
+                raise AssertionError("run must preserve self-dispatch for responses overrides")
+
+            agent_type = type("OverriddenSimpleAgent", (SimpleAgent,), {"responses": overridden_responses})
+        server, server_client = _make_agent(capture_enabled, agent_type)
+
+        model_response = {
+            "id": "response-1",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(model_response)
+            assert url_path == "/verify"
+            return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "question"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+        )
+        request = MagicMock(cookies={})
+
+        result = await server.run(request, body)
+
+        assert [call.kwargs["url_path"] for call in server_client.post.await_args_list] == [
+            "/seed_session",
+            "/ng-rollout/0-0/v1/responses" if capture_enabled else "/v1/responses",
+            "/verify",
+        ]
+        assert "ng_trajectory" not in result.model_dump(mode="json")
 
     async def test_responses_continues_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.

@@ -361,6 +361,24 @@ class NeMoGymResponseUsage(ResponseUsage):
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
 
+def accumulate_response_usage(
+    total: Optional[NeMoGymResponseUsage], additional: Optional[NeMoGymResponseUsage]
+) -> Optional[NeMoGymResponseUsage]:
+    """Accumulate top-level and detailed response token counts."""
+    if additional is None:
+        return total
+    if total is None:
+        return additional.model_copy(deep=True)
+
+    result = total.model_copy(deep=True)
+    result.input_tokens += additional.input_tokens
+    result.output_tokens += additional.output_tokens
+    result.total_tokens += additional.total_tokens
+    result.input_tokens_details.cached_tokens += additional.input_tokens_details.cached_tokens
+    result.output_tokens_details.reasoning_tokens += additional.output_tokens_details.reasoning_tokens
+    return result
+
+
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
