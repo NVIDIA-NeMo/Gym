@@ -242,8 +242,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
         await sandbox.download(str(results_remote_fpath), results_local_fpath)
 
-        await sandbox.stop()
-
         opencode_export = json.loads(results_local_fpath.read_text())
 
         return NeMoGymResponse(
@@ -298,6 +296,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(verify_response)
 
+        # TODO @bxyu-nvidia: Check if sandbox stop is idempotent
+        await sandbox.stop()
         self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
 
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(await get_response_json(verify_response))
