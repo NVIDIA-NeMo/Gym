@@ -21,10 +21,12 @@ from docker.models.containers import ExecResult
 from fastapi import Request
 from pydantic import BaseModel
 from swebench.harness.run_evaluation import make_test_spec
-from swebench.harness.test_spec.test_spec import LATEST
+from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -128,8 +130,48 @@ class DockerContainer(BaseModel):
         await self._inner_container.stop()
 
 
+# TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
+# They can possibly even omitted once this graduates to core infra.
+class SWEBenchSeedSessionRequest(BaseSeedSessionRequest):
+    sandbox_spec: Optional[Dict[str, Any]] = None
+
+
+class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
+    sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+
+
 class SwebenchResourcesServer(SimpleResourcesServer):
     config: SwebenchResourcesServerConfig
+
+    async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
+        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        global_config_dict = get_global_config_dict()
+        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+        provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        eval_sandbox_spec = SandboxSpec(
+            image=test_spec.instance_image_key,
+            ttl_s=self.config.sandbox_config.get("ttl_s", None),
+            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
+            workdir=None,  # Default to container's WORKDIR
+            env=dict(),
+            files=dict(),
+            metadata=provider_default_metadata
+            | self.config.sandbox_config.get("metadata", {})
+            | {
+                "nemo_gym_agent": self.config.name,
+                "instance_id": test_spec.instance_id[:63],
+            },
+            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            entrypoint=None,
+            provider_options=self.config.sandbox_config.get("provider_options", {}),
+        )
+        eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
+        await eval_sandbox.start(eval_sandbox_spec)
+
+        return eval_sandbox
+
+    async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        return await super().seed_session(body)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -161,30 +203,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             env_image_tag=LATEST,
         )
 
-        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
-        global_config_dict = get_global_config_dict()
-        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
-        provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
-        eval_sandbox_spec = SandboxSpec(
-            image=test_spec.instance_image_key,
-            ttl_s=self.config.sandbox_config.get("ttl_s", None),
-            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
-            workdir=None,  # Default to container's WORKDIR
-            env=dict(),
-            files=dict(),
-            metadata=provider_default_metadata
-            | self.config.sandbox_config.get("metadata", {})
-            | {
-                "nemo_gym_agent": self.config.name,
-                "instance_id": test_spec.instance_id[:63],
-            },
-            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
-            entrypoint=None,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
-        )
-        eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         start_time = time()
-        await eval_sandbox.start(eval_sandbox_spec)
+        eval_sandbox = await self._create_sandbox(test_spec)
         eval_sandbox_start_time_taken = time() - start_time
 
         if self.config.is_verifying_golden_patch:
