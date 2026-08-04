@@ -356,7 +356,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await sandbox.stop()
         self._sandbox_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
 
-        custom_response = {"opencode_results_fpath": self._sandbox_id_to_result_fpath[request.cookies["sandbox_id"]]}
+        custom_response = {"opencode_results_fpath": self._sandbox_id_to_result_fpath[cookies["sandbox_id"]]}
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(
             (await get_response_json(verify_response)) | custom_response
         )
