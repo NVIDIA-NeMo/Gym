@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge, reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -758,34 +759,38 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # ========================================================================
 
     def _parse_sec_url(self, url: str) -> Optional[Dict[str, str]]:
-        """Parse SEC URL to extract CIK and accession number."""
-        # URL format: https://www.sec.gov/Archives/edgar/data/{CIK}/{ACCESSION_NODASH}/{filename}
-        pattern = r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/"
+        """Parse SEC URL to extract CIK, accession number, and document filename."""
+        # URL format: https://www.sec.gov/Archives/edgar/data/{CIK}/{ACCESSION_NODASH}/{document}
+        pattern = r"sec\.gov/Archives/edgar/data/(\d+)/(\d+)/([^?#]*)"
         match = re.search(pattern, url)
         if match:
             cik = match.group(1).zfill(10)
             acc_nodash = match.group(2)
+            document = match.group(3).strip("/")
             # Convert to formatted accession: 0001234567-12-123456
             if len(acc_nodash) == 18:
                 accession = f"{acc_nodash[:10]}-{acc_nodash[10:12]}-{acc_nodash[12:]}"
             else:
                 accession = acc_nodash
-            return {"cik": cik, "accession_number": accession}
+            return {"cik": cik, "accession_number": accession, "document": document}
         return None
 
     def _url_to_filing_path(self, url: str) -> Optional[Path]:
         """Convert a SEC EDGAR URL to its local cache file path.
 
+        Keyed by (CIK, accession, document): distinct documents under one accession
+        (e.g. edgar_search sub-documents/exhibits) map to distinct cache files.
         Returns None if the URL doesn't match the expected SEC format.
         """
         parts = self._parse_sec_url(url)
         if not parts:
             return None
-        cik, accession_number = parts["cik"], parts["accession_number"]
-        cik_padded = str(cik).zfill(10)
-        acc_nodash = accession_number.replace("-", "")
-        # TODO: this path assumes the URL is for the primary filing document only, which is true because of how sec_filing_search is constructed
-        return self._filings_dir / cik_padded / f"{acc_nodash}.txt"
+        cik_padded = str(parts["cik"]).zfill(10)
+        acc_nodash = parts["accession_number"].replace("-", "")
+        # Flatten the document path into one safe filename; fall back to "index"
+        # when the URL stops at the accession directory (no document component).
+        safe_doc = re.sub(r"[^A-Za-z0-9._-]", "_", parts.get("document", "")) or "index"
+        return self._filings_dir / cik_padded / acc_nodash / f"{safe_doc}.txt"
 
     # ========================================================================
     # sec_filing_search Endpoint
@@ -1190,6 +1195,21 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     # Verify Endpoint
     # ========================================================================
 
+    async def _call_judge(self, judge_params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        # reraise_judge_errors also covers the wait_for timeout, which sits outside call_judge.
+        return await reraise_judge_errors(
+            asyncio.wait_for(
+                call_judge(
+                    self.server_client,
+                    server_name=self.config.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=judge_params,
+                    response_model=NeMoGymResponse,
+                ),
+                timeout=self.config.judge_call_timeout,
+            )
+        )
+
     async def verify(self, request: Request, body: FinanceAgentVerifyRequest) -> FinanceAgentVerifyResponse:
         """Verify the agent's answer.
 
@@ -1270,24 +1290,14 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         for attempt in range(max_judge_retries):
             try:
-                response = await asyncio.wait_for(
-                    self.server_client.post(
-                        server_name=self.config.judge_model_server.name,
-                        url_path="/v1/responses",
-                        json=judge_params,
-                    ),
-                    timeout=self.config.judge_call_timeout,
-                )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as e:
-                logger.warning(
-                    "Judge call attempt %d/%d failed: %s: %s", attempt + 1, max_judge_retries, type(e).__name__, e
-                )
+                judge_response = await self._call_judge(judge_params)
+            except JudgeError as judge_error:
+                logger.warning("Judge call attempt %d/%d failed: %s", attempt + 1, max_judge_retries, judge_error)
                 if attempt < max_judge_retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
                 logger.error("Judge model call failed after %d attempts", max_judge_retries)
-                return FinanceAgentVerifyResponse(**body.model_dump(), reward=0.0)
+                raise
 
             try:
                 last_output = judge_response.output[-1]

@@ -9,7 +9,7 @@ Financial information retrieval using SEC EDGAR filings with optional web search
 | Tool | Description |
 |------|-------------|
 | `sec_filing_search` | Search SEC EDGAR for filing metadata by stock ticker symbol |
-| `parse_html_page` | Fetch and parse any HTML page (SEC URLs use disk cache), store under a key |
+| `parse_html_page` | Fetch and parse an HTML page, optionally cache SEC content, and store it under a key |
 | `retrieve_information` | Query stored documents via LLM prompt with `{{key}}` placeholders |
 | `submit_final_result` | Submit the final answer (keeps model in tool-calling mode until ready) |
 | `web_search` | Internet search via Tavily API (optional — requires `tavily_api_key`) |
@@ -24,24 +24,24 @@ Create `env.yaml` in the Gym root:
 
 ```yaml
 policy_base_url: https://api.openai.com/v1
-policy_api_key: empty
+policy_api_key: ${oc.env:OPENAI_API_KEY}
 policy_model_name: gpt-5-mini
 
 search_judge_model_base_url: https://api.openai.com/v1
-search_judge_model_api_key: empty
+search_judge_model_api_key: ${oc.env:OPENAI_API_KEY}
 search_judge_model_name: gpt-5-mini
 
-# Optional: enable web_search tool (requires Tavily API key)
-tavily_api_key: tvly-XXX
+# Optional: set TAVILY_API_KEY to enable web_search.
+tavily_api_key: ${oc.env:TAVILY_API_KEY,null}
 ```
 
-The `tavily_api_key` is referenced as `${tavily_api_key}` in
-`configs/finance_sec_search.yaml`. If omitted, `web_search` is disabled.
+The config uses `${oc.select:tavily_api_key,null}`, so `web_search` is disabled
+when `tavily_api_key` is omitted or null.
 
 ## Cache Management
 
-The resource server caches SEC data locally to avoid redundant API calls and to
-enable offline operation after the first fetch.
+The resource server can cache SEC data locally to avoid redundant API calls and
+enable offline operation after the first fetch. Caching is opt-in.
 
 ### Enabling / disabling the cache (`use_cache`)
 
@@ -79,9 +79,8 @@ shared, persistent absolute path on a mounted filesystem (e.g.
 ### Pre-warming the cache (prefetch)
 
 The `prefetch_sec_metadata.py` script populates the metadata cache for a set of
-companies **before** starting rollouts. This avoids SEC.gov API calls during
-GPU-intensive rollout collection and eliminates race conditions when multiple
-seeds share the same cache.
+companies **before** starting rollouts. Set `use_cache: true` and configure the
+same `cache_dir` for the resource server so rollouts read the prefetched files.
 
 **Requirements**: Python 3.10+, `aiohttp`, `pyyaml` (both are Gym
 dependencies). Internet access to SEC.gov is required. No GPU, no model server,
@@ -109,9 +108,9 @@ The script is **idempotent**: it skips companies whose cache file already exists
 
 ### Without prefetch
 
-If the cache is empty, the resource server lazily fetches and caches metadata
-from SEC.gov on first access. This works but is slower on the first run and
-requires SEC.gov connectivity during rollout.
+With `use_cache: true`, an empty cache is populated lazily on first access. With
+the default `use_cache: false`, every request fetches fresh data and SEC.gov
+connectivity is required throughout the rollout.
 
 ### Shared cache
 
@@ -181,18 +180,11 @@ Output is written to `benchmarks/finance_sec_search/data/`:
 > is the canonical source for custom questions, while `prepare.py` is specific to
 > downloading and converting the Vals AI dataset.
 
-#### SecQue benchmark
+#### SECQUE benchmark
 
-To prepare the [SecQue](https://huggingface.co/datasets/nogabenyoash/SecQue) dataset (filters to questions mentioning known companies and converts to Gym format):
-
-```bash
-cd resources_servers/finance_sec_search
-python scripts/prepare_secque_questions.py
-```
-
-This writes `data/secque_questions.jsonl`. Use it as the `input_jsonl_fpath` in step 4 below.
-
-**Note that this dataset is not used for training anywhere and is only used for eval/benchmark purposes.**
+The open-book [SECQUE benchmark](../../benchmarks/secque/README.md) is a
+separate benchmark recipe that reuses the generic `equivalence_llm_judge`
+resource server. It does not use the tool-calling server documented here.
 
 ### 2. Start the vLLM server
 
@@ -243,5 +235,5 @@ gym env test --resources-server finance_sec_search
 
 ## Verification
 
-Uses LLM-as-judge with a financial grading rubric (0/1/2 scale). Only fully correct answers ([[2]]) receive reward 1.0. The judge prompt and rubric are defined in /prompt_templates.
+Uses LLM-as-judge with a financial grading rubric (0/1/2 scale). `reward_mode: binary` gives reward 1.0 only to fully correct answers (`[[2]]`); `reward_mode: scaled` also gives partially correct answers (`[[1]]`) 0.5. The judge additionally requires grounding: an answer that restates general financial knowledge without filing-specific figures, dates, or disclosures scores `[[0]]` even when it is conceptually correct. The judge prompt and rubric are defined in /prompt_templates.
 

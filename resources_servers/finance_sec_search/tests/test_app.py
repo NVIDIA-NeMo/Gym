@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -749,12 +750,31 @@ class TestDownloadAndParseFiling:
         assert "iXBRL Header" in result
 
     def test_url_to_filing_path(self, server) -> None:
-        """Test URL-to-filepath conversion for SEC URLs."""
+        """Test URL-to-filepath conversion for SEC URLs (keyed by document)."""
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/aapl-20250104.htm"
         path = server._url_to_filing_path(url)
         assert path is not None
-        assert path.name == "000032019325000008.txt"
+        # Path is filings/{CIK}/{accession}/{document}.txt
+        assert path.name == "aapl-20250104.htm.txt"
+        assert path.parent.name == "000032019325000008"
         assert "0000320193" in str(path.parent)
+
+    def test_url_to_filing_path_documents_do_not_collide(self, server) -> None:
+        """Two documents under the same accession map to distinct cache files."""
+        base = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008"
+        p_primary = server._url_to_filing_path(f"{base}/aapl-20241228.htm")
+        p_exhibit = server._url_to_filing_path(f"{base}/exhibit99-1.htm")
+        assert p_primary is not None and p_exhibit is not None
+        assert p_primary != p_exhibit
+        # ...but they still share the same accession directory.
+        assert p_primary.parent == p_exhibit.parent
+
+    def test_url_to_filing_path_no_document(self, server) -> None:
+        """A URL ending at the accession directory falls back to an index filename."""
+        url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000008/"
+        path = server._url_to_filing_path(url)
+        assert path is not None
+        assert path.name == "index.txt"
 
     def test_url_to_filing_path_invalid(self, server) -> None:
         """Invalid URLs return None."""
@@ -1130,6 +1150,21 @@ class TestVerify:
         assert res.judge_rating is None
 
     @pytest.mark.asyncio
+    async def test_verify_judge_call_failure_raises_after_retries(self, tmp_path) -> None:
+        """Judge HTTP call failing on every retry → JudgeError, so judge_failsafe
+        routes it to the failures sidecar instead of scoring 0.0."""
+        server = self._create_server_with_judge(tmp_path)
+        server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
+
+        response = self._make_response(
+            self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
+        )
+        req = self._make_verify_request(response, "$391.0 billion")
+        with patch("resources_servers.finance_sec_search.app.asyncio.sleep", AsyncMock()):
+            with pytest.raises(JudgeError, match="judge unavailable"):
+                await server.verify(self._mock_request(), req)
+
+    @pytest.mark.asyncio
     async def test_verify_extracts_answer_from_submit_tool(self, tmp_path) -> None:
         """Answer is extracted from submit_final_result, not from text messages."""
         server = self._create_server_with_judge(tmp_path)
@@ -1182,19 +1217,6 @@ class TestVerify:
 
         response = self._make_response(
             self._tool_call("submit_final_result", json.dumps({"final_result": "$100 million"}))
-        )
-        req = self._make_verify_request(response, "$391.0 billion")
-        res = await server.verify(self._mock_request(), req)
-        assert res.reward == 0.0
-
-    @pytest.mark.asyncio
-    async def test_verify_judge_call_failure(self, tmp_path) -> None:
-        """Judge HTTP call failure → reward 0.0, no crash."""
-        server = self._create_server_with_judge(tmp_path)
-        server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
-
-        response = self._make_response(
-            self._tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"}))
         )
         req = self._make_verify_request(response, "$391.0 billion")
         res = await server.verify(self._mock_request(), req)
