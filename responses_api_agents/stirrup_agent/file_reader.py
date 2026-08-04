@@ -42,6 +42,23 @@ from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS
 
 MAX_TOTAL_CHARS = 20_000
 
+# These files are Stirrup execution state, not user-facing deliverables. They
+# intentionally remain in the persisted repeat directory for resume, debugging,
+# and trajectory/SFT export, but must never be included in a judge request.
+PRIVATE_STIRRUP_ARTIFACT_NAMES = frozenset(
+    {
+        "finish_params.json",
+        "history.json",
+        "history.pkl",
+        "metadata.json",
+    }
+)
+
+
+def _judge_visible_file(fpath: Path) -> bool:
+    """Whether *fpath* is a top-level final deliverable visible to the judge."""
+    return fpath.is_file() and fpath.name not in PRIVATE_STIRRUP_ARTIFACT_NAMES
+
 
 def read_deliverable_files(output_dir: str) -> str:
     """Read text from all deliverable files in *output_dir*.
@@ -60,7 +77,7 @@ def read_deliverable_files(output_dir: str) -> str:
     if not output_path.is_dir():
         return ""
 
-    files = sorted(output_path.iterdir())
+    files = sorted(fpath for fpath in output_path.iterdir() if _judge_visible_file(fpath))
     if not files:
         return ""
 
@@ -68,9 +85,6 @@ def read_deliverable_files(output_dir: str) -> str:
     total_len = 0
 
     for fpath in files:
-        if not fpath.is_file():
-            continue
-
         ext = fpath.suffix.lower()
         try:
             text = _extract_text(fpath, ext)
@@ -358,10 +372,7 @@ def convert_deliverables_to_content_blocks(
     blocks: list[dict[str, Any]] = []
     converted_pdfs: list[Path] = []  # track for cleanup
 
-    for fpath in sorted(output_path.iterdir()):
-        if not fpath.is_file():
-            continue
-
+    for fpath in sorted(fpath for fpath in output_path.iterdir() if _judge_visible_file(fpath)):
         ext = fpath.suffix.lower()
 
         try:
