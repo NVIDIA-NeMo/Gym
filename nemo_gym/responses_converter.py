@@ -486,11 +486,18 @@ class ResponsesConverter(BaseModel):
 
         usage = None
         if chat_completion.usage:
+            cc_usage = chat_completion.usage
+            cached_tokens = (
+                (cc_usage.prompt_tokens_details.cached_tokens or 0) if cc_usage.prompt_tokens_details else 0
+            )
+            reasoning_tokens = (
+                (cc_usage.completion_tokens_details.reasoning_tokens or 0) if cc_usage.completion_tokens_details else 0
+            )
             usage = NeMoGymResponseUsage(
                 input_tokens=chat_completion.usage.prompt_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
                 output_tokens=chat_completion.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
                 total_tokens=chat_completion.usage.prompt_tokens + chat_completion.usage.completion_tokens,
             )
 
