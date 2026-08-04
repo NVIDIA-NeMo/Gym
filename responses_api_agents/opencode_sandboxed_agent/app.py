@@ -46,7 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
 
@@ -91,7 +91,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
     async def _start_sandbox(self, sandbox_id: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
-        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+        resolved_sandbox_provider = create_provider(
+            resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+        )
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
         if sandbox_id:
