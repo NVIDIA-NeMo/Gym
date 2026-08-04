@@ -318,6 +318,13 @@ required-version = ">=0.9.30"
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
 ]
+# override-dependencies overrides transitive dep version pins that conflict with
+# Python 3.13 wheel availability. Server venvs inherit this via the editable
+# nemo-gym install (uv >=0.11.24).
+override-dependencies = [
+    # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
+    "spacy>=3.8.13",
+]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Don't add a package any
 # server needs. Context: https://github.com/NVIDIA-NeMo/Gym/pull/1835

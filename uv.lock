@@ -10,6 +10,7 @@ resolution-markers = [
 
 [manifest]
 constraints = [{ name = "grpcio", specifier = ">=1.81.0rc1" }]
+overrides = [{ name = "spacy", specifier = ">=3.8.13" }]
 excludes = [
     "alembic",
     "blinker",
