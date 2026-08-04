@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import sys
 import time
 import uuid
@@ -65,7 +66,12 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_first_server_config_dict, get_response_json, raise_for_status, request
-from nemo_gym.switchyard_trace import SwitchyardTrace, reconstruct_switchyard_rollout
+from nemo_gym.switchyard_trace import (
+    SWITCHYARD_SCHEMA_VERSION,
+    SwitchyardTrace,
+    SwitchyardTraceError,
+    reconstruct_switchyard_rollout,
+)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -106,6 +112,13 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description="Which agent harness drives the SWE-bench rollout. 'openhands' uses the nv-OpenHands "
         "fork at swe_openhands_setup/. 'opencode' uses the opencode fork at swe_opencode_setup/ via "
         "its bench/ entry point.",
+    )
+    opencode_source: Literal["opencode", "nv-opencode"] = Field(
+        default="opencode",
+        description="For agent_framework='opencode', which opencode to run. 'opencode' (default) runs "
+        "upstream opencode headless (`opencode run`) with an opencode.json provider pointed at Switchyard "
+        "— no fork, so opencode's native X-Session-Id is captured. 'nv-opencode' uses the pinned fork's "
+        "bench entry point.",
     )
     agent_config: Optional[str] = Field(default=None, description="Path to agent configuration file")
     agent_tools_file: Optional[str] = Field(
@@ -180,15 +193,50 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         "If False (default), selection is deterministic per instance_id.",
     )
 
-    switchyard_base_url: Optional[str] = Field(
+    switchyard_spawn_routing_profile: Optional[str] = Field(
         default=None,
         description=(
-            "Base URL of a token-capture-enabled Switchyard proxy, exactly http://<host>:<port>. When set "
-            "for an OpenHands run, agent policy calls are routed to Switchyard (via the agent container's "
-            "NEMO_GYM_CONFIG_DICT and oh_config.toml — no OpenHands change needed) and the captured "
-            "per-call token records are retrieved after the agent finishes to build the training rollout. "
-            "Must be reachable from both this process and the agent container. When absent, behavior is "
-            "unchanged."
+            "Path to a Switchyard routing-profiles YAML; the shipped swe_agents/switchyard_profile.yaml "
+            "works for any deployment (endpoint, model, and parsers resolve from env vars this server "
+            "exports at spawn). When set, one dedicated token-capture Switchyard "
+            "instance is spawned per agent run on a free port (stateful token injection requires every "
+            "call of a session to reach the same process) and torn down after trace retrieval in run(). "
+            "Records land under the run's persistent_dir, and retrieval reads them from there, so a "
+            "proxy that exits mid-run does not strand its captured tokens. The `switchyard` CLI must be "
+            "on PATH. Instances are reaped in run(); calling responses() directly leaks the instance."
+        ),
+    )
+    switchyard_spawn_host: Optional[str] = Field(
+        default=None,
+        description=(
+            "Host advertised to agent containers for spawned Switchyard instances (the instance binds "
+            "0.0.0.0). Defaults to this node's hostname, which peer nodes resolve on Slurm clusters. "
+            "Set explicitly when containers must use a specific routable IP."
+        ),
+    )
+    switchyard_tool_parser: Optional[str] = Field(
+        default=None,
+        description=(
+            "vLLM tool-call parser for the served model family (e.g. 'qwen3_coder'), exported as "
+            "${SWITCHYARD_TOOL_PARSER} to the spawned instance. Required by profiles that reference "
+            "that variable — the shipped switchyard_profile.yaml does."
+        ),
+    )
+    switchyard_reasoning_parser: Optional[str] = Field(
+        default=None,
+        description=(
+            "vLLM reasoning parser for the served model family (e.g. 'nano_v3'), exported as "
+            "${SWITCHYARD_REASONING_PARSER} to the spawned instance. Required by profiles that "
+            "reference that variable — the shipped switchyard_profile.yaml does."
+        ),
+    )
+    switchyard_parser_pythonpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Colon-separated paths prepended to the spawned instance's PYTHONPATH so Switchyard's "
+            "parsers can import the serving vLLM. Deployment-specific (e.g. the training container's "
+            "/opt/nemo-rl/3rdparty/vllm:/opt/nemo_rl_venv/lib/python3.12/site-packages); unset leaves "
+            "PYTHONPATH untouched."
         ),
     )
 
@@ -266,13 +314,26 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_command: Optional[ExecuteContainerCommandArgs] = None
     agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
+    # Served model context length, fetched from Switchyard's /v1/models before the
+    # agent command is built; None leaves the opencode provider entry limit-less.
+    opencode_context_len: Optional[int] = None
 
     # GRPO related fields
     mask_sample: bool = False
 
     # Switchyard capture session for this run (uuid4 hex). Set only for OpenHands
-    # agent runs with switchyard_base_url configured; None leaves behavior unchanged.
+    # agent runs in spawn mode; None leaves behavior unchanged.
     switchyard_session_id: Optional[str] = None
+
+    # URL of the Switchyard spawned for this run, exactly http://<host>:<port>.
+    # Internal plumbing, not user-settable: _spawn_switchyard_local fills it in on
+    # the agent's node, and the harness command builder reads it from here.
+    switchyard_spawned_base_url: Optional[str] = None
+
+    # Generation endpoint this run's Switchyard proxies to. Chosen round-robin by
+    # the server (which holds the counter) and carried here because the instance
+    # is spawned on the agent's own node, where that counter is not available.
+    switchyard_backend_url: Optional[str] = None
 
     @property
     def instance_id(self) -> str:
@@ -1518,6 +1579,22 @@ fi
         report_path.write_text(json.dumps(report, indent=2))
 
 
+def _validate_switchyard_config(config: SWEBenchWrapperConfig) -> None:
+    """Fail fast on a malformed Switchyard routing profile."""
+    if config.switchyard_spawn_routing_profile:
+        if not Path(config.switchyard_spawn_routing_profile).is_file():
+            raise ValueError(
+                f"switchyard_spawn_routing_profile does not exist: {config.switchyard_spawn_routing_profile!r}"
+            )
+
+
+def _find_free_port() -> int:
+    """An OS-assigned free TCP port (small bind-to-use race, acceptable per run)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return int(sock.getsockname()[1])
+
+
 def _parse_switchyard_base_url(switchyard_base_url: str) -> Tuple[str, int]:
     """Host/port of the Switchyard proxy.
 
@@ -1651,7 +1728,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         # forwarding, and point the model-server entry of the agent container's
         # NEMO_GYM_CONFIG_DICT at Switchyard. Agent container only: the eval
         # container makes no policy calls and keeps the original config dict.
-        if self.config.switchyard_base_url and self.config.switchyard_session_id:
+        if self.config.switchyard_spawned_base_url and self.config.switchyard_session_id:
             config["llm"]["model"]["model"] = self.config.model_server_name
             config["llm"]["model"]["completion_kwargs"] = {
                 "proxy_x_session_id": self.config.switchyard_session_id,
@@ -1659,7 +1736,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             ng_config_dict_str = _switchyard_ng_config_dict_str(
                 self.config.ng_global_config_dict_str,
                 self.config.model_server_name,
-                self.config.switchyard_base_url,
+                self.config.switchyard_spawned_base_url,
             )
         else:
             ng_config_dict_str = self.config.ng_global_config_dict_str
@@ -1975,10 +2052,158 @@ def _render_opencode_user_message(
         )
 
 
+# Container path for the system-prompt instruction file we hand opencode via the
+# config's ``instructions`` list. Kept outside the workspace so it never shows up
+# in the ``git diff HEAD`` that becomes the task patch.
+_OPENCODE_INSTRUCTIONS_PATH = "/tmp/switchyard_opencode_instructions.md"
+
+# Steer the model away from opencode's `task` tool crash: upstream opencode
+# hard-fails when the model supplies a `task_id` that does not begin with `ses`
+# (a synchronous SessionID.make throw defeats its graceful fallback — see
+# sst/opencode task tool). Smaller models routinely invent one; omitting it lets
+# opencode spawn a fresh subagent session, which Switchyard captures cleanly.
+_OPENCODE_TASK_ID_GUIDANCE = (
+    "When you use the `task` tool to start a new subagent, do not set the "
+    "`task_id` parameter — omit it so a fresh subagent session is created. "
+    "Only pass `task_id` to resume a subagent session you started earlier in "
+    "this conversation; a valid session id begins with `ses`. Never invent or "
+    "guess a `task_id` value."
+)
+
+
+def _opencode_switchyard_config(
+    switchyard_base_url: str, model: str, context_len: Optional[int] = None
+) -> Dict[str, Any]:
+    """opencode.json for upstream opencode routed through Switchyard (no fork).
+
+    A custom ``@ai-sdk/openai-compatible`` provider — whose id does NOT start with
+    ``opencode`` — points at Switchyard. That id prefix is load-bearing: upstream
+    opencode only emits its native ``X-Session-Id`` / ``x-parent-session-id``
+    correlation headers for non-``opencode`` providers, and those headers are how
+    Switchyard captures the session tree. Set as the default model so opencode does
+    not fall back to its hosted free models. ``instructions`` appends the task-tool
+    guidance to opencode's system prompt (see ``_OPENCODE_TASK_ID_GUIDANCE``).
+
+    ``context_len`` (the served model's max_model_len) populates the model's
+    ``limit`` metadata: opencode budgets its ``max_tokens`` from ``limit.output``
+    (falling back to a flat 32000 without it) and enables compaction only when
+    ``limit.context`` is set. Output is reserved as ``min(32000, context // 4)``
+    so compaction (triggered at ``context - output``) keeps most of the window.
+    """
+    model_entry: Dict[str, Any] = {"name": model}
+    if context_len is not None:
+        model_entry["limit"] = {
+            "context": context_len,
+            "output": min(32000, context_len // 4),
+        }
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "switchyard": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Switchyard",
+                "options": {"baseURL": f"{switchyard_base_url.rstrip('/')}/v1", "apiKey": "dummy"},
+                "models": {model: model_entry},
+            }
+        },
+        "model": f"switchyard/{model}",
+        "instructions": [_OPENCODE_INSTRUCTIONS_PATH],
+        "autoupdate": False,
+    }
+
+
+def _filter_title_gen_records(envelope: dict) -> dict:
+    """Strip the title-generation record opencode fires before the agent loop.
+
+    opencode calls the model once with system='You are a title generator' to
+    name each session. Removing it keeps reconstruction to agent turns only.
+    """
+    filtered = [
+        r
+        for r in envelope.get("completions", [])
+        if not any(
+            msg.get("role") == "system" and "title generator" in str(msg.get("content", "")).lower()
+            for msg in r.get("messages", [])
+        )
+    ]
+    return {**envelope, "completions": filtered}
+
+
+
+def _retrieve_switchyard_trace_from_records(
+    records_by_session: Dict[str, List[Dict[str, Any]]],
+    session_id: str,
+    converter: "VLLMConverter",
+    filter_title_gen: bool = False,
+    allow_partial: bool = True,
+) -> SwitchyardTrace:
+    """Rebuild one session's rollout from its captured records.
+
+    Module-level and converter-explicit so the Ray task — which owns the capture
+    directory but has no server instance — can run retrieval on the rollout's own
+    node instead of centralizing it on the gym server.
+    """
+    envelope = {
+        "schema_version": SWITCHYARD_SCHEMA_VERSION,
+        "session_id": session_id,
+        "completions": records_by_session.get(session_id, []),
+    }
+    if filter_title_gen:
+        envelope = _filter_title_gen_records(envelope)
+    return reconstruct_switchyard_rollout(envelope, session_id, converter, allow_partial=allow_partial)
+
+
+def _reconstruct_switchyard_sessions_from_records(
+    records_by_session: Dict[str, List[Dict[str, Any]]],
+    sessions: List[Dict[str, Any]],
+    converter: "VLLMConverter",
+    filter_title_gen: bool = False,
+    allow_partial: bool = True,
+) -> Tuple[SwitchyardTrace, str, List[Dict[str, Any]], Optional[str]]:
+    """Reconstruct every session in an OpenCode session tree. See the wrapper
+    method of the same name for full semantics (root selection, degradation on
+    ambiguous trees); this is the converter-explicit form the Ray task uses.
+    """
+    roots = [se for se in sessions if not se.get("parent_session_id")]
+    if not roots:
+        raise SwitchyardTraceError("no root session captured")
+
+    degraded: Optional[str] = None
+    if len(roots) > 1:
+        roots.sort(key=lambda se: len(records_by_session.get(str(se["session_id"]), [])), reverse=True)
+        degraded = f"ambiguous session tree: {len(roots)} root sessions (likely context compaction)"
+
+    root_id = str(roots[0]["session_id"])
+    root_trace = _retrieve_switchyard_trace_from_records(
+        records_by_session, root_id, converter, filter_title_gen=filter_title_gen, allow_partial=allow_partial
+    )
+
+    subagents: List[Dict[str, Any]] = []
+    for entry in sessions:
+        session_id = str(entry["session_id"])
+        if not entry.get("parent_session_id") or session_id == root_id:
+            continue
+        trace = _retrieve_switchyard_trace_from_records(
+            records_by_session, session_id, converter, filter_title_gen=filter_title_gen
+        )
+        subagents.append(
+            {
+                "session_id": session_id,
+                "parent_session_id": entry["parent_session_id"],
+                "input": [item.model_dump() for item in trace.input_items],
+                "output": [item.model_dump() for item in trace.output_items],
+                "model": trace.model,
+                "record_uuids": trace.record_uuids,
+            }
+        )
+    return root_trace, root_id, subagents, degraded
+
 class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
 
     def setup(self) -> Path:
+        if self.config.opencode_source == "opencode":
+            return self._setup_upstream()
         setup_dir = self.parent_dir / "swe_opencode_setup"
 
         with self._setup_directory_lock(setup_dir, "opencode"):
@@ -2009,7 +2234,28 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             self._run_setup_command(command)
             return setup_dir
 
+    def _setup_upstream(self) -> Path:
+        """Install upstream opencode-ai via bun; no fork clone."""
+        setup_dir = self.parent_dir / "swe_upstream_opencode_setup"
+        with file_lock(setup_dir, "upstream opencode setup"):
+            bun_dir = setup_dir / "bun"
+            install_dir = setup_dir / "opencode"
+            opencode_bin = install_dir / "node_modules" / ".bin" / "opencode"
+            if opencode_bin.exists() and (bun_dir / "bin" / "bun").exists():
+                print(f"upstream opencode already installed at {setup_dir}", flush=True)
+                return setup_dir
+            print(f"Installing upstream opencode-ai at {setup_dir}...", flush=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
+            install_dir.mkdir(parents=True, exist_ok=True)
+            # The env assignment must ride the pipeline stage that runs the
+            # installer: `VAR=x cmd1 | cmd2` binds VAR to cmd1 only.
+            self._run_setup_command(f"curl -fsSL https://bun.sh/install | BUN_INSTALL={bun_dir} bash")
+            self._run_setup_command(f"cd {install_dir} && PATH={bun_dir}/bin:$PATH bun add opencode-ai")
+            return setup_dir
+
     def get_run_command(self) -> ExecuteContainerCommandArgs:
+        if self.config.opencode_source == "opencode":
+            return self._get_upstream_run_command()
         data_point = self.config.problem_info
         agent_run_id = self.config.agent_run_id
 
@@ -2195,6 +2441,157 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             timeout=self.config.swebench_agent_timeout + 60,
         )
 
+    def _get_upstream_run_command(self) -> ExecuteContainerCommandArgs:
+        """Run command for opencode_source='opencode': upstream stock opencode via opencode.json."""
+        data_point = self.config.problem_info
+        agent_run_id = self.config.agent_run_id
+        instance_id = data_point["instance_id"]
+        eval_dir_in_opencode = self.config.eval_dir_in_openhands
+
+        assert self.config.opencode_setup_dir is not None, (
+            "opencode setup directory is not set; opencode_source='opencode' requires _setup_upstream() to have run."
+        )
+        assert self.config.switchyard_spawned_base_url is not None, (
+            "opencode_source='opencode' requires a spawned Switchyard — it captures the session."
+        )
+
+        try:
+            model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
+            default_model_name = (
+                getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not resolve model server '{self.config.model_server_name}' for upstream opencode: {e}"
+            )
+
+        effective_model = self.config.body.model or default_model_name
+        workspace_path = _resolve_opencode_workspace_path(data_point)
+        user_message = _render_opencode_user_message(
+            data_point,
+            workspace_path,
+            template_override_path=self.config.resolved_user_prompt_template,
+        )
+        user_message_host_path = self.config.persistent_dir / f"user_message_{agent_run_id}.txt"
+        user_message_host_path.write_text(user_message)
+
+        opencode_cfg_json = json.dumps(
+            _opencode_switchyard_config(
+                self.config.switchyard_spawned_base_url, effective_model, self.config.opencode_context_len
+            )
+        )
+
+        # Output goes to the same eval-dir layout as the fork so _openhands_dir_copy_from_host works unchanged.
+        output_dir_in_container = f"/opencode_setup/opencode/{eval_dir_in_opencode}/{instance_id}/bench_run"
+        output_jsonl_in_container = f"{output_dir_in_container}/output.jsonl"
+
+        dataset_name = str(data_point.get("dataset_name", ""))
+        if "SWE-Gym" in dataset_name:
+            conda_activate_cmd = (
+                "{ deactivate >/dev/null 2>&1 || true; unset VIRTUAL_ENV; "
+                "if [ -d /opt/miniconda3 ]; then "
+                ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed || true; "
+                "fi; } && "
+            )
+        elif "R2E-Gym" in dataset_name:
+            conda_activate_cmd = (
+                "{ deactivate >/dev/null 2>&1 || true; unset VIRTUAL_ENV; "
+                "if [ -f /testbed/.venv/bin/activate ]; then "
+                ". /testbed/.venv/bin/activate || true; "
+                "fi; } && "
+            )
+        elif dataset_name in ("nv-internal-1", "swe-bench-ext") or "SWE-rebench-V2" in dataset_name:
+            conda_activate_cmd = ""
+        else:
+            conda_activate_cmd = (
+                "if [ -d /opt/miniconda3 ]; then "
+                ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed || true; "
+                "fi && "
+            )
+
+        baseline_fix = _extract_instance_dict(data_point).get("baseline_fix", "")
+        baseline_fix_cmd = f"{{ {baseline_fix} >/tmp/baseline_fix.log 2>&1 || true; }} && " if baseline_fix else ""
+
+        # args dict encoded as JSON so the extraction Python never sees shell metacharacters
+        py_args_json = json.dumps(
+            {
+                "workspace": workspace_path,
+                "instance_id": instance_id,
+                "model": effective_model,
+                "output_dir": output_dir_in_container,
+                "output_jsonl": output_jsonl_in_container,
+            }
+        )
+
+        agent_main_cmd = (
+            "mkdir -p /tmp/ && "
+            "export PATH=/opencode_setup/bun/bin:$PATH && "
+            f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
+            f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
+            f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
+            f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
+            "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
+            f"export SWITCHYARD_BASE_URL={shlex.quote(self.config.switchyard_spawned_base_url)} && "
+            "mkdir -p /root/.cache/opencode && "
+            "echo '{}' >/root/.cache/opencode/models.json && "
+            f"{conda_activate_cmd}"
+            f"{baseline_fix_cmd}"
+            f"cd {shlex.quote(workspace_path)} && "
+            f"echo {shlex.quote(opencode_cfg_json)} > opencode.json && "
+            f"echo {shlex.quote(_OPENCODE_TASK_ID_GUIDANCE)} > {_OPENCODE_INSTRUCTIONS_PATH} && "
+            "_OC_EXIT=0 && "
+            f"timeout {self.config.swebench_agent_timeout} "
+            "/opencode_setup/opencode/node_modules/.bin/opencode run "
+            f"--model {shlex.quote(f'switchyard/{effective_model}')} "
+            '"$(cat /opencode_setup/opencode/user_message.txt)" '
+            "|| _OC_EXIT=$?"
+        )
+
+        # Post-run extraction: git diff → output.jsonl in bench format.
+        # Uses _OC_ARGS JSON so no shell metacharacter issues in paths/ids.
+        extract_py = (
+            "import json,os,subprocess;"
+            "a=json.loads(os.environ['_OC_ARGS']);"
+            "r=subprocess.run(['git','-C',a['workspace'],'diff','HEAD'],capture_output=True,text=True,errors='replace');"
+            "patch=r.stdout.strip() or None;"
+            "ec=int(os.environ.get('_OC_EXIT','0'));"
+            "os.makedirs(a['output_dir'],exist_ok=True);"
+            "f=open(a['output_jsonl'],'w');"
+            "json.dump({'instance_id':a['instance_id'],'test_result':{'git_patch':patch},"
+            "'metadata':{'llm_config':{'model':a['model']}},"
+            "'error':None if ec==0 else f'opencode exit {ec}','metrics':None},f);"
+            "f.close()"
+        )
+
+        agent_script_name = f"agent_script_{agent_run_id}.sh"
+        agent_script_path = self.config.persistent_dir / agent_script_name
+        with open(agent_script_path, "w") as f:
+            f.write("#!/bin/bash\nset -e\n")
+            f.write(agent_main_cmd)
+            f.write(f"\nexport _OC_ARGS={shlex.quote(py_args_json)}\n")
+            f.write(f"python3 -c {shlex.quote(extract_py)}\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        agent_timeout_seconds = self.config.swebench_agent_timeout
+        opencode_cmd = (
+            f"timeout --signal=TERM --kill-after=30 {agent_timeout_seconds} "
+            f"bash /trajectories_mount/{agent_script_name}"
+        )
+
+        search_path = os.path.join(
+            self.config.opencode_setup_dir / "opencode" / eval_dir_in_opencode,
+            "**",
+            "output.jsonl",
+        )
+
+        return ExecuteContainerCommandArgs(
+            command=opencode_cmd,
+            expected_file_pattern=search_path,
+            mode="agent",
+            timeout=self.config.swebench_agent_timeout + 60,
+        )
+
 
 ########################################
 # START Ray worker logic
@@ -2214,6 +2611,217 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     return "other"
 
 
+def _switchyard_log_path(params: SWEBenchWrapperInstanceConfig) -> Path:
+    """Where a spawned Switchyard's stdout/stderr lands for this run."""
+    return params.persistent_dir / "switchyard.log"
+
+
+async def _spawn_switchyard_local(params: SWEBenchWrapperInstanceConfig) -> Tuple[str, Process]:
+    """Start this run's Switchyard on the local node; returns ``(base_url, process)``.
+
+    Runs wherever its agent runs, so proxies spread across the cluster the same
+    way ``runner_ray_remote`` does rather than piling onto the server's node.
+    Records go under the run's ``persistent_dir`` (shared storage), so the server
+    can rebuild the trajectory from disk after this process is gone.
+    """
+    port = _find_free_port()
+    host = params.switchyard_spawn_host or socket.gethostname()
+    rl_log_dir = params.persistent_dir / "switchyard_traces"
+    rl_log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = _switchyard_log_path(params)
+
+    env = dict(os.environ)
+    if params.switchyard_backend_url:
+        env["SWITCHYARD_VLLM_BASE_URL"] = params.switchyard_backend_url
+
+    # Everything the routing profile references via ${...} must be in the child's
+    # env: endpoint and model derived from the run's config (same source the gym
+    # vllm_model server reads), parsers and vLLM import paths from config fields.
+    cfg = OmegaConf.create(shlex.split(params.ng_global_config_dict_str)[0])
+    if not env.get("SWITCHYARD_VLLM_BASE_URL"):
+        urls = [u for u in (cfg.get("policy_base_url") or []) if u]
+        if urls:
+            env["SWITCHYARD_VLLM_BASE_URL"] = str(urls[0])
+    if not env.get("SWITCHYARD_POLICY_MODEL"):
+        model = cfg.get("policy_model_name")
+        if model:
+            env["SWITCHYARD_POLICY_MODEL"] = str(model)
+    if params.switchyard_tool_parser:
+        env["SWITCHYARD_TOOL_PARSER"] = params.switchyard_tool_parser
+    if params.switchyard_reasoning_parser:
+        env["SWITCHYARD_REASONING_PARSER"] = params.switchyard_reasoning_parser
+    if params.switchyard_parser_pythonpath:
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = params.switchyard_parser_pythonpath + (f":{existing}" if existing else "")
+
+    # The gym venv's bin dir is on PATH for the server process but not for this Ray
+    # task, so resolve the CLI next to the interpreter running the task instead.
+    switchyard_bin = shutil.which("switchyard") or str(Path(sys.executable).parent / "switchyard")
+
+    with log_path.open("w") as log_file:
+        process = await asyncio.create_subprocess_exec(
+            switchyard_bin,
+            "--routing-profiles",
+            str(params.switchyard_spawn_routing_profile),
+            "--enable-rl-logging",
+            "--rl-log-dir",
+            str(rl_log_dir),
+            "--",
+            "serve",
+            "--port",
+            str(port),
+            stdout=log_file,
+            stderr=log_file,
+            env=env,
+        )
+    try:
+        await _wait_switchyard_ready_local(port, process)
+    except Exception:
+        await _teardown_switchyard_process(process)
+        raise
+    return f"http://{host}:{port}", process
+
+
+async def _wait_switchyard_ready_local(port: int, process: Process, timeout_s: float = 240.0) -> None:
+    """Wait until *port* accepts TCP connections, or the process dies trying.
+
+    A socket probe rather than an HTTP poll: it needs no client machinery and
+    puts no connection pressure on a proxy that is still starting up.
+
+    240s, not 60: under Lustre load the CLI's Python imports alone can stall past
+    60s (measured p90=46s with the distribution truncated at the old timeout,
+    2026-08-01). A timeout kill also triggers a 16-rollout group retry — an
+    amplification loop where kills create the spawn herd that causes more stalls.
+    Dead-on-arrival proxies still fail fast via the process-exit check above.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if process.returncode is not None:
+            raise RuntimeError(
+                f"spawned Switchyard exited with code {process.returncode} before ready "
+                "(see the run's switchyard.log)"
+            )
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=1.0)
+            writer.close()
+            await writer.wait_closed()
+            return
+        except (ConnectionRefusedError, OSError, asyncio.TimeoutError):
+            pass
+        await asyncio.sleep(0.2)
+    raise RuntimeError(f"spawned Switchyard not ready after {timeout_s}s")
+
+
+async def _teardown_switchyard_process(process: Process) -> None:
+    """Reap a spawned Switchyard. Idempotent."""
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+
+
+def _switchyard_spawn_needed_for(params: SWEBenchWrapperInstanceConfig) -> bool:
+    """Whether this run gets its own Switchyard, decided from the run's own config."""
+    if not params.switchyard_spawn_routing_profile or params.verify_golden_patch:
+        return False
+    if params.switchyard_session_id:
+        return True
+    return params.agent_framework == "opencode" and params.opencode_source == "opencode"
+
+
+def _collect_switchyard_payload(params: SWEBenchWrapperInstanceConfig) -> Optional[Dict[str, Any]]:
+    """Read and reconstruct this rollout's captured trace, on the rollout's own node.
+
+    Runs in the Ray task strictly AFTER proxy teardown, so the record set is
+    complete — no live writer exists. Centralizing this on the gym server starved
+    its event loop at scale (512+ rollouts x hundreds of Lustre reads each).
+
+    Never raises: retrieval failure must not discard the agent/eval outcome. The
+    error travels in the payload and the server masks the sample (fail closed for
+    training, open for diagnostics).
+    """
+    if not _switchyard_spawn_needed_for(params):
+        return None
+    rl_log_dir = params.persistent_dir / "switchyard_traces"
+    payload: Dict[str, Any] = {
+        "trace": None,
+        "root_id": None,
+        "subagent_trajectories": None,
+        "degraded": None,
+        "error": None,
+    }
+    t0 = time.monotonic()
+    try:
+        converter = VLLMConverter(return_token_id_information=True)
+        records_by_session = SWEBenchWrapper._read_switchyard_records(rl_log_dir)
+        if params.switchyard_session_id:
+            # OpenHands: Gym minted the session id; single linear chain.
+            trace = _retrieve_switchyard_trace_from_records(
+                records_by_session, params.switchyard_session_id, converter, allow_partial=True
+            )
+            payload["trace"] = trace
+            payload["root_id"] = params.switchyard_session_id
+            if trace.partial_reason:
+                payload["degraded"] = f"partial trace: {trace.partial_reason}"
+        else:
+            # opencode mints its own ids: discover the session tree from records.
+            sessions = SWEBenchWrapper._sessions_from_records(records_by_session)
+            trace, root_id, subagents, degraded = _reconstruct_switchyard_sessions_from_records(
+                records_by_session, sessions, converter, filter_title_gen=True, allow_partial=True
+            )
+            if trace.partial_reason:
+                degraded = degraded or f"partial trace: {trace.partial_reason}"
+            payload.update(trace=trace, root_id=root_id, subagent_trajectories=subagents, degraded=degraded)
+    except Exception as e:
+        payload["error"] = f"{type(e).__name__}: {e}"
+    print(
+        f"[switchyard-retrieval] root={payload['root_id']} degraded={bool(payload['degraded'])} "
+        f"error={payload['error']!r} took={time.monotonic() - t0:.1f}s",
+        flush=True,
+    )
+    return payload
+
+
+async def _run_agent_with_switchyard(params: SWEBenchWrapperInstanceConfig) -> Dict[str, Any]:
+    """Run one rollout, owning its Switchyard's whole lifecycle on this node.
+
+    The proxy is started here rather than on the server so that its memory and
+    file descriptors land on the same node as the agent it serves; the server
+    reads the captured records back from shared storage afterwards.
+    """
+    # A Ray worker is not a child of the Gym server, so it inherits neither the
+    # server's PATH nor its NEMO_GYM_CONFIG_DICT. Three things below need the latter:
+    # the spawned proxy's route bundle (the venv's switchyard wrapper derives
+    # SWITCHYARD_POLICY_MODEL from it), the opencode command builders, and the aiohttp
+    # client behind _fetch_switchyard_max_model_len -- the last two via
+    # get_global_config_dict(), which reads this variable directly (global_config.py:793)
+    # and otherwise falls through to parsing Hydra CLI args. It is stored shell-quoted;
+    # both consumers want raw YAML.
+    os.environ.setdefault("NEMO_GYM_CONFIG_DICT", shlex.split(params.ng_global_config_dict_str)[0])
+
+    process: Optional[Process] = None
+    if _switchyard_spawn_needed_for(params):
+        params.switchyard_spawned_base_url, process = await _spawn_switchyard_local(params)
+        if params.agent_framework == "opencode":
+            params.opencode_context_len = await SWEBenchWrapper._fetch_switchyard_max_model_len(
+                params.switchyard_spawned_base_url, params.model_server_name
+            )
+        SWEBenchWrapper._build_agent_command(params)
+    try:
+        report_file = await RunOpenHandsAgent(config=params).process_single_datapoint()
+    finally:
+        if process is not None:
+            await _teardown_switchyard_process(process)
+    return {
+        "report_file": str(report_file) if report_file else None,
+        "switchyard": _collect_switchyard_payload(params),
+    }
+
+
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -2221,16 +2829,13 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     },
     num_cpus=0.1,
 )
-def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
+def runner_ray_remote(params_dict: dict[str, Any]) -> Dict[str, Any]:
     # For some reason Ray may not pick up the proper model fields if we don't rebuild the model here. Very strange.
     SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
     RunOpenHandsAgent.model_rebuild(force=True)
 
     params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
-    run_oh = RunOpenHandsAgent(config=params)
-    report_file = asyncio.run(run_oh.process_single_datapoint())
-
-    return report_file
+    return asyncio.run(_run_agent_with_switchyard(params))
 
 
 def update_and_read_metrics(metrics_fpath: Path, update_dict: Dict[str, Any] | None = None) -> dict:
@@ -2823,6 +3428,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     _sem: Optional[Semaphore] = None
     _vllm_converter: Optional[VLLMConverter] = None
+    # Switchyard payloads returned by Ray tasks, keyed by agent_run_id; set in
+    # _inner_responses, popped in run(). Direct responses() callers leak entries
+    # (same documented caveat as spawn-mode proxies) — growth is logged.
+    _pending_switchyard: Optional[Dict[str, Any]] = None
     _swe_bench_wrapper_server_config: Optional[SWEBenchWrapperServerConfig] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -2832,9 +3441,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     ########################################
 
     def model_post_init(self, context: Any) -> None:
-        # Fail fast on a malformed Switchyard URL rather than masking every sample.
-        if self.config.switchyard_base_url:
-            _parse_switchyard_base_url(self.config.switchyard_base_url)
+        # Fail fast on a malformed Switchyard config rather than masking every sample.
+        _validate_switchyard_config(self.config)
+        # Round-robin cursor over the policy's generation backends; the spawned
+        # instances themselves live on their agents' nodes.
+        self._switchyard_spawn_count: int = 0
 
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
@@ -2861,6 +3472,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         self._sem = Semaphore(self.config.concurrency)
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
+        self._pending_switchyard = {}
 
         return super().model_post_init(context)
 
@@ -3083,8 +3695,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"Searched in paths: {tried_paths}."
         )
 
+    @staticmethod
     def _build_apptainer_command(
-        self, params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
+        params: SWEBenchWrapperInstanceConfig, command: ExecuteContainerCommandArgs
     ) -> str:
         # Agent containers only ever see the redacted instance dict.
         dataset_path_to_mount = str(
@@ -3185,20 +3798,32 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             opencode_dir = f"{params.opencode_setup_dir}/opencode"
             bun_dir = f"{params.opencode_setup_dir}/bun"
             (Path(opencode_dir) / "evaluation" / "oh").mkdir(parents=True, exist_ok=True)
-            # opencode reads SQLite migrations from `<bundle>/../../migration`
-            # (packages/opencode/src/storage/db.ts) → /opencode_setup/migration.
-            mount_args.extend(
-                [
-                    f"--mount type=bind,src={opencode_dir},dst=/opencode_setup/opencode,ro",
-                    f"--mount type=bind,src={opencode_dir},dst={opencode_dir},ro",
-                    f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst=/opencode_setup/opencode/evaluation/oh",
-                    f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst={opencode_dir}/evaluation/oh",
-                    f"--mount type=bind,src={bun_dir},dst=/opencode_setup/bun,ro",
-                    f"--mount type=bind,src={bun_dir},dst={bun_dir},ro",
-                    f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
-                    f"--mount type=bind,src={opencode_dir}/packages/opencode/migration,dst=/opencode_setup/migration,ro",
-                ]
-            )
+            if params.opencode_source == "opencode":
+                # Upstream stock opencode: no fork repo structure, no migration mount.
+                mount_args.extend(
+                    [
+                        f"--mount type=bind,src={opencode_dir},dst=/opencode_setup/opencode,ro",
+                        f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst=/opencode_setup/opencode/evaluation/oh",
+                        f"--mount type=bind,src={bun_dir},dst=/opencode_setup/bun,ro",
+                        f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+                    ]
+                )
+            else:
+                # nv-opencode fork: existing mounts (unchanged).
+                # opencode reads SQLite migrations from `<bundle>/../../migration`
+                # (packages/opencode/src/storage/db.ts) → /opencode_setup/migration.
+                mount_args.extend(
+                    [
+                        f"--mount type=bind,src={opencode_dir},dst=/opencode_setup/opencode,ro",
+                        f"--mount type=bind,src={opencode_dir},dst={opencode_dir},ro",
+                        f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst=/opencode_setup/opencode/evaluation/oh",
+                        f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst={opencode_dir}/evaluation/oh",
+                        f"--mount type=bind,src={bun_dir},dst=/opencode_setup/bun,ro",
+                        f"--mount type=bind,src={bun_dir},dst={bun_dir},ro",
+                        f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
+                        f"--mount type=bind,src={opencode_dir}/packages/opencode/migration,dst=/opencode_setup/migration,ro",
+                    ]
+                )
             user_message_host = params.persistent_dir / f"user_message_{params.agent_run_id}.txt"
             mount_args.append(
                 f"--mount type=bind,src={user_message_host},dst=/opencode_setup/opencode/user_message.txt,ro"
@@ -3479,7 +4104,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # retries. Golden-patch verification makes no policy calls, so no session.
         switchyard_session_id = None
         if (
-            self.config.switchyard_base_url
+            self.config.switchyard_spawn_routing_profile
             and self.config.agent_framework == "openhands"
             and not self.config.verify_golden_patch
         ):
@@ -3600,17 +4225,47 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.eval_command = dataset_processor.get_run_command()
         params.eval_apptainer_command_str = self._build_apptainer_command(params, params.eval_command)
 
-        if self.config.agent_framework == "opencode":
-            params.agent_command = OpenCodeHarnessProcessor(config=params).get_run_command()
-        else:
-            params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
-        params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
-        params.agent_script = params.agent_script_path.read_text()
+        # Switchyard-routed runs defer the build to responses(): the script
+        # embeds the Switchyard routing, and spawn mode's instance URL plus the
+        # served model's context length are only known there.
+        if not self._agent_command_deferred(params):
+            self._build_agent_command(params)
 
         return params, dataset_processor
 
+    def _agent_command_deferred(self, params: SWEBenchWrapperInstanceConfig) -> bool:
+        """Whether ``responses`` builds the agent command instead of ``_setup_params``.
+
+        Only spawn mode defers: the command embeds the spawned instance's URL,
+        which does not exist until the Ray task starts the proxy on its own node.
+        """
+        return self._switchyard_spawn_needed(params)
+
+    @staticmethod
+    def _build_agent_command(params: SWEBenchWrapperInstanceConfig) -> None:
+        """Build the agent script and command from the current params.
+
+        Called at the end of ``_setup_params``, except for Switchyard-routed
+        runs, where ``responses`` calls it after the instance URL and the
+        served model's context length are known.
+        """
+        if params.agent_framework == "opencode":
+            params.agent_command = OpenCodeHarnessProcessor(config=params).get_run_command()
+        else:
+            params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
+        params.agent_apptainer_command_str = SWEBenchWrapper._build_apptainer_command(params, params.agent_command)
+        params.agent_script = params.agent_script_path.read_text()
+
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         params, dataset_processor = self._setup_params(body)
+
+        if self._switchyard_spawn_needed(params):
+            # The instance itself is started by the rollout's own Ray task so it
+            # lands on the agent's node; only the backend choice is made here,
+            # where the round-robin counter lives.
+            params.switchyard_backend_url = self._next_switchyard_backend_url(params)
+        elif self._agent_command_deferred(params):
+            self._build_agent_command(params)
 
         with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
@@ -3629,7 +4284,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def _inner_responses(
         self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor
     ) -> NeMoGymResponse:
-        maybe_report_file = await runner_ray_remote.remote(params.model_dump())
+        task_result = await runner_ray_remote.remote(params.model_dump())
+        maybe_report_file = (task_result or {}).get("report_file")
+        switchyard_payload = (task_result or {}).get("switchyard")
+        if switchyard_payload is not None:
+            self._pending_switchyard[params.agent_run_id] = switchyard_payload
+            if len(self._pending_switchyard) > 4096:
+                print(
+                    f"WARNING: {len(self._pending_switchyard)} un-consumed switchyard payloads "
+                    "(direct responses() callers leak them)",
+                    flush=True,
+                )
         metrics_to_update = dict()
 
         if maybe_report_file:
@@ -3651,7 +4316,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
-        persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
+        persisted_metrics = SWEBenchMetrics.model_validate(
+            await asyncio.to_thread(update_and_read_metrics, params.metrics_fpath)
+        )
         resolved_now = metrics_to_update.get("resolved", False)
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
@@ -3726,7 +4393,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
             input_items, output_items = split_responses_input_output_items(responses_items)
 
-        updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
+        updated_metrics = await asyncio.to_thread(update_and_read_metrics, params.metrics_fpath, metrics_to_update)
 
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
         # picks the backend). NeMoGymResponse.model is a required non-None string,
@@ -3775,29 +4442,58 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
             switchyard_trace_error = None
-            if instance_config.switchyard_base_url and instance_config.switchyard_session_id:
-                try:
-                    trace = await self._retrieve_switchyard_trace(instance_config)
-                    switchyard_input = [item.model_dump() for item in trace.input_items]
-                    switchyard_tools = [tool.model_dump() for tool in trace.tools]
-                    responses_create_params["input"] = switchyard_input
-                    responses_create_params["tools"] = switchyard_tools
-                    response.output = trace.output_items
-                    response.metadata = {
-                        "switchyard_source": "switchyard",
-                        "switchyard_session_id": instance_config.switchyard_session_id,
-                        "switchyard_record_uuids": json.dumps(trace.record_uuids),
-                        "switchyard_model": trace.model,
-                    }
-                except Exception as e:
+            # Captured records live under the run's own capture directory (the
+            # ``--rl-log-dir`` handed to its Switchyard), so retrieval reads the
+            # filesystem rather than the proxy, which may not have survived.
+            payload = self._pending_switchyard.pop(instance_config.agent_run_id, None)
+            if instance_config.switchyard_session_id:
+                # OpenHands: the Ray task retrieved on its own node; consume its payload.
+                if payload is None or payload.get("error") or payload.get("trace") is None:
                     # Fail closed for training, open for diagnostics: keep the
                     # OpenHands-derived rollout/patch/reward, but mask the sample
                     # rather than emit a partially token-annotated trajectory.
                     instance_config.mask_sample = True
-                    switchyard_trace_error = (
-                        f"session {instance_config.switchyard_session_id}: {type(e).__name__}: {e}"
-                    )
-
+                    reason = (payload or {}).get("error") or "no switchyard payload returned by the rollout task"
+                    switchyard_trace_error = f"session {instance_config.switchyard_session_id}: {reason}"
+                else:
+                    try:
+                        self._apply_switchyard_trace(
+                            responses_create_params, response, payload["trace"], instance_config.switchyard_session_id
+                        )
+                    except Exception as e:
+                        instance_config.mask_sample = True
+                        switchyard_trace_error = (
+                            f"session {instance_config.switchyard_session_id}: {type(e).__name__}: {e}"
+                        )
+            elif (
+                instance_config.switchyard_spawn_routing_profile
+                and instance_config.agent_framework == "opencode"
+                and instance_config.opencode_source == "opencode"
+            ):
+                # Upstream opencode: root -> main rollout, subagents -> token-annotated
+                # subagent_trajectories. All reading/reconstruction already happened in
+                # the Ray task on the rollout's node; only in-memory application here.
+                if payload is None or payload.get("error") or payload.get("trace") is None:
+                    instance_config.mask_sample = True
+                    reason = (payload or {}).get("error") or "no switchyard payload returned by the rollout task"
+                    switchyard_trace_error = f"opencode sessions: {reason}"
+                else:
+                    try:
+                        self._apply_switchyard_trace(
+                            responses_create_params, response, payload["trace"], payload["root_id"]
+                        )
+                        # Reconstructed (token-annotated) subagents replace the text
+                        # ones on success — even when the reconstructed list is empty.
+                        subagent_trajectories = payload["subagent_trajectories"]
+                    except Exception as e:
+                        instance_config.mask_sample = True
+                        switchyard_trace_error = f"opencode sessions: {type(e).__name__}: {e}"
+                    if not switchyard_trace_error and payload.get("degraded"):
+                        # Real token data was recovered but the tree was ambiguous:
+                        # emit it and mask, so the sample is excluded from the loss
+                        # without aborting its whole prompt group.
+                        instance_config.mask_sample = True
+                        switchyard_trace_error = f"opencode sessions: {payload['degraded']}"
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
                 response=response,
@@ -3809,21 +4505,171 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 switchyard_trace_error=switchyard_trace_error,
             )
 
-    async def _retrieve_switchyard_trace(self, instance_config: SWEBenchWrapperInstanceConfig) -> SwitchyardTrace:
-        """Fetch this run's captured completions from Switchyard and rebuild the rollout.
+    def _switchyard_spawn_needed(self, params: SWEBenchWrapperInstanceConfig) -> bool:
+        """Whether this run gets its own Switchyard instance.
 
-        No polling is needed: the agent has exited and Switchyard durably writes
-        each record before returning that call's model response. The GET is
-        idempotent, so the helper's transport retries are safe.
+        Spawn for exactly the runs whose calls are captured: OpenHands runs
+        with a minted session id, and upstream-opencode runs (which mint their
+        own ids). Golden-patch verification makes no policy calls.
         """
-        url = (
-            f"{instance_config.switchyard_base_url.rstrip('/')}"
-            f"/v1/sessions/{instance_config.switchyard_session_id}/completions"
+        if not self.config.switchyard_spawn_routing_profile or self.config.verify_golden_patch:
+            return False
+        if params.switchyard_session_id:
+            return True
+        return self.config.agent_framework == "opencode" and self.config.opencode_source == "opencode"
+
+    def _next_switchyard_backend_url(self, params: SWEBenchWrapperInstanceConfig) -> Optional[str]:
+        """The generation endpoint this run's Switchyard should proxy to.
+
+        Round-robins across every backend the policy exposes so no single vLLM
+        server takes the whole rollout wave. Chosen here because the counter is
+        server-side state; the instance that uses it starts on the agent's node.
+        """
+        cfg = OmegaConf.create(shlex.split(params.ng_global_config_dict_str)[0])
+        urls = [u for u in (cfg.get("policy_base_url") or []) if u]
+        if not urls:
+            return None
+        url = urls[self._switchyard_spawn_count % len(urls)]
+        self._switchyard_spawn_count += 1
+        return str(url)
+
+
+    @staticmethod
+    async def _fetch_switchyard_max_model_len(base_url: str, route_id: str) -> Optional[int]:
+        """The served model's context length from Switchyard's ``/v1/models``, or ``None``.
+
+        Switchyard surfaces the engine's ``max_model_len`` on token-capture
+        routes. Absence (older Switchyard, engine unreachable at proxy start)
+        degrades gracefully: the opencode provider entry ships without limits,
+        exactly today's behavior.
+        """
+        try:
+            response = await request(
+                "GET", f"{base_url.rstrip('/')}/v1/models", timeout=ClientTimeout(total=30)
+            )
+            await raise_for_status(response)
+            entries = (await get_response_json(response)).get("data") or []
+        except Exception as e:
+            print(f"WARNING: could not fetch max_model_len from Switchyard: {e}", flush=True)
+            return None
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id") == route_id:
+                value = entry.get("max_model_len")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    return value
+        print(f"WARNING: Switchyard /v1/models has no max_model_len for route {route_id!r}", flush=True)
+        return None
+
+    @staticmethod
+    def _read_switchyard_records(rl_log_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
+        """Every captured record under *rl_log_dir*, grouped by session id.
+
+        Reads the capture directory Switchyard was given via ``--rl-log-dir``
+        rather than querying the live proxy. Switchyard writes each record
+        atomically (tmp file + rename), so a finished rollout's records are
+        complete on disk whether or not its proxy process survived to serve
+        them — which it may not at training scale.
+
+        Grouping keys off each record's own ``session_id`` field, so Switchyard's
+        on-disk directory naming stays its own business.
+        """
+        by_session: Dict[str, List[Dict[str, Any]]] = {}
+        for record_path in sorted((rl_log_dir / "sessions").glob("*/*.json")):
+            try:
+                record = json.loads(record_path.read_text())
+            except (OSError, ValueError):
+                # An unreadable record must not sink the whole rollout; the
+                # reconstruction below still validates what it does get.
+                continue
+            session_id = record.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                by_session.setdefault(session_id, []).append(record)
+        for records in by_session.values():
+            records.sort(key=lambda r: (r.get("captured_at") or "", r.get("uuid") or ""))
+        return by_session
+
+    @staticmethod
+    def _sessions_from_records(records_by_session: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """``[{"session_id", "parent_session_id"}, ...]`` for a run's captured records."""
+        return [
+            {"session_id": session_id, "parent_session_id": records[0].get("parent_session_id")}
+            for session_id, records in sorted(records_by_session.items())
+        ]
+
+    def _list_switchyard_sessions(self, rl_log_dir: Path) -> List[Dict[str, Any]]:
+        """Session ids (with parent links) Switchyard captured for this run.
+
+        Harnesses like opencode mint their own session ids, so Gym discovers them
+        from the capture directory rather than any harness log. Scoped by the
+        per-run ``--rl-log-dir``, so the list covers exactly this rollout.
+        """
+        return self._sessions_from_records(self._read_switchyard_records(rl_log_dir))
+
+    def _retrieve_switchyard_trace(
+        self,
+        records_by_session: Dict[str, List[Dict[str, Any]]],
+        session_id: str,
+        filter_title_gen: bool = False,
+    ) -> SwitchyardTrace:
+        """Rebuild one session's rollout from its captured records.
+
+        Harness-neutral: keyed only on ``session_id`` so both the single-session
+        (OpenHands) and per-subagent (OpenCode) paths reuse it. Records come from
+        the capture directory rather than the proxy, so retrieval no longer
+        depends on the Switchyard process still being alive.
+        """
+        return _retrieve_switchyard_trace_from_records(
+            records_by_session, session_id, self._vllm_converter, filter_title_gen=filter_title_gen
         )
-        response = await request("GET", url, timeout=ClientTimeout(total=60))
-        await raise_for_status(response)
-        envelope = await get_response_json(response)
-        return reconstruct_switchyard_rollout(envelope, instance_config.switchyard_session_id, self._vllm_converter)
+
+    @staticmethod
+    def _apply_switchyard_trace(
+        responses_create_params: dict,
+        response: NeMoGymResponse,
+        trace: SwitchyardTrace,
+        session_id: str,
+    ) -> None:
+        """Replace the rollout's input/tools/output with a reconstructed Switchyard trace.
+
+        Switchyard is the source of truth for the token-annotated messages; the
+        harness supplies only the outcome/reward.
+        """
+        responses_create_params["input"] = [item.model_dump() for item in trace.input_items]
+        responses_create_params["tools"] = [tool.model_dump() for tool in trace.tools]
+        response.output = trace.output_items
+        response.metadata = {
+            "switchyard_source": "switchyard",
+            "switchyard_session_id": session_id,
+            "switchyard_record_uuids": json.dumps(trace.record_uuids),
+            "switchyard_model": trace.model,
+        }
+
+    def _reconstruct_switchyard_sessions(
+        self,
+        records_by_session: Dict[str, List[Dict[str, Any]]],
+        sessions: List[Dict[str, Any]],
+        filter_title_gen: bool = False,
+    ) -> Tuple[SwitchyardTrace, str, List[Dict[str, Any]], Optional[str]]:
+        """Reconstruct every session in an OpenCode session tree.
+
+        ``sessions`` is ``[{"session_id", "parent_session_id"}, ...]`` — OpenCode
+        mints a distinct session id per (sub)agent and Switchyard captures each
+        separately, so each is an independent linear chain reconstructed by
+        Layer 1. Returns ``(root_trace, root_session_id, subagent_entries,
+        degraded_reason)``: the parent-less root becomes the main rollout and each
+        subagent becomes a token-annotated entry tagged with its parent.
+
+        Degrade rather than fail: when the tree is ambiguous — most commonly
+        opencode context compaction, which starts a fresh parent-less session
+        mid-rollout — the largest root is used as the main rollout and
+        ``degraded_reason`` is returned so the caller can mask the sample. Emitting
+        real token data plus a mask beats emitting nothing, because a rollout with
+        no generation data aborts the whole prompt group downstream rather than
+        just excluding itself from the loss.
+        """
+        return _reconstruct_switchyard_sessions_from_records(
+            records_by_session, sessions, self._vllm_converter, filter_title_gen=filter_title_gen
+        )
 
 
 if __name__ == "__main__":

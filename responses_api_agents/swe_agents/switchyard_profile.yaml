@@ -1,0 +1,34 @@
+# Default routing profile for per-rollout Switchyard spawn (`switchyard_spawn_routing_profile`).
+#
+# Deployment-independent: every env reference below is exported by
+# _spawn_switchyard_local before the instance starts — endpoint and model from the
+# run's config, parsers from the switchyard_tool_parser / switchyard_reasoning_parser
+# config fields. A referenced variable that is unset fails the profile load with a
+# named error.
+#
+# `default` and `policy_model` are aliases of one route: dispatch is an exact match on
+# the request's model id and the harness paths send different ids (upstream opencode
+# POSTs "default"; the OpenHands fork POSTs the model server's name, "policy_model"
+# in training configs).
+defaults:
+  api_key: dummy
+  base_url: ${SWITCHYARD_VLLM_BASE_URL}
+  format: openai
+
+routes:
+  default: &policy_route
+    type: model
+    target: ${SWITCHYARD_POLICY_MODEL}
+    token_capture_engine: vllm
+    token_injection: true
+    injection_transport: prefix_chat
+    # NeMo-RL asserts exact on-policy sampling params and upstream opencode omits
+    # them, so pin them on every upstream request. Numeric literals on purpose:
+    # env interpolation would turn them into strings. Recipes with different
+    # sampling params supply their own profile.
+    extra_body:
+      temperature: 1.0
+      top_p: 1.0
+    tool_parser: ${SWITCHYARD_TOOL_PARSER}
+    reasoning_parser: ${SWITCHYARD_REASONING_PARSER}
+  policy_model: *policy_route
