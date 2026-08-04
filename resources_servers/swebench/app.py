@@ -48,7 +48,7 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: Dict[str, Any]
 
 
-class SWEBenchVerifyRequest(BaseVerifyRequest):
+class SWEBenchInstanceRequest(BaseModel):
     # See https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified
     # See swebench.harness.run_evaluation.TestSpec https://github.com/SWE-bench/SWE-bench/blob/f7bbbb2ccdf479001d6467c9e34af59e44a840f9/swebench/harness/test_spec/test_spec.py#L28
     repo: str
@@ -67,6 +67,10 @@ class SWEBenchVerifyRequest(BaseVerifyRequest):
     difficulty: str
     subset: str
     split: str
+
+
+class SWEBenchVerifyRequest(SWEBenchInstanceRequest, BaseVerifyRequest):
+    pass
 
 
 class SWEBenchVerifyResponse(BaseVerifyResponse):
@@ -134,7 +138,7 @@ class DockerContainer(BaseModel):
 
 # TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
 # They can possibly even omitted once this graduates to core infra.
-class SWEBenchSeedSessionRequest(SWEBenchVerifyRequest, BaseSeedSessionRequest):
+class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest):
     sandbox_spec: Optional[Dict[str, Any]] = None
 
 
