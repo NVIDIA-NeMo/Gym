@@ -37,7 +37,7 @@ PACKAGE_NAME = "nemo-gym-ci-junit"
 PACKAGE_FILENAME = "reports.zip"
 RECEIPT_FILENAME = "receipt.json"
 RECEIPT_SCHEMA_VERSION = 1
-EXPECTED_GITLAB_API_URL = "https://gitlab-master.nvidia.com/api/v4"
+EXPECTED_GITLAB_API_PATH = "/api/v4"
 EXPECTED_GYM_PROJECT_ID = 191584
 EXPECTED_GYM_PROJECT_PATH = "dl/nemo/gym"
 NEMO_PROJECT_ID = 65523
@@ -133,6 +133,7 @@ class GitLabPackageClient:
         self,
         api_url: str,
         *,
+        server_url: str,
         job_token: str,
         open_url: Callable[..., Any] = _default_open_url,
     ) -> None:
@@ -142,8 +143,19 @@ class GitLabPackageClient:
             raise CollectorError("CI_API_V4_URL must be an absolute HTTP(S) URL")
         if parsed.query or parsed.fragment:
             raise CollectorError("CI_API_V4_URL must not contain a query string or fragment")
-        if self.api_url != EXPECTED_GITLAB_API_URL:
-            raise CollectorError(f"Gym report relay requires CI_API_V4_URL={EXPECTED_GITLAB_API_URL}")
+        server_url = server_url.rstrip("/")
+        parsed_server = urllib.parse.urlsplit(server_url)
+        if (
+            parsed_server.scheme not in {"http", "https"}
+            or not parsed_server.netloc
+            or parsed_server.path not in {"", "/"}
+            or parsed_server.query
+            or parsed_server.fragment
+        ):
+            raise CollectorError("CI_SERVER_URL must be an absolute HTTP(S) origin")
+        expected_api_url = f"{server_url}{EXPECTED_GITLAB_API_PATH}"
+        if self.api_url != expected_api_url:
+            raise CollectorError("CI_API_V4_URL must equal CI_SERVER_URL followed by /api/v4")
         if not job_token:
             raise CollectorError("CI_JOB_TOKEN is required to download the Gym JUnit relay")
         self.job_token = job_token
@@ -468,6 +480,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         identity = identity_from_env(environ)
         client = GitLabPackageClient(
             _required_env(environ, "CI_API_V4_URL"),
+            server_url=_required_env(environ, "CI_SERVER_URL"),
             job_token=_required_env(environ, "CI_JOB_TOKEN"),
         )
         archive = client.download_relay(
