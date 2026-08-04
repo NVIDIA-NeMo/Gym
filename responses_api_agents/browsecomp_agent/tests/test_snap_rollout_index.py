@@ -5,7 +5,7 @@
 With num_repeats > 1, all rollouts of a task share _ng_task_index, so the old
 snap path (sample_{task_index}/attempt_{a}_*) made concurrent rollouts clobber
 and interleave each other's snapshot files — per-reset context extraction was
-unattributable (found on the mercor x4 collection run 5106853). The fix keys
+unattributable (found on a mercor x4 collection run). The fix keys
 the sample dir by rollout too: sample_{task_index}_r{rollout_index}, while
 single-rollout runs (no rollout_index in metadata) keep the legacy naming
 byte-for-byte.
