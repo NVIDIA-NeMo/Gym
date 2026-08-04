@@ -68,6 +68,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.server_utils import apply_rollout_prefix
 
 
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
@@ -123,6 +124,10 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     # output. Long ids do not match, and every task then silently runs against a
     # fallback workspace it never reads back. Refuse the run instead.
     max_agent_id_length: int = 64
+    # Address the model server under `/ng-rollout/<rollout_id>` so model-call capture can
+    # attribute each call. Only valid when `model_base_url` is a Gym model server; a direct
+    # vLLM endpoint has no such route and would 404.
+    rollout_scoped_model_url: bool = False
 
     @model_validator(mode="after")
     def _reject_unresolvable_agent_id(self) -> "PinchBenchAgentConfig":
@@ -189,12 +194,28 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         raise NotImplementedError("PinchBench is an external benchmark; use /run.")
 
+    def _rollout_scoped_model_base_url(self, rollout_id: Optional[str]) -> str:
+        """Model URL for one rollout, optionally carrying the capture correlation prefix.
+
+        Model-call capture only records calls that arrive under ``/ng-rollout/<id>``; without
+        it the middleware forwards them unattributed, so an agent that talks to a Gym model
+        server on a bare URL is invisible to observability. Only valid when
+        ``model_base_url`` is a Gym model server -- a non-Gym endpoint would 404 on the prefix.
+        """
+        base = self.config.model_base_url.rstrip("/")
+        if not self.config.rollout_scoped_model_url or not rollout_id:
+            return base
+        root, sep, suffix = base.rpartition("/v1")
+        if not sep:
+            return apply_rollout_prefix(base, rollout_id)
+        return f"{apply_rollout_prefix(root, rollout_id)}/v1{suffix}"
+
     # --- task env ----------------------------------------------------------
-    def _task_env(self, task_id: str) -> dict:
+    def _task_env(self, task_id: str, rollout_id: Optional[str] = None) -> dict:
         env = {
             "TASK_ID": task_id,
             "MODEL_NAME": self.config.model_name,
-            "MODEL_BASE_URL": self.config.model_base_url,
+            "MODEL_BASE_URL": self._rollout_scoped_model_base_url(rollout_id),
             "MODEL_API_KEY": self.config.model_api_key,
             "JUDGE_MODEL": self.config.judge_model,
             "JUDGE_BASE_URL": self.config.judge_base_url,
@@ -219,7 +240,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         return env
 
     # --- per-task sandbox (Gym Sandbox API; provider-neutral) ---------------
-    def _build_spec(self, task_id: str) -> SandboxSpec:
+    def _build_spec(self, task_id: str, rollout_id: Optional[str] = None) -> SandboxSpec:
         cfg = dict(self.config.sandbox_spec)
         return SandboxSpec(
             image=cfg.get("image"),
@@ -228,16 +249,16 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             workdir=cfg.get("workdir"),
             resources=SandboxResources.from_mapping(cfg.get("resources", {})),
             provider_options=cfg.get("provider_options", {}),
-            env=self._task_env(task_id),
+            env=self._task_env(task_id, rollout_id),
             metadata={"task_id": task_id},
         )
 
-    async def _run_in_sandbox(self, task_id: str, out_dir: Path) -> None:
+    async def _run_in_sandbox(self, task_id: str, out_dir: Path, rollout_id: Optional[str] = None) -> None:
         """Run one PinchBench task and pull its /out archive back."""
         provider = self.config.sandbox_provider or {}
         apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
         if isinstance(apptainer_cfg, dict) and apptainer_cfg.get("direct_exec"):
-            await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg)
+            await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg, rollout_id)
             return
 
         if not self.config.sandbox_provider:
@@ -245,7 +266,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         archive = f"{self.config.sandbox_work_base.rstrip('/')}/out/out.tgz"
         sb = AsyncSandbox(self.config.sandbox_provider)
         try:
-            await sb.start(self._build_spec(task_id))
+            await sb.start(self._build_spec(task_id, rollout_id))
             await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
             await sb.download(archive, out_dir / "out.tgz")
         finally:
@@ -362,7 +383,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         wrapper_path.chmod(0o755)
         return wrapper_path
 
-    async def _run_in_apptainer_direct(self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any]) -> None:
+    async def _run_in_apptainer_direct(
+        self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any], rollout_id: Optional[str] = None
+    ) -> None:
         image = self.config.sandbox_spec.get("image")
         if not image:
             raise ValueError("pinchbench sandbox_spec.image is required for direct Apptainer exec")
@@ -382,7 +405,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         elif isinstance(direct_args, str):
             direct_args = direct_args.split()
 
-        task_env = self._task_env(task_id)
+        task_env = self._task_env(task_id, rollout_id)
         argv = ["apptainer", "exec", *[str(arg) for arg in direct_args]]
         argv += ["--bind", f"{staging_dir}:{work_base}"]
         for key, value in task_env.items():
@@ -698,7 +721,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         archive_path = ""
         try:
             async with self._sem:
-                await self._run_in_sandbox(task_id, out_dir)  # one sandbox per task
+                await self._run_in_sandbox(task_id, out_dir, run_id)  # one sandbox per task
             result = self._parse_result(task_id, out_dir)
             response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
