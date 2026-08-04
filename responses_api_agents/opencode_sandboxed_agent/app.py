@@ -273,6 +273,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         # TODO @bxyu-nvidia: Once connected to SWE Bench resources server, put this behind a flag if /seed_session doesn't return a sandbox.
         sandbox = await self._start_sandbox()
+        print("SESSION ID:", request.session[SESSION_ID_KEY])
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
         response = await self.server_client.post(
