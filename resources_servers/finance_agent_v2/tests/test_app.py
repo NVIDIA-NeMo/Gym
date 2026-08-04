@@ -20,8 +20,10 @@ mocked. Requires the upstream `finance_agent` package to be importable (installe
 via the resource server's requirements.txt).
 """
 
+import asyncio
 import json
 import time
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -52,7 +54,7 @@ _TEST_SESSION_ID = "test-session"
 
 def _prompt_fpaths() -> dict:
     return {
-        "judge_prompt_template_fpath": str(_PROMPT_DIR / "finance_agent_v2_judge.yaml"),
+        "rubric_judge_prompt_template_fpath": str(_PROMPT_DIR / "finance_agent_v2_rubric_judge.yaml"),
         "retrieval_system_prompt_fpath": str(_PROMPT_DIR / "finance_agent_v2_retrieval.yaml"),
     }
 
@@ -69,7 +71,6 @@ def _make_server(**overrides) -> FinanceAgentV2ResourcesServer:
         retrieval_model_server=ModelServerRef(type="responses_api_models", name="policy"),
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
         judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-        reward_mode="binary",
         # Default tests run without the disk cache; cache-specific tests opt in.
         use_cache=False,
         **_prompt_fpaths(),
@@ -157,6 +158,107 @@ def _judge_response_json(text: str) -> str:
     ).model_dump_json()
 
 
+# ---------------------------------------------------------------------------
+# Rubric judge helpers
+# ---------------------------------------------------------------------------
+
+# Deliberately chosen so no criterion text is a substring of the answer: the
+# rendered prompt contains both, and several assertions below check which
+# criterion a given prompt is about.
+_ANSWER = "Total revenue reached $391.0B for the year and the stock reacted favorably."
+_C1 = "Revenue was $391.0 billion"
+_C2 = "Market sentiment was positive"
+_C3 = "Free cash flow was $60.9 billion"
+
+# Where the template puts the criterion. The judge stub keys off it so it can
+# tell which criterion a concurrent call is grading.
+_CRITERION_MARKER = "RUBRIC CRITERION (grade only this):"
+
+
+def _verdict(score: int, evidence: str = "the relevant span", reason: str = "matches") -> str:
+    return json.dumps({"extracted_evidence": evidence, "score": score, "reason": reason})
+
+
+def _rubric(*criteria: str) -> str:
+    return json.dumps([{"operator": "finance_agent_v2_operator", "criteria": c} for c in criteria])
+
+
+def _submitted_request(rubric) -> FinanceAgentV2VerifyRequest:
+    resp = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": _ANSWER})))
+    return _make_verify_request(resp, rubric=rubric)
+
+
+class _JudgeStub:
+    """Scripted judge endpoint, keyed by criterion rather than by call order.
+
+    Criteria are judged concurrently, so calls do not arrive in a fixed order and
+    an index-keyed script would be flaky. ``script`` maps criterion text to the
+    replies its successive calls get, where a reply is an int (turned into a
+    well-formed verdict), a str (returned verbatim, for parse-failure cases), or
+    an exception instance (raised, for API-failure cases).
+    """
+
+    def __init__(self, script: dict) -> None:
+        self._script = {criterion: list(replies) for criterion, replies in script.items()}
+        self.calls: Counter = Counter()
+        self.prompts: list[str] = []
+        self.max_in_flight = 0
+        self._in_flight = 0
+
+    async def post(self, *, server_name, url_path, json) -> MagicMock:  # noqa: A002
+        params = json
+        prompt = params.input[0].content
+        self.prompts.append(prompt)
+
+        criterion_section = prompt.rsplit(_CRITERION_MARKER, 1)[-1]
+        criterion = next((c for c in self._script if c in criterion_section), None)
+        assert criterion is not None, f"judge called with an unscripted criterion: {criterion_section[:200]!r}"
+        self.calls[criterion] += 1
+
+        self._in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        try:
+            # Yield so concurrent criteria actually overlap. Without this every
+            # call would finish before the next started and the semaphore's
+            # effect would be invisible to max_in_flight.
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            queue = self._script[criterion]
+            reply = queue.pop(0) if queue else "ran out of scripted replies"
+            if isinstance(reply, BaseException):
+                raise reply
+            if isinstance(reply, int):
+                reply = _verdict(reply)
+            response = MagicMock()
+            response.read = AsyncMock(return_value=_judge_response_json(reply))
+            return response
+        finally:
+            self._in_flight -= 1
+
+
+def _rubric_server(script: dict, **overrides) -> tuple[FinanceAgentV2ResourcesServer, _JudgeStub]:
+    server = _make_server(**overrides)
+    stub = _JudgeStub(script)
+    server.server_client.post = stub.post
+    return server, stub
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """Drop the retry backoff so failure-path tests do not sleep for real.
+
+    Patches ``asyncio.sleep`` itself, so tests that rely on ``sleep(0)`` to
+    interleave concurrent work (the semaphore test) must not use this.
+    """
+    import resources_servers.finance_agent_v2.app as app_mod
+
+    async def _sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(app_mod.asyncio, "sleep", _sleep)
+
+
 # ============================================================================
 # Initialization / tool registration
 # ============================================================================
@@ -169,8 +271,13 @@ class TestInitialization:
     def test_all_tools_available_with_keys(self) -> None:
         server = _make_server()
         for name in [
-            "calculator", "parse_html_page", "submit_final_result",
-            "web_search", "edgar_search", "price_history", "retrieve_information",
+            "calculator",
+            "parse_html_page",
+            "submit_final_result",
+            "web_search",
+            "edgar_search",
+            "price_history",
+            "retrieve_information",
         ]:
             assert server._tools.get(name) is not None, f"{name} should be available"
 
@@ -234,7 +341,9 @@ class TestToolDispatch:
     async def test_unavailable_tool_returns_error(self) -> None:
         server = _make_server(pricing_data_api_key=None)
         out = await server._dispatch_tool(
-            "price_history", _mock_request(), {"ticker": "AAPL", "start_date": "2024-01-01", "end_date": "2024-02-01", "asset_class": "equity"}
+            "price_history",
+            _mock_request(),
+            {"ticker": "AAPL", "start_date": "2024-01-01", "end_date": "2024-02-01", "asset_class": "equity"},
         )
         assert "not available" in json.loads(out["results"])["error"]
 
@@ -260,7 +369,9 @@ class TestToolDispatch:
         req = _mock_request()
 
         # Mock the upstream HTML fetch so no network is hit.
-        server._tools["parse_html_page"]._parse_html_page = AsyncMock(return_value="NVIDIA 10-K: shares outstanding 24.3 billion")
+        server._tools["parse_html_page"]._parse_html_page = AsyncMock(
+            return_value="NVIDIA 10-K: shares outstanding 24.3 billion"
+        )
         parse_out = await server._dispatch_tool(
             "parse_html_page", req, {"url": "https://example.com/10k", "key": "nvda_10k"}
         )
@@ -306,107 +417,341 @@ class TestSession:
 
 
 # ============================================================================
-# verify(): legacy [[N]] judge
+# verify(): per-criterion rubric judge
 # ============================================================================
 
 
-class TestVerifyLegacyJudge:
-    def _server(self, reward_mode="binary"):
-        server = _make_server(reward_mode=reward_mode)
-        post_mock = MagicMock()
-        server._post_mock = post_mock  # keep a handle for assertions
-        return server, post_mock
+class TestRubricParsing:
+    @pytest.mark.parametrize(
+        "rubric",
+        [
+            None,
+            "",
+            "not json",
+            json.dumps({"criteria": "a dict, not a list"}),
+            json.dumps([]),
+            json.dumps([{"operator": "op"}]),  # no criteria key
+            json.dumps([{"criteria": "   "}]),  # blank criteria
+        ],
+    )
+    def test_unusable_rubrics_yield_no_criteria(self, rubric) -> None:
+        assert FinanceAgentV2ResourcesServer._parse_rubric(rubric) == []
 
+    def test_parses_criteria_and_operator(self) -> None:
+        rubric = json.dumps(
+            [
+                {"operator": "finance_agent_v2_operator", "criteria": " Revenue was $391.0 billion "},
+                {"criteria": "Sentiment was positive"},
+            ]
+        )
+        assert FinanceAgentV2ResourcesServer._parse_rubric(rubric) == [
+            {"criteria": "Revenue was $391.0 billion", "operator": "finance_agent_v2_operator"},
+            {"criteria": "Sentiment was positive", "operator": None},
+        ]
+
+
+class TestScoreExtraction:
+    @pytest.mark.parametrize("score", [0, 1])
+    def test_bare_json(self, score) -> None:
+        assert FinanceAgentV2ResourcesServer._extract_score(_verdict(score)) == score
+
+    def test_fenced_json(self) -> None:
+        assert FinanceAgentV2ResourcesServer._extract_score(f"Here:\n```json\n{_verdict(1)}\n```") == 1
+
+    def test_last_object_wins(self) -> None:
+        """A worked example quoted while reasoning must not outrank the verdict."""
+        text = f"I recall the format {_verdict(0)} but for this answer: {_verdict(1)}"
+        assert FinanceAgentV2ResourcesServer._extract_score(text) == 1
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "   ",
+            "The criterion is satisfied.",  # no JSON at all
+            '{"score": "pass"}',  # strings are not verdicts
+            '{"score": 1.0}',  # nor floats
+            '{"score": true}',  # nor bools
+            '{"score": 2}',  # nor out-of-range ints
+            '{"reason": "no score key"}',
+            "{not valid json}",
+        ],
+    )
+    def test_unusable_replies(self, text) -> None:
+        assert FinanceAgentV2ResourcesServer._extract_score(text) is None
+
+
+class TestVerifyRubricJudge:
     @pytest.mark.asyncio
-    async def test_binary_full_credit(self) -> None:
-        server, post_mock = self._server("binary")
-        post_mock.read = AsyncMock(return_value=_judge_response_json("Matches exactly. The rating is: [[2]]"))
-        server.server_client.post = AsyncMock(return_value=post_mock)
+    async def test_all_criteria_pass(self) -> None:
+        server, stub = _rubric_server({_C1: [1, 1, 1], _C2: [1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
 
-        resp = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"})))
-        res = await server.verify(_mock_request(), _make_verify_request(resp, expected_answer="$391.0 billion"))
         assert res.reward == 1.0
-        assert res.judge_rating == 2
+        assert (res.rubric_total, res.rubric_passed, res.rubric_unresolved) == (2, 2, 0)
+        assert res.rubric_fraction == 1.0
+        assert res.rubric_all_pass is True
+        assert res.judge_error is None
+        assert stub.calls[_C1] == 3
+        assert all(j.unanimous for j in res.rubric_judgements)
 
     @pytest.mark.asyncio
-    async def test_binary_partial_is_zero(self) -> None:
-        server, post_mock = self._server("binary")
-        post_mock.read = AsyncMock(return_value=_judge_response_json("Partly right. [[1]]"))
-        server.server_client.post = AsyncMock(return_value=post_mock)
+    async def test_one_criterion_fails_zeroes_reward_but_keeps_partial_credit(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0], _C3: [1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2, _C3)))
 
-        resp = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": "$391 billion"})))
-        res = await server.verify(_mock_request(), _make_verify_request(resp, expected_answer="$391.0 billion"))
         assert res.reward == 0.0
+        assert res.rubric_passed == 2
+        assert res.rubric_fraction == pytest.approx(2 / 3)
+        assert res.rubric_all_pass is False
+        # Partial credit is the only thing separating this from a total miss, so
+        # the reward alone must not be the whole record.
+        assert res.judge_error is None
+        by_criterion = {j.criteria: j for j in res.rubric_judgements}
+        assert by_criterion[_C2].score == 0
+        assert by_criterion[_C2].votes == [0, 0, 0]
 
     @pytest.mark.asyncio
-    async def test_scaled_partial_is_half(self) -> None:
-        server, post_mock = self._server("scaled")
-        post_mock.read = AsyncMock(return_value=_judge_response_json("Partly right. [[1]]"))
-        server.server_client.post = AsyncMock(return_value=post_mock)
+    async def test_majority_vote_resolves_and_flags_disagreement(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 0], _C2: [0, 0, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
 
-        resp = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": "$391 billion"})))
-        res = await server.verify(_mock_request(), _make_verify_request(resp, expected_answer="$391.0 billion"))
-        assert res.reward == 0.5
+        by_criterion = {j.criteria: j for j in res.rubric_judgements}
+        assert by_criterion[_C1].score == 1
+        assert (by_criterion[_C1].votes_for, by_criterion[_C1].votes_against) == (2, 1)
+        assert by_criterion[_C1].unanimous is False
+        assert by_criterion[_C2].score == 0
+        assert (by_criterion[_C2].votes_for, by_criterion[_C2].votes_against) == (1, 2)
+        assert by_criterion[_C2].unanimous is False
+        # A 2-1 pass still counts as a pass.
+        assert res.rubric_passed == 1
 
     @pytest.mark.asyncio
-    async def test_no_submit_is_zero(self) -> None:
-        server, _ = self._server("binary")
-        server.server_client.post = AsyncMock()
-        resp = _make_response(_msg("I think it's $391 billion but I won't submit."))
-        res = await server.verify(_mock_request(), _make_verify_request(resp, expected_answer="$391.0 billion"))
+    async def test_stops_at_required_successes(self) -> None:
+        """The attempt cap is a ceiling, not a target: 3 clean verdicts end it."""
+        server, stub = _rubric_server({_C1: [1] * 10})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        assert stub.calls[_C1] == 3
+        assert res.rubric_judgements[0].attempts_used == 3
+
+    @pytest.mark.asyncio
+    async def test_unparseable_replies_are_retried(self, no_sleep) -> None:
+        server, stub = _rubric_server({_C1: ["I think it passes.", '{"score": "pass"}', 1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        judgement = res.rubric_judgements[0]
+        assert judgement.score == 1
+        assert judgement.parse_failures == 2
+        assert judgement.api_failures == 0
+        assert judgement.attempts_used == 5
+        assert stub.calls[_C1] == 5
+        assert res.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_api_errors_are_retried(self, no_sleep) -> None:
+        server, _ = _rubric_server({_C1: [RuntimeError("connection reset"), TimeoutError(), 0, 0, 0]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        judgement = res.rubric_judgements[0]
+        assert judgement.score == 0
+        assert judgement.api_failures == 2
+        assert judgement.parse_failures == 0
         assert res.reward == 0.0
-        server.server_client.post.assert_not_called()
+        assert res.judge_error is None  # resolved, just not satisfied
 
     @pytest.mark.asyncio
-    async def test_judge_no_verdict_is_flagged_not_silent_zero(self, monkeypatch) -> None:
-        """Judge emits no [[N]] (e.g. token budget exhausted): reward 0.0 but
-        judge_error set and judge_rating None, so it is distinguishable from a
-        real [[0]] and can be filtered downstream."""
-        import resources_servers.finance_agent_v2.app as app_mod
+    async def test_empty_reply_counts_as_api_failure(self, no_sleep) -> None:
+        """No visible text usually means the token budget went to hidden reasoning,
+        which is an infrastructure failure rather than a bad verdict."""
+        server, _ = _rubric_server({_C1: ["", 1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
 
-        async def _no_sleep(*_a, **_k):
-            return None
+        assert res.rubric_judgements[0].api_failures == 1
+        assert res.rubric_judgements[0].parse_failures == 0
 
-        monkeypatch.setattr(app_mod.asyncio, "sleep", _no_sleep)
+    @pytest.mark.asyncio
+    async def test_exhausted_attempts_leave_criterion_unresolved(self, no_sleep) -> None:
+        """Never reaching 3 verdicts is a judge failure, not a miss: score stays
+        null and judge_error is set so the row can be filtered out rather than
+        read as a genuine zero."""
+        server, stub = _rubric_server({_C1: [1, 1] + ["garbage"] * 20, _C2: [1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
 
-        server, post_mock = self._server("binary")
-        post_mock.read = AsyncMock(return_value=_judge_response_json(""))  # empty / no [[N]]
-        server.server_client.post = AsyncMock(return_value=post_mock)
-
-        resp = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"})))
-        res = await server.verify(_mock_request(), _make_verify_request(resp, expected_answer="$391.0 billion"))
+        assert stub.calls[_C1] == 10  # judge_max_attempts, then gives up
+        by_criterion = {j.criteria: j for j in res.rubric_judgements}
+        assert by_criterion[_C1].score is None
+        assert by_criterion[_C1].votes == [1, 1]  # kept for debugging, not voted on
+        assert by_criterion[_C1].unanimous is None
+        assert by_criterion[_C1].error is not None
+        assert res.rubric_unresolved == 1
+        assert res.rubric_all_pass is False
         assert res.reward == 0.0
-        assert res.judge_rating is None
+        assert res.judge_error is not None and "unresolved" in res.judge_error
+
+    @pytest.mark.asyncio
+    async def test_evidence_and_reason_recorded_per_vote(self) -> None:
+        server, _ = _rubric_server({_C1: [_verdict(1, evidence="revenue of $391.0B", reason="exact match"), 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        judgement = res.rubric_judgements[0]
+        assert judgement.evidence[0] == "revenue of $391.0B"
+        assert judgement.reasons[0] == "exact match"
+        assert len(judgement.evidence) == len(judgement.votes) == 3
+
+    @pytest.mark.asyncio
+    async def test_prompt_carries_question_answer_and_single_criterion(self) -> None:
+        server, stub = _rubric_server({_C1: [1, 1, 1], _C2: [1, 1, 1]})
+        await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        prompts_for_c1 = [p for p in stub.prompts if _C1 in p]
+        assert prompts_for_c1
+        prompt = prompts_for_c1[0]
+        assert "What was revenue?" in prompt
+        assert _ANSWER in prompt
+        # One criterion per call: the judge never sees the rest of the rubric.
+        assert _C2 not in prompt
+        # The guardrail that keeps the question from becoming extra requirements.
+        assert "Use the question only for scope/disambiguation" in prompt
+        # Placeholders were all substituted.
+        for placeholder in ("{question}", "{generated_answer}", "{criterion}"):
+            assert placeholder not in prompt
+
+    @pytest.mark.asyncio
+    async def test_no_submission_is_zero_without_judge_spend(self) -> None:
+        server, stub = _rubric_server({_C1: [1, 1, 1]})
+        request = _make_verify_request(
+            _make_response(_msg("It's $391 billion but I won't submit.")), rubric=_rubric(_C1)
+        )
+        res = await server.verify(_mock_request(), request)
+
+        assert res.reward == 0.0
+        assert res.judge_error is None  # a real failure, not a judge problem
+        assert res.rubric_judgements is None
+        assert sum(stub.calls.values()) == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_rubric_is_flagged_as_unscorable(self) -> None:
+        server, stub = _rubric_server({})
+        res = await server.verify(_mock_request(), _submitted_request(None))
+
+        assert res.reward == 0.0
+        assert res.judge_error is not None
+        assert sum(stub.calls.values()) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_judge_server_is_flagged_as_unscorable(self) -> None:
+        server = _make_server(judge_model_server=None)
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        assert res.reward == 0.0
+        assert res.rubric_total == 1
         assert res.judge_error is not None
 
-
-# ============================================================================
-# verify(): unlabeled dry-run
-# ============================================================================
-
-
-class TestVerifyDryRun:
     @pytest.mark.asyncio
-    async def test_dry_run_no_judge_no_labels(self) -> None:
-        """Unlabeled dry-run: no judge server, no expected_answer -> reward 0."""
-        server = _make_server(judge_model_server=None)
-        resp = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": "anything"})))
-        res = await server.verify(_mock_request(), _make_verify_request(resp))
-        assert res.reward == 0.0
+    @pytest.mark.parametrize("concurrency", [1, 2, 4])
+    async def test_concurrency_semaphore_is_respected(self, concurrency) -> None:
+        criteria = [_C1, _C2, _C3, "Margin expanded"]
+        server, stub = _rubric_server({c: [1, 1, 1] for c in criteria}, judge_max_concurrency=concurrency)
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(*criteria)))
 
-    @pytest.mark.asyncio
-    async def test_rubric_field_is_ignored_for_reward(self) -> None:
-        """The dataset's rubric field is reference-only and must not affect scoring."""
-        server = _make_server(reward_mode="binary")
-        post_mock = MagicMock()
-        post_mock.read = AsyncMock(return_value=_judge_response_json("Matches. [[2]]"))
-        server.server_client.post = AsyncMock(return_value=post_mock)
-
-        rubric = json.dumps([{"operator": "finance_agent_v2_operator", "criteria": "Revenue = $391.0 billion"}])
-        resp = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": "$391.0 billion"})))
-        res = await server.verify(
-            _mock_request(), _make_verify_request(resp, expected_answer="$391.0 billion", rubric=rubric)
-        )
-        # Reward comes purely from the [[N]] judge, not the rubric.
         assert res.reward == 1.0
-        assert res.judge_rating == 2
+        assert stub.max_in_flight == concurrency
+
+
+# ============================================================================
+# Aggregate metrics
+# ============================================================================
+
+
+class TestAggregateMetrics:
+    def _rollout(self, **overrides) -> dict:
+        rollout = {
+            "reward": 1.0,
+            "rubric_total": 2,
+            "rubric_passed": 2,
+            "rubric_unresolved": 0,
+            "rubric_fraction": 1.0,
+            "rubric_all_pass": True,
+            "judge_error": None,
+            "rubric_judgements": [
+                {"criteria": _C1, "score": 1, "unanimous": True, "attempts_used": 3},
+                {"criteria": _C2, "score": 1, "unanimous": True, "attempts_used": 3},
+            ],
+        }
+        rollout.update(overrides)
+        return rollout
+
+    def test_empty_input(self) -> None:
+        assert _make_server().compute_metrics([]) == {}
+
+    def test_pools_criteria_across_rollouts(self) -> None:
+        partial = self._rollout(
+            reward=0.0,
+            rubric_passed=1,
+            rubric_fraction=0.5,
+            rubric_all_pass=False,
+            rubric_judgements=[
+                {"criteria": _C1, "score": 1, "unanimous": False, "attempts_used": 3, "parse_failures": 1},
+                {"criteria": _C2, "score": 0, "unanimous": True, "attempts_used": 4, "api_failures": 1},
+            ],
+        )
+        metrics = _make_server().compute_metrics([[self._rollout()], [partial]])
+
+        assert metrics["mean/rubric_fraction"] == 0.75
+        assert metrics["mean/rubric_all_pass"] == 0.5
+        # Denominator is criteria, not questions.
+        assert metrics["rubric/criteria_total"] == 4
+        assert metrics["mean/criterion_pass_rate"] == 0.75
+        assert metrics["mean/judge_disagreement_rate"] == 0.25
+        assert metrics["rubric/parse_failures"] == 1
+        assert metrics["rubric/api_failures"] == 1
+        assert metrics["rubric/mean_attempts_per_criterion"] == pytest.approx(3.25)
+
+    def test_unresolved_criteria_excluded_from_rates_but_counted(self) -> None:
+        unresolved = self._rollout(
+            reward=0.0,
+            rubric_passed=1,
+            rubric_unresolved=1,
+            rubric_fraction=0.5,
+            rubric_all_pass=False,
+            judge_error="1/2 criteria unresolved",
+            rubric_judgements=[
+                {"criteria": _C1, "score": 1, "unanimous": True, "attempts_used": 3},
+                {"criteria": _C2, "score": None, "unanimous": None, "attempts_used": 10},
+            ],
+        )
+        metrics = _make_server().compute_metrics([[unresolved]])
+
+        assert metrics["rubric/criteria_unresolved"] == 1
+        assert metrics["rubric/criteria_resolved"] == 1
+        assert metrics["mean/criterion_pass_rate"] == 1.0
+        assert metrics["rubric/rollouts_with_judge_error"] == 1
+
+    def test_no_submission_rollout_counted_separately(self) -> None:
+        no_submit = {"reward": 0.0, "rubric_judgements": None, "judge_error": None}
+        metrics = _make_server().compute_metrics([[no_submit]])
+
+        assert metrics["rubric/rollouts_without_submission"] == 1
+        assert metrics["rubric/criteria_total"] == 0
+        assert "mean/criterion_pass_rate" not in metrics
+
+    def test_key_metrics_promote_judge_health(self) -> None:
+        agent_metrics = {
+            "mean/reward": 0.5,
+            "mean/rubric_fraction": 0.75,
+            "std/reward": 0.1,
+            "rubric/criteria_unresolved": 2,
+            "rubric/rollouts_with_judge_error": 1,
+            "rubric/rollouts_without_submission": 0,
+            "rubric/parse_failures": 3,
+        }
+        key = _make_server().get_key_metrics(agent_metrics)
+
+        assert key["mean/reward"] == 0.5
+        assert key["mean/rubric_fraction"] == 0.75
+        assert "std/reward" not in key
+        # A run whose judge failed must not read as a low score.
+        assert key["rubric/criteria_unresolved"] == 2
+        assert key["rubric/rollouts_with_judge_error"] == 1
+        assert "rubric/parse_failures" not in key

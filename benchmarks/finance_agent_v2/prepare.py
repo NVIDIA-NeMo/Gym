@@ -26,17 +26,17 @@ system / question prompts are imported from ``finance_agent.prompt`` — so the
 benchmark tracks upstream automatically instead of hand-copying schemas. Run it
 in the environment where ``finance-agent`` is installed (the resource server's).
 
-Grading uses **our own** judge (same as ``resources_servers/finance_sec_search``).
-The public FABv2 release ships no official grader, so for the PUBLIC set we score
-each answer with the legacy ``[[0]]/[[1]]/[[2]]`` judge (``app.py::verify`` in
-``reward_mode: binary``). That judge needs a GOLD ``expected_answer``, but the
-public CSV ships only rubric *criteria* (no single gold answer). Every public
-criterion is a positive factual assertion the answer must contain, so we
-synthesize ``expected_answer`` by joining the criteria into a bulleted GOLD
-reference — the judge then awards ``[[2]]`` (reward 1.0) only when the answer
-covers all required facts. The raw ``rubric`` is copied through **verbatim** for
-reference/completeness only; we deliberately do NOT encode how rubric checks map
-to a reward (Vals's private per-criterion grader is licensed).
+Grading uses **our own** judge. The public FABv2 release ships no official grader
+(Vals's per-criterion grader is licensed and not reproduced), so ``app.py::verify``
+judges each ``rubric`` criterion separately with a prompt written from scratch.
+The raw ``rubric`` is therefore copied through **verbatim** — it is the scoring
+input, so any edit to it changes scores.
+
+Every public criterion is a positive factual assertion the answer must contain, so
+joining them yields a readable gold-style reference; that is what ``expected_answer``
+still holds. Nothing reads it since scoring moved to per-criterion judging. It is
+kept so already-prepared datasets stay valid, and is a candidate for removal at the
+next regeneration.
 
 Input precedence for the no-args ``prepare()`` path (first that exists wins),
 all under ``data/``:
@@ -76,6 +76,7 @@ from finance_agent.tools import (
     TavilyWebSearch,
 )
 
+
 ENV_DIR = Path(__file__).parent
 DATA_DIR = ENV_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "vals_v2_public_27q.jsonl"
@@ -89,8 +90,13 @@ OUTPUT_FPATH = DATA_DIR / "vals_v2_public_27q.jsonl"
 _BENCHMARK_REL_FPATH = "benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl"
 
 # Upstream public question set (used as the reproducible fallback source when no
-# local export is present under data/). Pinned to the same repo the tools import from.
-CSV_URL = "https://raw.githubusercontent.com/vals-ai/finance-agent-v2/main/data/public.csv"
+# local export is present under data/). Pinned to the same commit the tools are
+# installed from in resources_servers/finance_agent_v2/requirements.txt, not to a
+# branch: the criteria in this CSV are the scoring input, so fetching from `main`
+# would let a silent upstream edit move scores between two runs of identical code.
+# Bump this together with the requirements pins, and re-baseline afterwards.
+_UPSTREAM_SHA = "22a5ed49aceea6adcd1160ea9f8c0cc1cc7e4d78"
+CSV_URL = f"https://raw.githubusercontent.com/vals-ai/finance-agent-v2/{_UPSTREAM_SHA}/data/public.csv"
 
 # Maps upstream tool name -> upstream Tool class (mirrors get_agent.available_tools).
 _TOOL_CLASSES = {
@@ -136,11 +142,11 @@ def build_tools(tool_names: list[str] | None = None) -> list[dict]:
 def parse_rubric(raw_rubric) -> list[dict]:
     """Normalize a rubric (raw JSON string, list, or dict) into a list of checks.
 
-    Propagated to the output for reference/completeness only. We deliberately do
-    NOT translate operators into any grading vocabulary or encode how a rubric
-    maps to a reward — the public release has no official grader and Vals's
-    private per-criterion grader is licensed. Reward is computed by our own
-    ``[[N]]`` judge against the synthesized ``expected_answer`` (see app.py::verify).
+    Criteria are copied verbatim: ``app.py::verify`` judges each one directly, so
+    this is the scoring input and any rewording here changes scores. Operators are
+    carried through untranslated — the public release has no official grader and
+    Vals's private one is licensed, so nothing here encodes how an operator maps to
+    a reward.
     """
     if not raw_rubric:
         return []
@@ -165,11 +171,11 @@ def parse_rubric(raw_rubric) -> list[dict]:
 
 
 def build_expected_answer(rubric: list[dict]) -> str:
-    """Synthesize a GOLD reference for our judge from the rubric criteria.
+    """Join the rubric criteria into a human-readable reference answer.
 
     The public CSV has no single gold answer; each criterion is a required fact.
-    We join them into a bulleted reference so the legacy ``[[N]]`` judge can grade
-    an answer for completeness against all required facts.
+    Nothing reads this field since scoring moved to per-criterion judging — it is
+    kept as a readable summary of what a full answer must establish.
     """
     criteria = [str(c.get("criteria", "")).strip() for c in rubric]
     criteria = [c for c in criteria if c]
@@ -190,12 +196,10 @@ def _convert_row(row: dict, tools: list[dict]) -> dict | None:
 
     Accepts both raw Vals CSV column names (``Question``, ``Question Type``,
     ``Expert time (mins)``, ``Rubric``) and lowercase JSONL keys. When the row
-    carries a rubric but no explicit ``expected_answer``, a GOLD reference is
-    synthesized from the rubric criteria for ``reward_mode: binary``.
+    carries a rubric but no explicit ``expected_answer``, a readable reference is
+    synthesized from the rubric criteria; scoring reads the ``rubric`` itself.
     """
-    question = (
-        row.get("question") or row.get("Question") or row.get("problem") or row.get("prompt") or ""
-    ).strip()
+    question = (row.get("question") or row.get("Question") or row.get("problem") or row.get("prompt") or "").strip()
     if not question:
         return None
 
@@ -247,6 +251,7 @@ def convert_file(input_file: Path, output_file: Path) -> tuple[int, int]:
 
     count = 0
     labeled = 0
+    without_rubric = 0
     with open(output_file, "w", encoding="utf-8") as f_out:
         for raw in _read_source(input_file):
             sample = _convert_row(raw, tools)
@@ -254,8 +259,23 @@ def convert_file(input_file: Path, output_file: Path) -> tuple[int, int]:
                 continue
             if sample.get("expected_answer"):
                 labeled += 1
+            if not json.loads(sample["rubric"]):
+                without_rubric += 1
             f_out.write(json.dumps(sample) + "\n")
             count += 1
+
+    # Fail loudly on a rubric-less conversion. The rubric is the scoring input, so
+    # if upstream renames the CSV's Rubric column the silent result is a dataset
+    # that still runs, still costs a full rollout per question, and scores every
+    # row 0.0 with judge_error — which reads like a bad model, not a broken
+    # dataset. Unlabeled question-only sources (public.txt) legitimately have no
+    # rubric, so only a partial loss is treated as drift.
+    if count and without_rubric and without_rubric < count:
+        raise ValueError(
+            f"{without_rubric}/{count} rows from {input_file} have no rubric, but others do. "
+            "Those rows cannot be scored. This usually means the source's rubric column was "
+            "renamed or is partly empty — check the source before using this dataset."
+        )
     return count, labeled
 
 
@@ -296,11 +316,15 @@ def prepare() -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Prepare / convert the Vals FABv2 benchmark data.")
     parser.add_argument(
-        "--input", "-i", default=None,
+        "--input",
+        "-i",
+        default=None,
         help="Explicit input file (.csv/.jsonl/.txt). If omitted, uses data/ precedence.",
     )
     parser.add_argument(
-        "--output", "-o", default=None,
+        "--output",
+        "-o",
+        default=None,
         help="Output JSONL path (only with --input). Default: input with a .jsonl suffix.",
     )
     args = parser.parse_args(argv)
@@ -318,8 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Converted {input_file} -> {output_file}")
     print(f"  rows: {count} ({labeled} with a synthesized/explicit expected_answer)")
     print(f"  tools: {', '.join(t['name'] for t in build_tools())}")
-    print("  expected_answer: explicit label, else synthesized from rubric criteria (GOLD for reward_mode=binary)")
-    print("  rubric: copied through verbatim (reference only; not used for reward)")
+    print("  rubric: copied through verbatim (the scoring input; judged one criterion at a time)")
+    print("  expected_answer: explicit label, else synthesized from rubric criteria (reference only)")
     return 0
 
 

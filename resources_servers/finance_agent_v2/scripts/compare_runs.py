@@ -10,8 +10,12 @@ Used for the cache-validation experiment:
       on an absolute *adjusted* price level.
 
 Rows are matched across files by their `question` text (falls back to line
-order). Judge failures (judge_error set / judge_rating is null) are reported
-separately, since a 0.0 there is not a meaningful "incorrect".
+order). Judge failures (`judge_error` set) are reported separately, since a 0.0
+there is not a meaningful "incorrect".
+
+Runs are compared on `rubric_fraction` as well as `reward`. Reward is
+all-or-nothing, so on its own it would hide a perturbation that flips one
+criterion of a question that was already failing another.
 
 Usage:
     python compare_runs.py A.jsonl B.jsonl [C.jsonl ...]
@@ -47,38 +51,39 @@ def main(paths: list[str]) -> int:
     runs = {Path(p).name: load(p) for p in paths}
     names = list(runs)
 
-    # question -> {run_name: (reward, rating, judge_error)}
+    # question -> {run_name: (reward, rubric_fraction, judge_error)}
     table: dict[str, dict[str, tuple]] = {}
     for name, rows in runs.items():
         for i, r in enumerate(rows):
             table.setdefault(key_of(r, i), {})[name] = (
                 r.get("reward"),
-                r.get("judge_rating"),
+                r.get("rubric_fraction"),
                 r.get("judge_error"),
             )
 
-    base = names[0]
     n_match = n_diff = n_judgefail = 0
     print(f"{'question':60}  " + "  ".join(f"{n[:16]:>16}" for n in names))
     print("-" * (62 + 18 * len(names)))
     for q, per_run in table.items():
         cells = []
-        rewards = []
+        outcomes = []
         any_judge_fail = False
         for n in names:
             val = per_run.get(n)
             if val is None:
                 cells.append(f"{'MISSING':>16}")
-                rewards.append(None)
+                outcomes.append(None)
                 continue
-            reward, rating, jerr = val
-            if jerr or rating is None:
+            reward, fraction, jerr = val
+            if jerr:
                 any_judge_fail = True
                 cells.append(f"{'judge_fail':>16}")
-            else:
+            elif fraction is None:
                 cells.append(f"{reward!s:>16}")
-            rewards.append(reward)
-        present = [x for x in rewards if x is not None]
+            else:
+                cells.append(f"{f'{reward} ({fraction:.2f})':>16}")
+            outcomes.append((reward, fraction))
+        present = [x for x in outcomes if x is not None]
         differs = len(set(present)) > 1
         if any_judge_fail:
             n_judgefail += 1
@@ -90,21 +95,22 @@ def main(paths: list[str]) -> int:
         print(f"{q[:60]:60}  " + "  ".join(cells) + flag)
 
     print("-" * (62 + 18 * len(names)))
-    print(f"matched (same reward across runs): {n_match}")
-    print(f"DIFFERENT reward across runs:      {n_diff}")
-    print(f"rows with a judge failure in >=1 run: {n_judgefail}")
+    print(f"matched (same reward + fraction across runs): {n_match}")
+    print(f"DIFFERENT outcome across runs:               {n_diff}")
+    print(f"rows with a judge failure in >=1 run:        {n_judgefail}")
 
-    def mean_reward(name: str) -> str:
+    def mean_of(name: str, index: int) -> str:
         vals = [
-            v[0]
+            v[index]
             for v in (per_run.get(name) for per_run in table.values())
-            if v is not None and not v[2] and v[1] is not None and isinstance(v[0], (int, float))
+            if v is not None and not v[2] and isinstance(v[index], (int, float))
         ]
         return f"{sum(vals) / len(vals):.3f} (n={len(vals)})" if vals else "n/a"
 
-    print("\nmean reward (judge-failures excluded):")
-    for n in names:
-        print(f"  {n}: {mean_reward(n)}")
+    for label, index in (("mean reward", 0), ("mean rubric_fraction", 1)):
+        print(f"\n{label} (judge-failures excluded):")
+        for n in names:
+            print(f"  {n}: {mean_of(n, index)}")
     return 0
 
 

@@ -1,8 +1,10 @@
+# Tool-response cache (pricing / edgar_search / sec.gov filing docs)
+cache*/
+
 # Large/generated data files
 data/*.jsonl
 data/*.csv
 
-# Keep the required gym env test fixtures
+# Keep the required example fixtures (data/*.json metrics are not ignored above)
 !data/example.jsonl
-!data/example_questions.jsonl
 !data/example_rollouts.jsonl

@@ -13,29 +13,35 @@
 config_paths:
   - resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml
 
-# Defaults for judge-model interpolation vars in finance_agent_v2.yaml so the
-# config resolves during prepare (no model needed). Override via env.yaml / CLI
-# when running an actual evaluation.
-search_judge_model_base_url: https://api.openai.com/v1
-search_judge_model_api_key: ""
-search_judge_model_name: gpt-5-mini
+# No endpoints or API keys are set here on purpose. The resource server config
+# gives every judge/tool variable a null-safe `oc.select` default, so this config
+# resolves standalone (prepare needs no model); supply real values through your
+# env.yaml (search_judge_model_base_url / _api_key / _name) or an NVFlow overlay.
 
 # Isolated copy of the resource server for this benchmark.
 finance_agent_v2_benchmark_resources_server:
   _inherit_from: finance_agent_v2_resources_server
 
-# Benchmark agent — inherits the finance_agent loop, overrides the dataset to the
-# frozen benchmark split and points at the isolated resources server above.
+# Benchmark agent — inherits the finance_agent_v2 loop, overrides the dataset to
+# the frozen benchmark split and points at the isolated resources server above.
 finance_agent_v2_benchmark_agent:
-  _inherit_from: finance_agent
+  _inherit_from: finance_agent_v2
   responses_api_agents:
-    finance_agent:
+    finance_agent_v2:
       resources_server:
         name: finance_agent_v2_benchmark_resources_server
       datasets:
       - name: finance_agent_v2
         type: benchmark
         jsonl_fpath: benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl
+        # The v2 system/question prompts are baked into each sample's
+        # responses_create_params by prepare.py (imported from the upstream
+        # finance_agent package), so there is no separate prompt config to apply.
         prompt_config: null
         prepare_script: benchmarks/finance_agent_v2/prepare.py
         num_repeats: 1
+        # Provenance: the public question set + rubrics come from
+        # vals-ai/finance-agent-v2 (MIT), the same repo the tools are imported
+        # from. BenchmarkDatasetConfig does not validate this field, but it is
+        # the only place the dataset's provenance is recorded.
+        license: MIT

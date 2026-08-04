@@ -48,6 +48,17 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 from fastapi import Body, FastAPI
+
+# Upstream Vals finance-agent-v2 tool classes (installed via requirements.txt).
+from finance_agent.tools import (
+    Calculator,
+    EDGARSearch,
+    ParseHtmlPage,
+    PriceHistory,
+    RetrieveInformation,
+    SubmitFinalResult,
+    TavilyWebSearch,
+)
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
@@ -68,16 +79,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
 
-# Upstream Vals finance-agent-v2 tool classes (installed via requirements.txt).
-from finance_agent.tools import (
-    Calculator,
-    EDGARSearch,
-    ParseHtmlPage,
-    PriceHistory,
-    RetrieveInformation,
-    SubmitFinalResult,
-    TavilyWebSearch,
-)
 
 # Local cache layer. Support both package import (tests:
 # resources_servers.finance_agent_v2.app) and flat script execution (the nemo-gym
@@ -91,13 +92,14 @@ try:
         SecFilingSearch,
     )
 except ImportError:  # pragma: no cover - exercised only under flat entrypoint execution
-    from cache import ToolCache
     from cached_tools import (
         CachedEDGARSearch,
         CachedParseHtmlPage,
         CachedPriceHistory,
         SecFilingSearch,
     )
+
+    from cache import ToolCache
 
 logger = logging.getLogger(__name__)
 
@@ -106,15 +108,9 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the Finance Agent v2 resource server."""
 
     # --- Tool API keys (external services the upstream tools call) -----------
-    tavily_api_key: Optional[str] = Field(
-        default=None, description="Tavily API key for the web_search tool."
-    )
-    sec_api_key: Optional[str] = Field(
-        default=None, description="sec-api.io API key for the edgar_search tool."
-    )
-    pricing_data_api_key: Optional[str] = Field(
-        default=None, description="Tiingo API key for the price_history tool."
-    )
+    tavily_api_key: Optional[str] = Field(default=None, description="Tavily API key for the web_search tool.")
+    sec_api_key: Optional[str] = Field(default=None, description="sec-api.io API key for the edgar_search tool.")
+    pricing_data_api_key: Optional[str] = Field(default=None, description="Tiingo API key for the price_history tool.")
 
     # --- Retrieval model (powers retrieve_information) -----------------------
     retrieval_model_server: Optional[ModelServerRef] = Field(
@@ -144,14 +140,15 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = Field(
         default=None, description="Parameters for judge model requests."
     )
-    judge_prompt_template: Optional[str] = Field(
+    rubric_judge_prompt_template: Optional[str] = Field(
         default=None,
-        description="Inline judge prompt template. Takes priority over judge_prompt_template_fpath. "
-        "Supports {question}, {expected_answer}, {generated_answer} placeholders.",
+        description="Inline rubric judge prompt template. Takes priority over "
+        "rubric_judge_prompt_template_fpath. Supports {question}, {generated_answer}, "
+        "{criterion} placeholders and grades one criterion per call.",
     )
-    judge_prompt_template_fpath: str = Field(
-        default="prompt_templates/finance_agent_v2_judge.yaml",
-        description="Fallback file path for the legacy judge prompt template.",
+    rubric_judge_prompt_template_fpath: str = Field(
+        default="prompt_templates/finance_agent_v2_rubric_judge.yaml",
+        description="Fallback file path for the rubric judge prompt template.",
     )
     judge_call_timeout: Optional[float] = Field(
         default=60.0,
@@ -159,11 +156,26 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     )
 
     # --- Scoring behavior ----------------------------------------------------
-    reward_mode: str = Field(
-        default="binary",
-        description="How the [[N]] judge rating maps to reward. "
-        "'binary': only [[2]] -> 1.0, else 0.0. "
-        "'scaled': [[0]] -> 0.0, [[1]] -> 0.5, [[2]] -> 1.0.",
+    # Each criterion is judged repeatedly and decided by majority vote. An attempt
+    # only counts as a success when the reply parses and yields an integer 0/1;
+    # API errors, timeouts, empty output, and unparseable replies are all retried
+    # against the same budget.
+    judge_required_successes: int = Field(
+        default=3,
+        description="Successful (parsed) judge verdicts needed per criterion before "
+        "voting. Keep odd so the majority cannot tie.",
+    )
+    judge_max_attempts: int = Field(
+        default=10,
+        description="Hard cap on judge calls per criterion. Whichever comes first, "
+        "judge_required_successes or this, ends the criterion. Falling short leaves "
+        "the criterion unresolved (score null).",
+    )
+    judge_max_concurrency: int = Field(
+        default=4,
+        description="Max concurrent judge calls per rollout, across criteria. Bounds "
+        "wall time (a question has ~9 criteria x 3-10 calls) without stampeding the "
+        "judge endpoint. 1 makes judging fully sequential.",
     )
 
     # --- Tool response caching -----------------------------------------------
@@ -231,25 +243,60 @@ class FinanceAgentV2RunRequest(BaseRunRequest):
 class FinanceAgentV2VerifyRequest(FinanceAgentV2RunRequest, BaseVerifyRequest):
     """Verify request for Finance Agent v2 tasks."""
 
-    # Carried through from the dataset for completeness/reference only. The public
-    # FABv2 release has no official grader, so this is NOT used for reward here —
-    # scoring uses our own [[N]] judge (see verify()).
+    # The scoring input: every criterion is judged separately (see verify()).
     rubric: Optional[str] = Field(
         default=None,
-        description="Reference-only: JSON string of the dataset's rubric criteria. "
-        "Not used for scoring.",
+        description="JSON string of the dataset's rubric criteria — the scoring input. "
+        "Each entry has 'criteria' (the claim to grade) and 'operator'. Absent/empty "
+        "means an unlabeled dry run, which cannot be scored.",
     )
+
+
+class RubricJudgement(BaseModel):
+    """Per-criterion judging record: the verdict plus everything needed to audit it.
+
+    ``score`` is None when the criterion never produced ``judge_required_successes``
+    parsable verdicts within ``judge_max_attempts``. That is a judge failure, not a
+    "not met" — the enclosing question's reward drops to 0.0 (``BaseVerifyResponse.reward``
+    is a non-optional float) but ``judge_error`` is set so those rows stay filterable.
+    """
+
+    criteria: str
+    operator: Optional[str] = None
+    score: Optional[int] = None
+    # Successful verdicts in call order. Length == judge_required_successes unless
+    # the criterion is unresolved.
+    votes: List[int] = Field(default_factory=list)
+    votes_for: int = 0
+    votes_against: int = 0
+    # False when the judge contradicted itself across votes. Aggregated into a
+    # disagreement rate so judge flakiness is trackable over time.
+    unanimous: Optional[bool] = None
+    attempts_used: int = 0
+    parse_failures: int = 0
+    api_failures: int = 0
+    # One entry per successful vote, in the same order as ``votes``.
+    evidence: List[str] = Field(default_factory=list)
+    reasons: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
 
 
 class FinanceAgentV2VerifyResponse(BaseVerifyResponse):
     """Verify response for Finance Agent v2 tasks."""
 
     expected_answer: Optional[str] = None
-    judge_rating: Optional[int] = None
-    judge_text: Optional[str] = None
-    # Set when the judge failed to produce a usable [[N]] verdict (call error, or
-    # no rating after all retries). Distinguishes a *judge failure* (reward 0.0 is
-    # not meaningful — filter/ignore these) from a genuine [[0]] "incorrect".
+    # Full per-criterion record — the debugging trail and the disagreement signal.
+    rubric_judgements: Optional[List[RubricJudgement]] = None
+    rubric_total: Optional[int] = None
+    rubric_passed: Optional[int] = None
+    rubric_unresolved: Optional[int] = None
+    # Partial credit, reported alongside the all-or-nothing reward so a 0.0 that
+    # missed one criterion is distinguishable from one that missed everything.
+    rubric_fraction: Optional[float] = None
+    rubric_all_pass: Optional[bool] = None
+    # Set when scoring could not be completed (no rubric, or any criterion left
+    # unresolved). Distinguishes a *judge failure* — where reward 0.0 is not a
+    # meaningful verdict and should be filtered — from a genuine miss.
     judge_error: Optional[str] = None
 
 
@@ -306,12 +353,12 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             with open(self.config.retrieval_system_prompt_fpath, "r") as f:
                 self._retrieval_system_prompt = yaml.safe_load(f)["retrieval_system_prompt"].strip()
 
-        # Judge prompt (legacy [[0]]/[[1]]/[[2]] mode).
-        if self.config.judge_prompt_template:
-            self._judge_prompt_template = self.config.judge_prompt_template.strip()
+        # Rubric judge prompt: rendered once per criterion by verify().
+        if self.config.rubric_judge_prompt_template:
+            self._rubric_judge_prompt_template = self.config.rubric_judge_prompt_template.strip()
         else:
-            with open(self.config.judge_prompt_template_fpath, "r") as f:
-                self._judge_prompt_template = yaml.safe_load(f)["judge_prompt_template"].strip()
+            with open(self.config.rubric_judge_prompt_template_fpath, "r") as f:
+                self._rubric_judge_prompt_template = yaml.safe_load(f)["rubric_judge_prompt_template"].strip()
 
         self._tools = self._build_tools()
 
@@ -341,9 +388,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         # shell via the config's ${oc.env:TAVILY_API_KEY} resolver, so behavior is
         # functionally identical to Vals when a key is present.
         if self.config.tavily_api_key:
-            tools["web_search"] = self._try_build(
-                "web_search", lambda: TavilyWebSearch(self.config.tavily_api_key)
-            )
+            tools["web_search"] = self._try_build("web_search", lambda: TavilyWebSearch(self.config.tavily_api_key))
         else:
             logger.info("No tavily_api_key configured — web_search will be unavailable")
             tools["web_search"] = None
@@ -427,12 +472,16 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         if elapsed > self.config.max_rollout_time_seconds:
             logger.warning(
                 "Session %s exceeded time budget (%.0fs > %.0fs)",
-                session_id, elapsed, self.config.max_rollout_time_seconds,
+                session_id,
+                elapsed,
+                self.config.max_rollout_time_seconds,
             )
-            return json.dumps({
-                "error": f"Time budget exhausted ({elapsed:.0f}s / {self.config.max_rollout_time_seconds:.0f}s). "
-                "No further tool calls will be executed. Call submit_final_result immediately with your best answer."
-            })
+            return json.dumps(
+                {
+                    "error": f"Time budget exhausted ({elapsed:.0f}s / {self.config.max_rollout_time_seconds:.0f}s). "
+                    "No further tool calls will be executed. Call submit_final_result immediately with your best answer."
+                }
+            )
         return None
 
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
@@ -462,9 +511,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         @app.post("/{tool_name}")
         async def handle_unknown_tool(tool_name: str):
             return {
-                "results": json.dumps(
-                    {"error": f"Tool '{tool_name}' does not exist. Available tools: {available}"}
-                )
+                "results": json.dumps({"error": f"Tool '{tool_name}' does not exist. Available tools: {available}"})
             }
 
         return app
@@ -478,14 +525,16 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
     async def _dispatch_tool(self, tool_name: str, request: Request, args: dict) -> Dict[str, str]:
         session_id = request.session.get(SESSION_ID_KEY, "")
 
-        if (timeout_msg := self._check_time_budget(session_id)):
+        if timeout_msg := self._check_time_budget(session_id):
             return {"results": timeout_msg}
 
         tool = self._tools.get(tool_name)
         if tool is None:
             return {
                 "results": json.dumps(
-                    {"error": f"Tool '{tool_name}' is not available (required API key or model server not configured)."}
+                    {
+                        "error": f"Tool '{tool_name}' is not available (required API key or model server not configured)."
+                    }
                 )
             }
 
@@ -557,13 +606,224 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
     # ------------------------------------------------------------------
     # Verify
     # ------------------------------------------------------------------
-    async def verify(self, request: Request, body: FinanceAgentV2VerifyRequest) -> FinanceAgentV2VerifyResponse:
-        """Verify the agent's answer (path A: own judge).
+    @staticmethod
+    def _parse_rubric(rubric: Optional[str]) -> List[Dict[str, Any]]:
+        """Parse the dataset's rubric JSON string into criteria dicts.
 
-        Rating scale (reward depends on config.reward_mode):
-            [[2]] = fully correct  -> binary: 1.0 | scaled: 1.0
-            [[1]] = partial        -> binary: 0.0 | scaled: 0.5
-            [[0]] = incorrect      -> binary: 0.0 | scaled: 0.0
+        Returns [] for anything unusable (absent, malformed, not a list, or no
+        entry carrying a non-empty ``criteria``), which verify() treats as an
+        unscorable dry run rather than a zero.
+        """
+        if not rubric:
+            return []
+        try:
+            parsed = json.loads(rubric)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Rubric is not valid JSON — cannot score")
+            return []
+        if not isinstance(parsed, list):
+            logger.warning("Rubric JSON is %s, expected a list — cannot score", type(parsed).__name__)
+            return []
+
+        criteria: List[Dict[str, Any]] = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            text = entry.get("criteria")
+            if isinstance(text, str) and text.strip():
+                criteria.append({"criteria": text.strip(), "operator": entry.get("operator")})
+        return criteria
+
+    @staticmethod
+    def _extract_score(judge_text: str) -> Optional[int]:
+        """Pull the binary ``score`` out of a judge reply, or None if unusable.
+
+        Accepts a bare JSON object or one fenced in markdown, and scans candidate
+        objects from the end so a worked example quoted mid-reasoning cannot
+        outrank the judge's actual verdict. Only integer 0/1 counts — a string
+        ``"pass"`` or a float is a parse failure, because silently coercing those
+        would let a confused judge vote.
+        """
+        if not judge_text or not judge_text.strip():
+            return None
+
+        candidates = re.findall(r"\{.*?\}", judge_text, re.DOTALL)
+        for blob in reversed(candidates):
+            try:
+                payload = json.loads(blob)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict) or "score" not in payload:
+                continue
+            score = payload["score"]
+            # bool is an int subclass in Python; True/False is not a verdict.
+            if isinstance(score, int) and not isinstance(score, bool) and score in (0, 1):
+                return score
+            return None
+        return None
+
+    @staticmethod
+    def _judge_reply_text(judge_response: NeMoGymResponse) -> str:
+        """Concatenate the visible text of a judge response."""
+        text = ""
+        for item in judge_response.output:
+            if getattr(item, "type", None) != "message":
+                continue
+            for part in getattr(item, "content", []) or []:
+                chunk = getattr(part, "text", None)
+                if isinstance(chunk, str):
+                    text += chunk
+        return text
+
+    async def _judge_attempt(self, prompt: str, attempt: int) -> tuple[Optional[int], Optional[str], str]:
+        """Make one judge call. Returns (score, error, raw_reply_text).
+
+        ``score`` is None when the call failed or the reply could not be parsed;
+        ``error`` describes which. Callers retry either case.
+        """
+        params = (
+            self.config.judge_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
+        ).model_copy(deep=True)
+        params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+
+        # Escalate after a failed attempt. Reasoning judge models can spend the
+        # entire max_output_tokens budget on hidden reasoning and emit no visible
+        # text, so retrying with identical params reproduces the empty output.
+        # Give later attempts a real chance: raise the output budget and lower the
+        # reasoning effort so the model actually emits the JSON verdict.
+        if attempt > 0:
+            if getattr(params, "max_output_tokens", None):
+                params.max_output_tokens = min(max(params.max_output_tokens, 4096) * 2, 32768)
+            if getattr(params, "reasoning", None) is not None:
+                try:
+                    params.reasoning.effort = "low"
+                except Exception:  # noqa: BLE001
+                    pass
+
+        try:
+            response = await asyncio.wait_for(
+                self.server_client.post(
+                    server_name=self.config.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=params,
+                ),
+                timeout=self.config.judge_call_timeout,
+            )
+            judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+        except Exception as e:  # noqa: BLE001
+            return None, f"judge call failed: {type(e).__name__}: {e}", ""
+
+        reply = self._judge_reply_text(judge_response)
+        score = self._extract_score(reply)
+        if score is None:
+            error = (
+                "judge returned empty output (likely token budget exhausted by reasoning)"
+                if not reply.strip()
+                else "judge reply had no integer 0/1 score"
+            )
+            return None, error, reply
+        return score, None, reply
+
+    async def _judge_criterion(
+        self, question: str, generated_answer: str, criterion: Dict[str, Any]
+    ) -> RubricJudgement:
+        """Judge one criterion, voting over repeated calls.
+
+        Calls the judge until ``judge_required_successes`` replies parse to a 0/1
+        or ``judge_max_attempts`` is spent, whichever comes first. API errors,
+        timeouts, and unparseable replies all consume an attempt and are retried.
+        Falling short of the required successes leaves ``score`` None (unresolved),
+        which is a judge failure rather than a "not met".
+        """
+        prompt = (
+            self._rubric_judge_prompt_template.replace("{question}", question)
+            .replace("{generated_answer}", generated_answer)
+            .replace("{criterion}", criterion["criteria"])
+        )
+
+        record = RubricJudgement(criteria=criterion["criteria"], operator=criterion.get("operator"))
+        needed = max(1, self.config.judge_required_successes)
+        last_error: Optional[str] = None
+
+        max_attempts = max(1, self.config.judge_max_attempts)
+        for attempt in range(max_attempts):
+            if len(record.votes) >= needed:
+                break
+            record.attempts_used += 1
+            score, error, reply = await self._judge_attempt(prompt, attempt)
+
+            if score is None:
+                last_error = error
+                if reply:
+                    record.parse_failures += 1
+                else:
+                    record.api_failures += 1
+                logger.warning(
+                    "Rubric judge attempt %d failed (%s) for criterion: %.80s",
+                    record.attempts_used,
+                    error,
+                    criterion["criteria"],
+                )
+                # Back off between failures only, capped so a flaky judge cannot
+                # stretch one criterion past the rollout budget, and skipped on the
+                # last attempt where there is nothing left to wait for.
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(min(2**attempt, 8))
+                continue
+
+            record.votes.append(score)
+            payload = self._extract_json_payload(reply)
+            record.evidence.append(str(payload.get("extracted_evidence", ""))[:1000])
+            record.reasons.append(str(payload.get("reason", ""))[:1000])
+
+        record.votes_for = sum(record.votes)
+        record.votes_against = len(record.votes) - record.votes_for
+
+        if len(record.votes) < needed:
+            record.error = last_error or f"only {len(record.votes)}/{needed} successful judge verdicts"
+            logger.error(
+                "Criterion unresolved after %d attempts (%s): %.80s",
+                record.attempts_used,
+                record.error,
+                criterion["criteria"],
+            )
+            return record
+
+        record.score = 1 if record.votes_for * 2 > len(record.votes) else 0
+        record.unanimous = record.votes_for == 0 or record.votes_against == 0
+        if not record.unanimous:
+            logger.info(
+                "Judge disagreed %d-%d on criterion: %.80s",
+                record.votes_for,
+                record.votes_against,
+                criterion["criteria"],
+            )
+        return record
+
+    @staticmethod
+    def _extract_json_payload(judge_text: str) -> Dict[str, Any]:
+        """Return the scored JSON object from a reply, or {} if not found.
+
+        Mirrors _extract_score's last-object-wins scan so the recorded evidence
+        and reason come from the same object the verdict came from.
+        """
+        for blob in reversed(re.findall(r"\{.*?\}", judge_text or "", re.DOTALL)):
+            try:
+                payload = json.loads(blob)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(payload, dict) and "score" in payload:
+                return payload
+        return {}
+
+    async def verify(self, request: Request, body: FinanceAgentV2VerifyRequest) -> FinanceAgentV2VerifyResponse:
+        """Score the agent's answer against the dataset's rubric criteria.
+
+        Each criterion is judged independently and decided by majority vote (see
+        ``_judge_criterion``). Reward is all-or-nothing: 1.0 only when every
+        criterion passes, else 0.0. ``rubric_fraction`` carries partial credit so a
+        near miss is distinguishable from a total one, and any unresolved criterion
+        sets ``judge_error`` so judge failures never masquerade as low scores.
         """
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id:
@@ -588,113 +848,151 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                         pass
                     break
 
+        # No submission is a genuine failure, not a judge failure: the agent had its
+        # chances (the loop nudges it until max_steps). Return before spending on the
+        # judge.
         if not generated_answer:
             return FinanceAgentV2VerifyResponse(**body.model_dump(), reward=0.0)
 
-        # Unlabeled dry-run: no expected_answer and no judge -> reward 0.
-        if not self.config.judge_model_server:
-            if body.expected_answer is None:
-                return FinanceAgentV2VerifyResponse(**body.model_dump(), reward=0.0)
-            reward = 1.0 if body.expected_answer.lower() in generated_answer.lower() else 0.0
-            return FinanceAgentV2VerifyResponse(**body.model_dump(), reward=reward)
-
-        # Legacy [[0]]/[[1]]/[[2]] judge.
-        judge_user_prompt = self._judge_prompt_template
-        judge_user_prompt = judge_user_prompt.replace("{question}", question)
-        judge_user_prompt = judge_user_prompt.replace("{expected_answer}", body.expected_answer or "")
-        judge_user_prompt = judge_user_prompt.replace("{generated_answer}", generated_answer)
-
-        judge_params = (
-            self.config.judge_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
-        ).model_copy(deep=True)
-        judge_params.input = [NeMoGymEasyInputMessage(role="user", content=judge_user_prompt)]
-
-        max_judge_retries = 3
-        judge_text = ""
-        rating = None
-        judge_error = None
-        for attempt in range(max_judge_retries):
-            # Escalate after a no-verdict attempt. Reasoning judge models can spend
-            # the entire max_output_tokens budget on hidden reasoning and emit no
-            # visible text, so retrying with identical params reproduces the empty
-            # output. Give later attempts a real chance: raise the output budget and
-            # lower the reasoning effort so the model actually emits the [[N]] tag.
-            attempt_params = judge_params.model_copy(deep=True)
-            if attempt > 0:
-                if getattr(attempt_params, "max_output_tokens", None):
-                    attempt_params.max_output_tokens = min(max(attempt_params.max_output_tokens, 4096) * 2, 32768)
-                if getattr(attempt_params, "reasoning", None) is not None:
-                    try:
-                        attempt_params.reasoning.effort = "low"
-                    except Exception:  # noqa: BLE001
-                        pass
-
-            try:
-                response = await asyncio.wait_for(
-                    self.server_client.post(
-                        server_name=self.config.judge_model_server.name,
-                        url_path="/v1/responses",
-                        json=attempt_params,
-                    ),
-                    timeout=self.config.judge_call_timeout,
-                )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as e:  # noqa: BLE001
-                judge_error = f"judge call failed: {type(e).__name__}: {e}"
-                logger.warning("Judge call attempt %d/%d failed: %s: %s", attempt + 1, max_judge_retries, type(e).__name__, e)
-                if attempt < max_judge_retries - 1:
-                    await asyncio.sleep(2**attempt)
-                    continue
-                logger.error("Judge model call failed after %d attempts", max_judge_retries)
-                # Judge failure: reward 0.0 is not a meaningful verdict — flag it.
-                return FinanceAgentV2VerifyResponse(
-                    **body.model_dump(), reward=0.0, judge_rating=None,
-                    judge_text=judge_text, judge_error=judge_error,
-                )
-
-            judge_text = ""
-            try:
-                last_output = judge_response.output[-1]
-                if getattr(last_output, "type", None) == "message":
-                    judge_text = getattr(last_output.content[-1], "text", "")
-            except Exception:  # noqa: BLE001
-                pass
-
-            rating_match = re.search(r"\[\[(\d+)\]\]", judge_text)
-            rating = int(rating_match.group(1)) if rating_match else None
-            if rating is not None:
-                judge_error = None
-                break
-
-            judge_error = (
-                "judge returned empty output (likely token budget exhausted by reasoning)"
-                if not judge_text.strip()
-                else "judge returned no [[N]] verdict"
-            )
-            logger.warning(
-                "Judge returned no [[N]] rating (attempt %d/%d). Output: %s",
-                attempt + 1, max_judge_retries, judge_text[:200],
-            )
-            if attempt < max_judge_retries - 1:
-                await asyncio.sleep(2**attempt)
-
-        # No usable verdict after all retries: surface as a judge failure rather
-        # than silently scoring a (misleading) 0.0.
-        if rating is None:
-            logger.error("Judge produced no verdict after %d attempts: %s", max_judge_retries, judge_error)
+        criteria = self._parse_rubric(body.rubric)
+        if not criteria:
             return FinanceAgentV2VerifyResponse(
-                **body.model_dump(), reward=0.0, judge_rating=None,
-                judge_text=judge_text, judge_error=judge_error,
+                **body.model_dump(),
+                reward=0.0,
+                judge_error="no usable rubric criteria — unlabeled dry run, not scorable",
             )
 
-        if self.config.reward_mode == "scaled":
-            reward = {0: 0.0, 1: 0.5, 2: 1.0}.get(rating, 0.0)
-        else:
-            reward = 1.0 if rating == 2 else 0.0
+        if not self.config.judge_model_server:
+            return FinanceAgentV2VerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                rubric_total=len(criteria),
+                judge_error="no judge_model_server configured — cannot score the rubric",
+            )
+
+        # Criteria are independent, so judge them concurrently under a semaphore:
+        # a question carries ~9 criteria x 3-10 calls, which is slow serially but
+        # would stampede the judge endpoint unbounded.
+        semaphore = asyncio.Semaphore(max(1, self.config.judge_max_concurrency))
+
+        async def judge_one(criterion: Dict[str, Any]) -> RubricJudgement:
+            async with semaphore:
+                return await self._judge_criterion(question, generated_answer, criterion)
+
+        judgements = await asyncio.gather(*(judge_one(c) for c in criteria))
+
+        total = len(judgements)
+        passed = sum(1 for j in judgements if j.score == 1)
+        unresolved = sum(1 for j in judgements if j.score is None)
+        all_pass = unresolved == 0 and passed == total
+
+        judge_error = None
+        if unresolved:
+            first = next(j for j in judgements if j.score is None)
+            judge_error = f"{unresolved}/{total} criteria unresolved (e.g. {first.error})"
+
+        logger.info(
+            "Rubric verdict: %d/%d passed, %d unresolved, reward=%.1f",
+            passed,
+            total,
+            unresolved,
+            1.0 if all_pass else 0.0,
+        )
 
         return FinanceAgentV2VerifyResponse(
-            **body.model_dump(), reward=reward, judge_rating=rating, judge_text=judge_text
+            **body.model_dump(),
+            reward=1.0 if all_pass else 0.0,
+            rubric_judgements=list(judgements),
+            rubric_total=total,
+            rubric_passed=passed,
+            rubric_unresolved=unresolved,
+            rubric_fraction=(passed / total) if total else None,
+            rubric_all_pass=all_pass,
+            judge_error=judge_error,
         )
+
+    # ------------------------------------------------------------------
+    # Aggregate metrics
+    # ------------------------------------------------------------------
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Rubric-level metrics on top of the RewardProfiler baseline.
+
+        The headline reward is all-or-nothing, which hides how close a failing
+        answer was and cannot distinguish a genuine miss from a judge that never
+        returned a verdict. These fill both gaps:
+
+        - ``mean/rubric_fraction`` is the partial-credit view of the same runs.
+        - ``mean/criterion_pass_rate`` pools every criterion so the denominator is
+          criteria, not questions, and is not skewed by rubric length.
+        - ``mean/judge_disagreement_rate`` is the share of resolved criteria where
+          the judge contradicted itself across votes. Track it over time: a rise
+          means the judge is getting less decisive on this data, independent of
+          model quality.
+        - the ``rubric/*`` counters keep judge failures and retry cost visible
+          instead of letting them hide inside the score.
+
+        Verify responses arrive as dicts, so ``rubric_judgements`` is read as
+        serialized dicts rather than ``RubricJudgement`` instances.
+        """
+        rollouts = [r for task in tasks for r in task]
+        if not rollouts:
+            return {}
+
+        fractions = [r["rubric_fraction"] for r in rollouts if r.get("rubric_fraction") is not None]
+        all_pass_flags = [bool(r["rubric_all_pass"]) for r in rollouts if r.get("rubric_all_pass") is not None]
+
+        criteria: List[Dict[str, Any]] = []
+        for r in rollouts:
+            for j in r.get("rubric_judgements") or []:
+                if isinstance(j, dict):
+                    criteria.append(j)
+
+        resolved = [j for j in criteria if j.get("score") is not None]
+        unresolved = len(criteria) - len(resolved)
+        # Only resolved criteria carry a meaningful unanimity flag.
+        contested = sum(1 for j in resolved if j.get("unanimous") is False)
+        judge_error_rollouts = sum(1 for r in rollouts if r.get("judge_error"))
+        no_submission = sum(1 for r in rollouts if not r.get("rubric_judgements") and not r.get("judge_error"))
+
+        metrics: Dict[str, Any] = {
+            "rubric/rollouts": len(rollouts),
+            "rubric/criteria_total": len(criteria),
+            "rubric/criteria_resolved": len(resolved),
+            "rubric/criteria_unresolved": unresolved,
+            "rubric/rollouts_with_judge_error": judge_error_rollouts,
+            "rubric/rollouts_without_submission": no_submission,
+            "rubric/parse_failures": sum(int(j.get("parse_failures") or 0) for j in criteria),
+            "rubric/api_failures": sum(int(j.get("api_failures") or 0) for j in criteria),
+        }
+        if fractions:
+            metrics["mean/rubric_fraction"] = sum(fractions) / len(fractions)
+        if all_pass_flags:
+            metrics["mean/rubric_all_pass"] = sum(all_pass_flags) / len(all_pass_flags)
+        if resolved:
+            metrics["mean/criterion_pass_rate"] = sum(1 for j in resolved if j.get("score") == 1) / len(resolved)
+            metrics["mean/judge_disagreement_rate"] = contested / len(resolved)
+        if criteria:
+            metrics["rubric/mean_attempts_per_criterion"] = sum(
+                int(j.get("attempts_used") or 0) for j in criteria
+            ) / len(criteria)
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Headline metrics: the usual mean/* plus judge-health counters.
+
+        The counters are promoted deliberately — a run whose judge failed on a
+        third of its criteria should not be read as a low score, and that is only
+        obvious if the failure count sits next to the score.
+        """
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for k in (
+            "rubric/criteria_unresolved",
+            "rubric/rollouts_with_judge_error",
+            "rubric/rollouts_without_submission",
+        ):
+            if k in agent_metrics:
+                key[k] = agent_metrics[k]
+        return key
 
 
 if __name__ == "__main__":

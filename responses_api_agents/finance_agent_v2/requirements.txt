@@ -1,0 +1,19 @@
+# Finance Agent v2 (FABv2) Agent Dependencies
+#
+# Unlike responses_api_agents/finance_agent (nemo-gym only), this agent depends
+# on the upstream package so that every parity-relevant value can be imported
+# instead of copied: the done-tool name, the 1h time budget, the valid tool
+# names, and the abort-worthy exception type. The pins are exact and must stay
+# byte-identical to resources_servers/finance_agent_v2/requirements.txt —
+# tests/test_app.py asserts they match, so the agent and the tools it drives can
+# never be built from two different upstream commits.
+-e nemo-gym[dev] @ ../../
+
+# Vals model-library (transitive via finance-agent; pinned explicitly so both
+# components resolve the same commit). NVIDIA fork of vals-ai/model-library@v0.1.25
+# with the openai floor dropped (>=2.28.0 -> <3.0) and a static version = "0.1.25".
+model-library @ git+https://gitlab-master.nvidia.com/swdl-nemollm-mlops/alignment-data/model-library.git@d80375ac4c8724c4c6b7824c7335210c0db05011
+
+# Vals finance-agent-v2 (provides finance_agent.get_agent / .tools / .exceptions).
+# No upstream tags exist; pinned to the HEAD commit at integration time.
+finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@22a5ed49aceea6adcd1160ea9f8c0cc1cc7e4d78

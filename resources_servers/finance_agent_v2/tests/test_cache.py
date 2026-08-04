@@ -23,8 +23,8 @@ it with the untouched upstream code.
 import logging
 
 import pytest
-
 from finance_agent.tools import EDGARSearch, ParseHtmlPage, PriceHistory
+
 from resources_servers.finance_agent_v2.cache import ToolCache
 from resources_servers.finance_agent_v2.cached_tools import (
     CachedEDGARSearch,
@@ -33,13 +33,26 @@ from resources_servers.finance_agent_v2.cached_tools import (
     SecFilingSearch,
 )
 
+
 _LOG = logging.getLogger("test")
 
 # A small immutable daily series (Tiingo-shaped records).
 _RECORDS = [
-    {"date": f"2024-01-{d:02d}T00:00:00.000Z", "open": 10.0 + d, "high": 11.0 + d, "low": 9.0 + d,
-     "close": 10.5 + d, "adjOpen": 9.9 + d, "adjHigh": 10.9 + d, "adjLow": 8.9 + d, "adjClose": 10.4 + d,
-     "volume": 1000 + d, "adjVolume": 1000 + d, "divCash": 0.0, "splitFactor": 1.0}
+    {
+        "date": f"2024-01-{d:02d}T00:00:00.000Z",
+        "open": 10.0 + d,
+        "high": 11.0 + d,
+        "low": 9.0 + d,
+        "close": 10.5 + d,
+        "adjOpen": 9.9 + d,
+        "adjHigh": 10.9 + d,
+        "adjLow": 8.9 + d,
+        "adjClose": 10.4 + d,
+        "volume": 1000 + d,
+        "adjVolume": 1000 + d,
+        "divCash": 0.0,
+        "splitFactor": 1.0,
+    }
     for d in range(2, 11)  # 2024-01-02 .. 2024-01-10
 ]
 
@@ -102,8 +115,8 @@ class TestCachedPriceHistory:
         calls_after_first = counter[0]
         second = (await cached.execute(_args(), {}, _LOG)).output
 
-        assert first == live_out          # cache miss -> live -> identical
-        assert second == live_out         # cache hit  -> identical
+        assert first == live_out  # cache miss -> live -> identical
+        assert second == live_out  # cache hit  -> identical
         assert counter[0] == calls_after_first  # second call hit disk, not network
 
     @pytest.mark.asyncio
@@ -135,7 +148,7 @@ class TestCachedPriceHistory:
         await cached.execute(_args(ticker="aapl", asset_class="equity"), {}, _LOG)
         await cached.execute(_args(ticker="BTCUSD", asset_class="crypto"), {}, _LOG)
 
-        assert cache.path("pricing", "equity", "AAPL.jsonl").exists()   # equity uppercases
+        assert cache.path("pricing", "equity", "AAPL.jsonl").exists()  # equity uppercases
         assert cache.path("pricing", "crypto", "btcusd.jsonl").exists()  # crypto lowercases
 
 
@@ -150,8 +163,16 @@ class TestCachedEDGARSearch:
         filings = [{"accessionNo": f"000-{i}", "formType": "10-K"} for i in range(10)]
         counter = [0]
 
-        async def _fake_search(self, search_query, start_date="1900-01-01", end_date="2026-03-01",
-                               top_n_results=100, page=1, form_types=None, ciks=None):
+        async def _fake_search(
+            self,
+            search_query,
+            start_date="1900-01-01",
+            end_date="2026-03-01",
+            top_n_results=100,
+            page=1,
+            form_types=None,
+            ciks=None,
+        ):
             counter[0] += 1
             return filings[: int(top_n_results)]
 
@@ -172,8 +193,16 @@ class TestCachedEDGARSearch:
     async def test_cache_file_is_debuggable(self, tmp_path, monkeypatch):
         filings = [{"accessionNo": "000-1", "formType": "10-K"}]
 
-        async def _fake_search(self, search_query, start_date="1900-01-01", end_date="2026-03-01",
-                               top_n_results=100, page=1, form_types=None, ciks=None):
+        async def _fake_search(
+            self,
+            search_query,
+            start_date="1900-01-01",
+            end_date="2026-03-01",
+            top_n_results=100,
+            page=1,
+            form_types=None,
+            ciks=None,
+        ):
             return filings
 
         monkeypatch.setattr(EDGARSearch, "_execute_search", _fake_search)
@@ -260,9 +289,13 @@ class TestSecFilingSearch:
         submissions = {
             "0000320193": {
                 "000032019324000123": {
-                    "ticker": "AAPL", "cik": "0000320193", "form": "10-K",
-                    "filing_date": "2024-11-01", "report_date": "2024-09-28",
-                    "accession_number": "0000320193-24-000123", "primary_document": "aapl-20240928.htm",
+                    "ticker": "AAPL",
+                    "cik": "0000320193",
+                    "form": "10-K",
+                    "filing_date": "2024-11-01",
+                    "report_date": "2024-09-28",
+                    "accession_number": "0000320193-24-000123",
+                    "primary_document": "aapl-20240928.htm",
                     "filing_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm",
                 }
             }

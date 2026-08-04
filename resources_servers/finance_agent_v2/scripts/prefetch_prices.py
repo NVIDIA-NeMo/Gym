@@ -26,13 +26,14 @@ Design notes:
   - Idempotent/resumable: a ticker whose master already covers the window is
     skipped unless ``--force`` is given.
 
-Usage:
-    python scripts/prefetch_prices.py \
+Usage (from the repository root):
+    python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
         --cache-dir /shared/cache/finance_agent_v2 \
         --tickers AAPL MSFT NVDA \
         --asset-class equity
     # or from a file (one "TICKER[,asset_class]" per line):
-    python scripts/prefetch_prices.py --cache-dir ... --tickers-file tickers.txt
+    python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
+        --cache-dir ... --tickers-file tickers.txt
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import os
 import sys
 from pathlib import Path
 
+
 # Make the resource server package importable whether run from its dir or elsewhere.
 _PKG_ROOT = Path(__file__).resolve().parents[1]
 if str(_PKG_ROOT.parent.parent) not in sys.path:
@@ -50,13 +52,15 @@ if str(_PKG_ROOT.parent.parent) not in sys.path:
 
 from finance_agent.tools import MAX_END_DATE  # noqa: E402
 
+
 try:
     from resources_servers.finance_agent_v2.cache import ToolCache
     from resources_servers.finance_agent_v2.cached_tools import CachedPriceHistory
 except ImportError:  # pragma: no cover - flat execution fallback
     sys.path.insert(0, str(_PKG_ROOT))
-    from cache import ToolCache  # type: ignore
     from cached_tools import CachedPriceHistory  # type: ignore
+
+    from cache import ToolCache  # type: ignore
 
 
 def _parse_ticker_line(line: str, default_asset_class: str) -> tuple[str, str] | None:
@@ -142,7 +146,9 @@ def main() -> None:
     p.add_argument("--tickers", nargs="*", help="Ticker symbols to prefetch.")
     p.add_argument("--tickers-file", help="File with one 'TICKER[,asset_class]' per line.")
     p.add_argument(
-        "--asset-class", default="equity", choices=["equity", "etf", "crypto", "fx"],
+        "--asset-class",
+        default="equity",
+        choices=["equity", "etf", "crypto", "fx"],
         help="Default asset class for tickers without an explicit one (default: equity).",
     )
     p.add_argument("--start", default="1990-01-01", help="Window start date YYYY-MM-DD (default: 1990-01-01).")

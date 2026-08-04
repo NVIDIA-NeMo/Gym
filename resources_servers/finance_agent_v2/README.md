@@ -3,8 +3,9 @@
 A NeMo Gym integration of the official [Vals Finance Agent Benchmark v2](https://github.com/vals-ai/finance-agent-v2)
 that **reuses Vals's own tool code directly** (tools-only wrap) instead of
 reimplementing it. The upstream `finance_agent.tools.*` classes are imported and
-exposed as HTTP endpoints; the existing nemo-gym `finance_agent` agent loop drives
-them. Scoring uses our own judge (path A) — see [Verification](#verification).
+exposed as HTTP endpoints; the `responses_api_agents/finance_agent_v2` loop drives
+them. Scoring uses our own per-criterion rubric judge (path A) — see
+[Verification](#verification).
 
 This is the v2 counterpart to `resources_servers/finance_sec_search` (v1). The key
 difference: v1 reimplements the tools; v2 imports them from upstream so the tool
@@ -38,14 +39,23 @@ Vals and is **not** byte-parity, so keep it out of eval. See
 
 ## Dependencies
 
-`requirements.txt` pins both upstream packages from git (`model-library` is **not**
-on PyPI; `finance-agent` requires `model-library==0.1.25`, i.e. tag `v0.1.25`):
+`requirements.txt` pins both upstream packages from git — neither is on PyPI, and
+both pins are exact so the benchmark stays reproducible (bump deliberately):
 
 ```
 -e nemo-gym[dev] @ ../../
-model-library @ git+https://github.com/vals-ai/model-library.git@v0.1.25
+model-library @ git+https://gitlab-master.nvidia.com/swdl-nemollm-mlops/alignment-data/model-library.git@<pinned-sha>
 finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@<pinned-sha>
 ```
+
+`model-library` is an **NVIDIA fork** of `vals-ai/model-library@v0.1.25`, not the
+upstream tag. Upstream floors `openai>=2.28.0`, which conflicts with the
+vllm-compatible `openai` (2.7.2) that Gym broadcasts from its head server. The
+fork drops that floor (`>=2.28.0` → `<3.0`) and keeps a static
+`version = "0.1.25"` so it still satisfies `finance-agent`'s
+`model-library==0.1.25` pin — which is why no core `openai`/`vllm` bump is needed
+in Gym. `finance-agent` publishes no tags, so it is pinned to the HEAD commit at
+integration time.
 
 Both nemo-gym and finance-agent require Python >=3.12.
 
@@ -57,10 +67,14 @@ environment config (`configs/finance_agent_v2.yaml`) plus a model config
 `responses_api_models/vllm_model/configs/vllm_model.yaml` for a self-hosted
 vLLM endpoint).
 
+Nothing below is required for the config to resolve — every credential and
+endpoint resolves as **config key → shell environment → null-safe default**, so
+`gym env resolve` and `+dry_run` work on a clean checkout with none of it set.
+
 Secrets live in `env.yaml` at the repo root (gitignored — never commit a populated
-copy). Copy `env.yaml.example` and fill in. Only the **model endpoints** go here;
-the **tool API keys are read directly from your shell** by the environment config
-(`${oc.env:SEC_API_KEY}` etc.), so just export them:
+copy). Only the **model endpoints** need to go there; the **tool API keys are
+easiest to export in your shell**, and one left unset simply registers its tool as
+unavailable:
 
 ```bash
 export OPENAI_API_KEY=...        # policy + judge (OpenAI)
@@ -70,11 +84,17 @@ export TIINGO_API_KEY=...        # price_history (Tiingo)
 ```
 
 ```yaml
-# env.yaml — model endpoints only
+# env.yaml — model endpoints only (tool keys come from the shell, above)
+# Policy model, also reused for retrieve_information. For a self-hosted model,
+# point these at your vLLM endpoint and run with vllm_model.yaml.
 policy_base_url: https://api.openai.com/v1
 policy_api_key: ${oc.env:OPENAI_API_KEY}
 policy_model_name: gpt-5-mini
 
+# Judge model used by /verify — a separate server from the policy on purpose, so
+# that models evaluated on this benchmark are all graded by the same judge and
+# their scores stay comparable. Any OpenAI-compatible endpoint, local vLLM
+# included. Omit to fall back to gpt-5-mini on api.openai.com.
 search_judge_model_base_url: https://api.openai.com/v1
 search_judge_model_api_key: ${oc.env:OPENAI_API_KEY}
 search_judge_model_name: gpt-5-mini
@@ -109,7 +129,7 @@ gym eval run --benchmark finance_agent_v2 \
 
 Run the Vals public question set end-to-end on the OpenAI API (`gpt-5-mini` for
 both policy and judge), limited to 3 rollouts to confirm the agent + tools +
-binary grading path works. Two configs only: the environment config and the
+rubric grading path works. Two configs only: the environment config and the
 OpenAI model config.
 
 1. **Secrets** — populate `env.yaml` (model endpoints) and export the tool keys
@@ -120,11 +140,11 @@ OpenAI model config.
    `benchmarks/finance_agent_v2/prepare.py`, which downloads the raw Vals public
    CSV from [finance-agent-v2](https://github.com/vals-ai/finance-agent-v2) (if no
    local source is present) and converts it. Prompts come from
-   `finance_agent.prompt` and tool schemas from `finance_agent.tools`. The public
-   CSV ships only rubric *criteria* (no single gold answer), so the script
-   synthesizes a GOLD `expected_answer` from those criteria for our judge. The
-   CSV's `rubric` is also copied through verbatim for reference only (it is **not**
-   used for reward). Run from the resource server's venv (has `finance_agent`):
+   `finance_agent.prompt` and tool schemas from `finance_agent.tools`. The CSV's
+   `rubric` is copied through verbatim — those criteria are what `/verify` scores.
+   The script also synthesizes a concatenated `expected_answer` from them, which is
+   now carried as a human-readable reference and is **not** read by scoring. Run
+   from the resource server's venv (has `finance_agent`):
 
    ```bash
    source resources_servers/finance_agent_v2/.venv/bin/activate
@@ -139,19 +159,21 @@ OpenAI model config.
    ```
 
 4. **Collect rollouts** against the running servers, limited to 3 questions
-   (`--no-serve` reuses the servers from step 3):
+   (`--no-serve` reuses the servers from step 3). The agent is `finance_agent_v2`
+   here because step 3 started the resources-server config; starting from the
+   benchmark config instead gives you `finance_agent_v2_benchmark_agent`:
 
    ```bash
    gym eval run --no-serve \
-     --agent finance_agent \
+     --agent finance_agent_v2 \
      --input benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl \
      --output results/finance_agent_v2_smoke.jsonl \
      --limit 3 --concurrency 3
    ```
 
-   Rewards land in `results/finance_agent_v2_smoke.jsonl` (1.0 = judge rated
-   `[[2]]`, i.e. the answer covers all required facts in the GOLD reference;
-   else 0.0). Drop `--limit` to run the full set. To run on a
+   Rewards land in `results/finance_agent_v2_smoke.jsonl` (1.0 = every rubric
+   criterion passed, else 0.0; `rubric_fraction` in the same rows carries the
+   partial credit). Drop `--limit` to run the full set. To run on a
    self-hosted model, use `-c responses_api_models/vllm_model/configs/vllm_model.yaml`
    and point `policy_*` in `env.yaml` at your vLLM endpoint.
 
@@ -200,7 +222,7 @@ re-runs are reproducible.
 runtime price queries are served from disk instead of hitting Tiingo:
 
 ```bash
-python benchmarks/finance_agent_v2/scripts/prefetch_prices.py \
+python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
   --cache-dir /shared/cache/finance_agent_v2 \
   --tickers AAPL MSFT NVDA --asset-class equity
 ```
@@ -222,38 +244,59 @@ loads input from its `data/` dir by this precedence:
 {"question": "...", "expected_answer": "...", "rubric": "[{\"operator\": \"...\", \"criteria\": \"...\"}]"}
 ```
 
-- `expected_answer` is the GOLD reference used by our `[[N]]` judge — this is what
-  drives reward.
-- `rubric` is propagated from the public CSV verbatim for reference/completeness
-  only. It is **not** consumed by scoring. (The public FABv2 release has no
-  official grader; Vals's private per-criterion rubric grader is licensed and is
-  deliberately not reproduced here.)
+- `rubric` is propagated from the public CSV verbatim and is **the scoring input**:
+  each `criteria` string is judged on its own (see [Verification](#verification)).
+  (The public FABv2 release has no official grader; Vals's private grader is
+  licensed and is deliberately not reproduced here — the judge here is ours.)
+- `expected_answer` is the rubric criteria concatenated into a readable reference.
+  Nothing reads it any more; it is kept so existing prepared datasets stay valid
+  and is a candidate for removal at the next dataset regeneration.
 - To source labels at scale, publish a labeled set to the GitLab Model Registry
   (mirrors v1's `finance_sec_search_vals_200_eval`) and point the dataset entry in
   `benchmarks/finance_agent_v2/config.yaml` at it (`type: benchmark` +
   `gitlab_identifier`).
 
-**Interim dry-run:** with no labels, `/verify` returns `reward=0` so the agent +
-tools path can be validated before ground truth is available.
+**Interim dry-run:** with no `rubric`, `/verify` returns `reward=0` with
+`judge_error` set, so the agent + tools path can be validated before ground truth
+is available without those rows looking like genuine zeros.
 
 ## Verification
 
-The public FABv2 release ships **no official grader**, so scoring uses **our own**
-approximation: the legacy `[[0]]/[[1]]/[[2]]` judge from
-`resources_servers/finance_sec_search`. The public CSV has no single gold answer,
-so the GOLD `expected_answer` is synthesized from the rubric criteria (see
-`benchmarks/finance_agent_v2/prepare.py`); the judge awards `[[2]]` (reward 1.0) only when
-the answer covers all required facts. The dataset's `rubric` field plays **no**
-role in reward.
+The public FABv2 release ships **no official grader**, so scoring is **our own**:
+each criterion in the dataset's `rubric` is judged separately against the answer
+the agent passed to `submit_final_result`.
 
-Set `reward_mode` in the resource server config:
+Per criterion, the judge is asked for a binary verdict (`1` = the answer asserts
+this claim, `0` = it does not) as JSON. Calls repeat until
+`judge_required_successes` (default 3) replies parse into an integer 0/1, capped at
+`judge_max_attempts` (default 10); API errors, timeouts, and unparseable replies
+consume an attempt and are retried with a raised output budget and lowered
+reasoning effort. The criterion's score is the majority of those verdicts — an odd
+count cannot tie — and every vote is retained in `rubric_judgements` with its
+evidence and reason. Criteria are judged concurrently up to
+`judge_max_concurrency`.
 
-| Mode | Mapping | Use |
-|------|---------|-----|
-| `binary` | `[[2]]` → 1.0, else 0.0 | **default (public)** — strict pass/fail |
-| `scaled` | `[[0]]`/`[[1]]`/`[[2]]` → 0.0/0.5/1.0 | shaped reward (training) |
+| Field | Meaning |
+|---|---|
+| `reward` | `1.0` only when every criterion resolved and passed, else `0.0` |
+| `rubric_fraction` | criteria passed / total — the partial-credit view |
+| `rubric_passed` / `rubric_total` | the same counts unnormalized |
+| `rubric_unresolved` | criteria that never got 3 parsable verdicts |
+| `rubric_judgements[].votes` / `.unanimous` | per-criterion vote record; non-unanimous means the judge contradicted itself |
+| `judge_error` | set when scoring could not complete (no rubric, or any unresolved criterion) — **filter these out rather than reading them as zeros** |
 
-Judge prompts live in `prompt_templates/`.
+A criterion the judge never resolved is a judge failure, not a miss, so it scores
+`null` rather than `0` and flags the whole row via `judge_error`.
+`/aggregate_metrics` reports `mean/rubric_fraction`, `mean/criterion_pass_rate`,
+and `mean/judge_disagreement_rate` (share of resolved criteria that were not
+unanimous — watch this over time), plus unresolved/judge-failure counts alongside
+the score so infrastructure noise cannot hide inside it.
+
+Because both the judge model and this prompt are ours, scores are **not**
+comparable to Vals's published numbers. The judge prompt lives in
+`prompt_templates/finance_agent_v2_rubric_judge.yaml`; override it inline with
+`rubric_judge_prompt_template` or point `rubric_judge_prompt_template_fpath`
+elsewhere.
 
 ## File structure
 
@@ -263,22 +306,32 @@ resources_servers/finance_agent_v2/         # server code + gym env test fixture
 ├── cache.py                       # ToolCache: namespaced atomic disk cache + read/write policy
 ├── cached_tools.py                # Cached* wrappers (price/edgar/parse) + SecFilingSearch
 ├── requirements.txt               # Pins nemo-gym + Vals model-library (NVIDIA fork) + finance-agent
-├── env.yaml.example
 ├── configs/
 │   └── finance_agent_v2.yaml      # Resources-server config used by gym env test / gym dataset collate
 │                                  # (the benchmark recipe config_paths-chains to this; no duplication)
 ├── prompt_templates/              # judge / retrieval (loaded at runtime; server cwd = this dir)
-├── data/                          # gym env test fixtures: example.jsonl (5), example_metrics.json, example_rollouts.jsonl
-└── tests/                         # test_app.py (server), test_cache.py (cache layer)
-
-benchmarks/finance_agent_v2/                # public eval recipe (self-contained)
-├── config.yaml                    # Thin overlay: config_paths -> resources config + _inherit_from + benchmark dataset
-├── prepare.py                     # gym eval prepare entry point + CSV->JSONL converter (builds tool schemas from upstream classes)
 ├── scripts/
 │   ├── prefetch_prices.py         # Sequential Tiingo prefetch into the cache (idempotent/resumable)
 │   └── compare_runs.py            # Compare rollout JSONLs by per-question reward
+├── data/                          # gym env test fixtures: example.jsonl (5), example_metrics.json,
+│                                  # example_rollouts.jsonl, example_rollouts_aggregate_metrics.json
+└── tests/                         # test_app.py (server), test_cache.py (cache layer)
+
+benchmarks/finance_agent_v2/                # public eval recipe (thin: config + prepare only)
+├── config.yaml                    # Thin overlay: config_paths -> resources config + _inherit_from + benchmark dataset
+├── prepare.py                     # gym eval prepare entry point + CSV->JSONL converter (builds tool schemas from upstream classes)
 └── data/                          # gitignored; prepare.py regenerates vals_v2_public_27q.jsonl from the upstream Vals export
 ```
+
+There is deliberately **no `environments/finance_agent_v2/`**: training data is
+produced by an external nvflow SDG pipeline rather than shipped in-repo, so an
+environment entry would only duplicate the server config and drift from it. Add
+one if and when a train/validation split is released with the benchmark.
+
+Credentials and endpoints are covered in the
+[benchmark README](../../benchmarks/finance_agent_v2/README.md#setup); every one
+resolves as config key → shell environment → null-safe default, so this
+environment resolves standalone on a clean checkout.
 
 ## Licensing
 
@@ -303,10 +356,9 @@ from the **public** Vals Finance Agent Benchmark v2 release
 ([vals-ai/finance-agent-v2](https://github.com/vals-ai/finance-agent-v2)); use is
 subject to that project's terms. The public release ships **no official grader**.
 
-**Grading is our own.** Reward is computed by our `[[0]]/[[1]]/[[2]]` judge (an
-approximation reused from `resources_servers/finance_sec_search`) against a GOLD
-`expected_answer` we synthesize from the public rubric criteria. The dataset's
-`rubric` field is propagated **for reference only** and is not used for scoring.
-Vals's private per-criterion rubric grader (prompts + reward logic) was obtained
-under a separate license and is **deliberately not reproduced** in this public
-code.
+**Grading is our own.** Reward comes from our own judge prompt
+(`prompt_templates/finance_agent_v2_rubric_judge.yaml`) run once per criterion of
+the public `rubric` field, voted over repeated calls. Vals's private grader
+(prompts + reward logic) was obtained under a separate license and is
+**deliberately not reproduced** in this public code; the prompt here was written
+from scratch, so scores are not comparable to Vals's published numbers.

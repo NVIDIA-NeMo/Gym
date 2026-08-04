@@ -48,8 +48,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import aiohttp
-from model_library.agent import Tool, ToolOutput
-
 from finance_agent.tools import (
     MAX_END_DATE,
     EDGARSearch,
@@ -57,6 +55,8 @@ from finance_agent.tools import (
     PriceHistory,
     _validate_date_format,
 )
+from model_library.agent import Tool, ToolOutput
+
 
 # Support both package import (tests: resources_servers.finance_agent_v2.cached_tools)
 # and flat script execution (the nemo-gym entrypoint runs app.py directly, so app.py
@@ -118,9 +118,7 @@ class CachedPriceHistory(PriceHistory):
         by_date.update({self._rec_date(r): r for r in old})
         return [by_date[d] for d in sorted(by_date)]
 
-    async def _fetch(
-        self, endpoint: str, ticker: str, start_date: str, end_date: str
-    ) -> list[dict[str, Any]]:
+    async def _fetch(self, endpoint: str, ticker: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
         cache = self._cache
         if not cache.enabled:
             return await super()._fetch(endpoint, ticker, start_date, end_date)
@@ -226,9 +224,7 @@ class CachedEDGARSearch(EDGARSearch):
             full = stored["filings"]
         else:
             # Fetch the full page (top_n=100) so the stored entry is top_n-independent.
-            full = await super()._execute_search(
-                search_query, start_date, end_date, 100, page, form_types, ciks
-            )
+            full = await super()._execute_search(search_query, start_date, end_date, 100, page, form_types, ciks)
             cache.write_json(path, {"request": request, "filings": full})
 
         return full[: int(top_n_results)]
@@ -236,7 +232,7 @@ class CachedEDGARSearch(EDGARSearch):
     @staticmethod
     def _slug(text: str, max_len: int = 48) -> str:
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
-        return (slug[:max_len].rstrip("-") or "query")
+        return slug[:max_len].rstrip("-") or "query"
 
 
 # ============================================================================
@@ -397,7 +393,10 @@ class SecFilingSearch(Tool):
                         if response.status in (403, 429, 503):
                             logger.warning(
                                 "sec.gov %d on attempt %d/%d for %s",
-                                response.status, attempt + 1, self._max_retries, url,
+                                response.status,
+                                attempt + 1,
+                                self._max_retries,
+                                url,
                             )
                             await asyncio.sleep(2**attempt)
                             continue
@@ -517,9 +516,7 @@ class SecFilingSearch(Tool):
             return filings
 
     # -- tool entry point -----------------------------------------------------
-    async def execute(
-        self, args: dict[str, Any], state: dict[str, Any], logger: logging.Logger
-    ) -> ToolOutput:
+    async def execute(self, args: dict[str, Any], state: dict[str, Any], logger: logging.Logger) -> ToolOutput:
         try:
             ticker = str(args.get("ticker", "")).strip()
             if not ticker:
