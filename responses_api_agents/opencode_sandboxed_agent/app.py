@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from shlex import quote
 from time import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import Request
@@ -89,11 +89,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_result_fpath: Dict[str, str] = dict()
 
-    async def _start_sandbox(self) -> AsyncSandbox:
-        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+    async def _start_sandbox(self, sandbox_id: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+
+        if sandbox_id:
+            sandbox = AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
+            await sandbox.connect({})
+            return sandbox
+
+        if self.config.debug:
+            print("Creating new sandbox since one wasn't provided", file=sys.stderr)
+
+        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         sandbox_spec = SandboxSpec(
             image="swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",  # This is just the first SWE Bench Verified image for now
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
@@ -110,6 +119,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
+
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
@@ -302,8 +312,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        # TODO @bxyu-nvidia: Once connected to SWE Bench resources server, put this behind a flag if /seed_session doesn't return a sandbox.
-        sandbox = await self._start_sandbox()
+        # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
+        # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
+        seed_session_result = await seed_session_response.json()
+        sandbox = await self._start_sandbox(sandbox_id=seed_session_result.get("sandbox_handle"))
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
         # Propagating the sandbox handle
