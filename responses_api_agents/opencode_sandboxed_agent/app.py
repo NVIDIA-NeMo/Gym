@@ -132,7 +132,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "$schema": "https://opencode.ai/config.json",
             "provider": {
                 "nemo_gym": {
-                    "npm": "@ai-sdk/openai-compatible",
+                    "npm": "@ai-sdk/openai",
                     "options": {
                         "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
                         "apiKey": "dummy_key",
