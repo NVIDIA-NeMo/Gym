@@ -95,6 +95,18 @@ def test_audio_is_disclosed_when_the_judge_cannot_decode_it(tmp_path: Path):
     assert "unverifiable rather than unmet" in out
 
 
+def test_undecodable_artifact_says_accompanying_prose_is_not_evidence(tmp_path: Path):
+    """Otherwise the judge credits the agent's own claims about a file it cannot inspect."""
+    d = tmp_path / "repeat_0"
+    d.mkdir()
+    (d / "mix.wav").write_bytes(b"RIFF" + b"\x00" * 2048)
+    (d / "model.onnx").write_bytes(b"\x00\x01\x02\x03" * 400)
+
+    out = _text_of(convert_deliverables_to_content_blocks(str(d), audio_capable=False))
+    assert out.count("unverified assertions") == 2, "both undecodable artifacts must carry the warning"
+    assert "do not award credit for a property you cannot observe directly" in out
+
+
 def test_audio_still_forwarded_when_the_judge_can_decode_it(tmp_path: Path):
     d = tmp_path / "repeat_0"
     d.mkdir()
