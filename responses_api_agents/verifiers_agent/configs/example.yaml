@@ -10,11 +10,11 @@ verifiers_agent:
         name: policy_model
       verifiers:
         taskset:
-          id: example_taskset
+          id: scratchpad_taskset
         agent:
           harness:
             id: "null"
-          max_turns: 1
+          max_turns: 2
       group_size: 1
       max_concurrent_generation: -1
       max_concurrent_scoring: -1

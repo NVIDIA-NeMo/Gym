@@ -9,8 +9,8 @@ change the Gym head server's dependencies.
 
 ## Example
 
-The included taskset asks the model to reverse a word and scores the exact answer. Configure
-the policy model in `env.yaml`, then run:
+The included taskset asks the model to round-trip a word through a stateful Verifiers tool and
+scores the exact answer. Configure the policy model in `env.yaml`, then run:
 
 ```bash
 gym env start \
@@ -34,17 +34,18 @@ and runs the task selected by each row's `task_idx`.
 Generate Gym rows in the same order as the configured V1 taskset:
 
 ```bash
-uv run responses_api_agents/verifiers_agent/scripts/create_dataset.py \
-  --taskset example_taskset \
+cd responses_api_agents/verifiers_agent
+uv run --python .venv/bin/python --no-project python3 scripts/create_dataset.py \
+  --taskset scratchpad_taskset \
   --size 1 \
-  --output responses_api_agents/verifiers_agent/data/tasks.jsonl
+  --output data/tasks.jsonl
 ```
 
-Install any taskset-specific dependency in this component's `requirements.txt`, then use the
-same taskset config in the export command and the agent YAML. Pass the pinned package to the
-isolated exporter with `uv run --with package==version ...`. Hub tasksets can be addressed by
-their pinned `org/name@version` identifier. Rows refer to tasks by index, so export and rollout
-collection must load the same taskset version, config, and order.
+Gym creates this component's `.venv` when it starts the agent. Install any taskset-specific
+dependency in this component's `requirements.txt`, then use the same taskset config in the export
+command and the agent YAML. Hub tasksets can be addressed by their pinned `org/name@version`
+identifier. Rows refer to tasks by index, so export and rollout collection must load the same
+taskset version, config, and order.
 
 The integration intentionally runs one V1 rollout per Gym row. V1 multi-agent environments and
 group rewards are not supported. Responses harnesses preserve Gym's native output items,

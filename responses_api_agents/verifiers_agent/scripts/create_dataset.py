@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# /// script
-# dependencies = ["verifiers==0.2.2.dev78"]
-# ///
-
 import argparse
 import json
 import sys

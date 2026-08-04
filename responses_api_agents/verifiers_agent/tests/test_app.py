@@ -14,7 +14,7 @@ from responses_api_agents.verifiers_agent.app import (
     VerifiersAgentConfig,
     VerifiersAgentRunRequest,
 )
-from responses_api_agents.verifiers_agent.example_taskset import ExampleData
+from responses_api_agents.verifiers_agent.scratchpad_taskset import ScratchpadData
 
 
 def make_agent() -> VerifiersAgent:
@@ -31,10 +31,10 @@ def make_agent() -> VerifiersAgent:
                 name="policy_model",
             ),
             verifiers={
-                "taskset": {"id": "example_taskset"},
+                "taskset": {"id": "scratchpad_taskset"},
                 "agent": {
                     "harness": {"id": "null"},
-                    "max_turns": 1,
+                    "max_turns": 2,
                 },
             },
         ),
@@ -47,18 +47,18 @@ class TestApp:
         agent = make_agent()
         task = agent._tasks[0]
         trace = vf.Trace(
-            task=vf.TraceTask(type="ExampleTask", data=task.data),
+            task=vf.TraceTask(type="ScratchpadTask", data=task.data),
             agent=vf.AgentInfo(config=vf.AgentConfig(model="policy")),
             nodes=[
                 vf.MessageNode(
-                    message=vf.AssistantMessage(content="desserts"),
+                    message=vf.AssistantMessage(content="sphinx"),
                     sampled=True,
                 )
             ],
         )
         await task.score(trace)
 
-        assert task.data.answer == "desserts"
+        assert task.data.word == "sphinx"
         assert agent._env.config.agent.harness.id == "null"
         assert trace.reward == 1.0
         assert not any(
@@ -68,7 +68,7 @@ class TestApp:
     @pytest.mark.parametrize("endpoint", ["/responses", "/chat/completions"])
     async def test_runs_and_scores_v1_trace(self, monkeypatch: pytest.MonkeyPatch, endpoint: str) -> None:
         agent = make_agent()
-        task = ExampleData(idx=0, prompt="question", answer="desserts")
+        task = ScratchpadData(idx=0, prompt="question", word="sphinx")
         function_call = {
             "id": "call_1",
             "call_id": "call_1",
@@ -88,7 +88,7 @@ class TestApp:
             "content": [
                 {
                     "type": "output_text",
-                    "text": "desserts",
+                    "text": "sphinx",
                     "annotations": [],
                 }
             ],
@@ -97,7 +97,7 @@ class TestApp:
             "generation_log_probs": [-0.2],
         }
         trace = vf.Trace(
-            task=vf.TraceTask(type="ExampleTask", data=task),
+            task=vf.TraceTask(type="ScratchpadTask", data=task),
             agent=vf.AgentInfo(config=vf.AgentConfig(model="policy")),
             tools=[
                 vf.Tool(
@@ -127,13 +127,13 @@ class TestApp:
                     message=vf.ToolMessage(
                         tool_call_id="call_1",
                         name="lookup",
-                        content="desserts",
+                        content="sphinx",
                     ),
                 ),
                 vf.MessageNode(
                     parent=2,
                     message=vf.AssistantMessage(
-                        content="desserts",
+                        content="sphinx",
                         provider_state=[answer] if endpoint == "/responses" else None,
                     ),
                     sampled=True,
@@ -172,7 +172,7 @@ class TestApp:
             "function_call_output",
             "message",
         ]
-        assert result.output[1].output == "desserts"
+        assert result.output[1].output == "sphinx"
         if endpoint == "/responses":
             assert result.output[0].prompt_token_ids == [1]
             assert result.output[2].generation_token_ids == [4]

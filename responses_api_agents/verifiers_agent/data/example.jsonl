@@ -1,1 +1,1 @@
-{"task_idx":0,"responses_create_params":{"input":"Reverse the word `stressed`. Reply with only the reversed word."},"agent_ref":{"type":"responses_api_agents","name":"verifiers_agent"}}
+{"task_idx":0,"responses_create_params":{"input":"Call `scratchpad_roundtrip` with word=\"sphinx\", then reply with only the word returned by the tool."},"agent_ref":{"type":"responses_api_agents","name":"verifiers_agent"}}
