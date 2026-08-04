@@ -217,17 +217,17 @@ When `return_token_id_information: true`, the completions backend automatically 
 The end-to-end flow is identical to the [Use VLLMModel](#use-vllmmodel) walkthrough above; just swap the model-server config:
 
 ```bash
-config_paths="resources_servers/example_multi_step/configs/example_multi_step.yaml,\
-responses_api_models/vllm_model/configs/vllm_model_completions.yaml"
+gym env start \
+    --config resources_servers/example_multi_step/configs/example_multi_step.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model_completions.yaml \
+    --model-url http://0.0.0.0:10240/v1 \
+    --model <your-model> \
+    --model-api-key dummy_key
 
-ng_run "+config_paths=[$config_paths]" \
-    ++policy_base_url=http://0.0.0.0:10240/v1 \
-    ++policy_model_name=<your-model> \
-    ++policy_api_key=dummy_key
-
-ng_collect_rollouts +agent_name=<your_agent> \
-    +input_jsonl_fpath=<your_data.jsonl> \
-    +output_jsonl_fpath=results/rollouts_completions.jsonl
+gym eval run --no-serve \
+    --agent <your_agent> \
+    --input <your_data.jsonl> \
+    --output results/rollouts_completions.jsonl
 ```
 
 Make sure your input JSONL respects the selected mode in the [Constraint matrix](#constraint-matrix) above.
