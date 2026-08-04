@@ -69,6 +69,7 @@ legal_agent_bench_harbor_agent:
 
       harbor_agent_override_timeout: 10800
       harbor_agent_max_timeout: null
+      harbor_skip_verification_on_agent_failure: true
       harbor_verifier_override_timeout: 3600
       harbor_verifier_max_timeout: null
       harbor_timeout_multiplier: null

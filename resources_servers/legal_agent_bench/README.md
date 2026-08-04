@@ -305,6 +305,10 @@ or more criteria fail; use `criteria_pass_rate` to see partial success.
   sandbox failures. A zero reward without an infrastructure/judge flag is an
   ordinary model/task result; a flagged result should be excluded from
   model-quality comparisons.
+- Harbor agent, adapter, connection, and timeout failures preserve any partial
+  trajectory but skip judging. Their result rows report `mask_sample`,
+  `agent_failed`, `model_connection_failed`, `agent_timed_out`, and
+  `failure_reason`, and their reward is forced to zero.
 - Hermes normally probes `/v1/models` and `/models` for optional pricing and
   context metadata. The LAB runner disables those lookups because Gym supplies
   the model explicitly and its internal policy proxy does not implement model

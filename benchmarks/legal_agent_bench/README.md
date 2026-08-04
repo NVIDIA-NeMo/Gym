@@ -221,8 +221,10 @@ created only when its first rollout starts. Each configurable rollout is stored
 under
 `<harness>_jobs/<model>/<YYYYMMDD-HHMMSS_hash>/<task_name>_<run_id>/`, where
 the task name is normalized and the run ID is an eight-character unique suffix.
-Harbor's result row uses the established Harbor response format rather than the
-configurable runner's top-level flags.
+Harbor retains its established response format and additionally reports
+`mask_sample`, `agent_failed`, `model_connection_failed`, `agent_timed_out`, and
+`failure_reason` for agent-phase failures. It preserves any partial trajectory,
+but skips judging and forces reward to zero when one of those failures occurs.
 
 ## Run a larger evaluation
 
@@ -372,6 +374,8 @@ is masked and is not sent to the judge. A normal model/task result can still
 receive zero reward without those flags. Infrastructure, configuration,
 task-loading, or judge failures set `mask_sample`; do not treat those zeroes as
 model-quality results.
+The Harbor variant reports the agent-phase subset described above and applies
+the same masking and no-judge behavior to those failures.
 
 Configurable-runner artifacts are grouped by harness, model, dated session, and
 task. The default roots are `results/legal_agent_bench/native_jobs`,
