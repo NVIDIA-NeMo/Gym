@@ -276,12 +276,15 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     rubric_structured_num_trials: int = 2
     rubric_structured_formatting_retries: int = 3
 
-    # When True, every judge call's raw response text is preserved on
+    # When True, every successful judge trial's raw response text is preserved on
     # ``verify_response.judge_response`` (per-trial in comparison mode under
     # ``per_ref_repeat[i].raw_responses``; under top-level ``raw_responses``
-    # in rubric modes). Off by default — raw responses are 10-50 KB each and
-    # multiply by num_trials × num_ref_repeats × num_tasks. Turn on for debug
-    # runs to post-mortem judge verdicts.
+    # in rubric modes). Structured rubric mode additionally parses
+    # ``CRITERION_NUMBER/GRADE/MAX_POSSIBLE_POINTS`` tags into
+    # ``criterion_grades`` with rubric IDs and a full-credit binary view, and
+    # requires every requested trial to be complete and internally consistent.
+    # Off by default — raw responses are 10-50 KB each and multiply by
+    # num_trials × num_ref_repeats × num_tasks.
     persist_raw_judge_responses: bool = False
 
 

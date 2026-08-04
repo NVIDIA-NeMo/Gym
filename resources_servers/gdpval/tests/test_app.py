@@ -12,10 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -30,6 +31,8 @@ from resources_servers.gdpval.app import (
     _iter_ref_repeat_dirs,
     _safe_output_text,
 )
+from resources_servers.gdpval.judge_panel import ResolvedJudge
+from resources_servers.gdpval.scoring import parse_structured_criterion_grades, score_with_rubric_structured
 
 
 def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
@@ -79,6 +82,194 @@ def _verify_request(**fields) -> GDPValVerifyRequest:
         rubric_pretty=fields.pop("rubric_pretty", ""),
         **fields,
     )
+
+
+class TestStructuredCriterionGrades:
+    @staticmethod
+    def _rubric() -> list[dict]:
+        return [
+            {
+                "rubric_item_id": "criterion-a",
+                "criterion": "Include the complete analysis.",
+                "score": 2,
+            },
+            {
+                "rubric_item_id": "criterion-b",
+                "criterion": "Use the requested filename.",
+                "score": 1,
+            },
+        ]
+
+    @staticmethod
+    def _response(content: str) -> MagicMock:
+        response = MagicMock()
+        response.choices = [MagicMock(message=MagicMock(content=content))]
+        return response
+
+    @staticmethod
+    def _judge() -> ResolvedJudge:
+        return ResolvedJudge(name="minimax", base_url="http://judge/v1", model="minimax-m3")
+
+    def test_parses_weighted_grades_and_full_credit_binary_view(self) -> None:
+        result = parse_structured_criterion_grades(
+            """
+            CRITERION_NUMBER[1]: GRADE[1] out of MAX_POSSIBLE_POINTS[2]
+            CRITERION_NUMBER[2]: GRADE[1] out of MAX_POSSIBLE_POINTS[1]
+            FINAL_SCORE[2] out of MAX_POSSIBLE_SCORE[3]
+            """,
+            self._rubric(),
+        )
+
+        assert result["complete"] is True
+        assert result["parsed_criteria_count"] == 2
+        assert result["awarded_points_sum"] == 2
+        assert result["max_possible_points_sum"] == 3
+        assert [item["binary_grade"] for item in result["criteria"]] == [0, 1]
+        assert [item["rubric_item_id"] for item in result["criteria"]] == [
+            "criterion-a",
+            "criterion-b",
+        ]
+
+    def test_duplicate_criterion_is_incomplete(self) -> None:
+        result = parse_structured_criterion_grades(
+            """
+            CRITERION_NUMBER[1]: GRADE[1] out of MAX_POSSIBLE_POINTS[2]
+            CRITERION_NUMBER[1]: GRADE[2] out of MAX_POSSIBLE_POINTS[2]
+            CRITERION_NUMBER[2]: GRADE[1] out of MAX_POSSIBLE_POINTS[1]
+            """,
+            self._rubric(),
+        )
+
+        assert result["complete"] is False
+        assert result["duplicate_criterion_numbers"] == [1]
+
+    @pytest.mark.asyncio
+    async def test_persists_complete_criterion_grades_for_every_trial(self) -> None:
+        contents = [
+            (
+                "CRITERION_NUMBER[1]: GRADE[1] out of MAX_POSSIBLE_POINTS[2]\n"
+                "CRITERION_NUMBER[2]: GRADE[1] out of MAX_POSSIBLE_POINTS[1]\n"
+                "FINAL_SCORE[2] out of MAX_POSSIBLE_SCORE[3]"
+            ),
+            (
+                "CRITERION_NUMBER[1]: GRADE[2] out of MAX_POSSIBLE_POINTS[2]\n"
+                "CRITERION_NUMBER[2]: GRADE[1] out of MAX_POSSIBLE_POINTS[1]\n"
+                "FINAL_SCORE[3] out of MAX_POSSIBLE_SCORE[3]"
+            ),
+        ]
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[self._response(text) for text in contents])
+
+        with patch("openai.AsyncOpenAI", return_value=client):
+            reward, metadata = await score_with_rubric_structured(
+                deliverable_text="A deliverable.",
+                rubric_json=self._rubric(),
+                rubric_pretty="",
+                task_prompt="Create the requested artifact.",
+                judges=[self._judge()],
+                num_trials=2,
+                formatting_retries=1,
+                include_raw_responses=True,
+            )
+
+        assert reward == pytest.approx(2.5 / 3)
+        assert metadata is not None
+        assert metadata["raw_responses"] == contents
+        assert len(metadata["criterion_grades"]) == 2
+        assert all(trial["complete"] is True for trial in metadata["criterion_grades"])
+        assert all(trial["grade_sum_matches_final_score"] is True for trial in metadata["criterion_grades"])
+        assert all(trial["max_sum_matches_final_max"] is True for trial in metadata["criterion_grades"])
+
+    @pytest.mark.asyncio
+    async def test_retries_inconsistent_totals_with_actionable_feedback(self) -> None:
+        contents = [
+            (
+                "CRITERION_NUMBER[1]: GRADE[1] out of MAX_POSSIBLE_POINTS[2]\n"
+                "CRITERION_NUMBER[2]: GRADE[1] out of MAX_POSSIBLE_POINTS[1]\n"
+                "FINAL_SCORE[3] out of MAX_POSSIBLE_SCORE[3]"
+            ),
+            (
+                "CRITERION_NUMBER[1]: GRADE[1] out of MAX_POSSIBLE_POINTS[2]\n"
+                "CRITERION_NUMBER[2]: GRADE[1] out of MAX_POSSIBLE_POINTS[1]\n"
+                "FINAL_SCORE[2] out of MAX_POSSIBLE_SCORE[3]"
+            ),
+        ]
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[self._response(text) for text in contents])
+
+        with patch("openai.AsyncOpenAI", return_value=client):
+            reward, metadata = await score_with_rubric_structured(
+                deliverable_text="A deliverable.",
+                rubric_json=self._rubric(),
+                rubric_pretty="",
+                task_prompt="Create the requested artifact.",
+                judges=[self._judge()],
+                num_trials=1,
+                formatting_retries=2,
+                include_raw_responses=True,
+            )
+
+        assert reward == pytest.approx(2 / 3)
+        assert metadata is not None
+        assert client.chat.completions.create.await_count == 2
+        first_messages = client.chat.completions.create.await_args_list[0].kwargs["messages"]
+        retry_messages = client.chat.completions.create.await_args_list[1].kwargs["messages"]
+        assert "exactly 2 criteria" in first_messages[0]["content"][-1]["text"]
+        assert "Previous-response diagnostics" in retry_messages[-1]["content"]
+        assert "Parsed 2 of 2 criteria" in retry_messages[-1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_rejects_incomplete_trial_set_as_judge_failure(self) -> None:
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=self._response("The response omitted all required score tags.")
+        )
+
+        with patch("openai.AsyncOpenAI", return_value=client):
+            with pytest.raises(JudgeError, match="0/2 completed"):
+                await score_with_rubric_structured(
+                    deliverable_text="A deliverable.",
+                    rubric_json=self._rubric(),
+                    rubric_pretty="",
+                    task_prompt="Create the requested artifact.",
+                    judges=[self._judge()],
+                    num_trials=2,
+                    formatting_retries=1,
+                    include_raw_responses=True,
+                )
+
+        # Stop immediately: once trial 1 is absent, a complete 2-trial result
+        # cannot be persisted from this attempt.
+        assert client.chat.completions.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_nonpersisted_mode_retains_upstream_partial_trial_behavior(self) -> None:
+        valid = (
+            "CRITERION_NUMBER[1]: GRADE[2] out of MAX_POSSIBLE_POINTS[2]\n"
+            "CRITERION_NUMBER[2]: GRADE[1] out of MAX_POSSIBLE_POINTS[1]\n"
+            "FINAL_SCORE[3] out of MAX_POSSIBLE_SCORE[3]"
+        )
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[self._response(valid), self._response("missing score tags")]
+        )
+
+        with patch("openai.AsyncOpenAI", return_value=client):
+            reward, metadata = await score_with_rubric_structured(
+                deliverable_text="A deliverable.",
+                rubric_json=self._rubric(),
+                rubric_pretty="",
+                task_prompt="Create the requested artifact.",
+                judges=[self._judge()],
+                num_trials=2,
+                formatting_retries=1,
+                include_raw_responses=False,
+            )
+
+        assert reward == 1.0
+        assert metadata is not None
+        assert metadata["num_trials_completed"] == 1
+        assert "criterion_grades" not in metadata
 
 
 class TestIterRefRepeatDirs:
@@ -774,6 +965,21 @@ class TestApp:
             return 0.7, {
                 "scoring_method": "structured_rubric",
                 "raw_responses": ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"],
+                "criterion_grades": [
+                    {
+                        "trial_number": 1,
+                        "judge": "judge",
+                        "complete": True,
+                        "criteria": [
+                            {
+                                "criterion_number": 1,
+                                "awarded_points": 1.0,
+                                "max_possible_points": 1.0,
+                                "binary_grade": 1,
+                            }
+                        ],
+                    }
+                ],
             }
 
         body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
@@ -786,6 +992,7 @@ class TestApp:
 
         assert captured_kwargs["include_raw_responses"] is True
         assert resp.judge_response["raw_responses"] == ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]
+        assert resp.judge_response["criterion_grades"][0]["criteria"][0]["binary_grade"] == 1
 
     def test_aggregate_metrics_comparison_elo(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest
