@@ -32,3 +32,5 @@ opencode_sandboxed_agent:
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
+
+      datasets: []
