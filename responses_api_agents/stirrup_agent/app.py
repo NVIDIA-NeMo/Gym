@@ -715,6 +715,19 @@ async def _run_stirrup_agent(
                 else:
                     shutil.copytree(src, task_dir / "reference_files", dirs_exist_ok=True)
 
+            # Make persisted artifacts group/world-accessible for shared run trees.
+            def _relax_perms(p: str) -> None:
+                try:
+                    os.chmod(p, os.stat(p).st_mode | 0o755)
+                except OSError as chmod_err:
+                    print(f"[stirrup] warning: could not chmod {p}: {chmod_err}", flush=True)
+
+            _relax_perms(str(task_dir.parent))
+            _relax_perms(str(task_dir))
+            for root, dirs, files in os.walk(task_dir):
+                for name in dirs + files:
+                    _relax_perms(os.path.join(root, name))
+
             print(f"[stirrup] persisted task artifacts to {task_dir}", flush=True)
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
@@ -1021,22 +1034,15 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             )
         print(f"Stirrup agent initialized with task={self.config.task!r}", flush=True)
 
-    # -- helpers ----------------------------------------------------------
-
-    def _get_model_base_url(self) -> str:
-        from nemo_gym.global_config import get_first_server_config_dict
-        from nemo_gym.server_utils import ServerClient
-
-        global_config_dict = ServerClient.load_from_global_config().global_config_dict
-        model_server_config = get_first_server_config_dict(global_config_dict, self.config.model_server.name)
-        return f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
-
     # -- /v1/responses ----------------------------------------------------
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming = Body(), rollout_id: Optional[str] = None
+    ) -> NeMoGymResponse:
         task_info = self.task_strategy.extract_task_info(body.metadata)
 
-        model_base_url = self._get_model_base_url()
+        # run() derives rollout_id from the row's task/rollout indices and passes it here.
+        model_base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
         if self.config.task == "gdpval":
             system_prompt = None
@@ -1309,7 +1315,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             else:
                 # Run the Stirrup agent
                 try:
-                    response = await self.responses(fixed_params)
+                    response = await self.responses(fixed_params, self.rollout_id_from_run(body))
                 except Exception as exc:
                     task_info = self.task_strategy.extract_task_info(existing_metadata)
                     failure_class = _classify_rollout_failure(exc)

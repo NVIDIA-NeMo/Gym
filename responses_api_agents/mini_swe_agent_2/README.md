@@ -24,6 +24,8 @@ over the older Docker/Singularity mini-SWE integration.
     - [Run One-Example Smoke](#run-one-example-smoke)
     - [Expected Outputs](#expected-outputs)
     - [Repeated Rollouts](#repeated-rollouts)
+  - [Running with Enroot (local / HPC)](#running-with-enroot-local--hpc)
+  - [Running SWE-bench on ECS Fargate](#running-swe-bench-on-ecs-fargate)
   - [Sandbox Environment Adapter](#sandbox-environment-adapter)
     - [Environment Lifecycle](#environment-lifecycle)
   - [Contributing](#contributing)
@@ -327,25 +329,33 @@ tool. The successful smoke kept `tool_choice=auto` and lowered
 
 ### Prerequisites
 
-- A NeMo Gym development environment with this agent's requirements installed.
-  From the repo root:
+- A NeMo Gym development environment. From the repo root:
 
 ```bash
 uv sync --extra dev --extra sandbox
-uv pip install mini-swe-agent==2.1.0 swebench==4.1.0
 ```
 
-  `uv sync --extra dev --extra sandbox` installs `nemo-gym[dev,sandbox]`
-  (including the OpenSandbox SDK) into the root venv, so the manual step only
-  adds this agent's extra runtime dependencies. Do **not** run
+  This installs `nemo-gym[dev,sandbox]` (including the OpenSandbox SDK) into the
+  root venv, which is all `gym env start` needs. `gym env start` builds this
+  agent's own per-server venv from
+  `responses_api_agents/mini_swe_agent_2/requirements.txt` (installing
+  `mini-swe-agent`, `swebench`, and a compatible `openai`), so you do not
+  install those yourself.
+
+  Do **not** install `mini-swe-agent`/`swebench` into the root venv (e.g.
+  `uv pip install mini-swe-agent==2.1.0 swebench==4.1.0`). `mini-swe-agent`
+  allows a newer `openai` than `nemo-gym` pins (`openai<=2.7.2`), so installing
+  it upgrades the root venv's `openai`. `gym env start` then pins every
+  per-server venv to the root venv's `openai` version, which conflicts with
+  `nemo-gym`'s pin and fails to resolve (`... nemo-gym depends on openai<=2.7.2
+  ... you require openai==2.44.0 ... unsatisfiable`). If this happens, reset the
+  root venv with `uv sync --extra dev --extra sandbox`.
+
+  Also do not run
   `uv pip install -r responses_api_agents/mini_swe_agent_2/requirements.txt`
-  from the repo root: that file pins `nemo-gym` via a `../../` editable path
-  that pip/uv resolve relative to the current working directory, so from the
-  repo root it points one level above the repo and fails with
-  `... does not appear to be a Python project`. That requirements file is meant
-  to be installed with the agent directory as the working directory, which is
-  exactly what `gym env start` does automatically when it builds the agent's
-  per-server virtual environment.
+  from the repo root: its `../../` editable path resolves relative to the
+  current working directory, so from the repo root it points above the repo and
+  fails with `... does not appear to be a Python project`.
 
 - Access to an OpenSandbox deployment reachable from the server process.
 - A policy model endpoint compatible with `responses_api_models/vllm_model`.
@@ -475,6 +485,153 @@ The agent writes per-instance mini-swe-agent configs and result artifacts under
 Use the agent's `step_timeout` and `eval_timeout` config values or CLI overrides
 to bound tool and verification execution. If you launch from a custom
 Kubernetes wrapper, add any outer per-sample guard there.
+
+## Running with Enroot (local / HPC)
+
+Swap OpenSandbox for the local enroot provider when you are on a single machine
+or HPC node where [enroot](https://github.com/NVIDIA/enroot) is the supported
+container runtime (common on NVIDIA/Slurm clusters). No API key or network
+service is required — the provider shells out to the `enroot` binary directly.
+
+### Prerequisites
+
+- `enroot` installed and on `PATH` (including the `enroot+caps` package for the
+  privileged helper binaries `enroot-mount`, `enroot-nsenter`, etc.).
+- Unprivileged user namespaces enabled (`unprivileged_userns_clone=1`).
+- The `scripts/enroot_prefetch_sqsh.py` helper in this repo (see below).
+
+### Step 1 — Pre-fetch sqsh files (one-time)
+
+`enroot import` pulls and converts Docker images to squashfs on first use, which
+is slow at scale. Pre-fetch the images up front with the bundled helper so every
+sandbox create is an instant cache hit:
+
+```bash
+python scripts/enroot_prefetch_sqsh.py \
+    --sqsh-dir /path/to/enroot_sqshs \
+    --jobs 4 \
+    'docker.io/swebench/sweb.eval.x86_64.django_1776_django-10973:latest' \
+    'docker.io/swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-8595:latest' \
+    'docker.io/swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-14141:latest' \
+    'docker.io/swebench/sweb.eval.x86_64.sympy_1776_sympy-20916:latest' \
+    'docker.io/swebench/sweb.eval.x86_64.pylint-dev_1776_pylint-4551:latest'
+```
+
+The helper uses the same SHA-256 cache key as the enroot provider, so sqsh files
+written here are picked up automatically at runtime without re-importing.
+
+To derive image names for other instances, apply the rule from
+[Dataset Information](#dataset-information):
+- `subset: verified` → `docker.io/swebench/sweb.eval.x86_64.<id>:latest` with
+  `__` → `_1776_`
+- Other subsets → `docker.io/xingyaoww/sweb.eval.x86_64.<id>:latest` with
+  `__` → `_s_`
+
+### Step 2 — Activate the venv and start the servers
+
+```bash
+source .venv/bin/activate
+
+gym env start \
+    --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+    --config nemo_gym/sandbox/providers/enroot/configs/enroot.yaml \
+    --model-type local_vllm_model \
+    --model Qwen/Qwen3.6-27B-FP8 \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=2' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_env_vars.VLLM_RAY_DP_PACK_STRATEGY=strict' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.enable_auto_tool_choice=true' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tool_call_parser=qwen3_coder' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.reasoning_parser=qwen3' \
+    '++policy_model.responses_api_models.local_vllm_model.uses_reasoning_parser=true' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.quantization=fp8' \
+    '++sandbox.enroot.create.sqsh_cache_dir=/path/to/enroot_sqshs' \
+    '++sandbox.enroot.create.bypass_entrypoint=false' &
+```
+
+Replace `/path/to/enroot_sqshs` with the directory used in Step 1. Adjust
+`tensor_parallel_size` to match the number of GPUs available. The
+`tool_call_parser=qwen3_coder` and `reasoning_parser=qwen3` flags are required
+for Qwen3-family models; use `tool_call_parser=hermes` for other models.
+
+### Step 3 — Run the eval
+
+```bash
+gym eval run --no-serve \
+    --agent mini_swe_agent_2 \
+    --input responses_api_agents/mini_swe_agent_2/data/example.jsonl \
+    --output results/mini_swe_agent_2_enroot.jsonl \
+    --limit 5 \
+    --num-repeats 1 \
+    --temperature 0.5 \
+    --max-output-tokens 8192
+```
+
+### Notes
+
+- The sqsh cache dir must be the same path in both Step 1 and the
+  `++sandbox.enroot.create.sqsh_cache_dir` override. If they differ the provider
+  will re-import the images from Docker Hub.
+- `bypass_entrypoint` (default `true`) passes `--rc /dev/null` to `enroot start`
+  to suppress Docker `ENTRYPOINT` interference. Enroot resolves this path inside
+  the container's namespace before `/dev` is set up, so it fails with
+  `No such file or directory: /dev/null` for SWE-bench images. Always set
+  `'++sandbox.enroot.create.bypass_entrypoint=false'` for SWE-bench tasks —
+  these images use a plain shell entrypoint that does not interfere with the
+  sandbox init.
+- The NVIDIA enroot hook (`/etc/enroot/hooks.d/98-nvidia.sh`) requires
+  `nvidia-container-cli` to inject GPUs into sandbox containers. SWE-bench
+  evaluation containers do not need GPUs; if you see hook errors inside Docker,
+  remove the hook with `rm /etc/enroot/hooks.d/98-nvidia.sh`.
+
+## Running SWE-bench on ECS Fargate
+
+Swap OpenSandbox for ECS Fargate by adding the ECS provider config to your
+`+config_paths` — the agent config (`configs/mini_swe_agent_2.yaml`), agent loop,
+and SWE-bench verifier are unchanged. For provider setup (AWS infra/SSM,
+credentials, the `:52222` network requirement, and automatic image mirroring via
+`auto_mirror`) see the ECS Fargate provider page under `infrastructure/sandbox`.
+SWE-bench task images are pulled into the ECR mirror on first use, so no manual
+image staging is needed.
+
+Each input row needs the SWE-bench instance fields shown under
+[Dataset Information](#dataset-information) plus `subset` (`verified`), `split`
+(`test`), and `responses_create_params`.
+
+**Golden smoke (no model)** — `run_golden=true` applies the gold patch and runs
+the verifier in-sandbox, so the model is never called:
+
+```bash
+CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml,nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+AWS_REGION=us-east-1 ng_run "+config_paths=[$CONFIG_PATHS]" \
+    ++mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.run_golden=true
+
+ng_collect_rollouts +agent_name=mini_swe_agent_2 \
+    +input_jsonl_fpath=data/swe_verified_smoke.jsonl \
+    +output_jsonl_fpath=results/ecs_golden.jsonl \
+    +limit=1 +num_repeats=1 +num_samples_in_parallel=1
+```
+
+A resolved instance returns reward `1.0` with `tests_status` populated.
+
+**Real rollout** — drop `run_golden` and point the model server at a live
+OpenAI-compatible endpoint (`policy_model_name` is the model id sent upstream):
+
+```bash
+AWS_REGION=us-east-1 ng_run "+config_paths=[$CONFIG_PATHS]" \
+    ++policy_base_url=https://<endpoint>/v1 ++policy_api_key=<key> ++policy_model_name=<model-id>
+
+ng_collect_rollouts +agent_name=mini_swe_agent_2 \
+    +input_jsonl_fpath=data/swe_verified_smoke.jsonl \
+    +output_jsonl_fpath=results/ecs_rollout.jsonl \
+    +limit=8 +num_repeats=1 +num_samples_in_parallel=8 \
+    '+responses_create_params={max_output_tokens: 16384, temperature: 0.6, top_p: 0.95}'
+```
+
+Reasoning models often only accept the default `temperature` (`1`) and reject a
+custom `top_p`; in that case use
+`'+responses_create_params={temperature: 1, max_output_tokens: 16384}'` and keep
+`max_output_tokens` large enough for reasoning tokens.
 
 ## Sandbox Environment Adapter
 

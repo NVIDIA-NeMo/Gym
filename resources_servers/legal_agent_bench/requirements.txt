@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+requests>=2.32.5

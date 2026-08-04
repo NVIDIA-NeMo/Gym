@@ -12,11 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import asyncio
 import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import traceback
 from asyncio import Semaphore
@@ -89,6 +89,10 @@ class MiniSWEAgentVerifyResponse(BaseVerifyResponse):
 
 
 @ray.remote(
+    # Rollout tasks spend nearly all their time waiting on LLM calls and
+    # sandbox I/O; reserving a full CPU per task caps concurrent rollouts at
+    # the Ray cluster's core count long before any real resource limit.
+    num_cpus=0.25,
     scheduling_strategy="SPREAD",
     runtime_env={
         "py_executable": sys.executable,
@@ -140,7 +144,9 @@ def _responses_create_params_to_model_kwargs(
     tool_choice = default_tool_choice if default_tool_choice is not None else params.get("tool_choice")
     if tool_choice == "bash":
         model_kwargs["tool_choice"] = _bash_tool_choice()
-    elif tool_choice is not None:
+    elif tool_choice is not None and tool_choice != "auto":
+        # Don't propagate "auto" — it would overwrite a more specific default
+        # in the mini-swe-agent base config (e.g. swebench.yaml: tool_choice: required).
         model_kwargs["tool_choice"] = tool_choice
 
     return model_kwargs
@@ -507,6 +513,11 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
     model_kwargs = model_config.setdefault("model_kwargs", {})
     model_kwargs["api_key"] = params["api_key"]
     model_kwargs["base_url"] = params["base_url"]
+    # Bounded retries for transient LLM-call failures (disconnects, resets):
+    # without any retry a single failed call kills the whole rollout, while a
+    # large value makes litellm retry silently for so long that the rollout
+    # looks hung. Config-provided model_kwargs take precedence.
+    model_kwargs.setdefault("num_retries", 5)
     model_kwargs.pop("api_base", None)
     max_output_tokens = model_kwargs.pop("max_output_tokens", None)
     if max_output_tokens is not None and "max_tokens" not in model_kwargs:
@@ -576,7 +587,18 @@ def _run_mini_swe_v2(**params: Any) -> dict[str, Any]:
         }
     finally:
         if env and hasattr(env, "cleanup"):
-            env.cleanup()
+            # Off the critical path: this finally block runs before the task's
+            # return value becomes fetchable, so an in-band stop() delays every
+            # finished result and, on failure, re-raises over it. Orphans are
+            # covered by the provider's sandbox TTL.
+            threading.Thread(target=_cleanup_env_best_effort, args=(env,), daemon=True).start()
+
+
+def _cleanup_env_best_effort(env: Any) -> None:
+    try:
+        env.cleanup()
+    except Exception as e:
+        print(f"[CLEANUP] best-effort sandbox teardown failed: {e}", flush=True)
 
 
 def run_mini_swe_with_sandbox(**params: Any) -> Any:
@@ -714,7 +736,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             split = body.split
             workers = 1
             run_golden = self.config.run_golden
-            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+            base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+            base_url = f"{self.base_url_for_run(base_url, body)}/v1"
             dummy_key = "dummy_key"
             model_name = f"hosted_vllm/{policy_model_name}"
             step_timeout = self.config.step_timeout
@@ -736,7 +759,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             top_p = (
                 body.responses_create_params.top_p
                 if body.responses_create_params.top_p is not None
-                else default_model_kwargs["top_p"]
+                else default_model_kwargs.get("top_p", None)
             )
             model_kwargs = _responses_create_params_to_model_kwargs(
                 responses_create_params_dict,
@@ -804,7 +827,12 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 if runtime_env.get("env_vars"):
                     runner = runner.options(runtime_env=runtime_env)
                 future = runner.remote(run_mini_swe_with_sandbox, params)
-                result = await asyncio.to_thread(ray.get, future)
+                # Ray ObjectRefs are awaitable: park on the event loop instead
+                # of pinning a thread in asyncio's default executor (capped at
+                # min(32, cpu+4) workers). With the thread-blocking ray.get,
+                # at most ~32 rollouts can be waiting on results at once and
+                # every other finished task queues behind them.
+                result = await future
                 result = result[instance_id]
                 input_messages = result["input_messages"]
                 response_output = result["response_output"]

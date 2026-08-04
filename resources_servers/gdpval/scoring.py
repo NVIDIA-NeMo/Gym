@@ -140,7 +140,7 @@ async def score_with_rubric(
                             {"role": "user", "content": judge_prompt},
                         ],
                         "temperature": 0.1,
-                        "max_tokens": 8192,
+                        "max_tokens": 65535,
                     },
                     judge.create_overrides,
                 )
@@ -288,7 +288,7 @@ async def score_with_rubric_visual(
                             {"role": "user", "content": content},
                         ],
                         "temperature": 0.1,
-                        "max_tokens": 8192,
+                        "max_tokens": 65535,
                     },
                     judge.create_overrides,
                 )

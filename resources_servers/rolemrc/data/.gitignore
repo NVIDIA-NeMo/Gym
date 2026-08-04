@@ -1,0 +1,7 @@
+# Full splits built by prepare_rolemrc.py (fetched from Junrulu/RoleMRC).
+# Only the committed example*.jsonl smoke samples are tracked.
+test.jsonl
+test_judge.jsonl
+*train.jsonl
+*validation.jsonl
+*_prepare.jsonl
