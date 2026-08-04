@@ -1331,3 +1331,192 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
     assert connect_call["sandbox_id"] == "sdk-sandbox-9"
     assert connect_call["skip_health_check"] is True
     assert connect_call["connection_config"].kwargs["domain"] == "sandbox.example"
+
+
+async def test_create_pty_requires_capability_and_start() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    plain = AsyncSandbox(PlainSandboxProvider())
+    with pytest.raises(RuntimeError, match="has not been started"):
+        await plain.pty.create()
+    await plain.start(SandboxSpec(image="image:tag"))
+    with pytest.raises(NotImplementedError, match="does not support PTY sessions"):
+        await plain.pty.create()
+    await plain.stop()
+
+    class PtySandboxProvider(PlainSandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pty_specs: list[SandboxPtySpec] = []
+
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> object:
+            del handle
+            self.pty_specs.append(spec)
+            return object()
+
+    provider = PtySandboxProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+    await sandbox.pty.create("htop", env={"A": "1"}, rows=50, cols=200, user="worker")
+    spec = provider.pty_specs[0]
+    assert (spec.command, spec.cwd, spec.env, spec.rows, spec.cols, spec.user) == (
+        "htop",
+        "/work",
+        {"A": "1"},
+        50,
+        200,
+        "worker",
+    )
+    await sandbox.pty.create(cwd="/elsewhere")
+    assert provider.pty_specs[1].cwd == "/elsewhere"
+    await sandbox.stop()
+
+
+async def test_pty_exec_collects_output_and_exit() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    class FakePtySession:
+        def __init__(self, out: list[bytes], err: list[bytes], code: int) -> None:
+            self._out = list(out)
+            self._err = list(err)
+            self._code = code
+            self.closed = False
+
+        async def read(self, *, timeout_s: float | None = None) -> bytes:
+            return self._out.pop(0) if self._out else b""
+
+        async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
+            return self._err.pop(0) if self._err else b""
+
+        async def wait_exit(self, *, timeout_s: float | None = None) -> int:
+            return self._code
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class PtyExecProvider(PlainSandboxProvider):
+        def __init__(self, session: FakePtySession) -> None:
+            super().__init__()
+            self._session = session
+            self.pty_specs: list[SandboxPtySpec] = []
+
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> FakePtySession:
+            self.pty_specs.append(spec)
+            return self._session
+
+    session = FakePtySession([b"a", b"b"], [b"E"], 3)
+    provider = PtyExecProvider(session)
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    result = await sandbox.pty.exec("make", pty=False)
+    assert (result.stdout, result.stderr, result.return_code) == ("ab", "E", 3)
+    assert provider.pty_specs[0].pty is False
+    assert session.closed
+
+    session2 = FakePtySession([b"merged"], [], 0)
+    provider._session = session2
+    result = await sandbox.pty.exec("make")
+    assert (result.stdout, result.stderr, result.return_code) == ("merged", None, 0)
+    await sandbox.stop()
+
+
+async def test_pty_exec_timeout_closes_session() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    class HangingSession:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def read(self, *, timeout_s: float | None = None) -> bytes:
+            await asyncio.sleep(3600)
+            return b""
+
+        read_stderr = read
+
+        async def wait_exit(self, *, timeout_s: float | None = None) -> int:
+            await asyncio.sleep(3600)
+            return 0
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class HangingProvider(PlainSandboxProvider):
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> HangingSession:
+            self.session = HangingSession()
+            return self.session
+
+    provider = HangingProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+        await sandbox.pty.exec("sleep 999", timeout_s=0.05)
+    assert provider.session.closed
+    await sandbox.stop()
+
+
+async def test_pty_exec_on_existing_session() -> None:
+    from nemo_gym.sandbox import SandboxPtyError, SandboxPtySpec
+
+    class EchoingSession:
+        """Emulates a live shell: echoes the typed line, then answers the marker."""
+
+        def __init__(self, *, stderr: list[bytes] | None = None, die: bool = False) -> None:
+            self.written: list[bytes] = []
+            self._pending: list[bytes] = []
+            self._stderr = list(stderr or [])
+            self._die = die
+            self.closed = False
+
+        async def write(self, data: bytes) -> None:
+            self.written.append(data)
+            if self._die:
+                return
+            typed = data.decode()
+            marker_line = typed.splitlines()[-1]
+            quoted = marker_line.split("'")
+            token = quoted[3] + quoted[5]  # quoted[1] is the printf format
+            # Shell echo of both typed lines, then the command output and marker.
+            self._pending = [typed.replace("\n", "\r\n").encode(), b"real-output\r\n", f"{token}:7\r\n".encode()]
+
+        async def read(self, *, timeout_s: float | None = None) -> bytes:
+            return self._pending.pop(0) if self._pending else b""
+
+        async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
+            if self._stderr:
+                return self._stderr.pop(0)
+            raise TimeoutError
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class NoCreateProvider(PlainSandboxProvider):
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> object:
+            raise AssertionError("pty.exec(session=...) must not create a new session")
+
+    sandbox = AsyncSandbox(NoCreateProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    session = EchoingSession(stderr=[b"warn\r\n"])
+    result = await sandbox.pty.exec("make all", session=session)
+    assert result.return_code == 7
+    assert "real-output" in result.stdout
+    assert result.stderr == "warn\r\n"
+    # The marker must not be matchable from the shell's echo of the typed line.
+    typed = session.written[0].decode()
+    quoted = typed.split("'")
+    token = quoted[3] + quoted[5]
+    assert f"{token}:" not in typed
+    assert not session.closed, "an existing session must stay open"
+
+    dying = EchoingSession(die=True)
+    with pytest.raises(SandboxPtyError, match="ended before the command finished"):
+        await sandbox.pty.exec("make", session=dying)
+    await sandbox.stop()
+
+
+async def test_pty_attach_requires_capability() -> None:
+    plain = AsyncSandbox(PlainSandboxProvider())
+    await plain.start(SandboxSpec(image="image:tag"))
+    with pytest.raises(NotImplementedError, match="does not support re-attaching PTY sessions"):
+        await plain.pty.attach("s-1")
+    await plain.stop()

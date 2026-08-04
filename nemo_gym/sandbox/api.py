@@ -17,6 +17,7 @@
 import asyncio
 import tempfile
 import threading
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -29,9 +30,14 @@ from nemo_gym.sandbox.providers import (
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
+    SandboxPtyError,
+    SandboxPtySession,
+    SandboxPtySpec,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxPty,
+    SupportsSandboxPtyAttach,
     create_provider,
 )
 
@@ -39,6 +45,154 @@ from nemo_gym.sandbox.providers import (
 T = TypeVar("T")
 SYNC_OPERATION_TIMEOUT_S = 3600.0
 SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
+
+
+async def _run_in_pty_session(session: SandboxPtySession, command: str) -> SandboxExecResult:
+    """Run ``command`` in a live session, delimited by a unique marker."""
+    token = f"NGPTY{uuid.uuid4().hex[:12]}"
+    # The marker is assembled from two literals so the shell's echo of this
+    # line cannot itself match the marker we scan for.
+    await session.write(f"{command}\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode())
+
+    needle = f"{token}:".encode()
+    buffer = bytearray()
+    while needle not in buffer:
+        chunk = await session.read()
+        if not chunk:
+            raise SandboxPtyError("PTY session ended before the command finished")
+        buffer.extend(chunk)
+
+    stdout, _, trailing = bytes(buffer).partition(needle)
+    exit_text = trailing.split(b"\n", 1)[0].strip()
+    stderr = bytearray()
+    try:
+        while chunk := await session.read_stderr(timeout_s=0.05):
+            stderr.extend(chunk)
+    except (TimeoutError, asyncio.TimeoutError):
+        pass
+    return SandboxExecResult(
+        stdout=stdout.decode(errors="replace"),
+        stderr=stderr.decode(errors="replace") or None,
+        return_code=int(exit_text) if exit_text.isdigit() else -1,
+    )
+
+
+class SandboxPty:
+    """PTY namespace of a sandbox: ``await sandbox.pty.create(...)`` for a live
+    session, ``await sandbox.pty.exec(...)`` for one-shot run-and-collect."""
+
+    def __init__(self, sandbox: "AsyncSandbox") -> None:
+        self._sandbox = sandbox
+
+    async def create(
+        self,
+        command: str | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        rows: int = 24,
+        cols: int = 80,
+        user: str | int | None = None,
+        pty: bool = True,
+    ) -> SandboxPtySession:
+        """Open an interactive terminal; the returned session carries
+        ``read``/``read_stderr``/``write``/``resize``/``send_signal``/
+        ``wait_exit``/``close`` and is an async context manager.
+
+        ``pty=False`` selects pipe mode: no TTY, stdout/stderr split across
+        ``read()``/``read_stderr()``. Close the session before the sandbox
+        stops: a session that outlives its sandbox fails subsequent reads with
+        ``SandboxPtyError``. Async-only; the sync ``Sandbox`` facade does not
+        mirror it.
+        """
+        sandbox = self._sandbox
+        handle = sandbox._require_handle()
+        if not isinstance(sandbox._provider, SupportsSandboxPty):
+            provider_name = getattr(sandbox._provider, "name", type(sandbox._provider).__name__)
+            raise NotImplementedError(
+                f"Sandbox provider {provider_name!r} does not support PTY sessions; use exec() instead"
+            )
+        return await sandbox._provider.create_pty(
+            handle,
+            SandboxPtySpec(
+                command=command,
+                cwd=cwd if cwd is not None else sandbox._spec.workdir if sandbox._spec is not None else None,
+                env=env,
+                rows=rows,
+                cols=cols,
+                user=user,
+                pty=pty,
+            ),
+        )
+
+    async def attach(
+        self,
+        session_id: str,
+        *,
+        takeover: bool = True,
+        since: int | None = None,
+    ) -> SandboxPtySession:
+        """Re-attach to a session opened earlier, here or in another process.
+
+        Sessions outlive the client that opened them, so ``session.session_id``
+        is all another process needs. ``takeover`` evicts the current holder,
+        whose session then fails with ``SandboxPtyError``; without it,
+        attaching to a held session fails. ``since`` replays retained output
+        from that byte offset first (``0`` replays all of it).
+        """
+        sandbox = self._sandbox
+        handle = sandbox._require_handle()
+        if not isinstance(sandbox._provider, SupportsSandboxPtyAttach):
+            provider_name = getattr(sandbox._provider, "name", type(sandbox._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support re-attaching PTY sessions")
+        return await sandbox._provider.attach_pty(handle, session_id, takeover=takeover, since=since)
+
+    async def exec(
+        self,
+        command: str,
+        *,
+        session: SandboxPtySession | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | int | None = None,
+        timeout_s: int | float | None = 180,
+        pty: bool = True,
+        rows: int = 24,
+        cols: int = 80,
+    ) -> SandboxExecResult:
+        """Run one command in a terminal session and collect its output.
+
+        Without ``session`` this opens a session for the command, drains it and
+        closes it. With ``session`` the command runs in that live session, which
+        stays open and keeps its shell state: output then also contains the
+        shell's echo of the command, ``stderr`` is best-effort (pipe mode only),
+        and a command that ends the shell (``exit``) raises ``SandboxPtyError``.
+        PTY mode returns all output on ``stdout`` and ``None`` stderr; pipe mode
+        splits the two. Raises ``TimeoutError`` when the command outlives
+        ``timeout_s``.
+        """
+        if session is not None:
+            return await asyncio.wait_for(_run_in_pty_session(session, command), timeout=timeout_s)
+        session = await self.create(command, cwd=cwd, env=env, rows=rows, cols=cols, user=user, pty=pty)
+        try:
+
+            async def drain(read: Callable[[], Awaitable[bytes]]) -> bytes:
+                chunks = bytearray()
+                while chunk := await read():
+                    chunks.extend(chunk)
+                return bytes(chunks)
+
+            stdout, stderr, return_code = await asyncio.wait_for(
+                asyncio.gather(drain(session.read), drain(session.read_stderr), session.wait_exit()),
+                timeout=timeout_s,
+            )
+        finally:
+            await session.close()
+        return SandboxExecResult(
+            stdout=stdout.decode(errors="replace"),
+            stderr=None if pty else stderr.decode(errors="replace"),
+            return_code=return_code,
+        )
 
 
 class AsyncSandbox:
@@ -54,6 +208,7 @@ class AsyncSandbox:
         self._handle: SandboxHandle | None = None
         self._stopped = True
         self._closed = False
+        self.pty = SandboxPty(self)
 
     def _require_handle(self) -> SandboxHandle:
         if self._handle is None or self._stopped:
