@@ -1,0 +1,104 @@
+# E2B sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `e2b` selects the provider class and its value is passed to the
+# provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping providers is
+# swapping this config path in `+config_paths` (no agent edit):
+#
+#   gym env start \
+#     --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+#     --config nemo_gym/sandbox/providers/e2b/configs/e2b.yaml \
+#     --config responses_api_models/vllm_model/configs/vllm_model.yaml
+#
+# Requires the SDK: `pip install 'e2b>=2.36.0,<3.0.0'`.
+#
+# Works against e2b.dev and against any e2b-compatible gateway -- point
+# `connection.api_url`/`connection.sandbox_url` at the gateway.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: e2b
+  e2b:
+    connection:
+      # Leave unset to use the SDK's own env vars: E2B_API_KEY, E2B_API_URL,
+      # E2B_SANDBOX_URL and E2B_DOMAIN.
+      api_key: ${oc.env:E2B_API_KEY,null}
+      # Self-hosted / e2b-compatible gateway. Both are usually the same host.
+      api_url: ${oc.env:E2B_API_URL,null}
+      sandbox_url: ${oc.env:E2B_SANDBOX_URL,null}
+      # Optional control-plane headers, including gateway bearer authentication.
+      # api_headers:
+      #   Authorization: Bearer <token>
+      # Control-plane request timeout. With E2B 2.36+, this also bounds opening
+      # command streams, not the full lifetime of a running command. This value
+      # is reapplied after a SandboxSpec.ready_timeout_s create override.
+      request_timeout_s: 120.0
+    create:
+      # E2B starts sandboxes from a pre-built TEMPLATE NAME or ID, not a registry
+      # reference. The direct SandboxSpec.image shortcut accepts only untagged
+      # names containing letters, digits, '-' and '_' to avoid confusing tagged
+      # template names with OCI image references.
+      #
+      # Resolution order for each sandbox:
+      #   1. SandboxSpec.provider_options.template
+      #   2. this template_map, keyed by SandboxSpec.image
+      #   3. SandboxSpec.image itself, when it is an unambiguous direct name
+      #   4. this `template` fallback, only when SandboxSpec.image is omitted
+      #
+      # Use provider_options.template for a tagged name or template ID. Map OCI
+      # image references and other indirect names here, e.g.:
+      #   template_map:
+      #     "ghcr.io/acme/task:1.0": acme-task-1-0
+      #
+      # Building templates from OCI images is provisioning, not part of
+      # starting a sandbox, so it lives outside this provider in
+      # nemo_gym/sandbox/providers/e2b/build.py. It emits exactly this mapping:
+      #   python -m nemo_gym.sandbox.providers.e2b.build \
+      #       --image ghcr.io/acme/task:1.0 --cpu-count 8 --memory-mb 16384 \
+      #       --output template_map.yaml
+      template: null
+      template_map: {}
+      # Default sandbox lifetime. SandboxSpec.ttl_s overrides this per sandbox.
+      timeout_s: 3600.0
+      # Secure the sandbox envd service with an access token.
+      secure: true
+      # Permit outbound internet access. Set false for offline/untrusted workloads.
+      allow_internet_access: true
+      # Resource limits are fixed when a template is built. False warns when a
+      # SandboxSpec requests resources; true rejects the request.
+      strict_resources: false
+
+    exec:
+      # Fallback only when timeout_s=None. AsyncSandbox.exec() normally supplies
+      # its own 180s wait/stream budget; pass an explicit timeout for longer
+      # commands. A background process can outlive a timed-out output stream.
+      default_timeout_s: 180.0
+      user: null
+      # Optional override for opening command and reconnect streams. E2B 2.36+
+      # does not apply this timeout to the full command lifetime. Leave null to
+      # use connection.request_timeout_s.
+      request_timeout_s: null
+      # Start commands detached and reattach by pid if the output stream drops.
+      # The command keeps running inside the sandbox when the stream dies, so a
+      # gateway rollout or proxy restart mid-command no longer fails it.
+      #
+      # On by default, matching Harbor's own e2b environment, which dispatches
+      # every command with background=True.
+      #
+      # Reattaching is lossy, so it is a fallback rather than the happy path:
+      # the stream is live rather than replayed, so stdout/stderr cover only
+      # from the reattach onwards (exit codes are unaffected), and a command
+      # that finishes while disconnected cannot be recovered at all.
+      background: true
+      reconnect_attempts: 2
+    operations:
+      # Retries for transient transport/5xx failures. Deterministic errors and
+      # rate limits are not retried. Command timeouts are terminal; kill
+      # timeouts may be retried so cleanup is not abandoned.
+      retries: 2
+      retry_delay_s: 0.5
+      retry_max_delay_s: 8.0
