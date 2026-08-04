@@ -859,6 +859,51 @@ class TestRolloutCollection:
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])
+    async def test_run_from_config_creates_missing_output_dir(
+        self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool
+    ) -> None:
+        """--output under a directory that doesn't exist yet must not raise.
+
+        The first artifact written is the materialized inputs, so a mkdir placed after it (or only
+        alongside the rollouts write) leaves this failing. resume_from_cache=True takes the same
+        path here because neither cached file exists, and must not be tripped up by the new dir.
+        """
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}}) + "\n"
+        )
+        # Two levels deep so `parents=True` is exercised, not just a single missing dir.
+        output_jsonl_fpath = tmp_path / "results" / "nested" / "rollouts.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=resume_from_cache,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_bytes(orjson.dumps([]))
+                return metrics_fpath
+
+        await Helper().run_from_config(config)
+
+        # All four artifacts share output_fpath's parent, so one mkdir has to cover all of them.
+        assert config.materialized_jsonl_fpath.exists()
+        assert output_jsonl_fpath.exists()
+        assert _failures_path_for(output_jsonl_fpath).exists()
+        assert output_jsonl_fpath.with_name("rollouts_aggregate_metrics.json").exists()
+
+    @pytest.mark.parametrize("resume_from_cache", [False, True])
     @pytest.mark.parametrize("redact_payloads", [False, True])
     async def test_run_from_config_replaces_stale_capture_before_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool, redact_payloads: bool
