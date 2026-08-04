@@ -249,12 +249,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # For now, the activation is put on the harness side.
         conda_activate_command_str = "(( [[ -f /opt/miniconda3/bin/activate ]] && source /opt/miniconda3/bin/activate && conda activate testbed 2>/dev/null ) || true)"
 
+        opencode_thinking_str = "--thinking"
+
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run {opencode_debug_str} {quote(query)}
+        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)}
         """
 
         opencode_config_content = json.dumps(self._create_opencode_config())
