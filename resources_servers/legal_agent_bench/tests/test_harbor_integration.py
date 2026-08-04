@@ -10,6 +10,7 @@ import time
 from asyncio import Semaphore
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,8 +19,11 @@ from omegaconf import OmegaConf
 from resources_servers.legal_agent_bench.harbor_bridge import REPO_ROOT, LegalAgentBenchHarborBridge
 from resources_servers.legal_agent_bench.legal_harbor_agent import (
     LegalAgentBenchHarborAgent,
+    LegalAgentBenchHarnessError,
+    ModelResponse,
     OpenAICompatibleAdapter,
     _chat_with_timeout,
+    _run_agent_async,
 )
 from resources_servers.legal_agent_bench.prepare import (
     EXPECTED_TASK_COUNT,
@@ -80,6 +84,7 @@ def test_folder_config_is_public_docker_only() -> None:
     assert resource["auto_prepare_assets"] is True
     assert agent["harbor_environment_type"] == "docker"
     assert agent["harbor_environment_import_path"] is None
+    assert agent["harbor_skip_verification_on_agent_failure"] is True
     assert "docker_image" not in json.dumps(agent)
 
 
@@ -270,6 +275,161 @@ async def test_policy_adapter_timeout(monkeypatch) -> None:
 
     with pytest.raises(TimeoutError, match="agent model request exceeded timeout"):
         await _chat_with_timeout(adapter, [], [])
+
+
+@pytest.mark.asyncio
+async def test_harbor_agent_preserves_partial_trajectory_then_propagates_failure(monkeypatch, tmp_path) -> None:
+    task_dir = tmp_path / "task"
+    (task_dir / "documents").mkdir(parents=True)
+    (task_dir / "environment").mkdir()
+    (task_dir / "task.toml").write_text('version = "1.0"\n', encoding="utf-8")
+    (task_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "title": "Test task",
+                "instructions": "Write the deliverable.",
+                "criteria": [{"id": "C-1", "title": "Done", "match_criteria": "Pass."}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    logs_dir = tmp_path / "logs" / "agent"
+    agent = LegalAgentBenchHarborAgent(
+        logs_dir=logs_dir,
+        model_name="policy-model",
+        api_base="http://policy/v1",
+        skills_dir=tmp_path / "skills",
+    )
+    monkeypatch.setattr(agent, "_skill_names", lambda: [])
+
+    async def hydrate(_environment, _docs_dir):
+        return None
+
+    monkeypatch.setattr(agent, "_hydrate_environment", hydrate)
+    monkeypatch.setattr(agent, "_create_adapter", MagicMock())
+    monkeypatch.setattr(
+        "resources_servers.legal_agent_bench.legal_harbor_agent.get_all_tool_definitions",
+        lambda: [],
+    )
+
+    class ToolExecutor:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def preflight(self):
+            return None
+
+    monkeypatch.setattr(
+        "resources_servers.legal_agent_bench.legal_harbor_agent.HarborToolExecutor",
+        ToolExecutor,
+    )
+
+    async def partial_failure(*, transcript_path, **_kwargs):
+        transcript_path.write_text(
+            json.dumps(
+                {
+                    "turn": 1,
+                    "role": "assistant",
+                    "message": {"role": "assistant", "content": "Partial work"},
+                    "text": "Partial work",
+                    "tool_calls": None,
+                    "input_tokens": 11,
+                    "output_tokens": 3,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "messages": [],
+            "turn_count": 1,
+            "input_tokens": 11,
+            "output_tokens": 3,
+            "wall_clock_seconds": 0.1,
+            "finished_cleanly": False,
+            "context_overflow": False,
+            "model_error": "adapter failed after partial output",
+            "model_error_type": "ConnectionError",
+            "model_connection_failed": True,
+            "agent_timed_out": False,
+            "tool_metrics": {},
+        }
+
+    monkeypatch.setattr(
+        "resources_servers.legal_agent_bench.legal_harbor_agent._run_agent_async",
+        partial_failure,
+    )
+
+    class Environment:
+        environment_dir = task_dir / "environment"
+
+        async def download_dir(self, _source, target):
+            Path(target).mkdir(parents=True, exist_ok=True)
+
+    context = SimpleNamespace()
+    with pytest.raises(LegalAgentBenchHarnessError, match="adapter failed after partial output"):
+        await agent.run("<!-- lab_task_id:test/task -->", Environment(), context)
+
+    trajectory = json.loads((logs_dir / "trajectory.json").read_text(encoding="utf-8"))
+    assert trajectory["steps"][-1]["message"] == "Partial work"
+    assert context.metadata["agent_failed"] is True
+    assert context.metadata["model_connection_failed"] is True
+    assert context.metadata["agent_timed_out"] is False
+    assert context.metadata["model_error"] == "adapter failed after partial output"
+
+
+@pytest.mark.asyncio
+async def test_harbor_loop_classifies_timeout_after_partial_output(tmp_path) -> None:
+    class Adapter:
+        timeout_seconds = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def make_system_message(self, content):
+            return {"role": "system", "content": content}
+
+        def make_user_message(self, content):
+            return {"role": "user", "content": content}
+
+        def make_tool_result_messages(self, results):
+            return [{"role": "tool", "content": result} for _call_id, result in results]
+
+        async def chat(self, _messages, _tools):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    message={"role": "assistant", "content": "Working"},
+                    tool_calls=[SimpleNamespace(id="call-1", name="read", arguments='{"path":"input.docx"}')],
+                    text="Working",
+                    input_tokens=10,
+                    output_tokens=2,
+                )
+            raise TimeoutError("model request timed out")
+
+    class ToolExecutor:
+        async def execute(self, _name, _arguments):
+            return "document text"
+
+        def get_metrics(self):
+            return {}
+
+    transcript = tmp_path / "transcript.jsonl"
+    result = await _run_agent_async(
+        adapter=Adapter(),
+        system_prompt="system",
+        tool_executor=ToolExecutor(),
+        tools=[],
+        max_turns=3,
+        transcript_path=transcript,
+    )
+
+    entries = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    assert any(entry.get("role") == "assistant" for entry in entries)
+    assert any(entry.get("role") == "model_error" for entry in entries)
+    assert result["model_error"] == "model request timed out"
+    assert result["agent_timed_out"] is True
+    assert result["model_connection_failed"] is False
 
 
 @pytest.mark.parametrize(

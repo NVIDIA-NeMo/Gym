@@ -18,6 +18,7 @@ from asyncio import Semaphore
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +30,7 @@ from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,
     HarborRunRequest,
+    _stop_verification_after_agent_failure,
 )
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
@@ -296,7 +298,7 @@ def _harbor_run_mocks(
                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
             mock_to_thread.return_value = trial_dir
 
-        yield
+        yield mock_ray
 
 
 # ===========================================================================
@@ -430,6 +432,89 @@ class TestApp:
         assert len(response.response.output) == 0
         assert response.responses_create_params.temperature == 0.3
         assert response.responses_create_params.input == []
+
+    async def test_run_masks_partial_agent_failure_and_ignores_verifier_reward(self):
+        server = _make_server(harbor_skip_verification_on_agent_failure=True)
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "agent_result": {
+                **DEFAULT_TRIAL_RESULT["agent_result"],
+                "metadata": {
+                    "agent_failed": True,
+                    "model_connection_failed": True,
+                    "agent_timed_out": False,
+                    "model_error": "adapter failed after partial output",
+                },
+            },
+            "exception_info": {
+                "exception_type": "LegalAgentBenchHarnessError",
+                "exception_message": "adapter failed after partial output",
+            },
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": None,
+        }
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY) as mock_ray:
+            response = await server.run(_make_run_request())
+
+        assert response.response.output
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.agent_failed is True
+        assert response.model_connection_failed is True
+        assert response.agent_timed_out is False
+        assert response.failure_reason == "adapter failed after partial output"
+        params = mock_ray.remote.call_args.args[1]
+        assert params["skip_verification_on_agent_failure"] is True
+
+    async def test_verification_hook_rejects_agent_failure(self):
+        event = SimpleNamespace(
+            result=SimpleNamespace(exception_info=SimpleNamespace(exception_type="AgentTimeoutError"))
+        )
+
+        with pytest.raises(RuntimeError, match="Skipping verification after agent failure: AgentTimeoutError"):
+            await _stop_verification_after_agent_failure(event)
+
+        await _stop_verification_after_agent_failure(SimpleNamespace(result=SimpleNamespace(exception_info=None)))
+
+    async def test_run_masks_timeout_with_partial_output(self):
+        server = _make_server(harbor_skip_verification_on_agent_failure=True)
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "exception_info": {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "Agent execution timed out",
+            },
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": None,
+        }
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY):
+            response = await server.run(_make_run_request())
+
+        assert response.response.output
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.agent_failed is True
+        assert response.agent_timed_out is True
+        assert response.failure_reason == "Agent execution timed out"
+
+    async def test_default_harbor_timeout_contract_is_unchanged(self):
+        server = _make_server()
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "exception_info": {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "Agent execution timed out",
+            },
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": {"started_at": "2026-01-01T00:01:00Z"},
+        }
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 1.0
+        assert response.agent_timeout_error == 1
+        assert "mask_sample" not in response.model_dump()
+        assert "agent_failed" not in response.model_dump()
 
     @pytest.mark.parametrize(
         "model_name, expected",
