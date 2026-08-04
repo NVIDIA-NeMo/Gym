@@ -423,8 +423,18 @@ def convert_deliverables_to_content_blocks(
     blocks: list[dict[str, Any]] = []
     converted_pdfs: list[Path] = []  # track for cleanup
 
-    for fpath in sorted(output_path.iterdir()):
-        if not fpath.is_file():
+    entries = sorted(output_path.iterdir())
+    # A PDF an Office file renders from must not also be emitted standalone, or
+    # the judge sees the same pages twice. Both spellings count: the same-stem
+    # sidecar Plan.pptx.pdf, and the ordinary sibling Plan.pdf.
+    consumed_pdfs: set[Path] = set()
+    for entry in entries:
+        if entry.is_file() and entry.suffix.lower() in OFFICE_EXTS:
+            sidecar = entry.with_name(entry.name + ".pdf")
+            consumed_pdfs.add(sidecar if sidecar.is_file() else entry.with_suffix(".pdf"))
+
+    for fpath in entries:
+        if not fpath.is_file() or fpath in consumed_pdfs:
             continue
 
         ext = fpath.suffix.lower()
@@ -440,9 +450,17 @@ def convert_deliverables_to_content_blocks(
                     )
 
             elif ext in OFFICE_EXTS:
-                pdf_path = _convert_office_to_pdf(fpath)
+                # Prefer a PDF preconvert already rendered. Reconverting is
+                # wasteful, needs LibreOffice on the judge host, and the cleanup
+                # below would delete someone else's artifact.
+                sidecar = fpath.with_name(fpath.name + ".pdf")
+                sibling = fpath.with_suffix(".pdf")
+                pdf_path = sidecar if sidecar.is_file() else (sibling if sibling.is_file() else None)
+                if pdf_path is None:
+                    pdf_path = _convert_office_to_pdf(fpath)
+                    if pdf_path and pdf_path.exists():
+                        converted_pdfs.append(pdf_path)
                 if pdf_path and pdf_path.exists():
-                    converted_pdfs.append(pdf_path)
                     data = pdf_path.read_bytes()
                     if images_and_text:
                         rendered = _pdf_bytes_to_image_text_blocks(
