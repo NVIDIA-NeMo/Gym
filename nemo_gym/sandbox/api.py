@@ -25,11 +25,13 @@ from typing import Any, TypeVar
 
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxEndpoint,
     create_provider,
 )
 
@@ -120,6 +122,24 @@ class AsyncSandbox:
         if self._stopped:
             return SandboxStatus.STOPPED
         return await self._provider.status(self._handle)
+
+    async def endpoint(self, port: int) -> SandboxEndpoint:
+        """Resolve a declared sandbox service port without exposing provider state."""
+
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError(f"Sandbox endpoint port must be an integer between 1 and 65535, got {port!r}")
+        declared_ports = self._spec.ports if self._spec is not None else ()
+        if port not in declared_ports:
+            raise ValueError(
+                f"Sandbox port {port} was not declared in SandboxSpec.ports; declared ports: {list(declared_ports)!r}"
+            )
+        if not isinstance(self._provider, SupportsSandboxEndpoint):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support service endpoints")
+        resolved = await self._provider.endpoint(self._require_handle(), port)
+        if not isinstance(resolved, SandboxEndpoint):
+            raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
+        return resolved
 
     async def stop(self) -> None:
         if self._closed:
@@ -314,6 +334,9 @@ class Sandbox:
         if self._closed:
             return SandboxStatus.STOPPED
         return self._runner.run("status", self._async_sandbox.status)
+
+    def endpoint(self, port: int) -> SandboxEndpoint:
+        return self._runner.run("endpoint", lambda: self._async_sandbox.endpoint(port))
 
     def stop(self) -> None:
         if self._closed:
