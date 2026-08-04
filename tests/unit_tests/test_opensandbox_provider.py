@@ -241,6 +241,216 @@ async def test_direct_create_passes_image_auth_to_sdk_create(
     assert image.auth.password == TEST_REGISTRY_PASSWORD
 
 
+async def test_pool_create_uses_api_key_auth_without_execd_connect(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_rest_request(
+        method: str,
+        url: str,
+        *,
+        json_body: Any | None = None,
+        headers: dict[str, str] | None = None,
+        timeout_s: float = 300.0,
+    ) -> tuple[int, str]:
+        calls.append(
+            {
+                "method": method,
+                "url": url,
+                "json_body": json_body,
+                "headers": headers,
+                "timeout_s": timeout_s,
+            }
+        )
+        return 201, '{"id": "pooled-sandbox-1"}'
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "http://sandbox.example",
+            "api_key": "pool-api-key",  # pragma: allowlist secret
+            "request_timeout_s": 30,
+        },
+        create={"request_timeout_s": 120, "timeout_s": 30},
+        probe={"command": None},
+    )
+    handle = await provider.create(
+        SandboxSpec(
+            ttl_s=1800,
+            metadata={"purpose": "osworld"},
+            provider_options={"extensions": {"poolRef": "osworld-kvm"}},
+        )
+    )
+
+    assert handle.sandbox_id == "pooled-sandbox-1"
+    assert isinstance(handle.raw, opensandbox_provider._PooledRestSandbox)
+    assert FakeSandbox.connected_args == ()
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"] == "http://sandbox.example/v1/sandboxes"
+    assert calls[0]["headers"] == {
+        "OPEN-SANDBOX-API-KEY": "pool-api-key"  # pragma: allowlist secret
+    }
+    assert calls[0]["json_body"]["timeout"] == 1800
+    assert calls[0]["json_body"]["extensions"] == {"poolRef": "osworld-kvm"}
+    assert calls[0]["json_body"]["metadata"]["purpose"] == "osworld"
+    assert calls[0]["json_body"]["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY]
+
+
+async def test_pool_connect_cancellation_deletes_known_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def fake_rest_request(
+        method: str,
+        url: str,
+        **_kwargs: Any,
+    ) -> tuple[int, str]:
+        calls.append((method, url))
+        if method == "POST":
+            return 201, '{"id": "pooled-cancelled-connect"}'
+        if method == "DELETE":
+            return 204, ""
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "http://sandbox.example"},
+        probe={"command": None},
+    )
+
+    async def cancelled_verify(_handle: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(provider, "_verify_created_handle", cancelled_verify)
+
+    with pytest.raises(asyncio.CancelledError):
+        await provider._create_once(
+            SandboxSpec(
+                ready_timeout_s=30,
+                provider_options={
+                    "extensions": {
+                        "poolRef": "osworld-kvm",
+                    }
+                },
+            )
+        )
+
+    assert calls == [
+        ("POST", "http://sandbox.example/v1/sandboxes"),
+        (
+            "DELETE",
+            "http://sandbox.example/v1/sandboxes/pooled-cancelled-connect",
+        ),
+    ]
+
+
+async def test_pool_post_cancellation_reaps_exact_create_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    create_marker = ""
+
+    async def fake_rest_request(
+        method: str,
+        url: str,
+        *,
+        json_body: Any | None = None,
+        **_kwargs: Any,
+    ) -> tuple[int, str]:
+        nonlocal create_marker
+        calls.append((method, url))
+        if method == "POST":
+            create_marker = str(json_body["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY])
+            raise asyncio.CancelledError
+        if method == "GET":
+            if "page=1&" in url:
+                return (
+                    200,
+                    (
+                        '{"items":[{"id":"some-other-create",'
+                        '"metadata":{"nemo-gym-create-id":"other"}}],'
+                        '"pagination":{"page":1,"pageSize":200,'
+                        '"totalPages":2,"hasNextPage":true}}'
+                    ),
+                )
+            return (
+                200,
+                (
+                    '{"items":[{"id":"lost-create",'
+                    f'"metadata":{{"{opensandbox_provider.POOLED_CREATE_MARKER_KEY}":'
+                    f'"{create_marker}"}}}}],'
+                    '"pagination":{"page":2,"pageSize":200,'
+                    '"totalPages":2,"hasNextPage":false}}'
+                ),
+            )
+        if method == "DELETE":
+            return 204, ""
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "http://sandbox.example"},
+        probe={"command": None},
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await provider._create_once(
+            SandboxSpec(
+                provider_options={
+                    "extensions": {
+                        "poolRef": "osworld-kvm",
+                    }
+                },
+            )
+        )
+
+    assert create_marker
+    assert calls == [
+        ("POST", "http://sandbox.example/v1/sandboxes"),
+        ("GET", "http://sandbox.example/v1/sandboxes?page=1&pageSize=200"),
+        ("GET", "http://sandbox.example/v1/sandboxes?page=2&pageSize=200"),
+        ("DELETE", "http://sandbox.example/v1/sandboxes/lost-create"),
+    ]
+
+
+async def test_pool_create_requires_pool_ref(
+    fake_opensandbox_sdk: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    with pytest.raises(ValueError, match="poolRef"):
+        await provider._create_once(SandboxSpec())
+
+
+async def test_endpoint_normalizes_missing_scheme() -> None:
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> Any:
+            assert port == 5000
+            return SimpleNamespace(
+                endpoint="10.0.0.22:5000",
+                headers={"X-Route": "sandbox"},
+            )
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"protocol": "http"},
+        operations={"retries": 0},
+        probe={"command": None},
+    )
+    resolved = await provider.endpoint(
+        opensandbox_provider.SandboxHandle(
+            sandbox_id="sandbox-1",
+            provider_name="opensandbox",
+            raw=FakeRaw(),
+        ),
+        5000,
+    )
+
+    assert resolved.endpoint == "http://10.0.0.22:5000"
+    assert resolved.headers == {"X-Route": "sandbox"}
+
+
 def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")

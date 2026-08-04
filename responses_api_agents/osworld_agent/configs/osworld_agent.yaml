@@ -14,6 +14,7 @@ osworld_simple_agent:
       sandbox_provider: null      # named nemo_gym.sandbox config; when set, Sandbox owns VM container lifecycle
       sandbox_spec:
         image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9
+        ttl_s: null
         ready_timeout_s: 120
         entrypoint:
           - /usr/bin/tini
@@ -27,6 +28,9 @@ osworld_simple_agent:
           cpu: 4
           memory_mib: 16384
           disk_gib: 40
+        provider_options:
+          extensions:
+            poolRef: null
       vm_path: ${oc.env:OSWORLD_VM_PATH,${oc.env:OSWORLD_SANDBOX_VM_PATH,""}}  # optional absolute qcow2 path
       sandbox_vm_path: null       # deprecated compatibility alias for vm_path
       sandbox_require_kvm: true

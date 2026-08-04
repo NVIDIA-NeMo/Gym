@@ -15,9 +15,11 @@
 """OpenSandbox provider implementation."""
 
 import asyncio
+import json
 import logging
 import re
 import shlex
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -28,6 +30,7 @@ from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -52,7 +55,107 @@ class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
 
 
+@dataclass(frozen=True)
+class _PooledEndpoint:
+    endpoint: str
+    headers: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _PooledLifecycleStatus:
+    state: str
+
+
+@dataclass(frozen=True)
+class _PooledLifecycleInfo:
+    status: _PooledLifecycleStatus
+
+
+@dataclass
+class _PooledRestSandbox:
+    """Minimal SDK-shaped handle for a Pool without pod-level execd/egress."""
+
+    sandbox_id: str
+    base_url: str
+    headers: dict[str, str]
+    protocol: str
+    timeout_s: float
+    use_server_proxy: bool
+
+    async def get_endpoint(self, port: int) -> _PooledEndpoint:
+        status, text = await _rest_request(
+            "GET",
+            f"{self.base_url}/v1/sandboxes/{self.sandbox_id}/endpoints/{port}"
+            f"?use_server_proxy={'true' if self.use_server_proxy else 'false'}",
+            headers=self.headers,
+            timeout_s=self.timeout_s,
+        )
+        if status != 200:
+            raise RuntimeError(
+                "OpenSandbox pooled endpoint lookup failed "
+                f"(HTTP {status}); sandbox_id={self.sandbox_id!r}; port={port}; "
+                f"body={text[:300]}"
+            )
+        try:
+            payload = json.loads(text)
+            endpoint = str(payload["endpoint"])
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise RuntimeError(
+                "OpenSandbox pooled endpoint lookup returned an unexpected "
+                f"body; sandbox_id={self.sandbox_id!r}; port={port}; "
+                f"body={text[:300]}"
+            ) from error
+        if "://" not in endpoint:
+            endpoint = f"{self.protocol}://{endpoint.lstrip('/')}"
+        return _PooledEndpoint(
+            endpoint=endpoint,
+            headers=_string_map(payload.get("headers") or {}),
+        )
+
+    async def get_info(self) -> _PooledLifecycleInfo:
+        status, text = await _rest_request(
+            "GET",
+            f"{self.base_url}/v1/sandboxes/{self.sandbox_id}",
+            headers=self.headers,
+            timeout_s=self.timeout_s,
+        )
+        if status == 404:
+            return _PooledLifecycleInfo(status=_PooledLifecycleStatus(state="deleted"))
+        if status != 200:
+            raise RuntimeError(
+                "OpenSandbox pooled lifecycle lookup failed "
+                f"(HTTP {status}); sandbox_id={self.sandbox_id!r}; "
+                f"body={text[:300]}"
+            )
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "OpenSandbox pooled lifecycle lookup returned an unexpected "
+                f"body; sandbox_id={self.sandbox_id!r}; body={text[:300]}"
+            ) from error
+        raw_status = payload.get("status") or {}
+        state = raw_status.get("state") if isinstance(raw_status, Mapping) else None
+        return _PooledLifecycleInfo(status=_PooledLifecycleStatus(state=str(state or "unknown")))
+
+    async def kill(self) -> None:
+        status, text = await _rest_request(
+            "DELETE",
+            f"{self.base_url}/v1/sandboxes/{self.sandbox_id}",
+            headers=self.headers,
+            timeout_s=self.timeout_s,
+        )
+        if status not in {200, 202, 204, 404}:
+            raise RuntimeError(
+                f"OpenSandbox pooled delete failed (HTTP {status}); sandbox_id={self.sandbox_id!r}; body={text[:300]}"
+            )
+
+    async def close(self) -> None:
+        """Match the SDK handle contract; REST calls own no persistent client."""
+
+
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+POOLED_CREATE_MARKER_KEY = "nemo-gym-create-id"
 RETRYABLE_ERROR_MARKERS = (
     "all connection attempts failed",
     "connection refused",
@@ -270,6 +373,29 @@ def _log_operation_retry(retry_state: Any) -> None:
         sleep_s,
         exception,
     )
+
+
+async def _rest_request(
+    method: str,
+    url: str,
+    *,
+    json_body: Any | None = None,
+    headers: Mapping[str, str] | None = None,
+    timeout_s: float = 300.0,
+) -> tuple[int, str]:
+    """Send one lifecycle request without initializing Gym's global config."""
+
+    import aiohttp  # noqa: PLC0415
+
+    timeout = aiohttp.ClientTimeout(total=timeout_s)
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+        async with session.request(
+            method,
+            url,
+            json=json_body,
+            headers=dict(headers or {}),
+        ) as response:
+            return response.status, await response.text()
 
 
 def _string_map(values: Mapping[str, Any]) -> dict[str, str]:
@@ -853,10 +979,229 @@ class OpenSandboxProvider:
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
 
+    def _rest_base_url(self) -> str:
+        domain = self._connection.domain
+        if not domain:
+            raise ValueError("OpenSandbox connection.domain is required for pool-mode create")
+        if domain.startswith(("http://", "https://")):
+            return domain.rstrip("/")
+        return f"{self._connection.protocol or 'http'}://{domain}".rstrip("/")
+
+    def _rest_headers(self) -> dict[str, str]:
+        if self._connection.api_key:
+            return {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
+        return {}
+
+    async def _rest_create_pooled(
+        self,
+        spec: SandboxSpec,
+        options: OpenSandboxProviderOptions,
+    ) -> str:
+        """Allocate from a server-side Pool using an image-less lifecycle POST."""
+
+        create_id = uuid.uuid4().hex
+        body: dict[str, Any] = {
+            "extensions": dict(options.extensions),
+            "metadata": {
+                **(spec.metadata or {}),
+                POOLED_CREATE_MARKER_KEY: create_id,
+            },
+        }
+        if spec.ttl_s is not None:
+            body["timeout"] = int(spec.ttl_s)
+
+        try:
+            status, text = await _rest_request(
+                "POST",
+                f"{self._rest_base_url()}/v1/sandboxes",
+                json_body=body,
+                headers=self._rest_headers(),
+                timeout_s=float(self._create.request_timeout_s or self._connection.request_timeout_s or 300),
+            )
+        except BaseException:
+            await self._reap_pooled_create_marker(create_id)
+            raise
+
+        if status not in {200, 201, 202}:
+            raise OpenSandboxCreateError(f"OpenSandbox pool-mode create failed (HTTP {status}): {text[:300]}")
+        try:
+            sandbox_id = json.loads(text)["id"]
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise OpenSandboxCreateError(
+                f"OpenSandbox pool-mode create returned an unexpected body: {text[:300]}"
+            ) from error
+        return str(sandbox_id)
+
+    async def _reap_pooled_create_marker(self, create_id: str) -> None:
+        """Delete only a lost create carrying this client's exact marker."""
+
+        base = self._rest_base_url()
+        timeout_s = float(self._operations.close_timeout_s or 30.0)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        page = 1
+        page_size = 200
+
+        def remaining_timeout_s() -> float:
+            return max(deadline - loop.time(), 0.0)
+
+        try:
+            while page <= 100:
+                remaining_s = remaining_timeout_s()
+                if remaining_s <= 0:
+                    LOGGER.warning(
+                        "Timed out scanning OpenSandbox sandboxes for abandoned create marker %s after %s pages",
+                        create_id,
+                        page - 1,
+                    )
+                    return
+                status, text = await _rest_request(
+                    "GET",
+                    f"{base}/v1/sandboxes?page={page}&pageSize={page_size}",
+                    headers=self._rest_headers(),
+                    timeout_s=remaining_s,
+                )
+                if status != 200:
+                    LOGGER.warning(
+                        "Could not list OpenSandbox sandboxes to reap abandoned create marker %s: page=%s HTTP %s",
+                        create_id,
+                        page,
+                        status,
+                    )
+                    return
+                data = json.loads(text)
+                items = data if isinstance(data, list) else data.get("items") or data.get("sandboxes") or []
+                for item in items:
+                    if not isinstance(item, Mapping):
+                        continue
+                    metadata = item.get("metadata") or {}
+                    if not isinstance(metadata, Mapping) or metadata.get(POOLED_CREATE_MARKER_KEY) != create_id:
+                        continue
+                    sandbox_id = str(item.get("id") or "")
+                    if not sandbox_id:
+                        continue
+                    remaining_s = remaining_timeout_s()
+                    if remaining_s <= 0:
+                        LOGGER.warning(
+                            "Timed out before deleting abandoned OpenSandbox pooled create %s (marker %s)",
+                            sandbox_id,
+                            create_id,
+                        )
+                        return
+                    delete_status, _ = await _rest_request(
+                        "DELETE",
+                        f"{base}/v1/sandboxes/{sandbox_id}",
+                        headers=self._rest_headers(),
+                        timeout_s=remaining_s,
+                    )
+                    LOGGER.warning(
+                        "Reaped abandoned OpenSandbox pooled create %s (marker %s, DELETE HTTP %s)",
+                        sandbox_id,
+                        create_id,
+                        delete_status,
+                    )
+                    return
+
+                if isinstance(data, list):
+                    has_next_page = len(items) >= page_size
+                else:
+                    pagination = data.get("pagination") or {}
+                    has_next_page = bool(pagination.get("hasNextPage"))
+                    total_pages = pagination.get("totalPages")
+                    if isinstance(total_pages, int):
+                        has_next_page = has_next_page or page < total_pages
+                if not has_next_page:
+                    return
+                page += 1
+            LOGGER.warning(
+                "Stopped scanning OpenSandbox sandboxes for abandoned create marker %s after %s pages",
+                create_id,
+                page - 1,
+            )
+        except Exception as error:  # noqa: BLE001
+            LOGGER.warning(
+                "Failed to reap abandoned OpenSandbox pooled create (marker %s): %r",
+                create_id,
+                error,
+            )
+
+    async def _cleanup_failed_pooled_create(self, handle: SandboxHandle) -> None:
+        try:
+            await _rest_request(
+                "DELETE",
+                f"{self._rest_base_url()}/v1/sandboxes/{handle.sandbox_id}",
+                headers=self._rest_headers(),
+                timeout_s=float(self._operations.close_timeout_s or 30.0),
+            )
+        except Exception as error:  # noqa: BLE001
+            LOGGER.warning(
+                "Failed to clean up pooled sandbox after create failure; sandbox_id=%s; error=%r",
+                handle.sandbox_id,
+                error,
+            )
+
+    async def _create_pooled(
+        self,
+        spec: SandboxSpec,
+        options: OpenSandboxProviderOptions,
+    ) -> SandboxHandle:
+        if "poolRef" not in options.extensions:
+            raise ValueError(
+                "OpenSandbox create without image/snapshot_id requires provider_options.extensions.poolRef"
+            )
+        sandbox_id = await self._rest_create_pooled(spec, options)
+        rest_handle = _PooledRestSandbox(
+            sandbox_id=sandbox_id,
+            base_url=self._rest_base_url(),
+            headers=self._rest_headers(),
+            protocol=self._connection.protocol or "http",
+            timeout_s=float(self._connection.request_timeout_s or self._create.request_timeout_s or 300.0),
+            use_server_proxy=self._connection.use_server_proxy,
+        )
+        created_handle = SandboxHandle(
+            sandbox_id=sandbox_id,
+            provider_name=self.name,
+            raw=rest_handle,
+        )
+        try:
+            await self._verify_created_handle(created_handle)
+        except BaseException:
+            await self._cleanup_failed_pooled_create(created_handle)
+            raise
+        return created_handle
+
+    async def endpoint(
+        self,
+        handle: SandboxHandle,
+        port: int,
+    ) -> SandboxEndpoint:
+        """Resolve one client-reachable direct or server-proxied service URL."""
+
+        if handle.raw is None:
+            raise RuntimeError(f"OpenSandbox handle for {handle.sandbox_id!r} has no SDK object")
+        endpoint = await self._await_sdk_operation(
+            lambda: handle.raw.get_endpoint(port),
+            operation=f"get_endpoint({port})",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=(
+                float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
+            ),
+        )
+        url = str(getattr(endpoint, "endpoint", "") or "")
+        if not url:
+            raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
+        if "://" not in url:
+            url = f"{self._connection.protocol or 'http'}://{url}"
+        headers = dict(getattr(endpoint, "headers", None) or {})
+        return SandboxEndpoint(endpoint=url, headers=headers)
+
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
+
+        if spec.image is None and options.snapshot_id is None:
+            return await self._create_pooled(spec, options)
 
         kwargs: dict[str, Any] = {
             "env": spec.env,
@@ -922,7 +1267,7 @@ class OpenSandboxProvider:
             if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
-        except Exception:
+        except BaseException:
             await self._cleanup_failed_create_handle(created_handle)
             raise
         return handle

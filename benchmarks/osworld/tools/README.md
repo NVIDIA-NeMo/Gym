@@ -8,7 +8,7 @@ configuration entry point; host checks and lifecycle wrappers live here:
 model host       -> probe_model_endpoint.py
 environment host -> check_environment.sh
 agent/control     -> prepare.py -> start_control.sh -> run_eval.sh
-abnormal recovery -> cleanup_run.sh
+abnormal recovery -> cleanup_run.sh -> cleanup_opensandbox_run.py
 ```
 
 | Tool | Purpose |
@@ -18,6 +18,7 @@ abnormal recovery -> cleanup_run.sh
 | `start_control.sh` | Preflight the agent/control build toolchain, then run `gym env start` |
 | `run_eval.sh` | Supervisor-friendly wrapper around `gym eval run --no-serve` |
 | `cleanup_run.sh` | Recovery-only cleanup for stale processes or labeled Sandbox containers after abnormal termination |
+| `cleanup_opensandbox_run.py` | Read-only audit or opt-in reaping of OpenSandbox instances matching one exact run ID |
 | `prepare_osworld_vm.sh` | Download and verify the pinned OSWorld qcow2 baseline |
 
 Model serving itself belongs to the selected model's deployment project;
@@ -89,3 +90,15 @@ validates both the PID environment and command before signaling it. Docker
 cleanup requires the Sandbox, OSWorld workload, and run-ID labels to match; it
 does not remove unlabeled or other-run containers. Model services are outside
 this lifecycle and are never stopped by this tool.
+
+When both `OPENSANDBOX_BASE_URL` and `OPENSANDBOX_API_KEY` are set,
+`cleanup_run.sh` also invokes the OpenSandbox reaper through the Gym Python
+environment. The reaper queries both OSWorld's `run-id` metadata and Gym's
+`nemo-gym.nvidia.com/run` attribution metadata, then rechecks returned metadata
+client-side before terminating anything. Run it without `--reap` for a
+read-only audit:
+
+```bash
+export OSWORLD_RUN_ID=my-osworld-run
+.venv/bin/python benchmarks/osworld/tools/cleanup_opensandbox_run.py
+```

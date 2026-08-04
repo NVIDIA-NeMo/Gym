@@ -305,21 +305,22 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv]
 managed = true
-required-version = ">=0.9.30"
+required-version = ">=0.11.25"
 # grpcio is a transitive dependency of ray. Pin the lower bound here to
 # ensure uv selects a CVE-safe version across all resolver paths.
 # Updated Sun Jun 22, 2026 (CVE remediation)
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
 ]
-# NOTE: server venvs install nemo-gym editably and inherit this list, so anything
-# here is also silently dropped from them (uv >=0.11.24). Don't add a package any
-# server needs. Context: https://github.com/NVIDIA-NeMo/Gym/pull/1835
-exclude-dependencies = [
-    # Exclude unwanted dependencies from mlflow
+
+# Keep dependency exclusions scoped to the upstream package that declares the
+# unwanted edge. Direct requirements for the same package names must remain
+# installable by Gym servers and agents.
+[[tool.uv.exclude-dependencies]]
+package = { name = "mlflow" }
+dependencies = [
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
@@ -333,6 +334,33 @@ exclude-dependencies = [
     "wcwidth",
     "werkzeug",
     "waitress",
+]
+
+[[tool.uv.exclude-dependencies]]
+package = { name = "osworld" }
+dependencies = [
+    # The pinned OSWorld fork does not use the optional SurferH client, and
+    # agp-client is not available from the configured package indexes.
+    "agp-client",
+    # The agent installs the headless OpenCV wheel explicitly. Avoid installing
+    # the conflicting GUI and contrib wheels declared by OSWorld itself.
+    "opencv-python",
+    "opencv-contrib-python",
+]
+
+[[tool.uv.exclude-dependencies]]
+package = { name = "paddleocr" }
+# OSWorld's OCR stack repeats the GUI-wheel requirements below the top-level
+# OSWorld package, so exclude those edges at the packages that declare them.
+dependencies = [
+    "opencv-python",
+    "opencv-contrib-python",
+]
+
+[[tool.uv.exclude-dependencies]]
+package = { name = "albumentations" }
+dependencies = [
+    "opencv-python",
 ]
 
 [tool.setuptools.package-data]

@@ -27,10 +27,9 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.20 has a resolver regression that silently drops pinned deps from
-  # `uv pip install -r requirements.txt` (e.g. matplotlib/scipy/Pillow), breaking
-  # per-server test venvs. 0.11.19 is the latest known-good version.
-  UV_INSTALL_URL: "https://astral.sh/uv/0.11.19/install.sh"
+  # Pin uv to the root project's minimum supported version. This release supports
+  # package-scoped dependency exclusions and passes per-server requirements installs.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.11.25/install.sh"
 
 jobs:
   full-test-suite:

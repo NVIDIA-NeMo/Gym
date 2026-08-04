@@ -7,12 +7,16 @@ from pathlib import Path
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 from benchmarks.osworld import assets
 from benchmarks.osworld.assets import asset_specs_from_task, ensure_osworld_assets
 from benchmarks.osworld.prepare import (
+    BASE_AGENT_CONFIG,
     DEFAULT_INPUT,
     NANO_OMNI_AGENT_CONFIG,
+    OPENSANDBOX_CONFIG,
+    OPENSANDBOX_VM_SENTINEL,
     POINTER_AGENT_CONFIG,
     main,
     prepare,
@@ -21,6 +25,7 @@ from benchmarks.osworld.prepare import (
     write_task_shard,
     write_vm_snapshot_manifest,
 )
+from nemo_gym.global_config import GlobalConfigDictParser
 
 
 def test_prepare_validates_committed_example() -> None:
@@ -118,6 +123,18 @@ def test_nano_omni_profile_is_one_complete_benchmark_config() -> None:
     paths = select_config_paths(profile="nano_omni", execution_backend="gym_sandbox")
 
     assert paths == (NANO_OMNI_AGENT_CONFIG.resolve(),)
+
+
+def test_opensandbox_backend_adds_pool_provider_config() -> None:
+    paths = select_config_paths(
+        profile="nano_omni",
+        execution_backend="gym_opensandbox",
+    )
+
+    assert paths == (
+        NANO_OMNI_AGENT_CONFIG.resolve(),
+        OPENSANDBOX_CONFIG.resolve(),
+    )
 
 
 def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> None:
@@ -242,6 +259,85 @@ def test_write_env_rejects_sandbox_without_explicit_vm(tmp_path: Path) -> None:
             policy_api_key="local",  # pragma: allowlist secret
             policy_model_name="model",
             execution_backend="gym_sandbox",
+        )
+
+
+def test_write_env_configures_image_less_opensandbox_pool(tmp_path: Path) -> None:
+    env_path = tmp_path / "run" / "env.yaml"
+
+    assert write_env(
+        env_path,
+        config_paths=(
+            NANO_OMNI_AGENT_CONFIG,
+            OPENSANDBOX_CONFIG,
+        ),
+        input_jsonl=DEFAULT_INPUT,
+        output_jsonl=tmp_path / "rollouts.jsonl",
+        policy_base_url="http://model.test/v1",
+        policy_api_key="local",  # pragma: allowlist secret
+        policy_model_name="model",
+        agent_name="osworld_nano_omni_agent",
+        execution_backend="gym_opensandbox",
+    )
+
+    config = yaml.safe_load(env_path.read_text(encoding="utf-8"))
+    agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
+    assert agent["sandbox_provider"] == "osworld_opensandbox"
+    assert agent["vm_path"] == OPENSANDBOX_VM_SENTINEL
+    assert agent["sandbox_require_kvm"] is False
+    assert agent["sandbox_spec"]["image"] is None
+    assert agent["sandbox_spec"]["ttl_s"] == 14400
+    assert agent["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == (
+        "${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}"
+    )
+    assert "OPENSANDBOX_API_KEY" not in env_path.read_text(encoding="utf-8")
+
+
+def test_opensandbox_env_composes_with_strict_inherited_sandbox_spec(tmp_path: Path) -> None:
+    env_path = tmp_path / "env.yaml"
+    assert write_env(
+        env_path,
+        config_paths=(
+            NANO_OMNI_AGENT_CONFIG,
+            OPENSANDBOX_CONFIG,
+        ),
+        input_jsonl=DEFAULT_INPUT,
+        output_jsonl=tmp_path / "rollouts.jsonl",
+        policy_base_url="http://model.test/v1",
+        policy_api_key="local",  # pragma: allowlist secret
+        policy_model_name="model",
+        agent_name="osworld_nano_omni_agent",
+        execution_backend="gym_opensandbox",
+    )
+
+    config = OmegaConf.merge(
+        OmegaConf.load(BASE_AGENT_CONFIG),
+        OmegaConf.load(NANO_OMNI_AGENT_CONFIG),
+        OmegaConf.load(OPENSANDBOX_CONFIG),
+        OmegaConf.load(env_path),
+    )
+    OmegaConf.set_struct(config, True)
+    GlobalConfigDictParser()._recursively_swap_keys(config)
+
+    agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
+    assert agent["sandbox_spec"]["ttl_s"] == 14400
+    assert agent["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == "osworld-kvm"
+
+
+def test_write_env_rejects_local_vm_for_opensandbox(tmp_path: Path) -> None:
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"unused")
+    with pytest.raises(ValueError, match="does not accept vm_path"):
+        write_env(
+            tmp_path / "env.yaml",
+            config_path=OPENSANDBOX_CONFIG,
+            input_jsonl=DEFAULT_INPUT,
+            output_jsonl=tmp_path / "rollouts.jsonl",
+            policy_base_url="http://model.test/v1",
+            policy_api_key="local",  # pragma: allowlist secret
+            policy_model_name="model",
+            execution_backend="gym_opensandbox",
+            vm_path=vm_path,
         )
 
 

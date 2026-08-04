@@ -709,6 +709,28 @@ def test_sync_loop_runner_times_out_async_operations() -> None:
         runner.close()
 
 
+def test_sync_loop_runner_waits_for_async_cancellation_cleanup() -> None:
+    runner = _AsyncLoopRunner(
+        wait_timeout_s=0.01,
+        cancellation_timeout_s=1.0,
+    )
+    cleanup_finished = threading.Event()
+
+    async def needs_async_cleanup() -> None:
+        try:
+            await asyncio.get_running_loop().create_future()
+        finally:
+            await asyncio.sleep(0.05)
+            cleanup_finished.set()
+
+    try:
+        with pytest.raises(TimeoutError, match="timed out waiting for the sync loop"):
+            runner.run("blocked", needs_async_cleanup)
+        assert cleanup_finished.is_set()
+    finally:
+        runner.close()
+
+
 def test_sync_sandbox_file_operations(tmp_path: Path) -> None:
     provider = FakeSandboxProvider()
     with Sandbox(provider) as sandbox:

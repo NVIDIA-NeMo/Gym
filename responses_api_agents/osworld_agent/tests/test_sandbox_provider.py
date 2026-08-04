@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import http.server
+import threading
 from typing import Any
 
 import pytest
+import requests
 
 from nemo_gym.sandbox import SandboxEndpoint, SandboxStatus
 from responses_api_agents.osworld_agent import sandbox_provider as osworld_sandbox
+from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
 
 
 class FakeSandbox:
@@ -113,8 +117,73 @@ def test_build_spec_docker_tcg_mode_does_not_map_kvm(tmp_path) -> None:
     assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--cap-add", "NET_ADMIN")
 
 
+def test_build_spec_uses_image_less_opensandbox_pool(monkeypatch) -> None:
+    monkeypatch.setenv("OSWORLD_RUN_ID", "opensandbox-run")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {
+            "opensandbox": {
+                "connection": {
+                    "domain": "http://sandbox.example",
+                    "use_server_proxy": False,
+                }
+            }
+        },
+        {
+            "ttl_s": 1800,
+            "image": None,
+            "entrypoint": ["/run/entry.sh"],
+            "env": {"KVM": "Y"},
+            "resources": {"cpu": 4, "memory_mib": 16384},
+            "provider_options": {"extensions": {"poolRef": "osworld-kvm"}},
+        },
+    )
+
+    spec = provider._build_spec(
+        "/opensandbox/Ubuntu.qcow2",
+        headless=True,
+        os_type="Ubuntu",
+    )
+
+    assert spec.image is None
+    assert spec.ttl_s == 1800
+    assert spec.ports == osworld_sandbox.OSWORLD_SERVICE_PORTS
+    assert spec.provider_options == {"extensions": {"poolRef": "osworld-kvm"}}
+    assert spec.metadata["osworld-provider"] == "gym-opensandbox-sandbox"
+    assert spec.metadata["run-id"] == "opensandbox-run"
+    assert spec.entrypoint is None
+    assert spec.env == {}
+    assert spec.resources.cpu is None
+
+
+def test_build_spec_rejects_invalid_opensandbox_pool_spec() -> None:
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"opensandbox": {}},
+        {"provider_options": {"extensions": {}}},
+    )
+    with pytest.raises(ValueError, match="poolRef"):
+        provider._build_spec(
+            "/opensandbox/Ubuntu.qcow2",
+            headless=True,
+            os_type="Ubuntu",
+        )
+
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"opensandbox": {}},
+        {
+            "image": "docker://osworld:latest",
+            "provider_options": {"extensions": {"poolRef": "osworld-kvm"}},
+        },
+    )
+    with pytest.raises(ValueError, match="image-less"):
+        provider._build_spec(
+            "/opensandbox/Ubuntu.qcow2",
+            headless=True,
+            os_type="Ubuntu",
+        )
+
+
 def test_provider_rejects_non_docker_config() -> None:
-    with pytest.raises(ValueError, match="requires Gym's Docker provider"):
+    with pytest.raises(ValueError, match="Docker or OpenSandbox provider"):
         osworld_sandbox.GymSandboxDesktopProvider(
             {"apptainer": {}},
             {"image": "osworld:fixed"},
@@ -148,6 +217,51 @@ def test_endpoint_contract_rejects_proxy_headers_and_paths() -> None:
             SandboxEndpoint("http://127.0.0.1:5000/proxy/path"),
             5000,
         )
+
+
+def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            del args
+
+        def do_GET(self) -> None:
+            seen["path"] = self.path
+            seen["route"] = self.headers.get("X-Route", "")
+            content = b'{"webSocketDebuggerUrl":"ws://10.0.0.22:9222/devtools/browser/test"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    forwarder, port = start_forwarder(
+        f"http://127.0.0.1:{upstream.server_address[1]}/proxy/9222",
+        {"X-Route": "gateway"},
+    )
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(
+                f"http://127.0.0.1:{port}/json/version",
+                timeout=10,
+            )
+        assert response.status_code == 200
+        assert seen == {
+            "path": "/proxy/9222/json/version",
+            "route": "gateway",
+        }
+        assert response.json()["webSocketDebuggerUrl"] == (f"ws://127.0.0.1:{port}/devtools/browser/test")
+    finally:
+        forwarder.shutdown()
+        forwarder.server_close()
+        upstream.shutdown()
+        upstream.server_close()
 
 
 def test_lifecycle_recreates_from_snapshot_and_close_is_idempotent(tmp_path, monkeypatch) -> None:
@@ -190,7 +304,12 @@ def test_start_failure_cleans_up_sandbox(tmp_path, monkeypatch) -> None:
         {"docker": {}},
         {"image": "osworld:fixed"},
     )
+    monkeypatch.setattr(
+        osworld_sandbox,
+        "start_forwarder",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forwarder failed")),
+    )
 
-    with pytest.raises(ValueError, match="requires headers"):
+    with pytest.raises(RuntimeError, match="forwarder failed"):
         provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
     assert BadEndpointSandbox.instances[-1].stopped == 1

@@ -9,23 +9,28 @@ The reusable Responses API runtime lives in
 [`responses_api_agents/osworld_agent`](../../responses_api_agents/osworld_agent/README.md).
 That README is the source of truth for request/response semantics, supported
 runners, agent ownership, parser contracts, and runtime configuration. The
-runtime uses an unmodified, pinned OSWorld dependency. In the current deployment
-path, Gym Docker Sandbox owns the VM container lifecycle while OSWorld keeps
-its setup, action, and evaluator behavior intact.
+runtime uses an unmodified, pinned OSWorld dependency. Gym's selected Docker or
+OpenSandbox provider owns the VM lifecycle while OSWorld keeps its setup,
+action, and evaluator behavior intact.
 
 ## Deployment roles
 
 The runtime has three explicit roles:
 
 ```text
-MODEL_HOST  ←─ model HTTP ─  AGENT_CONTROL_HOST  ─ Docker SSH →  ENVIRONMENT_HOST
-                              prepare / control / eval           Docker / KVM / VM
+MODEL_HOST  ←─ model HTTP ─  AGENT_CONTROL_HOST
+                              prepare / control / eval
+                                      │
+                                      ├─ Docker / Docker SSH → ENVIRONMENT_HOST → KVM VM
+                                      └─ OpenSandbox API → server-managed KVM Pool → VM
 ```
 
 - The model host serves a compatible vision-language model. It does not run
   Gym eval or OSWorld VM containers.
-- The environment host needs Docker, `/dev/kvm`, and the verified qcow2. It
-  does not need the benchmark or agent checkout.
+- In the Docker path, the environment host needs Docker, `/dev/kvm`, and the
+  verified qcow2. It does not need the benchmark or agent checkout.
+- In the OpenSandbox path, the management service and pre-provisioned Pool own
+  the environment capacity, VM image, and entrypoint.
 - The agent/control host needs this Gym checkout, the task input, and the same
   qcow2 path for preparation-time identity validation. It runs `prepare.py`,
   `tools/start_control.sh`, and `tools/run_eval.sh`.
@@ -43,7 +48,10 @@ interactive SSH session is part of runtime communication.
 - About 30 GB free disk for the Docker image and `Ubuntu.qcow2` cache.
 - A reachable vision-language model endpoint. Text-only models cannot act on
   screenshot observations.
-- Read/write access to `/dev/kvm` for the Gym Docker Sandbox path.
+- For the Gym Docker path, Docker and read/write access to `/dev/kvm` on the
+  environment host.
+- For the OpenSandbox path, a reachable API and a pre-provisioned OSWorld KVM
+  Pool; Docker, KVM, the VM image, and its entrypoint remain server-side.
 - A C compiler and Python development headers on the agent/control host. On
   Ubuntu, install `build-essential` and `python3-dev`; Gym's first server start
   builds the pinned `evdev` dependency in its managed environment.
@@ -196,6 +204,82 @@ Nano Omni history contains Thought and Action only; previously executed Code is
 not repeated. This prompt contract is implemented directly by the standard
 `NemotronV3NanoOmniAgent`, so deployments must not stage a Python subclass or
 extend `PYTHONPATH` with a reproduction overlay.
+
+### OpenSandbox Pool backend
+
+The `gym_opensandbox` backend keeps the same OSWorld agent, task setup, action,
+and evaluator path while replacing the local or remote Docker lifecycle with
+an allocation from a server-managed KVM Pool. The Pool operator owns its VM
+image, entrypoint, and capacity. Consequently, clients provide neither a
+container image nor `--vm-path`; they only name a pre-provisioned Pool. The
+checked-in default is `osworld-kvm`, overridable with
+`OPENSANDBOX_POOL_REF`.
+
+Install Gym with the OpenSandbox SDK and configure the management endpoint.
+Keep credentials in the environment; `prepare.py` does not write the API key
+to `env.yaml`:
+
+```bash
+uv sync --extra dev --extra sandbox
+export OPENSANDBOX_BASE_URL=opensandbox.example.com:8080
+export OPENSANDBOX_API_KEY=YOUR_OPENSANDBOX_API_KEY
+export OPENSANDBOX_POOL_REF=osworld-kvm
+```
+
+Verify the model endpoint with the request shape used by Nano Omni, then
+prepare a run. The input, output, and server-environment paths are client-owned
+durable paths; choose them outside a small login home when running on a shared
+cluster:
+
+```bash
+python3 benchmarks/osworld/tools/probe_model_endpoint.py \
+  --base-url http://MODEL_HOST:8000/v1 \
+  --api-key local-vllm \
+  --model SERVED_NANO_OMNI_MODEL \
+  --image-count 3
+
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_opensandbox \
+  --input /absolute/path/to/tasks.jsonl \
+  --output /absolute/run/root/results/rollouts.jsonl \
+  --server-venv-root /absolute/run/root/server-venvs \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-api-key local-vllm \
+  --policy-model-name SERVED_NANO_OMNI_MODEL \
+  --force-env
+```
+
+OpenSandbox may return path-based gateway endpoints with required routing
+headers rather than directly routable Pod addresses. The adapter creates
+client-local forwarders that preserve those paths and headers for OSWorld's
+HTTP services and Chrome CDP WebSockets. The pinned OSWorld revision also
+falls back to the guest loopback address when VLC status authentication is
+reached through such a gateway, so Chrome, direct desktop, and VLC evaluators
+use the same backend without a local source overlay.
+
+Start control and eval with the normal wrappers:
+
+```bash
+export OSWORLD_RUN_ID=my-osworld-opensandbox-run
+tools/start_control.sh /absolute/run/root
+# After control is ready, in a second terminal:
+tools/run_eval.sh /absolute/run/root
+```
+
+Normal Gym shutdown releases the Sandbox. If an interrupted run leaves an
+instance behind, keep the OpenSandbox variables exported and invoke
+`tools/cleanup_run.sh /absolute/run/root`. The wrapper stops only processes
+whose recorded environment matches `OSWORLD_RUN_ID`, then queries both the
+OSWorld and Gym run metadata keys and rechecks exact values before requesting
+termination. To audit without changing remote state, run from the repository
+root without `--reap`:
+
+```bash
+.venv/bin/python benchmarks/osworld/tools/cleanup_opensandbox_run.py \
+  --run-id my-osworld-opensandbox-run
+```
 
 ## Multi-environment runs
 
@@ -365,19 +449,20 @@ model-specific and do not change defaults for other runners.
 
 ### Proxy-required tasks
 
-Proxy policy belongs to the Gym `feature/osworld` adapter; VM setup belongs to
-the pinned OSWorld `nv-gym` runtime. The branch names are independent Git refs
-in different repositories. Gym connects them only through the immutable
-OSWorld commit in `pyproject.toml`. That OSWorld commit merges upstream main
-`83e85344` and retains the `nv-gym` integration overlay.
+Proxy policy belongs to the Gym OSWorld adapter; VM setup belongs to the pinned
+OSWorld `nv-gym` runtime. The integration lines are independent Git refs in
+different repositories. Gym connects them only through the immutable OSWorld
+commit in `responses_api_agents/osworld_agent/requirements.txt`. That OSWorld
+commit merges upstream main `83e85344` and retains the `nv-gym` integration
+overlay.
 
 #### OSWorld version selection
 
 | Consumer workflow | Required OSWorld version |
 | --- | --- |
-| Gym `feature/osworld` | No manual checkout. The agent package installs the exact SHA from `pyproject.toml`. |
+| Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/requirements.txt`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
-| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `31b76bf1c4d4e589238b314caa91470afc52651e` or a documented successor. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `dc23424e9f6316b181bde149e0dc9bc3c5ff78c9` or a documented successor. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
 | Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
 
@@ -386,7 +471,7 @@ For a direct integration of the tested version:
 ```bash
 git clone https://github.com/JeffPengCoder/OSWorld.git
 cd OSWorld
-git checkout 31b76bf1c4d4e589238b314caa91470afc52651e
+git checkout dc23424e9f6316b181bde149e0dc9bc3c5ff78c9
 ```
 
 Use an immutable SHA in a lockfile or deployment manifest. The `nv-gym`

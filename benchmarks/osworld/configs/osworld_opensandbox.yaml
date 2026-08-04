@@ -1,0 +1,35 @@
+# OpenSandbox lifecycle provider for a server-side OSWorld KVM Pool.
+# Credentials stay in environment variables; generated env.yaml files never
+# contain the API key.
+
+osworld_opensandbox:
+  default_metadata:
+    sandbox-api: opensandbox-sdk
+    workload: osworld
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_BASE_URL}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY}
+      protocol: http
+      request_timeout_s: 300
+      # External controllers may not route a Pool's private Pod network. The
+      # OSWorld adapter supplies local host:port forwarders for path-based
+      # gateway endpoints, including Chrome CDP WebSockets.
+      use_server_proxy: true
+    create:
+      request_timeout_s: 1200
+      timeout_s: 1200
+      skip_health_check: true
+      retries: 3
+      retry_delay_s: 5.0
+      retry_max_delay_s: 60.0
+    probe:
+      # The KVM Pool's pod-level execd probe is not guest readiness. The
+      # adapter waits for the OSWorld guest screenshot endpoint instead.
+      command: null
+    operations:
+      retries: 5
+      retry_delay_s: 1.0
+      retry_max_delay_s: 45.0
+      command_retries: 0
+      close_timeout_s: 60.0

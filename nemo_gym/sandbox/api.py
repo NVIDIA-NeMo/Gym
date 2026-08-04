@@ -15,6 +15,7 @@
 """Provider-neutral public sandbox API."""
 
 import asyncio
+import logging
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Mapping
@@ -37,8 +38,10 @@ from nemo_gym.sandbox.providers import (
 
 
 T = TypeVar("T")
+LOGGER = logging.getLogger(__name__)
 SYNC_OPERATION_TIMEOUT_S = 3600.0
 SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
+SYNC_CANCELLATION_TIMEOUT_S = 75.0
 
 
 class AsyncSandbox:
@@ -81,7 +84,7 @@ class AsyncSandbox:
                         source_path = tmp_path / f"file-{index}"
                         source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
-        except Exception:
+        except BaseException:
             await self._provider.close(handle)
             await self._provider.aclose()
             self._closed = True
@@ -202,9 +205,11 @@ class _AsyncLoopRunner:
         *,
         wait_timeout_s: float = SYNC_OPERATION_TIMEOUT_S,
         close_timeout_s: float = SYNC_LOOP_CLOSE_TIMEOUT_S,
+        cancellation_timeout_s: float = SYNC_CANCELLATION_TIMEOUT_S,
     ) -> None:
         self._wait_timeout_s = wait_timeout_s
         self._close_timeout_s = close_timeout_s
+        self._cancellation_timeout_s = cancellation_timeout_s
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._closed = False
@@ -234,6 +239,9 @@ class _AsyncLoopRunner:
             raise TimeoutError(
                 f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
             ) from e
+        except BaseException:
+            future.cancel()
+            raise
 
     def call(self, operation: str, func: Callable[[], T]) -> T:
         self._ensure_can_block(operation)
@@ -254,14 +262,41 @@ class _AsyncLoopRunner:
 
     def run(self, operation: str, awaitable_factory: Callable[[], Awaitable[T]]) -> T:
         self._ensure_can_block(operation)
-        future = asyncio.run_coroutine_threadsafe(awaitable_factory(), self._loop)
+        completion = threading.Event()
+        awaitable = awaitable_factory()
+
+        async def tracked_awaitable() -> T:
+            try:
+                return await awaitable
+            finally:
+                # ``concurrent.futures.Future.cancel()`` becomes done before
+                # the underlying asyncio Task has finished unwinding. Signal
+                # the caller only after provider-side cancellation cleanup.
+                completion.set()
+
+        future = asyncio.run_coroutine_threadsafe(tracked_awaitable(), self._loop)
+
+        def cancel_and_drain() -> None:
+            future.cancel()
+            if not completion.wait(timeout=self._cancellation_timeout_s):
+                LOGGER.warning(
+                    "Sandbox.%s() cancellation cleanup did not finish within %ss",
+                    operation,
+                    self._cancellation_timeout_s,
+                )
+
         try:
             return future.result(timeout=self._wait_timeout_s)
         except FutureTimeoutError as e:
-            future.cancel()
+            cancel_and_drain()
             raise TimeoutError(
                 f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
             ) from e
+        except BaseException:
+            # Ctrl-C and other caller-side BaseExceptions must not leave the
+            # provider coroutine running invisibly on the sync loop.
+            cancel_and_drain()
+            raise
 
     def close(self) -> None:
         if self._closed:
