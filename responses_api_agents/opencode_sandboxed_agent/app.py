@@ -23,9 +23,9 @@ from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -64,12 +64,17 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
-    pass
+    # Allow for benchmark params to propagate properly
+    model_config = ConfigDict(extra="allow")
+
+
+class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
+    # Allow for benchmark params to propagate properly
+    model_config = ConfigDict(extra="allow")
 
 
 class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
-    turns_used: int = 0
-    finished_naturally: bool = False
+    pass
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
@@ -254,46 +259,36 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     ) -> OpenCodeSandboxedAgentVerifyResponse:
         cookies = request.cookies
 
-        seed_resp = await self.server_client.post(
+        seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
             json=body.model_dump(),
             cookies=cookies,
         )
-        await raise_for_status(seed_resp)
-        cookies = seed_resp.cookies
+        await raise_for_status(seed_session_response)
+        cookies = seed_session_response.cookies
 
-        agent_resp = await self.server_client.post(
+        response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
             cookies=cookies,
         )
-        await raise_for_status(agent_resp)
-        cookies = agent_resp.cookies
-        agent_resp_json = await get_response_json(agent_resp)
+        await raise_for_status(response)
+        cookies = response.cookies
 
-        verify_resp = await self.server_client.post(
+        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(
+            body.model_dump() | {"response": await get_response_json(response)}
+        )
+
+        verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
-            json=body.model_dump() | {"response": agent_resp_json},
+            json=verify_request.model_dump(),
             cookies=cookies,
         )
-        await raise_for_status(verify_resp)
-        verify_json = await get_response_json(verify_resp)
-
-        gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
-        turns = sum(
-            1
-            for item in gym_resp.output
-            if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-        )
-        last = gym_resp.output[-1] if gym_resp.output else None
-        naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
-
-        return OpenCodeSandboxedAgentVerifyResponse.model_validate(
-            verify_json | {"turns_used": turns, "finished_naturally": naturally}
-        )
+        await raise_for_status(verify_response)
+        return OpenCodeSandboxedAgentVerifyResponse.model_validate(await get_response_json(verify_response))
 
 
 if __name__ == "__main__":
