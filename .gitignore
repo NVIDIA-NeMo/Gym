@@ -245,9 +245,3 @@ env.yaml
 responses_api_agents/cvdp_agent/deps/
 resources_servers/cvdp/data/gym_agentic_code_generation_no_commercial.jsonl
 resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.jsonl
-
-# Converted benchmark datasets + eval artifacts written next to them at runtime
-# (*_prepare.jsonl / *_metrics.json). Regenerable via datasets/convert_pivotrl_to_gym.py.
-# Code in datasets/ (converter, tests, mercor_collection.yaml) stays tracked.
-datasets/*.jsonl
-datasets/*_metrics.json
