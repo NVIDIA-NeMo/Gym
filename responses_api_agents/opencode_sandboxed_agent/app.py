@@ -132,7 +132,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "$schema": "https://opencode.ai/config.json",
             "provider": {
                 "nemo_gym": {
-                    "npm": "@ai-sdk/openai",
+                    # TODO @bxyu-nvidia: We should use @ai-sdk/openai here but there is some /v1/responses streaming error.
+                    "npm": "@ai-sdk/openai-compatible",
                     "options": {
                         "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
                         "apiKey": "dummy_key",
