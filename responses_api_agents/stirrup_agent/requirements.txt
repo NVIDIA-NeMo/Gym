@@ -2,7 +2,10 @@
 # Stirrup agent framework + HF tokenizer for dynamic max_tokens sizing.
 # Kept out of the outer nemo-gym pyproject.toml so core users don't pay
 # the PyTorch/transformers install cost.
-stirrup==0.1.12
+# The DynamicMaxTokensChatCompletionsClient integration targets Stirrup's 0.1
+# client API. Stirrup 0.2 makes context_window_tokens a required constructor
+# argument and needs a separately reviewed migration.
+stirrup>=0.1.12,<0.2
 transformers>=5.8.1
 # Deliverable-processing deps for file_reader.py AND the libraries the agent
 # tells the policy model are available in the sandbox (see
