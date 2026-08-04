@@ -44,7 +44,19 @@ from nemo_gym.sandbox.providers import (
 
 T = TypeVar("T")
 SYNC_OPERATION_TIMEOUT_S = 3600.0
+# Matches the providers' non-process exec sentinel (see docker provider).
+SANDBOX_PTY_RUNTIME_RETURN_CODE = 125
 SYNC_LOOP_CLOSE_TIMEOUT_S = 5.0
+
+
+def _pty_timeout_result(command: str, timeout_s: float | int | None, *, reusable: bool) -> SandboxExecResult:
+    detail = "" if reusable else "; the command is still running and the session should be discarded"
+    return SandboxExecResult(
+        stdout=None,
+        stderr=f"PTY command timed out after {timeout_s}s: {command!r}{detail}",
+        return_code=SANDBOX_PTY_RUNTIME_RETURN_CODE,
+        error_type="timeout",
+    )
 
 
 async def _run_in_pty_session(session: SandboxPtySession, command: str) -> SandboxExecResult:
@@ -63,6 +75,12 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
         buffer.extend(chunk)
 
     stdout, _, trailing = bytes(buffer).partition(needle)
+    while b"\n" not in trailing:
+        # The status digits can straddle the chunk that carried the marker.
+        chunk = await session.read()
+        if not chunk:
+            break
+        trailing += chunk
     exit_text = trailing.split(b"\n", 1)[0].strip()
     stderr = bytearray()
     try:
@@ -70,10 +88,12 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
             stderr.extend(chunk)
     except (TimeoutError, asyncio.TimeoutError):
         pass
+    parsed = exit_text.isdigit()
     return SandboxExecResult(
         stdout=stdout.decode(errors="replace"),
         stderr=stderr.decode(errors="replace") or None,
-        return_code=int(exit_text) if exit_text.isdigit() else -1,
+        return_code=int(exit_text) if parsed else SANDBOX_PTY_RUNTIME_RETURN_CODE,
+        error_type=None if parsed else "pty",
     )
 
 
@@ -100,20 +120,22 @@ class SandboxPty:
         ``wait_exit``/``close`` and is an async context manager.
 
         ``pty=False`` selects pipe mode: no TTY, stdout/stderr split across
-        ``read()``/``read_stderr()``. Close the session before the sandbox
-        stops: a session that outlives its sandbox fails subsequent reads with
-        ``SandboxPtyError``. Async-only; the sync ``Sandbox`` facade does not
-        mirror it.
+        ``read()``/``read_stderr()``. ``rows``/``cols`` are applied right after
+        the terminal connects, because the backend has no spawn-time size, so a
+        ``command`` that reads the size in its first moments can still see the
+        80x24 default; programs that honor SIGWINCH pick up the real size.
+        Close the session before the sandbox stops: a session that outlives its
+        sandbox fails subsequent reads with ``SandboxPtyError``. Async-only;
+        the sync ``Sandbox`` facade does not mirror it.
         """
         sandbox = self._sandbox
-        handle = sandbox._require_handle()
         if not isinstance(sandbox._provider, SupportsSandboxPty):
             provider_name = getattr(sandbox._provider, "name", type(sandbox._provider).__name__)
             raise NotImplementedError(
                 f"Sandbox provider {provider_name!r} does not support PTY sessions; use exec() instead"
             )
         return await sandbox._provider.create_pty(
-            handle,
+            sandbox._require_handle(),
             SandboxPtySpec(
                 command=command,
                 cwd=cwd if cwd is not None else sandbox._spec.workdir if sandbox._spec is not None else None,
@@ -141,11 +163,12 @@ class SandboxPty:
         from that byte offset first (``0`` replays all of it).
         """
         sandbox = self._sandbox
-        handle = sandbox._require_handle()
         if not isinstance(sandbox._provider, SupportsSandboxPtyAttach):
             provider_name = getattr(sandbox._provider, "name", type(sandbox._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support re-attaching PTY sessions")
-        return await sandbox._provider.attach_pty(handle, session_id, takeover=takeover, since=since)
+        return await sandbox._provider.attach_pty(
+            sandbox._require_handle(), session_id, takeover=takeover, since=since
+        )
 
     async def exec(
         self,
@@ -154,25 +177,38 @@ class SandboxPty:
         session: SandboxPtySession | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        user: str | int | None = None,
         timeout_s: int | float | None = 180,
-        pty: bool = True,
+        user: str | int | None = None,
         rows: int = 24,
         cols: int = 80,
+        pty: bool = True,
     ) -> SandboxExecResult:
         """Run one command in a terminal session and collect its output.
 
         Without ``session`` this opens a session for the command, drains it and
         closes it. With ``session`` the command runs in that live session, which
-        stays open and keeps its shell state: output then also contains the
-        shell's echo of the command, ``stderr`` is best-effort (pipe mode only),
-        and a command that ends the shell (``exit``) raises ``SandboxPtyError``.
+        stays open and keeps its shell state; ``cwd``/``env``/``user``/``rows``/
+        ``cols``/``pty`` are then ignored because they are fixed at
+        ``create()``. In a live session the output also contains the shell's
+        echo of the command, ``stderr`` is best-effort (pipe mode only), and a
+        command that ends the shell (``exit``) raises ``SandboxPtyError``.
+
         PTY mode returns all output on ``stdout`` and ``None`` stderr; pipe mode
-        splits the two. Raises ``TimeoutError`` when the command outlives
-        ``timeout_s``.
+        splits the two. A command that outlives ``timeout_s`` returns
+        ``error_type="timeout"`` like ``sandbox.exec()`` rather than raising;
+        with ``session`` that command keeps running and leaves unread output
+        behind, so discard the session rather than reusing it.
         """
         if session is not None:
-            return await asyncio.wait_for(_run_in_pty_session(session, command), timeout=timeout_s)
+            if cwd is not None or env is not None or user is not None:
+                raise ValueError(
+                    "cwd/env/user apply only when pty.exec opens its own session; "
+                    "for an existing session they are fixed at pty.create() time"
+                )
+            try:
+                return await asyncio.wait_for(_run_in_pty_session(session, command), timeout=timeout_s)
+            except (TimeoutError, asyncio.TimeoutError):
+                return _pty_timeout_result(command, timeout_s, reusable=False)
         session = await self.create(command, cwd=cwd, env=env, rows=rows, cols=cols, user=user, pty=pty)
         try:
 
@@ -186,6 +222,8 @@ class SandboxPty:
                 asyncio.gather(drain(session.read), drain(session.read_stderr), session.wait_exit()),
                 timeout=timeout_s,
             )
+        except (TimeoutError, asyncio.TimeoutError):
+            return _pty_timeout_result(command, timeout_s, reusable=True)
         finally:
             await session.close()
         return SandboxExecResult(
@@ -431,7 +469,10 @@ class _AsyncLoopRunner:
 
 
 class Sandbox:
-    """Synchronous wrapper around ``AsyncSandbox``."""
+    """Synchronous wrapper around ``AsyncSandbox``.
+
+    ``pty``, ``serialize`` and ``connect`` are async-only; use ``AsyncSandbox``
+    for those."""
 
     def __init__(
         self,

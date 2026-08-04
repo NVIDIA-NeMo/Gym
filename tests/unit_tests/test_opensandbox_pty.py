@@ -711,3 +711,21 @@ async def test_stderr_survives_bare_channel_frames() -> None:
     assert await session.read_stderr() == b"E"
     assert await session.read_stderr() == b""
     await session.close()
+
+
+async def test_send_signal_rejects_unsupported_names() -> None:
+    session, ws, _ = await _session_over([CONNECTED])
+    with pytest.raises(ValueError, match="execd PTY supports only"):
+        await session.send_signal("SIGUSR1")
+    assert ws.sent == [], "an unsupported signal must not reach the wire"
+    await session.send_signal("SIGTERM")
+    assert json.loads(ws.sent[0])["signal"] == "SIGTERM"
+    await session.close()
+
+
+async def test_replay_offset_is_exposed() -> None:
+    replay = b"\x03" + struct.pack(">Q", 4096) + b"tail"
+    session, ws, _ = await _session_over([CONNECTED, _binary(replay)])
+    assert await session.read() == b"tail"
+    assert session.replay_offset == 4096, "callers compare this to `since` to detect evicted output"
+    await session.close()

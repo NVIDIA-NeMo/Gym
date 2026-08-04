@@ -171,6 +171,9 @@ class SandboxPtySpec:
     command (mirroring ``exec()``'s user rewrite) and must raise ``ValueError``
     for values they cannot honor. ``pty=False`` selects pipe mode: no TTY,
     stdout and stderr delivered as separate streams, ``rows``/``cols`` ignored.
+    Backends that cannot size a terminal at spawn apply ``rows``/``cols`` as
+    soon as it connects, so a ``command`` reading the size immediately may
+    observe the backend default.
     """
 
     command: str | None = None
@@ -257,6 +260,9 @@ class SandboxPtySession(Protocol):
     """One live interactive terminal. Async context manager; exit closes it."""
 
     session_id: str
+    mode: str | None
+    """``"pty"`` or ``"pipe"`` once connected, ``None`` before that. Only pipe
+    mode splits stderr; in PTY mode all output arrives through ``read()``."""
 
     async def read(self, *, timeout_s: float | None = None) -> bytes:
         """Return the next output chunk (all terminal output in PTY mode;

@@ -19,6 +19,11 @@ released OpenSandbox SDKs expose no PTY API. Sessions live at
 ``{base}/pty[/{session_id}[/ws]]`` where ``base`` is the sandbox's execd
 endpoint as resolved by the SDK (through the server proxy when
 ``use_server_proxy`` is set).
+
+execd sends the exit frame and closes the socket concurrently with its output
+pumps, so a clean EOF means the socket drained, not that every byte the process
+wrote was delivered. Callers that need the tail should have the command emit a
+sentinel and read until it appears.
 """
 
 import asyncio
@@ -45,6 +50,8 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 
 # Mirrors execd's shell pick (bash when available, else sh) for env-only specs.
 _DEFAULT_SHELL_SNIPPET = 'exec "$(command -v bash || echo sh)"'
+# execd drops unrecognized signal names without reporting an error.
+SUPPORTED_SIGNALS = frozenset({"SIGINT", "SIGTERM", "SIGKILL", "SIGQUIT", "SIGHUP"})
 
 
 def _effective_command(spec: SandboxPtySpec) -> str | None:
@@ -89,6 +96,7 @@ class OpenSandboxPtySession:
         # rather than ending it.
         self._owned = owned
         self.mode: str | None = None
+        self.replay_offset: int | None = None
         self._output: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._stderr: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._exit: asyncio.Future[int] = asyncio.get_running_loop().create_future()
@@ -112,7 +120,10 @@ class OpenSandboxPtySession:
                     elif channel == CHAN_STDERR and len(data) > 1:
                         await self._stderr.put(data[1:])
                     elif channel == CHAN_REPLAY and len(data) > REPLAY_HEADER_BYTES:
-                        # Replay is one merged stream regardless of mode.
+                        # Replay is one merged stream regardless of mode. The
+                        # server clamps a `since` older than its 1 MiB buffer,
+                        # so a higher offset here means output was evicted.
+                        self.replay_offset = int.from_bytes(data[1:REPLAY_HEADER_BYTES], "big")
                         await self._output.put(data[REPLAY_HEADER_BYTES:])
                 elif message.type == aiohttp.WSMsgType.TEXT:
                     try:
@@ -199,6 +210,8 @@ class OpenSandboxPtySession:
         await self._send(json.dumps({"type": "resize", "cols": cols, "rows": rows}))
 
     async def send_signal(self, signal: str) -> None:
+        if signal not in SUPPORTED_SIGNALS:
+            raise ValueError(f"execd PTY supports only {sorted(SUPPORTED_SIGNALS)}, got {signal!r}")
         await self._send(json.dumps({"type": "signal", "signal": signal}))
 
     async def wait_exit(self, *, timeout_s: float | None = None) -> int:
@@ -343,6 +356,13 @@ async def attach_pty_session(
     except SandboxPtyError:
         await client.close()
         raise
+    except aiohttp.WSServerHandshakeError as e:
+        await client.close()
+        if e.status == 409:
+            raise SandboxPtyError(
+                f"PTY session {session_id} already has an attached client (pass takeover=True to evict)"
+            ) from e
+        raise SandboxPtyError(f"Failed to attach to PTY session {session_id}: {e}") from e
     except Exception as e:
         await client.close()
         raise SandboxPtyError(f"Failed to attach to PTY session {session_id}: {e}") from e

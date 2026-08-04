@@ -1336,8 +1336,9 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
 async def test_create_pty_requires_capability_and_start() -> None:
     from nemo_gym.sandbox import SandboxPtySpec
 
+    # Capability is checked before start state, matching endpoint().
     plain = AsyncSandbox(PlainSandboxProvider())
-    with pytest.raises(RuntimeError, match="has not been started"):
+    with pytest.raises(NotImplementedError, match="does not support PTY sessions"):
         await plain.pty.create()
     await plain.start(SandboxSpec(image="image:tag"))
     with pytest.raises(NotImplementedError, match="does not support PTY sessions"):
@@ -1356,6 +1357,8 @@ async def test_create_pty_requires_capability_and_start() -> None:
 
     provider = PtySandboxProvider()
     sandbox = AsyncSandbox(provider)
+    with pytest.raises(RuntimeError, match="has not been started"):
+        await sandbox.pty.create()
     await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
     await sandbox.pty.create("htop", env={"A": "1"}, rows=50, cols=200, user="worker")
     spec = provider.pty_specs[0]
@@ -1448,9 +1451,9 @@ async def test_pty_exec_timeout_closes_session() -> None:
     provider = HangingProvider()
     sandbox = AsyncSandbox(provider)
     await sandbox.start(SandboxSpec(image="image:tag"))
-    with pytest.raises((TimeoutError, asyncio.TimeoutError)):
-        await sandbox.pty.exec("sleep 999", timeout_s=0.05)
-    assert provider.session.closed
+    result = await sandbox.pty.exec("sleep 999", timeout_s=0.05)
+    assert (result.return_code, result.error_type) == (125, "timeout"), result
+    assert provider.session.closed, "a session pty.exec opened must be closed on timeout"
     await sandbox.stop()
 
 
@@ -1556,8 +1559,9 @@ async def test_pty_exec_marker_edges() -> None:
     sandbox = AsyncSandbox(Provider())
     await sandbox.start(SandboxSpec(image="image:tag"))
 
-    # A non-numeric status falls back to -1 rather than raising.
-    assert (await sandbox.pty.exec("x", session=ScriptedSession("x"))).return_code == -1
+    # A non-numeric status becomes the runtime sentinel, not a crash.
+    unparsed = await sandbox.pty.exec("x", session=ScriptedSession("x"))
+    assert (unparsed.return_code, unparsed.error_type) == (125, "pty"), unparsed
     # The marker is found even when it straddles two chunks.
     assert (await sandbox.pty.exec("x", session=ScriptedSession("7", split=True))).return_code == 7
 
@@ -1567,7 +1571,13 @@ async def test_pty_exec_marker_edges() -> None:
             return b""
 
     caller_owned = HangingSession("0")
-    with pytest.raises((TimeoutError, asyncio.TimeoutError)):
-        await sandbox.pty.exec("sleep", session=caller_owned, timeout_s=0.05)
+    timed_out = await sandbox.pty.exec("sleep", session=caller_owned, timeout_s=0.05)
+    assert (timed_out.return_code, timed_out.error_type) == (125, "timeout"), timed_out
+    assert "discarded" in (timed_out.stderr or ""), timed_out.stderr
     assert not caller_owned.closed, "pty.exec must not close a session it did not open"
+
+    # Session-fixed options must not be silently ignored.
+    for kwargs in ({"cwd": "/tmp"}, {"env": {"A": "1"}}, {"user": "root"}):
+        with pytest.raises(ValueError, match="fixed at pty.create"):
+            await sandbox.pty.exec("x", session=ScriptedSession("0"), **kwargs)
     await sandbox.stop()
