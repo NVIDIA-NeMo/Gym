@@ -77,6 +77,8 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
 
+    model_patch: Optional[str]
+
 
 # @bxyu-nvidia: This is a wrapper that can be passed directly to a very lightly modified version of `run_instance`
 # The method is almost identical to the original, just with async awaits rather than sync.
@@ -219,18 +221,19 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         test_spec = self._make_test_spec(body)
 
+        original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
+
         start_time = time()
         eval_sandbox = await self._create_sandbox(test_spec)
         eval_sandbox_start_time_taken = time() - start_time
 
+        model_patch = ""
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            # TODO @bxyu-nvidia: cd into WORKDIR in the input container
-            # extract the patch via git
             original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
-
-            model_patch = original_workdir
+            model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
+            model_patch = model_patch_result.stdout
 
         run_id = request.session[SESSION_ID_KEY]
         mock_container = DockerContainer(id=run_id)
@@ -260,6 +263,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             reward=int(res["resolved"]),
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
+            model_patch=model_patch or None,
         )
 
 
