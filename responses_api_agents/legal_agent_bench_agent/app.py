@@ -8,7 +8,9 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import math
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -63,6 +65,12 @@ AGENT_CLI_PINS = {
     "claude_code_agent": ("claude_code_version", "CLAUDE_SPEC", "@anthropic-ai/claude-code"),
     "codex_agent": ("codex_version", "CODEX_SPEC", "@openai/codex"),
 }
+PINNED_NPM_VERSION = re.compile(
+    r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+IMMUTABLE_IMAGE = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
 CODEX_MODEL_CATALOG_PATH = "/trajectories_mount/codex_model_catalog.json"
 CODEX_MODEL_CATALOG = {
     "models": [
@@ -444,11 +452,12 @@ def agent_runtime_env(agent_server_module: str, agent_kwargs: dict[str, Any]) ->
         return {}
     field, environment_variable, package = pin
     version = agent_kwargs.get(field)
-    if not isinstance(version, str) or not version.strip():
+    normalized_version = version.strip() if isinstance(version, str) else ""
+    if not PINNED_NPM_VERSION.fullmatch(normalized_version):
         raise LegalAgentBenchConfigurationError(
-            f"Configurable LAB agent {key!r} requires a pinned agent_kwargs.{field}"
+            f"Configurable LAB agent {key!r} requires agent_kwargs.{field} to be an exact npm version"
         )
-    return {environment_variable: f"{package}@{version.strip()}"}
+    return {environment_variable: f"{package}@{normalized_version}"}
 
 
 def ensure_agent_runtime(
@@ -731,7 +740,37 @@ def compose_agent_input(
                 "parallel_tool_calls": False,
             }
         )
-    return params.model_copy(update=update)
+    payload = params.model_dump(mode="json")
+    payload.update(update)
+    return NeMoGymResponseCreateParamsNonStreaming.model_validate(payload)
+
+
+def _normalized_reward_data(reward_data: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate verifier metrics before they can reach response construction or host artifacts."""
+
+    def metric(name: str) -> float:
+        value = reward_data.get(name, 0.0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise LegalAgentBenchArtifactError(f"Invalid verifier {name}: expected a number")
+        normalized = float(value)
+        if not math.isfinite(normalized) or not 0.0 <= normalized <= 1.0:
+            raise LegalAgentBenchArtifactError(f"Invalid verifier {name}: expected a finite value in [0, 1]")
+        return normalized
+
+    def count(name: str) -> int:
+        value = reward_data.get(name, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise LegalAgentBenchArtifactError(f"Invalid verifier {name}: expected a non-negative integer")
+        return value
+
+    normalized = dict(reward_data)
+    normalized.update(
+        reward=metric("reward"),
+        criteria_pass_rate=metric("criteria_pass_rate"),
+        verifier_error=count("verifier_error"),
+        judge_error_count=count("judge_error_count"),
+    )
+    return normalized
 
 
 def _task_toml(task_dir: Path) -> dict[str, Any]:
@@ -831,9 +870,11 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
 
     async def _ensure_image(self, task_dir: Path) -> str:
         if self.config.sandbox_image:
-            if _provider_name(self._provider_config()) != "docker" and "@sha256:" not in self.config.sandbox_image:
+            if _provider_name(self._provider_config()) != "docker" and not IMMUTABLE_IMAGE.fullmatch(
+                self.config.sandbox_image
+            ):
                 raise LegalAgentBenchConfigurationError(
-                    "Non-Docker LAB sandbox_image must use an immutable @sha256 digest"
+                    "Non-Docker LAB sandbox_image must use a complete immutable @sha256 digest"
                 )
             return self.config.sandbox_image
         if _provider_name(self._provider_config()) != "docker":
@@ -1187,15 +1228,16 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _materialize_verifier_downloads(paths: dict[str, Path], downloaded: dict[str, bytes]) -> dict[str, Any]:
-        for filename, contents in downloaded.items():
-            (paths["verifier"] / filename).write_bytes(contents)
         try:
             reward_data = json.loads(downloaded["reward.json"].decode("utf-8"))
         except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LegalAgentBenchArtifactError(f"Invalid verifier reward.json: {exc}") from exc
         if not isinstance(reward_data, dict):
             raise LegalAgentBenchArtifactError("Invalid verifier reward.json: expected an object")
-        return reward_data
+        normalized = _normalized_reward_data(reward_data)
+        for filename, contents in downloaded.items():
+            (paths["verifier"] / filename).write_bytes(contents)
+        return normalized
 
     @staticmethod
     def _runner_status(paths: dict[str, Path]) -> dict[str, Any]:
@@ -1317,8 +1359,14 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         configuration_failed: bool = False,
         failure_reason: Optional[str] = None,
     ) -> LegalAgentBenchAgentResponse:
-        verifier_error = int(reward_data.get("verifier_error") or 0)
-        judge_errors = int(reward_data.get("judge_error_count") or 0)
+        try:
+            normalized_reward = _normalized_reward_data(reward_data)
+        except LegalAgentBenchArtifactError as exc:
+            normalized_reward = _normalized_reward_data({})
+            verifier_failed = True
+            failure_reason = failure_reason or str(exc)
+        verifier_error = normalized_reward["verifier_error"]
+        judge_errors = normalized_reward["judge_error_count"]
         unreliable = bool(
             agent_failed
             or model_connection_failed
@@ -1334,9 +1382,9 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         return LegalAgentBenchAgentResponse(
             responses_create_params=params,
             response=response,
-            reward=float(reward_data.get("reward") or 0.0),
+            reward=normalized_reward["reward"],
             instance_id=body.instance_id,
-            criteria_pass_rate=float(reward_data.get("criteria_pass_rate") or 0.0),
+            criteria_pass_rate=normalized_reward["criteria_pass_rate"],
             judge_error_count=judge_errors,
             verifier_error=verifier_error,
             mask_sample=unreliable,
@@ -1482,7 +1530,10 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                     await verifier_sandbox.stop()
                     verifier_sandbox = None
                     if verifier_failure is None:
-                        reward_data = self._materialize_verifier_downloads(paths, verifier_downloads)
+                        try:
+                            reward_data = self._materialize_verifier_downloads(paths, verifier_downloads)
+                        except LegalAgentBenchArtifactError as exc:
+                            verifier_failure = str(exc)
                     verifier_failed = verifier_failure is not None
                     failure_reason = verifier_failure or failure_reason
             except LegalAgentBenchTaskError as exc:
