@@ -189,14 +189,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             opencode_debug_str = "--print-logs --log-level DEBUG"
 
-        export_fname = "export.json"
         command = f"""
         echo "Shell: $SHELL" \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run {opencode_debug_str} {quote(query)} \
-        && session_id=$(opencode session list --format json | jq -r '.[0].id') \
-        && opencode export $session_id > {export_fname}
+        && opencode run {opencode_debug_str} {quote(query)}
         """
 
         opencode_config_content = json.dumps(self._create_opencode_config())
@@ -209,8 +206,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
         )
         if self.config.debug:
-            print("STDOUT: ", result.stdout, file=sys.stderr)
-            print("STDERR: ", result.stderr, file=sys.stderr)
+            print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
+            print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
+
+        export_fname = "export.json"
+        export_result = await sandbox.exec(
+            command=f"""session_id=$(opencode session list --format json | jq -r '.[0].id') \
+        && opencode export $session_id > {export_fname}"""
+        )
+        if self.config.debug:
+            print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+            print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         pwd_result = await sandbox.exec(command="pwd")
         results_remote_fpath = Path(pwd_result.stdout) / export_fname
