@@ -14,13 +14,12 @@ from responses_api_agents.verifiers_agent.app import (
     VerifiersAgentConfig,
     VerifiersAgentRunRequest,
 )
-from responses_api_agents.verifiers_agent.scratchpad_taskset import ScratchpadData
 
 
 def make_agent() -> VerifiersAgent:
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {POLICY_MODEL_NAME_KEY_NAME: "policy"}
-    return VerifiersAgent(
+    agent = VerifiersAgent(
         config=VerifiersAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -31,36 +30,28 @@ def make_agent() -> VerifiersAgent:
                 name="policy_model",
             ),
             verifiers={
-                "taskset": {"id": "scratchpad_taskset"},
-                "agent": {
+                "taskset": {
+                    "id": "textarena",
+                    "game": "Wordle-v0",
+                },
+                "player": {
                     "harness": {"id": "null"},
-                    "max_turns": 2,
+                    "max_turns": 6,
                 },
             },
         ),
         server_client=server_client,
     )
+    agent._tasks.append(vf.Task(vf.TaskData(idx=0, prompt="question")))
+    return agent
 
 
 class TestApp:
-    async def test_loads_v1_taskset_and_harness(self) -> None:
+    async def test_loads_multiturn_v1_env_and_harness(self) -> None:
         agent = make_agent()
-        task = agent._tasks[0]
-        trace = vf.Trace(
-            task=vf.TraceTask(type="ScratchpadTask", data=task.data),
-            agent=vf.AgentInfo(config=vf.AgentConfig(model="policy")),
-            nodes=[
-                vf.MessageNode(
-                    message=vf.AssistantMessage(content="sphinx"),
-                    sampled=True,
-                )
-            ],
-        )
-        await task.score(trace)
-
-        assert task.data.word == "sphinx"
-        assert agent._env.config.agent.harness.id == "null"
-        assert trace.reward == 1.0
+        assert type(agent._env).__name__ == "TextArenaEnv"
+        assert agent._env.config.taskset.game == "Wordle-v0"
+        assert agent._env.config.player.harness.id == "null"
         assert not any(
             getattr(route, "path", "").endswith("/v1/responses") for route in agent.setup_webserver().routes
         )
@@ -68,7 +59,7 @@ class TestApp:
     @pytest.mark.parametrize("endpoint", ["/responses", "/chat/completions"])
     async def test_runs_and_scores_v1_trace(self, monkeypatch: pytest.MonkeyPatch, endpoint: str) -> None:
         agent = make_agent()
-        task = ScratchpadData(idx=0, prompt="question", word="sphinx")
+        task = agent._tasks[0].data
         function_call = {
             "id": "call_1",
             "call_id": "call_1",
@@ -80,8 +71,24 @@ class TestApp:
             "generation_token_ids": [2],
             "generation_log_probs": [-0.1],
         }
-        answer = {
+        first_answer = {
             "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "[apple]",
+                    "annotations": [],
+                }
+            ],
+            "prompt_token_ids": [1, 2, 3],
+            "generation_token_ids": [4],
+            "generation_log_probs": [-0.2],
+        }
+        answer = {
+            "id": "msg_2",
             "type": "message",
             "role": "assistant",
             "status": "completed",
@@ -97,7 +104,7 @@ class TestApp:
             "generation_log_probs": [-0.2],
         }
         trace = vf.Trace(
-            task=vf.TraceTask(type="ScratchpadTask", data=task),
+            task=vf.TraceTask(type="Task", data=task),
             agent=vf.AgentInfo(config=vf.AgentConfig(model="policy")),
             tools=[
                 vf.Tool(
@@ -133,6 +140,18 @@ class TestApp:
                 vf.MessageNode(
                     parent=2,
                     message=vf.AssistantMessage(
+                        content="[apple]",
+                        provider_state=[first_answer] if endpoint == "/responses" else None,
+                    ),
+                    sampled=True,
+                ),
+                vf.MessageNode(
+                    parent=3,
+                    message=vf.UserMessage(content="X X X X X — 5 guesses left"),
+                ),
+                vf.MessageNode(
+                    parent=4,
+                    message=vf.AssistantMessage(
                         content="sphinx",
                         provider_state=[answer] if endpoint == "/responses" else None,
                     ),
@@ -144,6 +163,7 @@ class TestApp:
             calls=[
                 vf.ModelCall(node=1, model="policy", endpoint=endpoint),
                 vf.ModelCall(node=3, model="policy", endpoint=endpoint),
+                vf.ModelCall(node=5, model="policy", endpoint=endpoint),
             ],
             is_completed=True,
             ok=True,
@@ -171,11 +191,15 @@ class TestApp:
             "function_call",
             "function_call_output",
             "message",
+            "message",
+            "message",
         ]
         assert result.output[1].output == "sphinx"
+        assert result.output[3].role == "user"
+        assert result.output[3].content == "X X X X X — 5 guesses left"
         if endpoint == "/responses":
             assert result.output[0].prompt_token_ids == [1]
-            assert result.output[2].generation_token_ids == [4]
+            assert result.output[4].generation_token_ids == [4]
         assert result.reward == 1.0
         assert result.metrics == {"used_tool": 1.0}
         assert agent._env.run_slot.call_args.args[0] is slot

@@ -13,13 +13,15 @@
 # limitations under the License.
 
 import json
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from itertools import islice
 from time import time
-from typing import Any
+from typing import Annotated, Any
 
 import verifiers.v1 as vf
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr
 from verifiers.v1.dialects.chat import message_to_wire
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -35,7 +37,7 @@ from nemo_gym.responses_converter import ResponsesConverter
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
-    verifiers: vf.SingleAgentEnvConfig
+    verifiers: Annotated[vf.EnvConfig, BeforeValidator(vf.resolve_env_config)]
     max_tokens: int = 8192
     temperature: float = 1.0
     top_p: float = 1.0
@@ -61,14 +63,16 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
 
 class VerifiersAgent(SimpleResponsesAPIAgent):
     config: VerifiersAgentConfig
-    _env: vf.SingleAgentEnv = PrivateAttr()
+    _env: vf.Env = PrivateAttr()
     _tasks: list[vf.Task] = PrivateAttr()
+    _task_iter: Iterator[vf.Task] = PrivateAttr()
     _converter: ResponsesConverter = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._env = vf.SingleAgentEnv(self.config.verifiers)
-        self._tasks = list(self._env.taskset)
+        self._env = vf.load_environment(self.config.verifiers)
+        self._tasks = []
+        self._task_iter = iter(self._env.taskset)
         self._converter = ResponsesConverter(return_token_id_information=True)
 
     def setup_webserver(self) -> FastAPI:
@@ -92,13 +96,15 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         body: VerifiersAgentRunRequest = Body(),
     ) -> VerifiersNeMoGymResponse:
         params = body.responses_create_params
-        try:
-            task = self._tasks[body.task_idx]
-        except IndexError:
+        missing = body.task_idx + 1 - len(self._tasks)
+        if missing > 0:
+            self._tasks.extend(islice(self._task_iter, missing))
+        if body.task_idx >= len(self._tasks):
             raise HTTPException(
                 status_code=422,
                 detail=f"task_idx {body.task_idx} is out of range for {len(self._tasks)} tasks",
-            ) from None
+            )
+        task = self._tasks[body.task_idx]
 
         sampling = json.loads((params.metadata or {}).get("extra_body", "{}"))
         sampling.update(

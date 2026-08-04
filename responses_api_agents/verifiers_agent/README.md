@@ -9,8 +9,8 @@ change the Gym head server's dependencies.
 
 ## Example
 
-The included taskset asks the model to round-trip a word through a stateful Verifiers tool and
-scores the exact answer. Configure the policy model in `env.yaml`, then run:
+The example uses Verifiers' built-in multi-turn TextArena taskset to play Wordle. Configure the
+policy model in `env.yaml`, then run:
 
 ```bash
 gym env start \
@@ -24,10 +24,11 @@ gym eval run --no-serve \
   --limit 1
 ```
 
-The `verifiers` block in `configs/example.yaml` is a normal single-agent V1 environment config.
-Change its `taskset` and `agent.harness` fields to use another installed V1 taskset or harness.
+The `verifiers` block in `configs/example.yaml` is a normal V1 environment config. Change its
+`taskset` and role harness fields to use another installed V1 taskset or harness.
 The agent loads the taskset once, keeps the V1 serving resources alive with the Gym server,
 and runs the task selected by each row's `task_idx`.
+TextArena's game engine supplies each follow-up turn and scores the finished game.
 
 ## Export a taskset
 
@@ -36,7 +37,8 @@ Generate Gym rows in the same order as the configured V1 taskset:
 ```bash
 cd responses_api_agents/verifiers_agent
 uv run --python .venv/bin/python --no-project python3 scripts/create_dataset.py \
-  --taskset scratchpad_taskset \
+  --taskset textarena \
+  --taskset-config '{"game":"Wordle-v0"}' \
   --size 1 \
   --output data/tasks.jsonl
 ```

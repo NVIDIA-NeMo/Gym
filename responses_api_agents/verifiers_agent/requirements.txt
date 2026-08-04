@@ -1,2 +1,4 @@
 -e nemo-gym[dev] @ ../../
-verifiers==0.2.2.dev78
+verifiers[ta]==0.2.2.dev78
+# NLTK 3.10 rejects imports from Gym's component-local virtualenv.
+nltk<3.10
