@@ -247,7 +247,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # TODO @bxyu-nvidia: We need to manually activate the conda env here for SWE Verified
         # Eventually this will only be present on the SWE Bench resources server side
         # For now, the activation is put on the harness side.
-        conda_activate_command_str = "(( [[ -f /opt/miniconda3/bin/activate ]] && source /opt/miniconda3/bin/activate && conda activate testbed 2>/dev/null ) || true)"
+        conda_activate_command_str = "{ source /opt/miniconda3/bin/activate && conda activate testbed || true; }"
 
         opencode_thinking_str = "--thinking"
 
