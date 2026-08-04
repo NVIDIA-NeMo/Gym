@@ -24,6 +24,7 @@ independently.  Provides three scoring modes:
 
 from __future__ import annotations
 
+import os
 import asyncio
 import json
 import random
@@ -32,6 +33,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwargs, sample_judge
+
+# The SDK default is 600s with 2 silent retries, so one slow request (a
+# multi-page PDF rasterised to images) burns 30 minutes and then surfaces as a
+# bare transient 500 that never mentions a timeout. Retries do not help: a
+# request too slow once is too slow three times.
+JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "1800"))
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +127,12 @@ async def score_with_rubric(
         deliverable_text=deliverable_text,
     )
 
-    client = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+    client = AsyncOpenAI(
+        base_url=judge.base_url,
+        api_key=judge.api_key,
+        timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     max_retries = 5
     base_delay = 2.0
@@ -268,7 +280,12 @@ async def score_with_rubric_visual(
     content: list[dict] = [{"type": "text", "text": judge_text}]
     content.extend(deliverable_content_blocks)
 
-    client = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+    client = AsyncOpenAI(
+        base_url=judge.base_url,
+        api_key=judge.api_key,
+        timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     max_retries = 5
     base_delay = 2.0
@@ -403,7 +420,12 @@ async def score_with_rubric_structured(
     def _client_for(judge: ResolvedJudge) -> Any:
         key = (judge.base_url, judge.api_key)
         if key not in client_cache:
-            client_cache[key] = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+            client_cache[key] = AsyncOpenAI(
+                base_url=judge.base_url,
+                api_key=judge.api_key,
+                timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         return client_cache[key]
 
     # Compute max possible score from rubric. Different upstream formats name

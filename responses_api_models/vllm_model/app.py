@@ -152,8 +152,7 @@ def _append_transport_io(event: Dict[str, Any]) -> None:
 _REASONING_FIELD_MODE = os.environ.get("NEMO_GYM_REASONING_FIELD", "both").strip() or "both"
 if _REASONING_FIELD_MODE not in ("both", "reasoning", "reasoning_content"):
     raise ValueError(
-        f"NEMO_GYM_REASONING_FIELD must be 'both', 'reasoning', or 'reasoning_content'; "
-        f"got {_REASONING_FIELD_MODE!r}"
+        f"NEMO_GYM_REASONING_FIELD must be 'both', 'reasoning', or 'reasoning_content'; got {_REASONING_FIELD_MODE!r}"
     )
 
 
