@@ -75,7 +75,7 @@ class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
 
 
 class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
-    pass
+    opencode_results_fpath: str
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
@@ -85,6 +85,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
 
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._sandbox_id_to_result_fpath: Dict[str, str] = dict()
 
     async def _start_sandbox(self) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
@@ -246,6 +247,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         opencode_export = json.loads(results_local_fpath.read_text())
 
+        self._sandbox_id_to_result_fpath[request.cookies["sandbox_id"]] = str(results_local_fpath)
+
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -305,7 +308,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await sandbox.stop()
         self._sandbox_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
 
-        return OpenCodeSandboxedAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        custom_response = {"opencode_results_fpath": self._sandbox_id_to_result_fpath[request.cookies["sandbox_id"]]}
+        return OpenCodeSandboxedAgentVerifyResponse.model_validate(
+            (await get_response_json(verify_response)) | custom_response
+        )
 
 
 if __name__ == "__main__":
