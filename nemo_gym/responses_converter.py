@@ -60,6 +60,13 @@ from nemo_gym.openai_utils import (
 )
 
 
+def _message_content_to_text(content: Any) -> str:
+    """Plain text of a chat message content (a string, or a list of text parts)."""
+    if isinstance(content, str):
+        return content
+    return "".join(part.get("text", "") for part in content or [] if isinstance(part, dict))
+
+
 class ResponsesConverterState(BaseModel):
     return_token_id_information: bool
 
@@ -166,6 +173,22 @@ class ResponsesConverter(BaseModel):
 
         state.flush_assistant()
 
+        # The Responses API inserts `instructions` as a system message at the start of the model's
+        # context. Chat Completions has no such parameter, so map it explicitly — otherwise it is
+        # silently dropped when the remaining params are passed through (extra fields are ignored).
+        # The leading run of system/developer messages is folded into the same single system
+        # message: chat backends commonly admit only one system message, at position 0 (harnesses
+        # like the Codex CLI send instructions plus a leading developer message).
+        instructions = responses_create_params.pop("instructions", None)
+        if instructions:
+            leading_parts = [instructions]
+            while state.messages and state.messages[0]["role"] in ("system", "developer"):
+                leading_parts.append(_message_content_to_text(state.messages.pop(0)["content"]))
+            state.messages.insert(
+                0,
+                NeMoGymChatCompletionSystemMessageParam(content="\n\n".join(leading_parts), role="system"),
+            )
+
         model = responses_create_params.pop("model", None)
         if model is not None:
             responses_create_params["model"] = model
@@ -240,7 +263,10 @@ class ResponsesConverter(BaseModel):
         match m["role"]:
             case "assistant":
                 final_content = ""
-                if isinstance(m["content"], list):
+                if m["content"] is None:
+                    # Tool-call only turns have "None" according to the official API spec.
+                    pass
+                elif isinstance(m["content"], list):
                     content_str = "".join([part.get("text", "") for part in m["content"]])
                     final_content += content_str
                 elif isinstance(m["content"], str):
@@ -291,7 +317,8 @@ class ResponsesConverter(BaseModel):
 
         This is done to group together one (or multiple) reasoning message(s) into a single,
         cohesive block, later prepending it to a subsequent assistant message.
-        See: https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/how-to-faq.md#faq-openai-responses-vs-chat-completions-api for an example of reasoning in responses api.
+        See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
+        for background on reasoning in the Responses API.
         """
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]

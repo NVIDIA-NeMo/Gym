@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import base64
 import json
 import os
@@ -74,6 +75,30 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
 
+    # When True, outbound calls go to vLLM's /v1/completions endpoint instead
+    # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
+    # external endpoints continue to work; only the upstream call swaps.
+    #
+    # In raw mode (render_chat_template=False, the default) the messages list
+    # must be a single user message (optionally preceded by a single system
+    # message); tools, multi-turn turns, audio, and non-text blocks are
+    # rejected. With render_chat_template=True the messages are rendered into
+    # a prompt string client-side via HF AutoTokenizer.apply_chat_template,
+    # which lifts the multi-turn restriction.
+    use_completions_api: bool = False
+
+    # Only consulted when ``use_completions_api`` is True. When True, render
+    # the messages list to a prompt string via HF AutoTokenizer.apply_chat_template
+    # (tokenize=False, add_generation_prompt=True) before forwarding to
+    # /v1/completions. The HF tokenizer is loaded once at startup from
+    # ``tokenizer`` (or ``model`` if unset). Fails at startup if the loaded
+    # tokenizer has no chat_template.
+    render_chat_template: bool = False
+
+    # HF identifier or local path passed to AutoTokenizer.from_pretrained.
+    # When None, falls back to ``model``.
+    tokenizer: Optional[str] = None
+
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
@@ -110,6 +135,50 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = self.get_converter()
+
+        self._chat_template_tokenizer = None
+        if self.config.use_completions_api and self.config.render_chat_template:
+            self._chat_template_tokenizer = self._load_chat_template_tokenizer()
+
+    def _load_chat_template_tokenizer(self):
+        """Load an HF AutoTokenizer for client-side chat-template rendering.
+
+        Imported lazily so that VLLMModel users who don't set
+        ``render_chat_template=True`` aren't forced to have ``transformers``
+        imported at server start (it's a heavy import).
+
+        Fails loudly at startup if (a) the tokenizer can't be loaded, or
+        (b) it loaded but has no ``chat_template`` configured.
+        """
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as e:
+            raise ImportError(
+                f"NeMo Gym server `{self.config.name}` is configured with "
+                "use_completions_api=true and render_chat_template=true, which requires "
+                "the `transformers` package to load an HF tokenizer for chat-template "
+                "rendering. Install it (`pip install transformers`) or set "
+                "render_chat_template=false to use raw rendering instead."
+            ) from e
+
+        tokenizer_id = self.config.tokenizer or self.config.model
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"NeMo Gym server `{self.config.name}`: AutoTokenizer.from_pretrained({tokenizer_id!r}) "
+                "failed. Set `tokenizer:` in the server config to an HF identifier or local "
+                "path, or set render_chat_template=false."
+            ) from e
+
+        if not getattr(tokenizer, "chat_template", None):
+            raise RuntimeError(
+                f"NeMo Gym server `{self.config.name}`: tokenizer loaded from {tokenizer_id!r} "
+                "has no chat_template configured. Point `tokenizer:` at a model whose "
+                "tokenizer ships a chat template, or set render_chat_template=false."
+            )
+
+        return tokenizer
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -232,10 +301,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
 
-        metadata = body_dict.get("metadata", dict())
+        metadata = body_dict.get("metadata") or {}
 
         # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
-        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs", "{}")
+        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs") or "{}"
         chat_template_kwargs.update(json.loads(metadata_chat_template_kwargs_str))
 
         if chat_template_kwargs:
@@ -246,7 +315,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
 
-        metadata_extra_body_str = metadata.get("extra_body", "{}")
+        metadata_extra_body_str = metadata.get("extra_body") or "{}"
         extra_body.update(json.loads(metadata_extra_body_str))
 
         if self.config.return_token_id_information:
@@ -384,6 +453,9 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        if self.config.use_completions_api:
+            return await self._chat_completions_via_completions_api(request, body)
+
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
@@ -500,6 +572,325 @@ class VLLMModel(SimpleResponsesAPIModel):
             # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
             # chat_completion_dict.pop("prompt_token_ids")
             # choice_dict.pop("token_ids")
+
+        return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def _chat_completions_via_completions_api(
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> NeMoGymChatCompletion:
+        """Drive vLLM's /v1/completions instead of /v1/chat/completions.
+
+        Primary use case: base (non-instruct) models. Returns the same
+        NeMoGymChatCompletion shape as the chat-completions path so external
+        callers don't need to change.
+
+        Two render modes (selected by ``render_chat_template``):
+
+        - **raw** (default): the messages list must be a single user message
+          (optionally preceded by a single system message); their content is
+          forwarded verbatim. Tools and multi-turn turns are rejected.
+        - **chat_template**: messages are rendered via
+          ``HF AutoTokenizer.apply_chat_template(tokenize=False,
+          add_generation_prompt=True)`` before being forwarded. Multi-turn
+          and tools are allowed; tools are rendered into the prompt by the
+          template, but tool-call output text is **not parsed** by Gym since
+          /v1/completions doesn't run vLLM's tool-call parser — the caller
+          is responsible for parsing tool calls out of the assistant text.
+
+        Audio metadata and non-text content blocks are rejected in both
+        modes — /v1/completions is text-only.
+        """
+        body_dict = body.model_dump(exclude_unset=True)
+        messages = body_dict.get("messages", []) or []
+        metadata = body_dict.get("metadata", {}) or {}
+
+        if not self.config.render_chat_template and body_dict.get("tools"):
+            raise ValueError(
+                f"NeMo Gym server `{self.config.name}`: tools are not supported "
+                "with use_completions_api=true and render_chat_template=false. "
+                "Set render_chat_template=true (so the chat template can render "
+                "tool definitions into the prompt) or set use_completions_api=false "
+                "for the standard chat-completions tool-call path."
+            )
+
+        for audio_key in ("audio_data", "audio_path", "audio_paths"):
+            if metadata.get(audio_key):
+                raise ValueError(
+                    f"NeMo Gym server `{self.config.name}`: audio metadata "
+                    f"({audio_key!r}) is not supported with use_completions_api=true. "
+                    "/v1/completions is text-only."
+                )
+
+        if self.config.render_chat_template:
+            prompt = await asyncio.to_thread(self._render_messages_via_chat_template, body_dict)
+        else:
+            prompt = self._render_messages_to_prompt(messages)
+
+        completion_body = self._build_completion_body_from_chat_body(body_dict, prompt)
+
+        client = self._resolve_client(request)
+
+        try:
+            completion_dict = await client.create_completion(**completion_body)
+        except ClientResponseError as e:
+            result_content_str = e.response_content.decode()
+            is_out_of_context_length = e.status == 400 and (
+                "context length" in result_content_str or "max_tokens" in result_content_str
+            )
+            if is_out_of_context_length:
+                res = self._create_empty_chat_completion()
+                res.choices[0].finish_reason = "length"
+                return res
+            raise
+
+        if self.config.return_token_id_information:
+            choice_dict = completion_dict["choices"][0]
+            if choice_dict.get("prompt_token_ids") is None:
+                tokenize_body = dict(
+                    model=self.config.model,
+                    prompt=prompt,
+                )
+                if "add_special_tokens" in completion_body:
+                    tokenize_body["add_special_tokens"] = completion_body["add_special_tokens"]
+                tokenize_response = await client.create_tokenize(**tokenize_body)
+                choice_dict["prompt_token_ids"] = tokenize_response["tokens"]
+
+        return self._completion_dict_to_chat_completion(completion_dict)
+
+    def _render_messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        """Convert a chat-style messages list into a flat prompt string.
+
+        Allows at most one optional system message followed by exactly one
+        user message. Their string contents are joined with ``\\n\\n``.
+        Rejects anything else (assistant / tool turns, multiple users,
+        list-of-blocks content with non-text parts). The caller is expected
+        to do prompt templating upstream before sending.
+        """
+        if not messages:
+            raise ValueError("Cannot render an empty messages list to a prompt.")
+
+        if len(messages) > 2:
+            raise ValueError(
+                f"use_completions_api=true accepts at most one system + one user message; "
+                f"got {len(messages)} messages. Render the prompt upstream and submit a "
+                "single user message."
+            )
+
+        roles = [m.get("role") for m in messages]
+        if len(messages) == 2 and roles != ["system", "user"]:
+            raise ValueError(
+                f"use_completions_api=true requires the two-message form to be [system, user]; got {roles}."
+            )
+        if len(messages) == 1 and roles[0] != "user":
+            raise ValueError(f"use_completions_api=true requires a user message; got role={roles[0]!r}.")
+
+        parts: List[str] = []
+        for m in messages:
+            parts.append(self._stringify_message_content(m))
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _stringify_message_content(message: Dict[str, Any]) -> str:
+        """Coerce a single message's content into a flat string.
+
+        Accepts:
+          - ``str``: returned as-is.
+          - list of text blocks (``[{"type": "text", "text": ...}, ...]``):
+            concatenated with no separator. This is the shape produced by
+            VLLMConverter when the caller passes a string ``input`` to
+            /v1/responses.
+
+        Anything else (image / audio blocks, None content) is rejected — the
+        caller is expected to render upstream when use_completions_api is true.
+        """
+        content = message.get("content")
+        role = message.get("role")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") not in ("text", "input_text"):
+                    raise ValueError(
+                        f"use_completions_api=true only accepts text content blocks; "
+                        f"got block type {part.get('type') if isinstance(part, dict) else type(part).__name__!r} "
+                        f"for role={role!r}."
+                    )
+                text_parts.append(part.get("text", ""))
+            return "".join(text_parts)
+        raise ValueError(
+            f"use_completions_api=true requires string or text-block-list content; "
+            f"got {type(content).__name__} for role={role!r}."
+        )
+
+    def _render_messages_via_chat_template(self, body_dict: Dict[str, Any]) -> str:
+        """Render the request's messages to a single prompt string using the
+        HF tokenizer's chat template.
+
+        Calls ``apply_chat_template`` with ``add_generation_prompt=True`` so
+        the rendered string ends where the assistant turn would begin.
+        Assistant and tool messages, plus any tool definitions, are passed
+        through to the template unchanged.
+
+        ``chat_template_kwargs`` is merged from two sources: the
+        server-level value from config, plus an optional per-request
+        override JSON-encoded under ``metadata.chat_template_kwargs``. The
+        per-request override wins on key conflicts.
+        """
+        messages = body_dict.get("messages") or []
+        tools = body_dict.get("tools") or None
+        self._validate_text_only_messages(messages)
+
+        # Mirror the precedence rules in _preprocess_chat_completion_create_params:
+        # global config baseline, per-request metadata overrides on top.
+        chat_template_kwargs: Dict[str, Any] = {}
+        if self.config.chat_template_kwargs:
+            chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))
+        metadata = body_dict.get("metadata") or {}
+        metadata_kwargs_str = metadata.get("chat_template_kwargs") or "{}"
+        chat_template_kwargs.update(json.loads(metadata_kwargs_str))
+
+        return self._chat_template_tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            tools=tools,
+            **chat_template_kwargs,
+        )
+
+    def _validate_text_only_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Reject non-text content before forwarding to /v1/completions."""
+        for message in messages:
+            if message.get("content") is not None:
+                self._stringify_message_content(message)
+
+    def _build_completion_body_from_chat_body(self, chat_body_dict: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+        """Translate a chat-completion request body into a /v1/completions body.
+
+        Only forwards fields that vLLM /v1/completions accepts. Sampling knobs
+        (top_k, min_p, repetition_penalty, etc.) that have no first-class
+        completion field are passed via ``extra_body`` if the operator set
+        ``config.extra_body`` — same precedence rule as the chat path.
+        """
+        out: Dict[str, Any] = {
+            "model": self.config.model,
+            "prompt": prompt,
+        }
+
+        # Pass-through sampling fields with the same names on /v1/completions.
+        for key in (
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "n",
+            "seed",
+            "stop",
+            "frequency_penalty",
+            "presence_penalty",
+            "logit_bias",
+            "response_format",
+            "user",
+        ):
+            if key in chat_body_dict:
+                out[key] = chat_body_dict[key]
+
+        # ``max_completion_tokens`` is the chat-API alias; map onto ``max_tokens``.
+        if "max_tokens" not in out and "max_completion_tokens" in chat_body_dict:
+            out["max_tokens"] = chat_body_dict["max_completion_tokens"]
+
+        # /v1/completions ``logprobs`` is an int (top-N), not a bool. We mainly
+        # need ``logprobs=0`` (just the sampled token's logprob) when the
+        # operator wants generation-token-id metadata for RL training.
+        chat_logprobs = chat_body_dict.get("logprobs")
+        chat_top_logprobs = chat_body_dict.get("top_logprobs")
+        if chat_top_logprobs is not None:
+            out["logprobs"] = chat_top_logprobs
+        elif chat_logprobs is True:
+            out["logprobs"] = 0
+        elif self.config.return_token_id_information and "logprobs" not in out:
+            out["logprobs"] = 0
+
+        # Operator-level extra_body merges in (e.g. return_tokens_as_token_ids).
+        # Same precedence as the chat path: extra_body fields do NOT override
+        # request-level fields.
+        if self.config.extra_body:
+            extra_body = deepcopy(self.config.extra_body)
+            out = extra_body | out
+
+        if self.config.return_token_id_information:
+            # Prefer vLLM's inline prompt and generation token IDs. Keep the
+            # token-string form available for older engines that omit them.
+            out["return_token_ids"] = True
+            out["return_tokens_as_token_ids"] = True
+
+        return out
+
+    def _completion_dict_to_chat_completion(self, completion_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
+        """Wrap a /v1/completions response as a NeMoGymChatCompletion.
+
+        vLLM /v1/completions returns ``choices[i].text``; we lift it into a
+        single assistant chat message. Reasoning content (``<think>...</think>``
+        in the raw text) is left inline — VLLMConverter._extract_reasoning_from_content
+        will pull it out downstream when the result is converted back to a
+        Response.
+        """
+        choice_dict = completion_dict["choices"][0]
+        text = choice_dict.get("text") or ""
+
+        message_dict: Dict[str, Any] = {
+            "role": "assistant",
+            "content": text,
+            "tool_calls": None,
+        }
+
+        if self.config.return_token_id_information:
+            logprobs = choice_dict.get("logprobs")
+            if not logprobs or logprobs.get("token_logprobs") is None:
+                raise RuntimeError(
+                    f"`{self.config.name}` requested per-token logprobs from vLLM "
+                    "(return_token_id_information=True, logprobs=0), but the response "
+                    f"had none (choice.logprobs={logprobs!r}). Cannot extract token IDs or logprobs."
+                )
+
+            tokens = logprobs.get("tokens") or []
+            token_logprobs = logprobs["token_logprobs"]
+
+            inline_generation_token_ids = choice_dict.get("token_ids")
+            if inline_generation_token_ids is None and logprobs.get("tokens") is None:
+                raise RuntimeError(
+                    f"`{self.config.name}` requested generation token IDs from vLLM, "
+                    "but the response contained neither choice.token_ids nor choice.logprobs.tokens."
+                )
+            generation_token_ids = (
+                inline_generation_token_ids
+                if inline_generation_token_ids is not None
+                else [t.removeprefix("token_id:") for t in tokens]
+            )
+            generation_log_probs = list(token_logprobs)
+
+            message_dict.update(
+                prompt_token_ids=choice_dict["prompt_token_ids"],
+                generation_token_ids=generation_token_ids,
+                generation_log_probs=generation_log_probs,
+            )
+
+        chat_completion_dict = {
+            "id": completion_dict.get("id", "chatcmpl-completions"),
+            "object": "chat.completion",
+            "created": completion_dict.get("created", int(time())),
+            "model": completion_dict.get("model", self.config.model),
+            "choices": [
+                {
+                    "index": choice_dict.get("index", 0),
+                    "finish_reason": choice_dict.get("finish_reason") or "stop",
+                    "message": message_dict,
+                }
+            ],
+        }
+
+        if completion_dict.get("usage") is not None:
+            chat_completion_dict["usage"] = completion_dict["usage"]
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
