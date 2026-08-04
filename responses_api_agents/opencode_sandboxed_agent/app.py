@@ -211,7 +211,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         export_fname = "export.json"
         export_result = await sandbox.exec(
-            command=f"""session_id=$(opencode session list --format json | jq -r '.[0].id') \
+            command=f"""export PATH=$HOME/.opencode/bin:$PATH \
+        && session_id=$(opencode session list --format json | jq -r '.[0].id') \
         && opencode export $session_id > {export_fname}"""
         )
         if self.config.debug:
