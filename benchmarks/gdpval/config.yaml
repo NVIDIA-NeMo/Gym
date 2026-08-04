@@ -81,8 +81,9 @@ gdpval_resources_server:
         - name: gemini-3.1-pro
           model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
           create_params_overrides: { extra_body: { reasoning_effort: high } }
-          # Handles audio/video natively — tasks with those files route here.
-          handles_audio_video: true
+          # Reads audio AND video natively — tasks with those files route here.
+          handles_audio: true
+          handles_video: true
         - name: claude-opus-4.8
           # Served via NVIDIA inference (Bedrock). The proxy exposes it on the
           # Anthropic /v1/messages route; extra_body.thinking enables reasoning.
