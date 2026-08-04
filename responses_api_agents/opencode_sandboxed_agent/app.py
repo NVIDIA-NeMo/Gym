@@ -188,6 +188,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         export_fname = "export.json"
         command = f"""
         echo "Shell: $SHELL" \
+        && curl http://10.109.29.239:8000/v1 \
+        && curl {get_server_url(self.config.model_server.name)}/v1 \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && opencode run --print-logs --log-level DEBUG {quote(query)} \
