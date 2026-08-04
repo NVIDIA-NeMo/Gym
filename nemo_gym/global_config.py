@@ -32,7 +32,7 @@ import rich
 import wandb
 import wandb.util
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
-from omegaconf.errors import InterpolationKeyError
+from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
@@ -833,11 +833,15 @@ def set_global_config_dict(
     global _GLOBAL_CONFIG_DICT
     try:
         global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
-    except InterpolationKeyError as e:
+    except InterpolationResolutionError as e:
         # Same class of user error as an unset '???' (see raise_on_missing_values), so report it the same
-        # way instead of letting omegaconf's traceback reach the top level.
+        # way instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
+        # (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
+        # message and so is passed through as-is.
         match = re.search(r"Interpolation key '([^']+)' not found", str(e))
-        key = match.group(1) if match else e.full_key
+        if not match:
+            raise ConfigInterpolationError(str(e)) from e
+        key = match.group(1)
         raise ConfigInterpolationError(
             f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
 
