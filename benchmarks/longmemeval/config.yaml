@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/longmemeval/configs/longmemeval.yaml
+
+longmemeval_benchmark_simple_agent:
+  _inherit_from: longmemeval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: longmemeval
+        type: benchmark
+        jsonl_fpath: benchmarks/longmemeval/data/longmemeval_benchmark.jsonl
+        prepare_script: benchmarks/longmemeval/prepare.py
+        prompt_config: null
+        license: Creative Commons Attribution-NonCommercial 4.0
