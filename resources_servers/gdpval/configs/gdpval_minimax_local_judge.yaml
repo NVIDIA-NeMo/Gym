@@ -19,8 +19,9 @@
 #
 # GDPVal judge overlay: swap the default remote frontier-judge panel for a
 # gym-spawned, LOCAL, MULTIMODAL MiniMax-M3 judge served in vLLM. MiniMax-M3
-# reads images AND audio/video, so it can score every GDPVal deliverable
-# modality directly.
+# reads images AND video, so it can score those GDPVal deliverable modalities
+# directly. It has no audio tower, so audio is dropped (see judge_handles_audio
+# below).
 #
 # Chain this AFTER the benchmark config, e.g.:
 #

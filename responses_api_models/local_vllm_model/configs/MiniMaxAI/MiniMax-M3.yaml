@@ -10,10 +10,10 @@
 #     point gym at its /v1 endpoint via
 #     resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml.
 #
-# Gym-spawned MiniMax-M3 vLLM deployment (MULTIMODAL — reads images, audio, and
-# video). MiniMax-M3 is used as the GDPVal local judge; unlike an image-only VLM
-# it can consume the raw audio/video deliverables directly (see
-# resources_servers/gdpval/configs/gdpval_minimax_local_judge.yaml).
+# Gym-spawned MiniMax-M3 vLLM deployment (MULTIMODAL — reads images and video;
+# its config has no audio tower). MiniMax-M3 is used as the GDPVal local judge;
+# unlike an image-only VLM it can consume the raw video deliverables directly
+# (see resources_servers/gdpval/configs/gdpval_minimax_local_judge.yaml).
 #
 # Requires vLLM >= 0.24.0 (first release with MiniMax-M3 support + the
 # minimax_m3 tool/reasoning parsers). Gym pins this in

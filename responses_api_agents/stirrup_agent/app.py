@@ -1211,9 +1211,13 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 # Fall back to the flat (no repeat_index) layout for backwards compat with older
                 # runs. Only use the flat path when it actually exists on disk — if neither the
                 # repeat dir nor the flat dir exists it's a fresh run and we keep the repeat path.
+                # A genuine flat dir holds the deliverable files directly. Once ANY repeat has been
+                # written, task_<id>/ also exists — as the repeats' PARENT — so an unwritten repeat
+                # would fall back onto it and judge a sibling repeat's files (or read the wrong
+                # finish marker). Require the absence of repeat_* children to tell the two apart.
                 if (self.config.judge_only or self.config.rerun_incomplete) and not Path(deliverables_dir).is_dir():
                     flat_dir = Path(self.config.persist_deliverables_dir) / f"task_{task_id}"
-                    if flat_dir.is_dir():
+                    if flat_dir.is_dir() and not any(flat_dir.glob("repeat_*")):
                         deliverables_dir = str(flat_dir.absolute())
 
             # Per-request opt-in to judge an already-cached deliverable instead of
