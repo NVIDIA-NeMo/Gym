@@ -271,6 +271,18 @@ class RolloutCaptureGate:
         admitted = lineage.admit(call_id, parent_call_id=None, mode="text")
         if cause is not None:
             self.metrics[f"fallback_{cause}"] += 1
+            if cause == "no_match":
+                # Where does the request first diverge from recorded lineage?
+                # depth 0 every time = systematic per-turn drift (e.g. the F5
+                # reasoning asymmetry); depth k>0 = localized rewrite, the
+                # longest-prefix-matching opportunity.
+                matched, incoming = index_lineage.divergence_depth(messages)
+                bucket = str(matched) if matched < 5 else "5plus"
+                key = f"no_match_matched_depth_{bucket}"
+                self.metrics[key] = self.metrics.get(key, 0) + 1
+                self.metrics["no_match_incoming_turns"] = (
+                    self.metrics.get("no_match_incoming_turns", 0) + incoming
+                )
         return GateDecision(
             rollout_id=rollout_id,
             call_id=admitted.call_id,

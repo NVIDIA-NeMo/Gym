@@ -46,11 +46,36 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
+
+# --- experimental: canonical text fingerprints (NG_TIC_FP_CANONICAL=1) --------
+# Hypothesis under test (call-timing report F5): record indexes the served turn
+# with reasoning wrapped as <think>...</think> content, while resolve sees the
+# incoming turn after the reasoning parser stripped it — so every reasoning
+# turn diverges and lookups always miss. Canonicalizing the *hash input only*
+# (records are never rewritten) makes the two sides agree: think blocks are
+# dropped and whitespace collapsed. A collision between two genuinely different
+# turns that differ only in reasoning/whitespace yields an *ambiguous* match,
+# which resolve() already refuses — degrading to fallback, never a wrong parent.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_FP_CANONICAL: bool | None = None
+
+
+def _fp_canonical_enabled() -> bool:
+    global _FP_CANONICAL
+    if _FP_CANONICAL is None:
+        _FP_CANONICAL = os.environ.get("NG_TIC_FP_CANONICAL") == "1"
+    return _FP_CANONICAL
+
+
+def _canonical_turn_text(text: str) -> str:
+    return " ".join(_THINK_BLOCK_RE.sub(" ", text).split())
 
 
 def canonicalize_tool_arguments(value: Any) -> str:
@@ -157,15 +182,41 @@ def assistant_fingerprint(messages: list[dict]) -> str:
         if not isinstance(message, dict) or not _is_assistant_authored(message):
             continue
         count += 1
-        hasher.update(b"\x00")
-        hasher.update(_text_of(message.get("content")).encode("utf-8"))
-        for name, arguments in _tools_of(message):
-            hasher.update(b"\x01")
-            hasher.update(name.encode("utf-8"))
-            hasher.update(arguments.encode("utf-8"))
+        _hash_turn(hasher, message)
     if count == 0:
         return ""
     return hasher.hexdigest()
+
+
+def _hash_turn(hasher: "hashlib._Hash", message: dict) -> None:
+    """Feed one model-authored turn into the running fingerprint."""
+    text = _text_of(message.get("content"))
+    if _fp_canonical_enabled():
+        text = _canonical_turn_text(text)
+    hasher.update(b"\x00")
+    hasher.update(text.encode("utf-8"))
+    for name, arguments in _tools_of(message):
+        hasher.update(b"\x01")
+        hasher.update(name.encode("utf-8"))
+        hasher.update(arguments.encode("utf-8"))
+
+
+def assistant_prefix_fingerprints(messages: list[dict]) -> list[str]:
+    """Running fingerprint after each model-authored turn, in order.
+
+    ``result[-1] == assistant_fingerprint(messages)`` (when any turn exists).
+    The incremental hasher states are free — this is the observability seam
+    for measuring *where* a request first diverges from the recorded lineage
+    (call-timing report F5 / longest-prefix matching groundwork).
+    """
+    hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
+    fps: list[str] = []
+    for message in messages or []:
+        if not isinstance(message, dict) or not _is_assistant_authored(message):
+            continue
+        _hash_turn(hasher, message)
+        fps.append(hasher.hexdigest())
+    return fps
 
 
 @dataclass
@@ -185,6 +236,9 @@ class RolloutLineage:
     # Running sum of cum_len over recorded nodes, so the index can bound itself on memory without
     # walking every node on every access.
     total_tokens: int = 0
+    # Observability: every recorded per-turn prefix fingerprint -> its depth
+    # (1-based turn count). ~80 B/turn; dropped with the rollout at seal.
+    prefix_depths: dict[str, int] = field(default_factory=dict)
 
     def resolve(self, messages: list[dict]) -> LineageNode | None:
         """The call this request continues, or ``None``.
@@ -211,9 +265,27 @@ class RolloutLineage:
             self.total_tokens -= previous.cum_len
         self.total_tokens += node.cum_len
         self.by_call_id[call_id] = node
-        fingerprint = assistant_fingerprint(messages)
-        if fingerprint:
-            self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
+        prefix_fps = assistant_prefix_fingerprints(messages)
+        if prefix_fps:
+            self.by_fingerprint.setdefault(prefix_fps[-1], []).append(call_id)
+        for depth, fp in enumerate(prefix_fps, start=1):
+            self.prefix_depths.setdefault(fp, depth)
+
+    def divergence_depth(self, messages: list[dict]) -> tuple[int, int]:
+        """(deepest recorded prefix this request matches, its own turn count).
+
+        Observability for the `fallback_no_match` cause: 0 means even the
+        first model-authored turn was never recorded in this form (systematic
+        per-turn drift); k < n means the request diverges after turn k
+        (localized rewrite — the longest-prefix-matching opportunity).
+        """
+        fps = assistant_prefix_fingerprints(messages)
+        matched = 0
+        for i, fp in enumerate(fps):
+            if fp not in self.prefix_depths:
+                break
+            matched = i + 1
+        return matched, len(fps)
 
 
 class LineageIndex:
