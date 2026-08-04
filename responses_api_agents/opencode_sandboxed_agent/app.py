@@ -122,6 +122,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
         for message in opencode_export["messages"]:
+            if message["info"]["role"] != "assistant":
+                continue
+
             token_info = message["info"].get("tokens")
             if not token_info:
                 continue
