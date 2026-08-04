@@ -1,0 +1,181 @@
+---
+title: "E2B Provider"
+description: "Configure NeMo Gym sandboxes backed by E2B or an E2B-compatible gateway."
+position: 2
+---
+
+The `e2b` provider creates isolated cloud sandboxes through the E2B Python SDK. It supports
+the hosted E2B service and E2B-compatible gateways with custom API and sandbox URLs.
+
+## Setup
+
+Install the sandbox extra in the environment that creates sandboxes:
+
+```bash
+uv sync --extra sandbox
+```
+
+For a package install, use:
+
+```bash
+pip install "nemo-gym[sandbox]"
+```
+
+The provider requires `e2b>=2.36.0,<3.0.0`. Set `E2B_API_KEY` for the hosted service. For a
+compatible gateway, also set `E2B_API_URL` and `E2B_SANDBOX_URL` to the endpoints supplied by
+the gateway operator.
+
+## Provider Config
+
+NeMo Gym ships an E2B config at `nemo_gym/sandbox/providers/e2b/configs/e2b.yaml`. It defines
+a top-level `sandbox` block that agents reference with `sandbox_provider: sandbox`:
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: e2b
+  e2b:
+    connection:
+      api_key: ${oc.env:E2B_API_KEY,null}
+      api_url: ${oc.env:E2B_API_URL,null}
+      sandbox_url: ${oc.env:E2B_SANDBOX_URL,null}
+      request_timeout_s: 120.0
+    create:
+      template: null
+      template_map: {}
+      timeout_s: 3600.0
+      secure: true
+      allow_internet_access: true
+      strict_resources: false
+    exec:
+      default_timeout_s: 180.0
+      user: null
+      request_timeout_s: null
+      background: true
+      reconnect_attempts: 2
+    operations:
+      retries: 2
+      retry_delay_s: 0.5
+      retry_max_delay_s: 8.0
+```
+
+Pass the provider config beside the agent and model configs:
+
+```bash
+gym env start \
+  --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+  --config nemo_gym/sandbox/providers/e2b/configs/e2b.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
+## Prepare Templates
+
+E2B starts a sandbox from a template name or ID rather than an OCI image reference. Because
+tagged template names and OCI references can both contain `:`, the provider resolves a template
+conservatively:
+
+1. `SandboxSpec.provider_options.template`
+2. `create.template_map[SandboxSpec.image]`
+3. `SandboxSpec.image`, when it is an untagged name matching `[A-Za-z0-9_-]+`
+4. The `create.template` fallback, only when `SandboxSpec.image` is omitted
+
+Use `provider_options.template` for a tagged template name or template ID. A non-empty,
+unmapped image raises instead of silently selecting an unrelated fallback template.
+
+Build templates from OCI images as a separate provisioning step:
+
+```bash
+python -m nemo_gym.sandbox.providers.e2b.build \
+  --image ghcr.io/acme/task:1.0 \
+  --cpu-count 8 \
+  --memory-mb 16384 \
+  --output template_map.yaml
+```
+
+The generated YAML contains an image-to-template mapping ready to place under `create`:
+
+```yaml
+template_map:
+  "ghcr.io/acme/task:1.0": task-1-0__f00ee9d593d9
+```
+
+Template building can create E2B resources and is never performed implicitly by sandbox
+creation. Generated names are deterministic for the image, CPU count, and memory size, so a
+matching existing template can be reused. The helper's local timeout stops waiting but cannot
+cancel a remote build that E2B has already accepted; check E2B before retrying after a timeout.
+By default a batch failure prevents queued siblings from starting and waits for already-started
+builds to finish; pass `--continue-on-error` to keep building the remaining images.
+
+## Relevant `SandboxSpec` Fields
+
+| Field | E2B behavior |
+| --- | --- |
+| `image` | Untagged names matching `[A-Za-z0-9_-]+` are direct; tagged names, IDs, and OCI references require `provider_options.template` or `create.template_map`. |
+| `ttl_s` | Sandbox lifetime; overrides `create.timeout_s` and must be positive. |
+| `ready_timeout_s` | Positive per-sandbox override for the E2B create request timeout. Omitted values use the connection timeout. |
+| `workdir` | Used by the NeMo Gym facade as the default command working directory. |
+| `env` | Passed to E2B when the sandbox is created. |
+| `files` | Uploaded after creation and before `start()` returns. |
+| `metadata` | Passed to E2B as string metadata. |
+| `resources` | Fixed by the template rather than applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
+| `entrypoint` | Unsupported and rejected before allocation; define it in the E2B template. |
+| `provider_options` | Supports only `template`; unknown or invalid values are rejected before allocation. |
+
+The bundled builder controls template CPU count and memory. Disk and GPU requirements need a
+suitable template prepared through E2B tooling.
+
+## Timeouts and Reconnection
+
+`SandboxSpec.ttl_s` controls the remote sandbox lifetime. Treat it as a cleanup backstop and
+still call `stop()` or use a context manager so the sandbox is killed as soon as work finishes.
+
+`SandboxSpec.ready_timeout_s` overrides the E2B create request timeout. The SDK retains an
+explicit create timeout on the returned sandbox connection; the shipped
+`connection.request_timeout_s` is reapplied to later calls, while a programmatic config that
+leaves it unset inherits `ready_timeout_s` for that sandbox object.
+
+With E2B 2.36+, the connection or exec `request_timeout_s` only bounds opening command and
+reconnect streams. Command `timeout_s` is NeMo Gym's total wait/stream budget across the initial
+connection and any reconnects. The public facades normally supply 180 seconds, so pass a larger
+value explicitly for long builds or test suites. With background execution, a timed-out stream
+does not guarantee that the remote process was killed; close the sandbox before reuse when a
+lingering process would be unsafe.
+
+Background execution lets the provider reconnect to a running process by PID after an output
+stream interruption. Output emitted before reconnection is not replayed. If the process exits
+during the gap, its result cannot be recovered. Reconnects consume the original wait budget
+rather than starting a new one.
+
+Create is not automatically retried because an ambiguous failure could allocate two billable
+sandboxes. Rate-limit responses are returned without automatic retries so callers can choose
+their backoff window. Close retries transient kill failures, treats an expired sandbox as
+already closed, and clears the local handle only after confirmed cleanup. Serialized handles
+carry the E2B sandbox ID for reconnection through another configured provider instance. E2B's
+public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
+(300 seconds in E2B 2.36).
+
+## Security and Isolation
+
+E2B supplies the sandbox isolation boundary; when using a compatible gateway, its operator is
+responsible for the deployment's security posture. The shipped config uses `secure: true`, so
+the sandbox envd service requires an access token.
+
+Outbound internet access is enabled by default for workloads that install dependencies. Set
+`create.allow_internet_access: false` for offline or untrusted workloads. Values in
+`SandboxSpec.env` are injected into the remote sandbox, so pass only secrets required by the
+workload and keep E2B credentials in the provider connection config or host environment.
+
+`mini_swe_agent_2` removes `e2b.connection.api_key` from generated per-instance worker YAML and
+passes it through the worker's `E2B_API_KEY` environment instead. The key stays out of the
+worker's serializable provider config; the E2B SDK reads the environment variable directly.
+
+## Integration Attribution
+
+NeMo Gym appends `nemo-gym/<version>` to the E2B SDK `User-Agent` for both runtime sandbox
+requests and template provisioning. This lets E2B distinguish NeMo Gym traffic without adding
+metadata to the sandbox itself. An explicit custom `User-Agent` in connection headers takes
+precedence in the E2B SDK and can hide this attribution.
+
+Sandbox and template operations use the E2B SDK's public high-level APIs; attribution uses
+E2B's set-once integration hook. E2B owns and pools its HTTP and ConnectRPC transports, and
+NeMo Gym does not replace them through private SDK hooks.
