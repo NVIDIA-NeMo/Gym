@@ -35,8 +35,10 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
@@ -165,17 +167,37 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
                 messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
             elif message["info"]["role"] == "assistant":
-                message_parts = []
                 for part in message["parts"]:
-                    if part["type"] != "text":
-                        continue
-
-                    message_parts.append(
-                        NeMoGymResponseOutputText(annotations=[], text=part["text"], type="output_text")
-                    )
-
-                messages.append(NeMoGymResponseOutputMessage(id=message["info"]["id"], content=message_parts))
+                    if part["type"] == "text":
+                        messages.append(
+                            NeMoGymResponseOutputMessage(
+                                id=message["info"]["id"],
+                                content=[
+                                    NeMoGymResponseOutputText(annotations=[], text=part["text"], type="output_text")
+                                ],
+                            )
+                        )
+                    elif part["type"] == "tool":
+                        messages.append(
+                            NeMoGymResponseFunctionToolCall(
+                                arguments=json.dumps(part["state"]["input"]),
+                                call_id=part["callID"],
+                                name=part["tool"],
+                            )
+                        )
+                        messages.append(
+                            NeMoGymFunctionCallOutput(
+                                call_id=part["callID"],
+                                output=part["state"]["output"],
+                            )
+                        )
+                    elif part["type"] in ("step-finish", "step-start"):
+                        pass
+                    else:
+                        # @bxyu-nvidia: Defensive raise in case we're missing something.
+                        raise NotImplementedError(message)
             else:
+                # @bxyu-nvidia: Defensive raise in case we're missing something.
                 raise NotImplementedError(message)
 
         return messages

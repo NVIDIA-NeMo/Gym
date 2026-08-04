@@ -22,8 +22,10 @@ from pytest import MonkeyPatch, fixture
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
@@ -46,6 +48,7 @@ class TestOpenCodeSandboxedAgent:
             opencode_version="",
             sandbox_provider="",
             sandbox_config=dict(),
+            sandbox_timeout=0,
         )
 
     @fixture
@@ -68,6 +71,35 @@ class TestOpenCodeSandboxedAgent:
                 status="completed",
                 type="message",
             ),
+            NeMoGymResponseOutputMessage(
+                id="msg_fcac0a57e001U3oznWiAigQPlo",
+                content=[
+                    NeMoGymResponseOutputText(
+                        annotations=[],
+                        text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
+                        type="output_text",
+                        logprobs=None,
+                    )
+                ],
+                role="assistant",
+                status="completed",
+                type="message",
+            ),
+            NeMoGymResponseFunctionToolCall(
+                arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
+                call_id="chatcmpl-tool-944dd9d62f6ccf66",
+                name="read",
+                type="function_call",
+                id=None,
+                status=None,
+            ),
+            NeMoGymFunctionCallOutput(
+                call_id="chatcmpl-tool-944dd9d62f6ccf66",
+                output="<path>/testbed/astropy/modeling/separable.py</path>\n<type>file</type>\n<content>\n...(End of file - total 317 lines)\n</content>",
+                type="function_call_output",
+                id=None,
+                status=None,
+            ),
         ]
 
         assert expected_output_items == actual_output_items
@@ -81,7 +113,14 @@ class TestOpenCodeSandboxedAgent:
                 output_tokens=10,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=7873,
-            )
+            ),
+            NeMoGymResponseUsage(
+                input_tokens=8692,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                output_tokens=71,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=8763,
+            ),
         ]
 
         assert expected_usages == actual_usages
@@ -91,7 +130,7 @@ class TestOpenCodeSandboxedAgent:
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         sandbox_mock = AsyncMock()
-        monkeypatch.setattr(server, "_start_sandbox", sandbox_mock)
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(server, "_create_opencode_config", lambda: dict())
 
         sandbox_mock.return_value.exec.return_value = MagicMock()
@@ -107,7 +146,7 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
 
         actual_response = await server.responses(
-            request=MagicMock(session={SESSION_ID_KEY: "my session"}),
+            request=MagicMock(session={SESSION_ID_KEY: "my session"}, cookies={"sandbox_id": ""}),
             body=NeMoGymResponseCreateParamsNonStreaming(
                 input=[{"role": "user", "content": "hello"}],
             ),
@@ -132,7 +171,36 @@ class TestOpenCodeSandboxedAgent:
                     role="assistant",
                     status="completed",
                     type="message",
-                )
+                ),
+                NeMoGymResponseOutputMessage(
+                    id="msg_fcac0a57e001U3oznWiAigQPlo",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            annotations=[],
+                            text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
+                            type="output_text",
+                            logprobs=None,
+                        )
+                    ],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                ),
+                NeMoGymResponseFunctionToolCall(
+                    arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
+                    call_id="chatcmpl-tool-944dd9d62f6ccf66",
+                    name="read",
+                    type="function_call",
+                    id=None,
+                    status=None,
+                ),
+                NeMoGymFunctionCallOutput(
+                    call_id="chatcmpl-tool-944dd9d62f6ccf66",
+                    output="<path>/testbed/astropy/modeling/separable.py</path>\n<type>file</type>\n<content>\n...(End of file - total 317 lines)\n</content>",
+                    type="function_call_output",
+                    id=None,
+                    status=None,
+                ),
             ],
             parallel_tool_calls=True,
             temperature=None,
@@ -154,11 +222,11 @@ class TestOpenCodeSandboxedAgent:
             top_logprobs=None,
             truncation=None,
             usage=NeMoGymResponseUsage(
-                input_tokens=55,
+                input_tokens=8747,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7808),
-                output_tokens=10,
+                output_tokens=81,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=7873,
+                total_tokens=16636,
             ),
             user=None,
         )
