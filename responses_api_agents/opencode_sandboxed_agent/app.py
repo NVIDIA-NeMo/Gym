@@ -183,6 +183,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        print("INNER COOKIES:", request.cookies)
         sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
 
         query = None
@@ -277,6 +278,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         # For propagating the sandbox handle
         cookies[self.get_session_middleware_key()] = request.session[SESSION_ID_KEY]
+        print("COOKIES:", cookies)
 
         response = await self.server_client.post(
             server_name=self.config.name,
