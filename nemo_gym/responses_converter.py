@@ -489,11 +489,23 @@ class ResponsesConverter(BaseModel):
 
         usage = None
         if chat_completion.usage:
+            # Chat Completions carries the cache and reasoning counts in optional sub-objects
+            # (prompt_tokens_details / completion_tokens_details); the Responses schema requires
+            # both counts as plain ints. Read the provider's value whenever it reports one -- these
+            # were previously hard-coded to 0, which discarded every real cache and reasoning count.
+            # A provider that reports no detail still folds to 0, since Responses cannot encode
+            # "unknown"; see _cache_signal in base_responses_api_model.py for the consumer.
+            prompt_details = chat_completion.usage.prompt_tokens_details
+            completion_details = chat_completion.usage.completion_tokens_details
             usage = NeMoGymResponseUsage(
                 input_tokens=chat_completion.usage.prompt_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(
+                    cached_tokens=(prompt_details.cached_tokens or 0) if prompt_details else 0
+                ),
                 output_tokens=chat_completion.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=(completion_details.reasoning_tokens or 0) if completion_details else 0
+                ),
                 total_tokens=chat_completion.usage.prompt_tokens + chat_completion.usage.completion_tokens,
             )
 

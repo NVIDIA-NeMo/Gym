@@ -24,10 +24,14 @@ from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseMcpApprovalRequest,
     NeMoGymResponseMcpCall,
     NeMoGymResponseMcpListTools,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
     TokenIDLogProbMixin,
+    accumulate_response_usage,
 )
 
 
@@ -147,3 +151,42 @@ class TestRoutedExpertsWireFormats:
     def test_rejects_non_list_non_string(self) -> None:
         with pytest.raises(ValidationError):
             TokenIDLogProbMixin.model_validate({**self._BASE, "routed_experts": 42})
+
+
+class TestAccumulateResponseUsage:
+    @staticmethod
+    def _usage(input_tokens: int, output_tokens: int, cached: int, reasoning: int) -> NeMoGymResponseUsage:
+        return NeMoGymResponseUsage(
+            input_tokens=input_tokens,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached),
+            output_tokens=output_tokens,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning),
+            total_tokens=input_tokens + output_tokens,
+        )
+
+    def test_sums_every_counter_including_details(self) -> None:
+        # Multi-turn agents previously reset the details to 0 while summing the top-level counts,
+        # which threw away the per-turn cache and reasoning counts the model server reported.
+        total = self._usage(10, 5, cached=4, reasoning=2)
+        accumulate_response_usage(total, self._usage(20, 7, cached=8, reasoning=3))
+
+        assert total.input_tokens == 30
+        assert total.output_tokens == 12
+        assert total.total_tokens == 42
+        assert total.input_tokens_details.cached_tokens == 12
+        assert total.output_tokens_details.reasoning_tokens == 5
+
+    def test_turn_without_detail_contributes_nothing(self) -> None:
+        total = self._usage(10, 5, cached=4, reasoning=2)
+        accumulate_response_usage(total, self._usage(1, 1, cached=0, reasoning=0))
+
+        assert total.input_tokens_details.cached_tokens == 4
+        assert total.output_tokens_details.reasoning_tokens == 2
+
+    def test_does_not_mutate_the_addend(self) -> None:
+        total = self._usage(10, 5, cached=4, reasoning=2)
+        addend = self._usage(20, 7, cached=8, reasoning=3)
+        accumulate_response_usage(total, addend)
+
+        assert addend.input_tokens == 20
+        assert addend.input_tokens_details.cached_tokens == 8

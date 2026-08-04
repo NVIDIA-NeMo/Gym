@@ -804,14 +804,20 @@ class AnthropicConverter:
     def _usage_to_responses_usage(self, usage: Optional[Dict[str, Any]]) -> Optional[NeMoGymResponseUsage]:
         if usage is None:
             return None
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
+        input_tokens = usage.get("input_tokens") or 0
+        output_tokens = usage.get("output_tokens") or 0
         return NeMoGymResponseUsage(
             input_tokens=input_tokens,
+            # Anthropic sends the cache-read count as an explicit null when it has nothing to
+            # report, so ``or 0`` is needed as well as the default: the Responses schema types
+            # cached_tokens as a plain int and a null here fails validation.
             input_tokens_details=NeMoGymResponseInputTokensDetails(
-                cached_tokens=usage.get("cache_read_input_tokens", 0)
+                cached_tokens=usage.get("cache_read_input_tokens") or 0
             ),
             output_tokens=output_tokens,
+            # Anthropic has no reasoning-token counter -- thinking tokens are already inside
+            # output_tokens -- so unlike the Chat Completions path there is no upstream field to
+            # propagate here. The literal is the whole of what Anthropic reports, not a dropped value.
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=input_tokens + output_tokens,
         )

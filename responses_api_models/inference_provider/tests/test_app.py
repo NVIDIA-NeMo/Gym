@@ -264,7 +264,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Hello from the model!")
@@ -295,7 +294,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         async def mock_create_chat(**kwargs):
@@ -314,7 +312,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         async def mock_create_chat(**kwargs):
@@ -348,7 +345,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(
@@ -408,7 +404,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="<think>Let me reason about this...</think>The answer is 42.")
@@ -437,7 +432,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="<think>Let me reason about this...</think>The answer is 42.")
@@ -465,7 +459,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Hi!")
@@ -494,7 +487,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Truncated output...", finish_reason="length")
@@ -516,7 +508,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="", finish_reason="content_filter")
@@ -548,7 +539,6 @@ class TestResponses:
         server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         client.post("/v1/responses", json={"input": "hello world"})
@@ -562,7 +552,6 @@ class TestResponses:
         client = TestClient(app)
 
         monkeypatch.setattr("responses_api_models.inference_provider.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("responses_api_models.inference_provider.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         called_kwargs = {}
