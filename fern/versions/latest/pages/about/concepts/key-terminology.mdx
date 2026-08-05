@@ -26,7 +26,7 @@ Two compositions matter:
 
 The **agent harness** belongs to the agent, not the environment. In Gym packaging, an environment *config* still names which agent server to run — that is a wiring reference, not ownership of the harness.
 
-The **model** is the model you call — often an LLM or VLM, as local weights or a remote API endpoint. In Gym it is usually exposed by the **Model server** (or your harness can call an endpoint directly). The same environment shape can be used for **benchmark** eval (fixed taskset / protocol) or for **training** (rewards or synthetic data); the main differences are task split and contamination controls, not a different environment type.
+The **model** (also called the **policy**) is what you call for generation — local weights or a remote API endpoint. In Gym it is usually exposed by the **Model server** (or your harness can call an endpoint directly). The same environment shape can be used for **benchmark** eval (fixed taskset / protocol) or for **training** (rewards or synthetic data); the main differences are task split and contamination controls, not a different environment type.
 
 | Concept | In NeMo Gym |
 | --- | --- |
@@ -64,7 +64,7 @@ The **model** is the model you call — often an LLM or VLM, as local weights or
 
 | Term | Definition |
 | --- | --- |
-| **Model / policy model** | The model being trained or evaluated — often an LLM or VLM — as local weights or a remote endpoint, usually via the Model server. See [Model Server](/model-server). |
+| **Model / policy model** | The model being trained or evaluated — local weights or a remote endpoint, usually via the Model server. See [Model Server](/model-server). |
 | **Agent harness** | How the model interacts with the environment: loops model calls, routes tools, manages context, and decides when the task is done. See [Agent Server](/agent-server). |
 | **Agent** | Model + agent harness. |
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
