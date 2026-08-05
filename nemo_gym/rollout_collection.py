@@ -16,6 +16,7 @@ import asyncio
 import glob as glob_module
 import json
 import os
+import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter
@@ -572,6 +573,7 @@ class RolloutCollectionHelper(BaseModel):
         failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
+        elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
                 for line in f:
@@ -585,6 +587,12 @@ class RolloutCollectionHelper(BaseModel):
                     attempts_by_key[k] += 1
                     if fr.get(NG_TERMINAL_KEY):
                         terminal_keys.add(k)
+                    # A failed attempt still tells us how long this task runs -
+                    # the only duration signal available for a task that has not
+                    # succeeded yet. Keep the longest attempt seen.
+                    observed = _observed_elapsed(fr)
+                    if observed is not None:
+                        elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in attempts_by_key.items() if n >= max_attempts}
@@ -599,6 +607,22 @@ class RolloutCollectionHelper(BaseModel):
             attempt = attempts_by_key.get(get_key(row), 0)
             if attempt > 0:
                 row[ATTEMPT_INDEX_KEY_NAME] = attempt
+
+        # Longest-first: known-long tasks go to the front so they get a whole
+        # allocation to finish in rather than being cut off at its boundary.
+        # Tasks with no recorded timing keep their relative input order behind
+        # them - guessing from row content is worse than not guessing.
+        if config.dispatch_longest_first and elapsed_by_key:
+            known = [r for r in input_rows if get_key(r) in elapsed_by_key]
+            unknown = [r for r in input_rows if get_key(r) not in elapsed_by_key]
+            known.sort(key=lambda r: elapsed_by_key[get_key(r)], reverse=True)
+            input_rows = known + unknown
+            if known:
+                print(
+                    f"Dispatching longest-first: {len(known)} row(s) with known timings "
+                    f"(longest {elapsed_by_key[get_key(known[0])] / 60:.0f} min) ahead of "
+                    f"{len(unknown)} unseen row(s)"
+                )
 
         key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
@@ -675,7 +699,23 @@ class RolloutCollectionHelper(BaseModel):
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
+        latency_tracker = DispatchLatencyTracker()
+        if config.dispatch_budget_s:
+            print(
+                f"Dispatch budget: {config.dispatch_budget_s / 60:.0f} min. New rollouts stop being "
+                + (
+                    f"dispatched with under {config.drain_margin_s / 60:.0f} min left."
+                    if config.drain_margin_s
+                    else "dispatched once less time remains than this run's observed p75 task duration."
+                )
+            )
+        for future in self.run_examples(
+            input_rows,
+            semaphore=semaphore,
+            dispatch_budget_s=config.dispatch_budget_s,
+            drain_margin_s=config.drain_margin_s,
+            latency_tracker=latency_tracker,
+        ):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -732,6 +772,8 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
+
+        print(latency_tracker.summary())
 
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
@@ -870,15 +912,43 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
+        dispatch_budget_s: Optional[float] = None,
+        drain_margin_s: Optional[float] = None,
+        latency_tracker: Optional["DispatchLatencyTracker"] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
         """
         server_client = self.setup_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
+        tracker = latency_tracker if latency_tracker is not None else DispatchLatencyTracker()
+        deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s else None
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
+                # Drain check happens *after* acquiring a slot, so it sees the
+                # real remaining time at the moment this task would start rather
+                # than at queueing time.
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    margin = tracker.drain_margin(drain_margin_s)
+                    if remaining <= 0 or (margin is not None and remaining < margin):
+                        tracker.record_drained()
+                        # No row anywhere: absence is the resume signal, so this
+                        # task is re-dispatched intact next allocation instead of
+                        # being started and killed part-way through.
+                        return row, {
+                            NG_FAILURE_CLASS_KEY: "kill_shaped",
+                            NG_NO_PERSIST_KEY: True,
+                            "error_message": (
+                                f"not dispatched: {remaining:.0f}s left in dispatch budget, "
+                                f"below the {margin:.0f}s drain margin"
+                                if margin is not None
+                                else "not dispatched: dispatch budget exhausted"
+                            ),
+                        }
+
+                started = time.monotonic()
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)
@@ -891,7 +961,9 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             flush=True,
                         )
                     raise
-                return row, await get_response_json(res)
+                result = await get_response_json(res)
+                tracker.record(time.monotonic() - started)
+                return row, result
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

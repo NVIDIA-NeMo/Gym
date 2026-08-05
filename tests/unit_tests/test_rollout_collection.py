@@ -32,6 +32,8 @@ from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+    DispatchLatencyTracker,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
@@ -1104,6 +1106,237 @@ class TestRolloutCollection:
         output_fpath = tmp_path / "output.jsonl"
         result = await helper._call_aggregate_metrics([], [], output_fpath)
         assert result is None
+
+
+class TestDispatchBudget:
+    """A task that cannot finish before the deadline must not be started."""
+
+    @staticmethod
+    def _row(task_index: int) -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: task_index,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+
+    def _helper(self, posted: list) -> RolloutCollectionHelper:
+        async def post(server_name, url_path, json):  # noqa: A002
+            posted.append(json[TASK_INDEX_KEY_NAME])
+            return MagicMock(status=200)
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(side_effect=post)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        return MockHelper()
+
+    async def test_no_budget_dispatches_everything(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        posted: list = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+
+        rows = [self._row(i) for i in range(3)]
+        results = [await future for future in self._helper(posted).run_examples(rows)]
+
+        assert sorted(posted) == [0, 1, 2]
+        assert all(NG_NO_PERSIST_KEY not in result for _row, result in results)
+
+    async def test_exhausted_budget_drains_without_dispatching(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        posted: list = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+
+        tracker = DispatchLatencyTracker()
+        rows = [self._row(i) for i in range(3)]
+        results = [
+            await future
+            for future in self._helper(posted).run_examples(rows, dispatch_budget_s=-1.0, latency_tracker=tracker)
+        ]
+
+        assert posted == [], "no /run request may be sent once the budget is spent"
+        assert tracker.drained == 3
+        for _row, result in results:
+            # kill_shaped + no_persist means no row is written anywhere, so the
+            # task is re-dispatched intact on the next resume.
+            assert result[NG_NO_PERSIST_KEY] is True
+            assert result[NG_FAILURE_CLASS_KEY] == "kill_shaped"
+            assert NG_TERMINAL_KEY not in result
+            assert "not dispatched" in result["error_message"]
+
+    async def test_drain_margin_blocks_a_task_that_cannot_finish(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        posted: list = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+
+        tracker = DispatchLatencyTracker()
+        results = [
+            await future
+            for future in self._helper(posted).run_examples(
+                [self._row(0)],
+                dispatch_budget_s=60.0,
+                drain_margin_s=3600.0,
+                latency_tracker=tracker,
+            )
+        ]
+
+        assert posted == []
+        assert tracker.drained == 1
+        assert "below the 3600s drain margin" in results[0][1]["error_message"]
+
+    @pytest.mark.parametrize(
+        "drain_margin_s, expected",
+        [
+            (None, "observed p75 task duration"),
+            (600.0, "under 10 min left"),
+        ],
+    )
+    async def test_run_from_config_announces_the_budget(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
+        drain_margin_s: float | None,
+        expected: str,
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}}) + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+            dispatch_budget_s=1800.0,
+            drain_margin_s=drain_margin_s,
+        )
+
+        class MockHelper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"reward": 1.0}))
+                    futures.append(future)
+                return futures
+
+        await MockHelper().run_from_config(config)
+
+        out = capsys.readouterr().out
+        assert "Dispatch budget: 30 min" in out
+        assert expected in out
+        # run_examples is stubbed here, so nothing was timed; the summary still
+        # prints rather than being skipped.
+        assert "No completed rollouts to report latency for." in out
+
+    async def test_generous_budget_still_dispatches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        posted: list = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+
+        tracker = DispatchLatencyTracker()
+        results = [
+            await future
+            for future in self._helper(posted).run_examples(
+                [self._row(0)], dispatch_budget_s=3600.0, drain_margin_s=1.0, latency_tracker=tracker
+            )
+        ]
+
+        assert posted == [0]
+        assert tracker.drained == 0
+        assert results[0][1] == {"reward": 1.0}
+        # The completed rollout is timed, so the adaptive margin has a basis.
+        assert tracker.quantile(0.5) is not None
+
+
+class TestLongestFirstDispatch:
+    """On resume, known-long tasks go first so they don't straddle the boundary."""
+
+    @staticmethod
+    def _write_resume_state(tmp_path: Path, failures: list) -> RolloutCollectionConfig:
+        materialized = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "input": True} for i in range(4)]
+        (tmp_path / "output_materialized_inputs.jsonl").write_bytes(
+            b"\n".join(map(orjson.dumps, materialized)) + b"\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath.write_bytes(b"")
+
+        failures_fpath = _failures_path_for(output_jsonl_fpath)
+        if failures:
+            failures_fpath.write_bytes(b"\n".join(map(orjson.dumps, failures)) + b"\n")
+
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            # Off by default upstream: opt in explicitly for these tests.
+            dispatch_longest_first=True,
+        )
+
+    def test_known_timings_lead_unseen_rows_keep_order(self, tmp_path: Path) -> None:
+        # Task 2 ran longest, task 0 next; tasks 1 and 3 have never been timed.
+        failures = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 600},
+            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000},
+        ]
+        config = self._write_resume_state(tmp_path, failures)
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [2, 0, 1, 3]
+
+    def test_longest_attempt_wins_when_a_task_failed_twice(self, tmp_path: Path) -> None:
+        failures = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 30},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 60},
+        ]
+        config = self._write_resume_state(tmp_path, failures)
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows][:2] == [0, 1]
+
+    def test_disabled_preserves_input_order(self, tmp_path: Path) -> None:
+        failures = [{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000}]
+        config = self._write_resume_state(tmp_path, failures)
+        config.dispatch_longest_first = False
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 1, 2, 3]
+
+    def test_fresh_run_without_timings_is_untouched(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 1, 2, 3]
+
+    def test_timeout_failures_are_retried_not_gated(self, tmp_path: Path) -> None:
+        """A per-task timeout is a statement about load, not about the task."""
+        failures = [
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "elapsed_seconds": 12600,
+                NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+            }
+        ]
+        config = self._write_resume_state(tmp_path, failures)
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert 1 in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
+
+    def test_explicitly_terminal_rows_stay_gated(self, tmp_path: Path) -> None:
+        failures = [{TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_TERMINAL_KEY: True}]
+        config = self._write_resume_state(tmp_path, failures)
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
 
 
 class TestExpandInputGlob:
