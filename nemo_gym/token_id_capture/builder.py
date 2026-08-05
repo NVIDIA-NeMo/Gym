@@ -45,7 +45,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.records import TokenEntry, compute_digest
 
 
 @dataclass
@@ -97,6 +97,8 @@ class BuildNotes:
     unresolved_retries: list[str] = field(default_factory=list)
     # Calls without generated tokens are excluded from the chain.
     empty_generation_calls: list[str] = field(default_factory=list)
+    # Why a recorded parent link was not used, by reason.
+    parent_link_fallbacks: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -155,6 +157,40 @@ class _PrefixIndex:
         return (best[0], len(best) > 1) if best else (None, False)
 
 
+def _resolve_parent(
+    node: "_Node",
+    by_call_id: dict[str, "_Node"],
+    prefix_index: _PrefixIndex,
+) -> tuple["_Node | None", bool, str | None]:
+    """Find this call's parent, preferring the recorded link over prefix matching.
+
+    Returns ``(parent, ambiguous, note)``. ``note`` names why the recorded link
+    was not used, so a run can report how often it fell back instead of silently
+    behaving differently.
+
+    The recorded link is verified rather than trusted: the child's prompt must
+    actually start with the parent's cumulative sequence, checked by digest so
+    it costs a hash of a prefix instead of comparing whole arrays. A stale store
+    (a rerun that appended onto a previous attempt's records) fails here and
+    falls back rather than merging two attempts into one trajectory.
+    """
+    prompt = list(node.entry.prompt_token_ids)
+    claimed = node.entry.parent_call_id
+    if claimed is not None:
+        parent = by_call_id.get(claimed)
+        if parent is None:
+            return _infer_parent(prompt, prefix_index) + ("parent_call_id_missing",)
+        cum_len = parent.entry.cum_len
+        if cum_len is None:
+            cum_len = len(parent.cumulative)
+        if cum_len <= len(prompt) and compute_digest(prompt[:cum_len]) == (
+            parent.entry.digest or compute_digest(parent.cumulative)
+        ):
+            return parent, False, None
+        return _infer_parent(prompt, prefix_index) + ("parent_digest_mismatch",)
+    return _infer_parent(prompt, prefix_index) + (None,)
+
+
 def _infer_parent(prompt: list[int], index: _PrefixIndex) -> tuple["_Node | None", bool]:
     """Infer the parent from the longest cumulative prefix.
 
@@ -188,10 +224,15 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     quarantined: list[str] = []
     prefix_index = _PrefixIndex()
 
+    nodes_by_call_id: dict[str, _Node] = {}
+    fallbacks: dict[str, int] = {}
+
     for entry in ordered:
         prompt = list(entry.prompt_token_ids)
         node = _Node(entry=entry, cumulative=prompt + list(entry.generation_token_ids))
-        parent, ambiguous = _infer_parent(prompt, prefix_index)
+        parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, prefix_index)
+        if note:
+            fallbacks[note] = fallbacks.get(note, 0) + 1
         if parent is not None:
             node.parent = parent
             if ambiguous:
@@ -203,6 +244,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
             roots.append(node)
         nodes.append(node)
         prefix_index.add(node)
+        nodes_by_call_id[entry.model_call_id] = node
 
     # Resolve retry siblings.
     # A harness can retry after a timeout, server error, or dropped stream.
@@ -314,6 +356,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         delivered_fraction=round(delivered / captured, 4) if captured else 0.0,
         unresolved_retries=unresolved_retries,
         empty_generation_calls=empty_generation,
+        parent_link_fallbacks=fallbacks,
     )
     return BuildOutput(chains=chains, quarantined=quarantined, notes=notes)
 

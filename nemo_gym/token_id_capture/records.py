@@ -25,6 +25,8 @@ Both records share a ``model_call_id``.
 
 from __future__ import annotations
 
+import hashlib
+import struct
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -41,7 +43,41 @@ TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_prob
 # ``extra="allow"`` otherwise hides unknown fields.
 #
 #   1  rollout and call identity, the token arrays, the output items and their carrier index
-TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1
+#   2  parent_call_id, cum_len and digest, added when calls began being linked to their parent
+TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 2
+
+# Bumped if the digest encoding below ever changes, so a stale digest fails to
+# verify instead of silently comparing equal.
+DIGEST_VERSION = 1
+_DIGEST_DOMAIN = b"nemo-gym-tokens"
+_EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
+
+
+def encode_token_ids(token_ids: list[int]) -> bytes:
+    """Stable, length-delimited, big-endian encoding of a token sequence.
+
+    The encoding is fixed and length-delimited so an independent implementation
+    can hash the same bytes and get the same digest.
+    """
+    encoded = bytearray(struct.pack(">BQ", DIGEST_VERSION, len(token_ids)))
+    for token_id in token_ids:
+        if token_id < 0:
+            raise ValueError(f"token ids must be non-negative, got {token_id}")
+        encoded.extend(struct.pack(">Q", token_id))
+    return bytes(encoded)
+
+
+def compute_digest(token_ids: list[int]) -> str:
+    """Digest of an exact token sequence.
+
+    Used to verify a claimed ``parent_call_id`` in O(1) instead of comparing
+    whole arrays, and to detect a stale or interleaved store (a rerun that
+    appended onto a previous attempt's records fails the check rather than
+    merging silently).
+    """
+    if not token_ids:
+        return _EMPTY_DIGEST
+    return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
 class TokenEntry(BaseModel):
@@ -74,6 +110,24 @@ class TokenEntry(BaseModel):
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 
+    # --- Added with parent resolution (schema version 2).
+    # Optional: null when the model server could not identify the parent, in which case the
+    # builder matches token prefixes instead.
+    #
+    # When present these make the chain exact rather than matched. Two calls
+    # can share a prompt and differ only in their generation (a harness retry,
+    # since capture records a response the client may never have received);
+    # prefix matching has to guess between them, whereas the next call's parent
+    # link names the one the harness actually kept. They also turn the builder's
+    # O(N^2) prefix scan into an O(1) lookup, and let a claimed parent be
+    # verified rather than trusted.
+    parent_call_id: str | None = None
+    # len(prompt_token_ids) + len(generation_token_ids) for THIS call: the
+    # length of the prefix a child of this call must start with.
+    cum_len: int | None = None
+    # compute_digest(prompt_token_ids + generation_token_ids).
+    digest: str | None = None
+
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":
         """Accept older records and reject newer records.
@@ -98,6 +152,24 @@ class TokenEntry(BaseModel):
                 f"token_item_index {self.token_item_index} is outside output_items of length {len(self.output_items)}"
             )
         return self
+
+
+def cumulative_tokens(entry: TokenEntry) -> list[int]:
+    """The full sequence a child of this call must start with."""
+    return list(entry.prompt_token_ids) + list(entry.generation_token_ids)
+
+
+def stamp_lineage(entry: TokenEntry, parent_call_id: str | None) -> TokenEntry:
+    """Fill ``cum_len`` and ``digest`` (always) and ``parent_call_id`` (when known).
+
+    ``cum_len``/``digest`` describe this call and are always computable; the
+    parent link is only known when the model server resolved one.
+    """
+    cumulative = cumulative_tokens(entry)
+    entry.cum_len = len(cumulative)
+    entry.digest = compute_digest(cumulative)
+    entry.parent_call_id = parent_call_id
+    return entry
 
 
 def response_to_output_items(payload: dict) -> list[dict]:
