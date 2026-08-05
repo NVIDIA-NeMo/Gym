@@ -361,9 +361,29 @@ class NeMoGymResponseUsage(ResponseUsage):
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
 
+_RESPONSE_NEW_FIELDS_2_53_0 = frozenset({"completed_at", "moderation", "prompt_cache_options", "prompt_cache_retention"})
+_FUNCTION_TOOL_NEW_FIELDS_2_53_0 = frozenset({"allowed_callers", "defer_loading", "output_schema"})
+
+
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    # openai 2.53.0 added these optional fields to Response. Exclude them from
+    # serialization so existing server tests and downstream consumers are unaffected.
+    completed_at: Optional[float] = Field(default=None, exclude=True)
+    moderation: Optional[Any] = Field(default=None, exclude=True)
+    prompt_cache_options: Optional[Any] = Field(default=None, exclude=True)
+    prompt_cache_retention: Optional[Any] = Field(default=None, exclude=True)
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        data = super().model_dump(**kwargs)
+        # openai 2.53.0 added new optional fields to FunctionTool. Strip them so
+        # serialized responses are indistinguishable from pre-2.53.0 output.
+        for tool in data.get("tools") or []:
+            if isinstance(tool, dict):
+                for field in _FUNCTION_TOOL_NEW_FIELDS_2_53_0:
+                    tool.pop(field, None)
+        return data
 
 
 ########################################

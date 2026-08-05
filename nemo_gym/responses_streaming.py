@@ -40,7 +40,11 @@ from uuid import uuid4
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseInputItem
+from nemo_gym.openai_utils import (
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputItem,
+    _FUNCTION_TOOL_NEW_FIELDS_2_53_0,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -217,6 +221,14 @@ def validate_streaming_responses_params(body: dict[str, Any]) -> NeMoGymResponse
     by dropping an unknown field surface to the client.
     """
     body = deepcopy(body)
+    # openai 2.53.0 added new optional fields to FunctionTool/FunctionToolParam
+    # (allowed_callers, defer_loading, output_schema). Strip None values from tool
+    # dicts so callers that round-trip via FunctionTool.model_dump() still validate.
+    for tool in body.get("tools") or []:
+        if isinstance(tool, dict) and tool.get("type") == "function":
+            for field in _FUNCTION_TOOL_NEW_FIELDS_2_53_0:
+                if tool.get(field) is None:
+                    tool.pop(field, None)
     while True:
         try:
             return NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
