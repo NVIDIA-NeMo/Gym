@@ -33,7 +33,6 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -43,7 +42,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     ModelCallRef,
@@ -53,6 +51,9 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+
+
+_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -254,14 +255,23 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        model_response, _, model_server_cookies, resources_server_cookies = await self._create_episode(
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
+        model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
             body,
             model_url_path=self.url_path_for_request("/v1/responses", request),
             resources_server_cookies=request.cookies,
+            rollout_id=rollout_id or "unscoped",
+            collect_trajectory=collect_trajectory,
         )
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
             response.set_cookie(k, v)
+        if trajectory is not None:
+            model_response = model_response.model_copy(
+                update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")}
+            )
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
@@ -276,25 +286,23 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        trajectory = None
-        # Token-id capture also uses rollout correlation but does not enable trajectory collection.
-        global_config = getattr(self.server_client, "global_config_dict", None)
-        collect_trajectory = isinstance(global_config, Mapping) and bool(
-            global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
+        response = await self.server_client.post(
+            server_name=self.config.name,
+            url_path=self.url_path_for_run("/v1/responses", body),
+            json=body.responses_create_params,
+            cookies=cookies,
         )
-        # Direct collection bypasses the self-call route. Keep HTTP dispatch for overridden
-        # responses() methods so their custom handler and middleware behavior remains active.
-        if not collect_trajectory or type(self).responses is not SimpleAgent.responses:
-            response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(response)
-            model_response_json = await get_response_json(response)
-            cookies = response.cookies
-        else:
+        await raise_for_status(response)
+        model_response_json = await get_response_json(response)
+        cookies = response.cookies
+
+        trajectory = None
+        expected_rollout_id = self.rollout_id_from_run(body)
+        raw_trajectory = (
+            model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None) if expected_rollout_id is not None else None
+        )
+        if isinstance(raw_trajectory, dict):
+            trajectory = TrajectoryRecord.model_validate(raw_trajectory)
             extra = body.model_extra or {}
             task_id = next(
                 (
@@ -304,17 +312,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 ),
                 "unknown",
             )
-            model_response, trajectory, model_server_cookies, cookies = await self._create_episode(
-                body.responses_create_params,
-                model_url_path=self.url_path_for_run("/v1/responses", body),
-                resources_server_cookies=cookies,
-                task_id=task_id,
-                rollout_id=maybe_rollout_id_from_run_body(body) or "unknown",
-                collect_trajectory=True,
+            rollout_id = expected_rollout_id or trajectory.rollout_id
+            trajectory = trajectory.model_copy(
+                update={
+                    "task_id": task_id,
+                    "rollout_id": rollout_id,
+                    "turns": [
+                        turn.model_copy(update={"task_id": task_id, "rollout_id": rollout_id})
+                        for turn in trajectory.turns
+                    ],
+                }
             )
-            if model_server_cookies:
-                cookies.update(model_server_cookies)
-            model_response_json = model_response.model_dump(mode="json")
 
         verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": model_response_json})
 

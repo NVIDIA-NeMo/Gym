@@ -204,7 +204,12 @@ class TestRolloutCollection:
             },
             "ng_model_call_capture": {
                 "calls": [
-                    {"model_call_id": "shared", "request": "captured", "response_status": "completed"},
+                    {
+                        "model_call_id": "shared",
+                        "request": "captured",
+                        "response": {"status": "incomplete"},
+                        "response_status": "completed",
+                    },
                     {"model_call_id": "capture-only", "request": "new"},
                 ]
             },

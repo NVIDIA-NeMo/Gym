@@ -374,8 +374,10 @@ def accumulate_response_usage(
     result.input_tokens += additional.input_tokens
     result.output_tokens += additional.output_tokens
     result.total_tokens += additional.total_tokens
-    result.input_tokens_details.cached_tokens += additional.input_tokens_details.cached_tokens
-    result.output_tokens_details.reasoning_tokens += additional.output_tokens_details.reasoning_tokens
+    if result.input_tokens_details is not None and additional.input_tokens_details is not None:
+        result.input_tokens_details.cached_tokens += additional.input_tokens_details.cached_tokens
+    if result.output_tokens_details is not None and additional.output_tokens_details is not None:
+        result.output_tokens_details.reasoning_tokens += additional.output_tokens_details.reasoning_tokens
     return result
 
 

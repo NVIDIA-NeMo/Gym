@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
 import pytest
+from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -98,6 +99,7 @@ class TestApp:
             ),
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server.server_client.global_config_dict = {"observability_enabled": True}
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -193,6 +195,12 @@ class TestApp:
         }
         assert expected_responses_dict == actual_responses_dict
 
+        prefixed_response = client.post(
+            "/ng-rollout/0-0/v1/responses", json={"input": [{"role": "user", "content": "hello"}]}
+        )
+        assert prefixed_response.status_code == 200
+        assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
+
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
         server, server_client = _make_agent(True)
@@ -243,10 +251,14 @@ class TestApp:
             )
         )
 
-        async def post(*, url_path, **kwargs):
+        async def post(*, server_name, url_path, **kwargs):
             if url_path == "/seed_session":
                 return _mock_response()
-            if url_path.endswith("/v1/responses"):
+            if server_name == "simple":
+                nested_request = MagicMock(cookies=kwargs["cookies"], path_params={"rollout_id": "4-1"})
+                model_response = await server.responses(nested_request, Response(), kwargs["json"])
+                return _mock_response(model_response.model_dump(mode="json"))
+            if server_name == "model":
                 return _mock_response(next(model_payloads))
             if url_path == "/lookup":
                 return _mock_response(status=422, content="bad input")
@@ -268,6 +280,17 @@ class TestApp:
         request = MagicMock()
         request.cookies = {}
         result = await server.run(request, body)
+
+        assert [
+            (item.kwargs["server_name"], item.kwargs["url_path"]) for item in server_client.post.await_args_list
+        ] == [
+            ("resources", "/seed_session"),
+            ("simple", "/ng-rollout/4-1/v1/responses"),
+            ("model", "/ng-rollout/4-1/v1/responses"),
+            ("resources", "/lookup"),
+            ("model", "/ng-rollout/4-1/v1/responses"),
+            ("resources", "/verify"),
+        ]
 
         result_data = result.model_dump(mode="json")
         result_data["ng_model_call_capture"] = {
@@ -316,7 +339,7 @@ class TestApp:
         assert (tool.output, tool.status, tool.error_type) == ("bad input", "failed", "http_422")
         assert tool.started_at is not None and tool.completed_at is not None and tool.duration_ms is not None
 
-    @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, True)))
+    @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
     async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
         agent_type = SimpleAgent
         if override_responses:
