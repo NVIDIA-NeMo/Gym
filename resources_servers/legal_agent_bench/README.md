@@ -280,8 +280,10 @@ jq . "$ARTIFACT_DIR/agent/trajectory.json"
 open "$ARTIFACT_DIR/verifier/report.html"  # macOS; use xdg-open on Linux
 ```
 
-In `run_summary.json`, a reliable completed rollout has `mask_sample: false`,
-all failure flags false, `judge_error_count: 0`, and `verifier_error: 0`.
+In `run_summary.json`, a reliable scored rollout has `mask_sample: false`, all
+failure flags false, `judge_error_count: 0`, and `verifier_error: 0`. This
+includes incomplete max-turn or context-limit outcomes: their partial output is
+still judged and saved in the main rollout JSONL.
 `output_files` lists the deliverables and `agent/trajectory.json` is the inner
 harness trace. A zero `full_task` reward can still be a valid rollout when one
 or more criteria fail; use `criteria_pass_rate` to see partial success.
@@ -300,15 +302,19 @@ or more criteria fail; use `criteria_pass_rate` to see partial success.
   runner checks the policy endpoint from inside Docker. On Docker Desktop,
   derived loopback model URLs are automatically routed through
   `host.docker.internal`; `sandbox_model_base_url` is an explicit override.
-  Connectivity and harness failures are masked and skip judging.
-  Task-loading and harness-configuration failures are kept separate from Docker
-  sandbox failures. A zero reward without an infrastructure/judge flag is an
-  ordinary model/task result; a flagged result should be excluded from
-  model-quality comparisons.
+  Connectivity, harness, sandbox, and verifier failures are masked, skip
+  judging when applicable, and carry `_ng_failure_class`, which routes them to
+  the failure sidecar for bounded retry. Task-loading and harness-configuration
+  failures additionally carry `_ng_failure_terminal: true`, so they are not
+  retried. `mask_sample` is a training hint, not the routing signal. A zero
+  reward without an infrastructure/judge flag is an ordinary model/task result;
+  a flagged result should be excluded from model-quality comparisons.
 - Harbor agent, adapter, connection, and timeout failures preserve any partial
   trajectory but skip judging. Their result rows report `mask_sample`,
   `agent_failed`, `model_connection_failed`, `agent_timed_out`, and
-  `failure_reason`, and their reward is forced to zero.
+  `failure_reason`, carry `_ng_failure_class`, and have their reward forced to
+  zero. Harbor context-limit and max-turn stops are instead judged as valid
+  incomplete outcomes.
 - Hermes normally probes `/v1/models` and `/models` for optional pricing and
   context metadata. The LAB runner disables those lookups because Gym supplies
   the model explicitly and its internal policy proxy does not implement model

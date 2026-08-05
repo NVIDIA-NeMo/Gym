@@ -163,9 +163,7 @@ def test_dependency_runtime_cache_is_harness_and_recipe_specific(monkeypatch, tm
 
     def fake_run(args, **kwargs):
         if len(args) > 1 and args[1] == "run":
-            mounted_bundle = next(
-                Path(arg.split(":", 1)[0]) for arg in args if ":/nemo_gym_mount:ro" in arg
-            )
+            mounted_bundle = next(Path(arg.split(":", 1)[0]) for arg in args if ":/nemo_gym_mount:ro" in arg)
             assert mounted_bundle != tmp_path
             assert not (mounted_bundle / "env.yaml").exists()
         calls.append((args, kwargs))
@@ -637,7 +635,7 @@ def test_stage_agent_source_copies_only_selected_runtime_package(monkeypatch, tm
     (package / "runtime_helpers").mkdir()
     (package / "app.py").write_text("VALUE = 1\n")
     (package / "runtime_helpers" / "tool.py").write_text("VALUE = 2\n")
-    (package / "tests" / "rubric.py").write_text("SECRET = True\n")
+    (package / "tests" / "rubric.py").write_text("SECRET = True\n")  # pragma: allowlist secret
     (package / "data" / "example.jsonl").write_text("{}\n")
     (repository / "resources_servers" / "legal_agent_bench" / "data" / "runtime").mkdir(parents=True)
     (repository / "resources_servers" / "legal_agent_bench" / "data" / "runtime" / "rubric.json").write_text("{}")
@@ -803,6 +801,44 @@ def test_response_masks_harness_and_verifier_failures() -> None:
     assert response.model_connection_failed is True
     assert response.verifier_failed is True
     assert response.mask_sample is True
+    assert response.model_dump()["_ng_failure_class"] == "model_connection_failed"
+    assert "_ng_failure_terminal" not in response.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("failure_flag", "expected_class", "terminal"),
+    [
+        ("agent_failed", "agent_failed", False),
+        ("model_connection_failed", "model_connection_failed", False),
+        ("agent_timed_out", "agent_timed_out", False),
+        ("verifier_failed", "verifier_failed", False),
+        ("verifier_timed_out", "verifier_failed", False),
+        ("sandbox_failed", "sandbox_failed", False),
+        ("task_failed", "task_failed", True),
+        ("configuration_failed", "configuration_failed", True),
+    ],
+)
+def test_response_routes_every_failure_class(failure_flag, expected_class, terminal) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+    body = app.LegalAgentBenchRunRequest(
+        instance_id="legal_agent_bench::area__task",
+        responses_create_params=params,
+    )
+
+    response = runner._response(
+        body=body,
+        params=params,
+        response=app._empty_response("policy"),
+        reward_data={},
+        paths=None,
+        **{failure_flag: True},
+    )
+    response_data = response.model_dump()
+
+    assert response.mask_sample is True
+    assert response_data["_ng_failure_class"] == expected_class
+    assert response_data.get("_ng_failure_terminal", False) is terminal
 
 
 @pytest.mark.parametrize(
@@ -834,6 +870,8 @@ def test_response_masks_malformed_verifier_metrics_instead_of_raising(reward_dat
     assert response.verifier_failed is True
     assert response.mask_sample is True
     assert response.failure_reason.startswith("Invalid verifier")
+    assert response.model_dump()["_ng_failure_class"] == "verifier_failed"
+    assert "_ng_failure_terminal" not in response.model_dump()
 
 
 @pytest.mark.asyncio
@@ -850,6 +888,8 @@ async def test_run_classifies_invalid_task_without_sandbox_failure(monkeypatch) 
 
     assert response.task_failed is True
     assert response.configuration_failed is False
+    assert response.model_dump()["_ng_failure_class"] == "task_failed"
+    assert response.model_dump()["_ng_failure_terminal"] is True
     assert response.sandbox_failed is False
     assert response.mask_sample is True
     assert "Unsafe Legal Agent Bench task name" in response.failure_reason
@@ -887,6 +927,8 @@ async def test_run_classifies_bad_agent_configuration_without_sandbox_failure(mo
     assert response.task_failed is False
     assert response.sandbox_failed is False
     assert response.mask_sample is True
+    assert response.model_dump()["_ng_failure_class"] == "configuration_failed"
+    assert response.model_dump()["_ng_failure_terminal"] is True
     assert "missing configured CLI pin" in response.failure_reason
 
 
@@ -1088,8 +1130,23 @@ def test_verifier_sandbox_has_no_host_mounts(monkeypatch, tmp_path) -> None:
         (b'{"reward": "invalid", "criteria_pass_rate": 1.0}', 0.0, True),
     ],
 )
-async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(
-    monkeypatch, tmp_path, capsys, reward_blob, expected_reward, expected_verifier_failed
+@pytest.mark.parametrize(
+    "agent_module",
+    [
+        "responses_api_agents.legal_agent_bench_native_agent.app",
+        "responses_api_agents.hermes_agent.app",
+        "responses_api_agents.claude_code_agent.app",
+        "responses_api_agents.codex_agent.app",
+    ],
+)
+async def test_incomplete_limit_outcomes_are_verified_for_every_harness(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    reward_blob,
+    expected_reward,
+    expected_verifier_failed,
+    agent_module,
 ) -> None:
     _root, task = _task_tree(tmp_path)
     skills = _skills(tmp_path)
@@ -1115,7 +1172,7 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(
 
     agent_sandbox = PhaseSandbox("agent")
     verifier_sandbox = PhaseSandbox("verifier")
-    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config(agent_server_module=agent_module))
     runner._sem = app.asyncio.Semaphore(1)
     runner._session_results_dir = tmp_path / "results"
 
@@ -1126,7 +1183,15 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(
         return deps
 
     def write_runner(paths, params, model_url):
-        (paths["runtime"] / "response.json").write_text(_successful_response().model_dump_json())
+        incomplete = app.NeMoGymResponse.model_validate(
+            _successful_response().model_dump(mode="json")
+            | {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "metadata": {"nemo_gym_stop_reason": "max_turns"},
+            }
+        )
+        (paths["runtime"] / "response.json").write_text(incomplete.model_dump_json())
 
     async def run_verifier(sandbox, task_dir, paths):
         assert sandbox is verifier_sandbox
@@ -1142,7 +1207,7 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(
 
     monkeypatch.setattr(app, "resolve_task_dir", lambda runtime, instance: task)
     monkeypatch.setattr(app, "resolve_repo_path", lambda path: skills)
-    monkeypatch.setattr(app, "compose_agent_input", lambda task_dir, skills_dir, params: params)
+    monkeypatch.setattr(app, "compose_agent_input", lambda task_dir, skills_dir, params, **kwargs: params)
     monkeypatch.setattr(runner, "_ensure_image", ensure_image)
     monkeypatch.setattr(runner, "_ensure_runtime", ensure_runtime)
     monkeypatch.setattr(runner, "_stage_agent_source", lambda paths: None)
@@ -1167,6 +1232,14 @@ async def test_run_stops_agent_sandbox_before_starting_verifier_sandbox(
     assert response.reward == expected_reward
     assert response.verifier_failed is expected_verifier_failed
     assert response.sandbox_failed is False
+    response_data = response.model_dump()
+    if expected_verifier_failed:
+        assert response_data["_ng_failure_class"] == "verifier_failed"
+        assert "_ng_failure_terminal" not in response_data
+    else:
+        assert "_ng_failure_class" not in response_data
+        assert "_ng_failure_terminal" not in response_data
+        assert response.mask_sample is False
     assert Path(response.artifact_dir).is_dir()
     terminal_output = capsys.readouterr().out
     assert "LAB rollout artifacts:" in terminal_output
@@ -1251,6 +1324,8 @@ async def test_model_connectivity_failure_is_masked_and_skips_verifier(monkeypat
     assert response.model_connection_failed is True
     assert response.mask_sample is True
     assert response.verifier_failed is False
+    assert response.model_dump()["_ng_failure_class"] == "model_connection_failed"
+    assert "_ng_failure_terminal" not in response.model_dump()
     assert "unreachable" in response.failure_reason
     summary = json.loads(Path(response.run_summary_path).read_text())
     assert summary["flags"]["model_connection_failed"] is True

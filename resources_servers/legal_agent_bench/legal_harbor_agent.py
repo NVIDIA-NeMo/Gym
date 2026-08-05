@@ -414,13 +414,15 @@ async def _run_agent_async(
             except Exception as exc:
                 err_msg = str(exc)
                 _log_model_error(transcript_file, turn_count, exc)
+                if _is_context_overflow_error(err_msg):
+                    # Context exhaustion is a valid incomplete model outcome.
+                    # Preserve the partial artifacts and let Harbor verify them.
+                    context_overflow = True
+                    break
                 model_error = err_msg
                 model_error_type = type(exc).__name__
                 agent_timed_out = isinstance(exc, TimeoutError)
                 model_connection_failed = isinstance(exc, (ConnectionError, OSError)) and not agent_timed_out
-                if _is_context_overflow_error(err_msg):
-                    context_overflow = True
-                    break
                 break
 
             messages.append(response.message)

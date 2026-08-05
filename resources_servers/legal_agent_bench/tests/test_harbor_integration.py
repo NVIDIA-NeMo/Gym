@@ -432,6 +432,107 @@ async def test_harbor_loop_classifies_timeout_after_partial_output(tmp_path) -> 
     assert result["model_connection_failed"] is False
 
 
+@pytest.mark.asyncio
+async def test_harbor_loop_preserves_context_limit_as_scoreable_incomplete_output(tmp_path) -> None:
+    class Adapter:
+        timeout_seconds = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def make_system_message(self, content):
+            return {"role": "system", "content": content}
+
+        def make_user_message(self, content):
+            return {"role": "user", "content": content}
+
+        def make_tool_result_messages(self, results):
+            return [{"role": "tool", "content": result} for _call_id, result in results]
+
+        async def chat(self, _messages, _tools):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    message={"role": "assistant", "content": "Partial work"},
+                    tool_calls=[SimpleNamespace(id="call-1", name="read", arguments='{"path":"input.docx"}')],
+                    text="Partial work",
+                    input_tokens=10,
+                    output_tokens=2,
+                )
+            raise RuntimeError("maximum context length exceeded")
+
+    class ToolExecutor:
+        async def execute(self, _name, _arguments):
+            return "document text"
+
+        def get_metrics(self):
+            return {}
+
+    result = await _run_agent_async(
+        adapter=Adapter(),
+        system_prompt="system",
+        tool_executor=ToolExecutor(),
+        tools=[],
+        max_turns=3,
+        transcript_path=tmp_path / "transcript.jsonl",
+    )
+
+    assert result["context_overflow"] is True
+    assert result["finished_cleanly"] is False
+    assert result["model_error"] is None
+    assert result["model_connection_failed"] is False
+    assert result["agent_timed_out"] is False
+    assert result["output_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_harbor_loop_preserves_max_turns_as_scoreable_incomplete_output(tmp_path) -> None:
+    class Adapter:
+        timeout_seconds = None
+
+        def make_system_message(self, content):
+            return {"role": "system", "content": content}
+
+        def make_user_message(self, content):
+            return {"role": "user", "content": content}
+
+        def make_tool_result_messages(self, results):
+            return [{"role": "tool", "content": result} for _call_id, result in results]
+
+        async def chat(self, _messages, _tools):
+            return ModelResponse(
+                message={"role": "assistant", "content": "Partial work"},
+                tool_calls=[SimpleNamespace(id="call-1", name="read", arguments='{"path":"input.docx"}')],
+                text="Partial work",
+                input_tokens=10,
+                output_tokens=2,
+            )
+
+    class ToolExecutor:
+        async def execute(self, _name, _arguments):
+            return "document text"
+
+        def get_metrics(self):
+            return {}
+
+    result = await _run_agent_async(
+        adapter=Adapter(),
+        system_prompt="system",
+        tool_executor=ToolExecutor(),
+        tools=[],
+        max_turns=1,
+        transcript_path=tmp_path / "transcript.jsonl",
+    )
+
+    assert result["turn_count"] == 1
+    assert result["finished_cleanly"] is False
+    assert result["context_overflow"] is False
+    assert result["model_error"] is None
+    assert result["model_connection_failed"] is False
+    assert result["agent_timed_out"] is False
+    assert result["output_tokens"] == 2
+
+
 @pytest.mark.parametrize(
     "message, expected",
     [

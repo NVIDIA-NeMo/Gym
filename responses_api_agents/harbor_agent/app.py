@@ -43,6 +43,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
 
@@ -250,17 +251,66 @@ class HarborAgent(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
 
+    def _terminal_failure_response(
+        self,
+        body: HarborRunRequest,
+        *,
+        failure_class: str,
+        reason: str,
+        model_name: str,
+    ) -> HarborVerifyResponse:
+        response = HarborAgentUtils.get_default_response_object()
+        response["model"] = model_name
+        response["output"] = []
+        return HarborVerifyResponse.model_validate(
+            {
+                "responses_create_params": body.responses_create_params.model_dump(mode="json"),
+                "reward": 0.0,
+                "response": response,
+                "instance_id": body.instance_id,
+                "mask_sample": True,
+                "task_failed": failure_class == "task_failed",
+                "configuration_failed": failure_class == "configuration_failed",
+                "failure_reason": reason,
+                NG_FAILURE_CLASS_KEY: failure_class,
+                NG_TERMINAL_KEY: True,
+            }
+        )
+
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self.sem:
-            global_config_dict = get_global_config_dict()
-
-            policy_model_name = global_config_dict["policy_model_name"]
-            base_url = self._resolve_model_base_url(global_config_dict)
+            try:
+                global_config_dict = get_global_config_dict()
+                policy_model_name = global_config_dict["policy_model_name"]
+                base_url = self._resolve_model_base_url(global_config_dict)
+            except (KeyError, TypeError, ValueError) as exc:
+                return self._terminal_failure_response(
+                    body,
+                    failure_class="configuration_failed",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    model_name=self.config.model_server.name,
+                )
             run_timestamp = datetime.now(timezone.utc)
             run_id = self._build_run_id(run_timestamp)
 
             instance_id = body.instance_id
-            dataset_alias, task_name = self._parse_instance_id(instance_id)
+            try:
+                dataset_alias, task_name = self._parse_instance_id(instance_id)
+            except ValueError as exc:
+                return self._terminal_failure_response(
+                    body,
+                    failure_class="task_failed",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    model_name=policy_model_name,
+                )
+            if dataset_alias not in self.config.harbor_datasets:
+                available = ", ".join(sorted(self.config.harbor_datasets))
+                return self._terminal_failure_response(
+                    body,
+                    failure_class="task_failed",
+                    reason=f"Unknown dataset alias in instance_id: {dataset_alias!r}. Available aliases: [{available}]",
+                    model_name=policy_model_name,
+                )
 
             output_file_dir = self._get_results_output_dir(policy_model_name, dataset_alias, run_timestamp)
             jobs_dir = self._get_jobs_output_dir(policy_model_name, dataset_alias, run_timestamp)
@@ -271,15 +321,23 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 exclude_none=True,
             )
 
-            job_config_dict = self._build_job_config(
-                dataset_alias,
-                task_name,
-                policy_model_name,
-                base_url,
-                job_name=job_name,
-                jobs_dir=jobs_dir,
-                responses_create_params=responses_create_params,
-            )
+            try:
+                job_config_dict = self._build_job_config(
+                    dataset_alias,
+                    task_name,
+                    policy_model_name,
+                    base_url,
+                    job_name=job_name,
+                    jobs_dir=jobs_dir,
+                    responses_create_params=responses_create_params,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                return self._terminal_failure_response(
+                    body,
+                    failure_class="configuration_failed",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    model_name=policy_model_name,
+                )
 
             try:
                 params = dict(
@@ -313,37 +371,71 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 reward = HarborAgentUtils.extract_reward(verifier_result)
 
                 failure_fields = {}
-                if self.config.harbor_skip_verification_on_agent_failure:
-                    exception_info = trial_result.get("exception_info") or {}
-                    agent_metadata = (trial_result.get("agent_result") or {}).get("metadata") or {}
-                    failed_during_agent_phase = bool(
-                        exception_info
-                        and trial_result.get("agent_execution") is not None
-                        and trial_result.get("verifier") is None
-                    )
-                    agent_timed_out = bool(
-                        exception_info.get("exception_type") == "AgentTimeoutError"
-                        or agent_metadata.get("agent_timed_out", False)
-                    )
-                    agent_failed = bool(
-                        agent_metadata.get("agent_failed", False) or failed_during_agent_phase or agent_timed_out
-                    )
-                    model_connection_failed = bool(agent_metadata.get("model_connection_failed", False))
-                    failure_reason = agent_metadata.get("model_error")
-                    if agent_timed_out:
-                        failure_reason = exception_info.get("exception_message") or failure_reason
-                    elif agent_failed and not failure_reason:
-                        failure_reason = exception_info.get("exception_message")
-                    mask_sample = bool(agent_failed or model_connection_failed or agent_timed_out)
+                exception_info = trial_result.get("exception_info") or {}
+                agent_metadata = (trial_result.get("agent_result") or {}).get("metadata") or {}
+                context_limit_reached = bool(agent_error_flags.get("context_length_exceeded", False))
+                memory_limit_reached = bool(agent_error_flags.get("memory_limit_exceeded", False))
+                agent_started = trial_result.get("agent_execution") is not None
+                verifier_started = trial_result.get("verifier") is not None
+                failed_during_agent_phase = bool(exception_info and agent_started and not verifier_started)
+                agent_timed_out = bool(
+                    exception_info.get("exception_type") == "AgentTimeoutError"
+                    or agent_metadata.get("agent_timed_out", False)
+                )
+                agent_failed = bool(
+                    agent_metadata.get("agent_failed", False) or failed_during_agent_phase or agent_timed_out
+                )
+                model_connection_failed = bool(agent_metadata.get("model_connection_failed", False))
+                verifier_failed = bool(
+                    (exception_info and verifier_started and not agent_failed)
+                    or (not agent_failed and not context_limit_reached and verifier_result is None)
+                )
+                sandbox_failed = bool(
+                    memory_limit_reached or (exception_info and not agent_started and not verifier_started)
+                )
+
+                # Harbor exposes context exhaustion separately in
+                # context_length_exceeded_error. It is a scoreable incomplete
+                # outcome, not an operational failure.
+                if context_limit_reached:
+                    agent_failed = False
+                    model_connection_failed = False
+                    agent_timed_out = False
+
+                failure_reason = agent_metadata.get("model_error")
+                if agent_timed_out or verifier_failed or sandbox_failed:
+                    failure_reason = exception_info.get("exception_message") or failure_reason
+                    if memory_limit_reached and not failure_reason:
+                        failure_reason = "Harbor sandbox exceeded its memory limit"
+                elif agent_failed and not failure_reason:
+                    failure_reason = exception_info.get("exception_message")
+
+                failure_class = None
+                if model_connection_failed:
+                    failure_class = "model_connection_failed"
+                elif sandbox_failed:
+                    failure_class = "sandbox_failed"
+                elif verifier_failed:
+                    failure_class = "verifier_failed"
+                elif agent_timed_out:
+                    failure_class = "agent_timed_out"
+                elif agent_failed:
+                    failure_class = "agent_failed"
+
+                mask_sample = failure_class is not None
+                if self.config.harbor_skip_verification_on_agent_failure or mask_sample:
                     failure_fields = {
                         "mask_sample": mask_sample,
                         "agent_failed": agent_failed,
                         "model_connection_failed": model_connection_failed,
                         "agent_timed_out": agent_timed_out,
+                        "verifier_failed": verifier_failed,
+                        "sandbox_failed": sandbox_failed,
                         "failure_reason": failure_reason,
                     }
-                    if mask_sample:
-                        reward = 0.0
+                if failure_class is not None:
+                    failure_fields[NG_FAILURE_CLASS_KEY] = failure_class
+                    reward = 0.0
 
                 # Convert Harbor outputs to NeMo Gym response items:
                 # keep rich trajectory details, then overlay rollout token details when present.
@@ -365,14 +457,16 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 usage = None
                 reward = 0.0
                 failure_fields = {}
-                if self.config.harbor_skip_verification_on_agent_failure:
-                    failure_fields = {
-                        "mask_sample": True,
-                        "agent_failed": True,
-                        "model_connection_failed": False,
-                        "agent_timed_out": False,
-                        "failure_reason": str(e),
-                    }
+                failure_fields = {
+                    "mask_sample": True,
+                    "agent_failed": False,
+                    "model_connection_failed": False,
+                    "agent_timed_out": False,
+                    "verifier_failed": False,
+                    "sandbox_failed": True,
+                    "failure_reason": str(e),
+                    NG_FAILURE_CLASS_KEY: "sandbox_failed",
+                }
 
             response = HarborAgentUtils.get_default_response_object()
             response["model"] = policy_model_name
@@ -396,7 +490,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
                 memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
                 agent_timeout_error=int(
-                    ((trial_result or {}).get("exception_info") or {}).get("exception_type") == "AgentTimeoutError"
+                    not agent_error_flags.get("context_length_exceeded", False)
+                    and ((trial_result or {}).get("exception_info") or {}).get("exception_type") == "AgentTimeoutError"
                 ),
                 **failure_fields,
             )

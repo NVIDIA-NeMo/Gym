@@ -153,7 +153,7 @@ async def test_model_failure_preserves_partial_trajectory(monkeypatch) -> None:
     assert any(isinstance(item, NeMoGymFunctionCallOutput) for item in result.output)
 
 
-async def test_turn_limit_is_an_explicit_failure(monkeypatch) -> None:
+async def test_turn_limit_is_a_scoreable_incomplete_outcome(monkeypatch) -> None:
     agent = _agent(max_turns=1)
     agent.server_client.post = AsyncMock(return_value=_raw_response(_model_response([_function_call()])))
     monkeypatch.setattr(app.LabToolExecutor, "execute", AsyncMock(return_value="file.txt"))
@@ -163,9 +163,10 @@ async def test_turn_limit_is_an_explicit_failure(monkeypatch) -> None:
         NeMoGymResponseCreateParamsNonStreaming(input="Do the task"),
     )
 
-    assert result.status == "failed"
-    assert result.error is not None
-    assert "1-turn limit" in result.error.message
+    assert result.status == "incomplete"
+    assert result.error is None
+    assert result.incomplete_details.reason == "max_output_tokens"
+    assert result.metadata == {"nemo_gym_stop_reason": "max_turns"}
     assert len(result.output) == 2
 
 

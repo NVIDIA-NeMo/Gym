@@ -886,3 +886,28 @@ def test_partial_codex_output_preserves_trajectory_and_marks_response_failed() -
     assert response.status == "failed"
     assert response.error is not None
     assert "stream_error" in response.error.message
+
+
+@pytest.mark.parametrize("reported_in", ["stdout", "stderr"])
+def test_codex_context_limit_output_is_a_scoreable_incomplete_outcome(reported_in: str) -> None:
+    agent = _make_agent()
+    partial = _item_completed({"id": "msg-1", "type": "agent_message", "text": "partial answer"})
+    context_error = "maximum context length exceeded"
+    stdout = partial
+    metadata = {"status": "failed", "error_type": "process_exit_1", "stderr": ""}
+    if reported_in == "stdout":
+        stdout += "\n" + json.dumps({"type": "turn.failed", "error": {"message": context_error}})
+    else:
+        metadata["stderr"] = context_error
+
+    async def fake_run_codex(*args, **kwargs):
+        return stdout, "codex-default", metadata
+
+    object.__setattr__(agent, "_run_codex", fake_run_codex)
+    response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="perform the task")))
+
+    assert response.output
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.incomplete_details.reason == "max_output_tokens"
+    assert response.metadata == {"nemo_gym_stop_reason": "context_limit"}

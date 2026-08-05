@@ -33,6 +33,7 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Simpl
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -636,8 +637,11 @@ def agent_response_failure(response: NeMoGymResponse, agent_server_module: str) 
     """Return a harness-failure reason without treating normal task-quality failures as infrastructure."""
     if response.error is not None:
         return f"Agent returned an error response: {response.error}"
+    # Max-turn and context-limit stops are valid incomplete model outcomes. The
+    # harnesses represent those with ``incomplete_details`` so LAB can still
+    # verify and score whatever artifacts the agent produced.
     if response.incomplete_details is not None:
-        return f"Agent returned an incomplete response: {response.incomplete_details}"
+        return None
     if not response.output:
         return "Agent produced an empty trajectory"
 
@@ -1379,6 +1383,30 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
             or verifier_error
             or judge_errors
         )
+        failure_class: Optional[str] = None
+        failure_terminal = False
+        if task_failed:
+            failure_class = "task_failed"
+            failure_terminal = True
+        elif configuration_failed:
+            failure_class = "configuration_failed"
+            failure_terminal = True
+        elif model_connection_failed:
+            failure_class = "model_connection_failed"
+        elif sandbox_failed:
+            failure_class = "sandbox_failed"
+        elif verifier_failed or verifier_timed_out or verifier_error or judge_errors:
+            failure_class = "verifier_failed"
+        elif agent_timed_out:
+            failure_class = "agent_timed_out"
+        elif agent_failed:
+            failure_class = "agent_failed"
+
+        routing: dict[str, Any] = {}
+        if failure_class is not None:
+            routing[NG_FAILURE_CLASS_KEY] = failure_class
+        if failure_terminal:
+            routing[NG_TERMINAL_KEY] = True
         return LegalAgentBenchAgentResponse(
             responses_create_params=params,
             response=response,
@@ -1408,6 +1436,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 else None
             ),
             output_dir=str(paths["output"]) if paths else None,
+            **routing,
         )
 
     async def run(self, request: Request, body: LegalAgentBenchRunRequest) -> LegalAgentBenchAgentResponse:
