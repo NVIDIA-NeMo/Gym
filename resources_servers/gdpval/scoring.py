@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from pathlib import Path
 from typing import Any, Optional
 
+from nemo_gym.judge import JudgeError
 from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwargs, sample_judge
 
 
@@ -39,6 +41,12 @@ from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwa
 # ---------------------------------------------------------------------------
 FINAL_SCORE_TAG = "FINAL_SCORE"
 MAX_POSSIBLE_SCORE_TAG = "MAX_POSSIBLE_SCORE"
+# The OpenAI SDK otherwise applies a 600-second timeout plus automatic retries.
+# Image-dense local-judge requests can legitimately run longer, so allow one
+# bounded 60-minute attempt and disable SDK-level multiplication of that bound.
+STRUCTURED_JUDGE_REQUEST_TIMEOUT_SECONDS = float(
+    os.environ.get("GDPVAL_STRUCTURED_JUDGE_REQUEST_TIMEOUT_SECONDS", "3600")
+)
 
 STRUCTURED_JUDGE_PROMPT = (
     "Given a task description, reference files, an evaluation rubric, and submission file(s) for the task-- "
@@ -54,6 +62,13 @@ STRUCTURED_JUDGE_PROMPT = (
 
 _FINAL_SCORE_RE = re.compile(rf"{FINAL_SCORE_TAG}\[\s*([+-]?\d+(?:\.\d+)?)\s*\]")
 _MAX_SCORE_RE = re.compile(rf"{MAX_POSSIBLE_SCORE_TAG}\[\s*([+-]?\d+(?:\.\d+)?)\s*\]")
+_CRITERION_GRADE_RE = re.compile(
+    r"CRITERION_NUMBER\[\s*(\d+)\s*\]\s*:\s*"
+    r"GRADE\[\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\]\s*"
+    r"out\s+of\s+MAX_POSSIBLE_POINTS\[\s*"
+    r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\]",
+    re.IGNORECASE,
+)
 
 
 def parse_structured_score(response_text: str) -> tuple[float | None, float | None]:
@@ -66,6 +81,93 @@ def parse_structured_score(response_text: str) -> tuple[float | None, float | No
     score = float(score_match.group(1)) if score_match else None
     max_score = float(max_match.group(1)) if max_match else None
     return score, max_score
+
+
+def parse_structured_criterion_grades(response_text: str, rubric_json: Any) -> dict[str, Any]:
+    """Extract and annotate per-criterion grades from structured judge text.
+
+    The requested format is one-based, but a consistently zero-based response
+    is also mapped. Raw points are retained; ``binary_grade`` is 1 only for
+    full credit. Completeness diagnostics let the strict persistence path
+    reject omissions, duplicates, or inconsistent totals before caching.
+    """
+    if isinstance(rubric_json, str):
+        try:
+            rubric_json = json.loads(rubric_json) if rubric_json else []
+        except json.JSONDecodeError:
+            rubric_json = []
+    if isinstance(rubric_json, list):
+        rubric_items = rubric_json
+    elif isinstance(rubric_json, dict) and isinstance(rubric_json.get("criteria"), list):
+        rubric_items = rubric_json["criteria"]
+    else:
+        rubric_items = []
+
+    raw_grades = [
+        {
+            "criterion_number": int(match.group(1)),
+            "awarded_points": float(match.group(2)),
+            "max_possible_points": float(match.group(3)),
+        }
+        for match in _CRITERION_GRADE_RE.finditer(response_text)
+    ]
+    numbers = [grade["criterion_number"] for grade in raw_grades]
+    unique_numbers = set(numbers)
+    expected_count = len(rubric_items)
+
+    if numbers and expected_count and all(1 <= number <= expected_count for number in numbers):
+        numbering = "one_based"
+        index_for = lambda number: number - 1
+        expected_numbers = set(range(1, expected_count + 1))
+    elif numbers and expected_count and all(0 <= number < expected_count for number in numbers):
+        numbering = "zero_based"
+        index_for = lambda number: number
+        expected_numbers = set(range(expected_count))
+    else:
+        numbering = "unmapped"
+        index_for = lambda number: None
+        expected_numbers = set()
+
+    criteria: list[dict[str, Any]] = []
+    for grade in raw_grades:
+        rubric_index = index_for(grade["criterion_number"])
+        rubric_item = (
+            rubric_items[rubric_index]
+            if isinstance(rubric_index, int)
+            and 0 <= rubric_index < expected_count
+            and isinstance(rubric_items[rubric_index], dict)
+            else {}
+        )
+        max_points = grade["max_possible_points"]
+        criteria.append(
+            {
+                **grade,
+                "binary_grade": int(grade["awarded_points"] >= max_points - 1e-9) if max_points > 0 else None,
+                "rubric_index": rubric_index,
+                "rubric_item_id": rubric_item.get("rubric_item_id"),
+                "criterion": rubric_item.get("criterion"),
+                "rubric_weight": rubric_item.get("score", rubric_item.get("weight")),
+            }
+        )
+
+    duplicate_numbers = sorted(number for number in unique_numbers if numbers.count(number) > 1)
+    missing_criterion_numbers = sorted(expected_numbers - unique_numbers)
+    unexpected_criterion_numbers = sorted(unique_numbers - expected_numbers)
+    complete = (
+        expected_count > 0 and numbering != "unmapped" and not duplicate_numbers and unique_numbers == expected_numbers
+    )
+    return {
+        "criteria": criteria,
+        "parsed_criteria_count": len(criteria),
+        "expected_criteria_count": expected_count,
+        "criterion_numbering": numbering,
+        "duplicate_criterion_numbers": duplicate_numbers,
+        "missing_criterion_numbers": missing_criterion_numbers,
+        "unexpected_criterion_numbers": unexpected_criterion_numbers,
+        "complete": complete,
+        "awarded_points_sum": sum(criterion["awarded_points"] for criterion in criteria),
+        "max_possible_points_sum": sum(criterion["max_possible_points"] for criterion in criteria),
+    }
 
 
 def _render_template(template_path: str, **kwargs) -> str:
@@ -393,7 +495,7 @@ async def score_with_rubric_structured(
     Returns ``(normalized_score, metadata)`` where *normalized_score* is in
     [0, 1] and *metadata* contains per-trial scores and percentages.
     """
-    from openai import AsyncOpenAI
+    from openai import APITimeoutError, AsyncOpenAI
 
     rng = rng or random.Random()
     # One AsyncOpenAI client per distinct upstream (base_url, api_key), reused
@@ -403,7 +505,12 @@ async def score_with_rubric_structured(
     def _client_for(judge: ResolvedJudge) -> Any:
         key = (judge.base_url, judge.api_key)
         if key not in client_cache:
-            client_cache[key] = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+            client_cache[key] = AsyncOpenAI(
+                base_url=judge.base_url,
+                api_key=judge.api_key,
+                timeout=STRUCTURED_JUDGE_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         return client_cache[key]
 
     # Compute max possible score from rubric. Different upstream formats name
@@ -422,15 +529,33 @@ async def score_with_rubric_structured(
     if isinstance(rubric_json, str):
         rubric_json = json.loads(rubric_json) if rubric_json else []
     if isinstance(rubric_json, list):
-        max_possible = sum(_criterion_points(item) for item in rubric_json)
-    elif isinstance(rubric_json, dict) and "criteria" in rubric_json:
-        max_possible = sum(_criterion_points(c) for c in rubric_json["criteria"])
+        rubric_items = rubric_json
+    elif isinstance(rubric_json, dict) and isinstance(rubric_json.get("criteria"), list):
+        rubric_items = rubric_json["criteria"]
     else:
-        max_possible = 0
+        rubric_items = []
+    max_possible = sum(_criterion_points(item) for item in rubric_items)
+    criterion_maxima = [float(_criterion_points(item)) for item in rubric_items]
+    criterion_count = len(rubric_items)
+
+    def _format_number(value: float) -> str:
+        return str(int(value)) if value.is_integer() else str(value)
+
+    criterion_maxima_summary = ", ".join(
+        f"{index}:{_format_number(points)}" for index, points in enumerate(criterion_maxima, start=1)
+    )
+    structured_requirements = (
+        f"The rubric has exactly {criterion_count} criteria, numbered 1 through "
+        f"{criterion_count}. Emit exactly one CRITERION_NUMBER line for every criterion "
+        "in that range, with no omissions or duplicates. The required "
+        f"MAX_POSSIBLE_POINTS values are [{criterion_maxima_summary}], whose sum is "
+        f"{_format_number(float(max_possible))}. The FINAL_SCORE must equal the sum of "
+        "all GRADE values, and MAX_POSSIBLE_SCORE must equal that stated sum.\n"
+    )
 
     rubric_str = rubric_pretty if rubric_pretty else json.dumps(rubric_json, indent=2)
     if max_possible > 0:
-        rubric_str += f"\nTotal possible score: {max_possible}\n"
+        rubric_str += f"\nTotal possible score: {max_possible}\n{structured_requirements}"
 
     # Build message content
     content: list[dict] = []
@@ -457,6 +582,7 @@ async def score_with_rubric_structured(
     percentages: list[float] = []
     trial_responses: list[str] = []
     trial_judges: list[str] = []
+    trial_criterion_grades: list[dict[str, Any]] = []
 
     for trial in range(num_trials):
         trial_num = trial + 1
@@ -468,13 +594,33 @@ async def score_with_rubric_structured(
             judge.create_overrides,
         )
 
+        retry_feedback: str | None = None
         for retry in range(formatting_retries):
+            if retry_feedback is not None:
+                # Do not replay the potentially long invalid response. Compact
+                # diagnostics give the judge an actionable correction while
+                # keeping retry context bounded.
+                create_kwargs["messages"] = messages + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous response was rejected for structured-output "
+                            "consistency. Produce a fresh complete evaluation and obey these "
+                            f"requirements exactly:\n{structured_requirements}"
+                            f"Previous-response diagnostics: {retry_feedback}"
+                        ),
+                    }
+                ]
             try:
                 response = await client.chat.completions.create(**create_kwargs)
                 resp_text = (response.choices[0].message.content or "").strip()
             except Exception as e:
                 err_str = str(e).lower()
-                is_retryable = any(m in err_str for m in ("429", "503", "504", "rate", "timeout"))
+                # A full request-budget timeout is retried by the persisted
+                # rollout/resume path, not inside the same verify call.
+                is_retryable = not isinstance(e, APITimeoutError) and any(
+                    marker in err_str for marker in ("429", "503", "504", "rate", "timeout")
+                )
                 if is_retryable and retry < formatting_retries - 1:
                     delay = 5.0 * (2**retry)
                     print(
@@ -490,6 +636,10 @@ async def score_with_rubric_structured(
             if score is not None and parsed_max is not None:
                 # Validate max matches computed max (if we have one)
                 if max_possible > 0 and abs(parsed_max - max_possible) > 0.01:
+                    retry_feedback = (
+                        f"MAX_POSSIBLE_SCORE was {_format_number(float(parsed_max))}, but it "
+                        f"must be {_format_number(float(max_possible))}. "
+                    )
                     print(
                         f"[structured-rubric] trial {trial_num} retry {retry + 1}: "
                         f"max_possible mismatch (parsed={parsed_max}, expected={max_possible})",
@@ -497,11 +647,50 @@ async def score_with_rubric_structured(
                     )
                     continue
 
+                criterion_result = None
+                if include_raw_responses:
+                    criterion_result = parse_structured_criterion_grades(resp_text, rubric_json)
+                    criterion_result.update(
+                        {
+                            "trial_number": trial_num,
+                            "judge": judge.name,
+                            "grade_sum_matches_final_score": (
+                                abs(criterion_result["awarded_points_sum"] - score) <= 0.01
+                            ),
+                            "max_sum_matches_final_max": (
+                                abs(criterion_result["max_possible_points_sum"] - parsed_max) <= 0.01
+                            ),
+                        }
+                    )
+                    if not (
+                        criterion_result.get("complete") is True
+                        and criterion_result["grade_sum_matches_final_score"]
+                        and criterion_result["max_sum_matches_final_max"]
+                    ):
+                        retry_feedback = (
+                            f"Parsed {criterion_result['parsed_criteria_count']} of "
+                            f"{criterion_result['expected_criteria_count']} criteria; "
+                            f"numbering={criterion_result['criterion_numbering']}; "
+                            f"missing criterion numbers={criterion_result['missing_criterion_numbers']}; "
+                            f"unexpected criterion numbers={criterion_result['unexpected_criterion_numbers']}; "
+                            f"duplicate criterion numbers={criterion_result['duplicate_criterion_numbers']}; "
+                            "the parsed GRADE sum must equal FINAL_SCORE and the parsed "
+                            "MAX_POSSIBLE_POINTS sum must equal MAX_POSSIBLE_SCORE. "
+                        )
+                        print(
+                            f"[structured-rubric] trial {trial_num} retry {retry + 1}/{formatting_retries}: "
+                            "criterion payload is incomplete or inconsistent with final score",
+                            flush=True,
+                        )
+                        continue
+
                 scores.append(score)
                 max_scores.append(parsed_max)
                 percentages.append((score / parsed_max) * 100 if parsed_max > 0 else 0)
                 trial_responses.append(resp_text)
                 trial_judges.append(judge.name)
+                if criterion_result is not None:
+                    trial_criterion_grades.append(criterion_result)
                 parsed_ok = True
                 print(
                     f"[structured-rubric] trial {trial_num}: score={score}/{parsed_max} ({percentages[-1]:.1f}%)",
@@ -509,6 +698,7 @@ async def score_with_rubric_structured(
                 )
                 break
             else:
+                retry_feedback = "The FINAL_SCORE and/or MAX_POSSIBLE_SCORE tags were missing or malformed. "
                 print(
                     f"[structured-rubric] trial {trial_num} retry {retry + 1}/{formatting_retries}: "
                     f"failed to parse FINAL_SCORE/MAX_POSSIBLE_SCORE tags",
@@ -517,12 +707,28 @@ async def score_with_rubric_structured(
 
         if not parsed_ok:
             print(f"[structured-rubric] trial {trial_num}: all retries exhausted, skipping trial", flush=True)
+            if include_raw_responses:
+                # Once one persisted trial is missing, later trials cannot make
+                # this attempt valid; avoid spending calls on a result that must
+                # be retried as a whole.
+                print(
+                    f"[structured-rubric] trial {trial_num}: aborting remaining trials because "
+                    "a complete persisted trial set is now impossible",
+                    flush=True,
+                )
+                break
+
+    if include_raw_responses and len(scores) != num_trials:
+        raise JudgeError(
+            f"structured rubric produced an incomplete or inconsistent trial set: {len(scores)}/{num_trials} completed"
+        )
 
     if not scores:
         print("[structured-rubric] no valid scores from any trial", flush=True)
         no_valid_metadata: dict = {"error": "no_valid_scores", "num_trials": num_trials}
         if include_raw_responses:
             no_valid_metadata["raw_responses"] = trial_responses
+            no_valid_metadata["criterion_grades"] = trial_criterion_grades
         return 0.0, no_valid_metadata
 
     avg_score = sum(scores) / len(scores)
@@ -547,6 +753,7 @@ async def score_with_rubric_structured(
     }
     if include_raw_responses:
         metadata["raw_responses"] = trial_responses
+        metadata["criterion_grades"] = trial_criterion_grades
 
     print(
         f"[structured-rubric] final: avg={avg_score:.1f}/{effective_max} ({avg_pct:.1f}%), "

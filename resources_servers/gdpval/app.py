@@ -83,11 +83,16 @@ def _iter_ref_repeat_dirs(task_dir: Path) -> List[Path]:
 
 
 def _safe_output_text(response: Any) -> str:
-    """Extract concatenated assistant text from a response without relying on
+    """Extract only the final assistant text from a response without relying on
     ``response.output_text`` — that property raises ``AttributeError`` when
     ``output[*].content`` contains raw strings (e.g. input messages carried
-    through by the Stirrup agent)."""
-    parts: List[str] = []
+    through by the Stirrup agent).
+
+    Stirrup responses retain the complete assistant/tool trajectory for cache,
+    audit, and SFT. The rubric judge must not receive that trajectory when it
+    falls back to response text because no final deliverable file is readable.
+    """
+    assistant_messages: List[str] = []
     output = getattr(response, "output", None) or []
     for item in output:
         d = item.model_dump() if hasattr(item, "model_dump") else dict(item)
@@ -96,15 +101,19 @@ def _safe_output_text(response: Any) -> str:
         if d.get("role") and d.get("role") != "assistant":
             continue
         content = d.get("content") or []
+        parts: List[str] = []
         if isinstance(content, str):
             parts.append(content)
-            continue
-        for c in content:
-            if isinstance(c, str):
-                parts.append(c)
-            elif isinstance(c, dict) and c.get("type") == "output_text":
-                parts.append(c.get("text") or "")
-    return "\n".join(p for p in parts if p)
+        else:
+            for c in content:
+                if isinstance(c, str):
+                    parts.append(c)
+                elif isinstance(c, dict) and c.get("type") == "output_text":
+                    parts.append(c.get("text") or "")
+        message = "\n".join(p for p in parts if p)
+        if message:
+            assistant_messages.append(message)
+    return assistant_messages[-1] if assistant_messages else ""
 
 
 class ReferenceModelConfig(BaseModel):
@@ -267,12 +276,15 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     rubric_structured_num_trials: int = 2
     rubric_structured_formatting_retries: int = 3
 
-    # When True, every judge call's raw response text is preserved on
+    # When True, every successful judge trial's raw response text is preserved on
     # ``verify_response.judge_response`` (per-trial in comparison mode under
     # ``per_ref_repeat[i].raw_responses``; under top-level ``raw_responses``
-    # in rubric modes). Off by default — raw responses are 10-50 KB each and
-    # multiply by num_trials × num_ref_repeats × num_tasks. Turn on for debug
-    # runs to post-mortem judge verdicts.
+    # in rubric modes). Structured rubric mode additionally parses
+    # ``CRITERION_NUMBER/GRADE/MAX_POSSIBLE_POINTS`` tags into
+    # ``criterion_grades`` with rubric IDs and a full-credit binary view, and
+    # requires every requested trial to be complete and internally consistent.
+    # Off by default — raw responses are 10-50 KB each and multiply by
+    # num_trials × num_ref_repeats × num_tasks.
     persist_raw_judge_responses: bool = False
 
 
@@ -320,6 +332,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
+        if self.config.judge_media_mode == "images_and_text":
+            from resources_servers.gdpval.media_conversion import validate_images_and_text_dependencies
+
+            # This mode promises both page images and supplemental PDF text.
+            # Refuse to start instead of silently grading with weaker input.
+            validate_images_and_text_dependencies()
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
