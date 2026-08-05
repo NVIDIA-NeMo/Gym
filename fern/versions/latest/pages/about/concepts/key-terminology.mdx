@@ -14,7 +14,7 @@ A **dataset** is a JSONL file of **tasks** (one row = one problem). Running the 
 Each run follows:
 
 1. **seed_session** — set up isolated state for this attempt  
-2. **agent loop** — call the model, use tools, repeat until done  
+2. **agent loop** — call the LLM-model (policy-model), use tools, repeat until done  
 3. **verify** — score the attempt → **reward**
 
 Two compositions matter:
