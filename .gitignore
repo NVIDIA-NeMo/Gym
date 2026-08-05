@@ -229,10 +229,6 @@ env.yaml
 # Backup files
 *.backup
 
-# Local run logs, not for the repo
-OPENSANDBOX_SSE_DROP_REPORT.md
-EXPERIMENT_LOG.md
-
 # Claude Code agent runtime artifacts
 **/.claude_node/
 
