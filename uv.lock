@@ -2543,7 +2543,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], marker = "extra == 'all'" },
     { name = "omegaconf" },
-    { name = "openai", specifier = "<=2.53.0,>=2.53.0" },
+    { name = "openai", specifier = "<=2.53.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
     { name = "openshell", marker = "extra == 'sandbox'", specifier = ">=0.0.92,<0.1" },
     { name = "orjson" },
