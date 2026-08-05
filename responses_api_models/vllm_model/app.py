@@ -319,6 +319,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         super().setup_exception_middleware(app)
 
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        app.post("/tokenize")(self.tokenize)
+        return app
+
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
 
@@ -454,6 +459,36 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.sampling_overrides:
             body_dict.update(self.config.sampling_overrides)
         return body_dict
+
+    async def tokenize(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> dict[str, list[int]]:
+        """Diagnostic/admission tokenization; never generation evidence."""
+
+        chat_params = self._converter.responses_to_chat_completion_create_params(body)
+        body_dict = chat_params.model_dump(exclude_unset=True)
+        body_dict = self._preprocess_chat_completion_create_params(
+            request,
+            body_dict,
+        )
+        tokenize_body = {
+            key: body_dict[key]
+            for key in (
+                "model",
+                "messages",
+                "tools",
+                "chat_template_kwargs",
+                "required_prefix_token_ids",
+            )
+            if key in body_dict and body_dict[key] is not None
+        }
+        result = await self._resolve_client(request).create_tokenize(**tokenize_body)
+        tokens = result.get("tokens")
+        if not isinstance(tokens, list) or not all(isinstance(token_id, int) for token_id in tokens):
+            raise RuntimeError(f"`{self.config.name}` received invalid /tokenize tokens: {tokens!r}")
+        return {"tokens": tokens}
 
     async def _responses_native(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
