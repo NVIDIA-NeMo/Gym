@@ -64,6 +64,8 @@ class CaptureContext:
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
+    # Record whether the model server supplied this call's prefix.
+    prefix_supplied: bool = False
     # Resolve the parent once before dispatch.
     # Downstream inference consumes ``parent_tokens`` for exact prefix supply.
     # Capture reuses the same parent decision.
@@ -171,6 +173,7 @@ async def capture_tokens(
             output_items=content_items,
             token_item_index=token_item_index,
             created_at=time.time(),
+            prefix_supplied=sink.prefix_supplied,
         )
     except Exception:
         await _capture_failed(context, "build")
