@@ -22,15 +22,10 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _render_directives,
     _render_pool_directives,
     _render_service_command,
-<<<<<<< HEAD
     _resolve_env,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.api import _resolve_env_refs
-=======
-    build_sbatch_script,
-)
->>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
 
 
@@ -269,7 +264,6 @@ def test_build_sbatch_script_policy_model_flags(submit_config_with_policy, bench
 
 
 # ---------------------------------------------------------------------------
-<<<<<<< HEAD
 # _resolve_env
 # ---------------------------------------------------------------------------
 
@@ -511,8 +505,6 @@ def test_build_sbatch_script_driver_env(bench_dir, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-=======
->>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
 # Fixtures
 # ---------------------------------------------------------------------------
 
