@@ -81,6 +81,7 @@ def test_policy_model_conflict_raises():
     driver = {**DRIVER, "policy_model": "svc", "benchmarks": {"gsm8k": {"run": {"policy_base_url": "http://other"}}}}
     with pytest.raises(ValidationError, match="already sets"):
         SubmitConfig.model_validate(_config(driver=driver))
+<<<<<<< HEAD
 
 
 def test_service_env_accepted():
@@ -96,3 +97,5 @@ def test_driver_env_accepted():
 def test_service_unknown_field_raises():
     with pytest.raises(ValidationError):
         SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "unknown_field": "x"}}))
+=======
+>>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749

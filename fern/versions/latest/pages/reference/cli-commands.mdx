@@ -401,6 +401,8 @@ gym env init --resources-server my_server
 
 Resolve the configs, flags, and overrides into a final merged config and print it. Useful for debugging configuration. Secrets are hidden.
 
+Unlike `gym env validate`, `resolve` substitutes no dummy model, so a model config's `policy_*` values must be supplied for its interpolations to resolve.
+
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
@@ -411,7 +413,10 @@ Resolve the configs, flags, and overrides into a final merged config and print i
 gym env resolve \
     --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
-    ++responses_create_params.temperature=0.6
+    ++responses_create_params.temperature=0.6 \
+    ++policy_base_url=https://api.openai.com/v1 \
+    ++policy_api_key=sk-example \
+    ++policy_model_name=gpt-4o-mini
 ```
 
 ### `gym env validate`

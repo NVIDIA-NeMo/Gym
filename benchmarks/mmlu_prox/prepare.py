@@ -23,6 +23,7 @@ options) in the `question` field, and carries a per-row `template_metadata`
 with an `output_regex` for language-specific answer extraction.
 """
 
+import hashlib
 import importlib.util
 import json
 import tempfile
@@ -36,8 +37,49 @@ from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "mmlu_prox_benchmark.jsonl"
-LANG_LIBS_URL = "https://raw.githubusercontent.com/EleutherAI/lm-evaluation-harness/refs/heads/main/lm_eval/tasks/mmlu_prox/lang_libs.py"
-DEFAULT_LANGUAGES = ["en", "de", "es", "fr", "it", "ja"]
+LANG_LIBS_COMMIT = "f4d4b3de3ee6741a7151a9fe74945ee515262f4c"  # pragma: allowlist secret
+LANG_LIBS_SHA256 = "582a892b4e8419c16384552b369d7ba828418c57768ccdd82d61172116b3da55"  # pragma: allowlist secret
+LANG_LIBS_URL = (
+    "https://raw.githubusercontent.com/EleutherAI/lm-evaluation-harness/"
+    f"{LANG_LIBS_COMMIT}/lm_eval/tasks/mmlu_prox/lang_libs.py"
+)
+DEFAULT_LANGUAGES = [
+    "af",
+    "ar",
+    "bn",
+    "cs",
+    "de",
+    "en",
+    "es",
+    "fr",
+    "hi",
+    "hu",
+    "id",
+    "it",
+    "ja",
+    "ko",
+    "mr",
+    "ne",
+    "pt",
+    "ru",
+    "sr",
+    "sw",
+    "te",
+    "th",
+    "uk",
+    "ur",
+    "vi",
+    "wo",
+    "yo",
+    "zh",
+    "zu",
+]
+
+
+def _verify_lang_libs(content: bytes) -> None:
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    if actual_sha256 != LANG_LIBS_SHA256:
+        raise RuntimeError(f"lang_libs.py checksum mismatch: expected {LANG_LIBS_SHA256}, got {actual_sha256}")
 
 
 def _download_and_parse_lang_libs() -> tuple:
@@ -45,15 +87,19 @@ def _download_and_parse_lang_libs() -> tuple:
     cached_path = DATA_DIR / "lang_libs.py"
 
     if cached_path.exists():
+        _verify_lang_libs(cached_path.read_bytes())
         print(f"Using cached lang_libs.py from {cached_path}")
         lang_libs_path = str(cached_path)
     else:
         print(f"Downloading lang_libs.py from {LANG_LIBS_URL}...")
         try:
             with urllib.request.urlopen(LANG_LIBS_URL) as response:
-                content = response.read().decode("utf-8")
+                content_bytes = response.read()
         except Exception as e:
             raise RuntimeError(f"Failed to download lang_libs.py: {e}")
+
+        _verify_lang_libs(content_bytes)
+        content = content_bytes.decode("utf-8")
 
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -130,21 +176,26 @@ def prepare(languages: list[str] = DEFAULT_LANGUAGES) -> Path:
     print("Successfully loaded lang_libs data.")
 
     hf_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
+    row_count = 0
 
-    rows = []
-    for language in languages:
-        print(f"Downloading MMLU-ProX [{language}] from HuggingFace...")
-        ds = load_dataset("li-lab/MMLU-ProX", language, split="test", token=hf_token)
-        for example in ds:
-            row = _format_entry(example, language, lang_libs, lang_subjects)
-            rows.append(json.dumps(row) + "\n")
-        print(f"  {len(ds)} examples loaded for language '{language}'")
+    # Stream rows to avoid buffering the full multilingual dataset in memory.
+    # Replace atomically so a failed preparation cannot leave a partial output.
+    with tempfile.TemporaryDirectory(dir=OUTPUT_FPATH.parent) as temp_dir:
+        temp_path = Path(temp_dir) / OUTPUT_FPATH.name
+        with temp_path.open("w") as output:
+            for language in languages:
+                print(f"Downloading MMLU-ProX [{language}] from HuggingFace...")
+                ds = load_dataset("li-lab/MMLU-ProX", language, split="test", token=hf_token)
+                for example in ds:
+                    row = _format_entry(example, language, lang_libs, lang_subjects)
+                    output.write(json.dumps(row) + "\n")
+                row_count += len(ds)
+                print(f"  {len(ds)} examples loaded for language '{language}'")
 
-    with open(OUTPUT_FPATH, "w") as f:
-        f.writelines(rows)
+        temp_path.replace(OUTPUT_FPATH)
 
-    print(f"Wrote {len(rows)} total problems to {OUTPUT_FPATH}")
+    print(f"Wrote {row_count} total problems to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
 
 

@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+<<<<<<< HEAD
 import os
+=======
+>>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Tag, model_validator
@@ -36,8 +39,11 @@ class BaseServiceConfig(_StrictModel):
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
+<<<<<<< HEAD
     # Values starting with "$" are resolved from the host environment at submit time.
     env: dict[str, str] = {}
+=======
+>>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -124,8 +130,11 @@ class DriverConfig(_StrictModel):
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
     benchmarks: dict[str, BenchmarkRunConfig]
+<<<<<<< HEAD
     # Values starting with "$" are resolved from the host environment at submit time.
     env: dict[str, str] = {}
+=======
+>>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
 
 
 class JobConfig(_StrictModel):
@@ -133,6 +142,7 @@ class JobConfig(_StrictModel):
     output_path: str
 
 
+<<<<<<< HEAD
 def _resolve_env_refs(data: Any) -> Any:
     if isinstance(data, dict):
         return {k: _resolve_env_refs(v) for k, v in data.items()}
@@ -146,17 +156,22 @@ def _resolve_env_refs(data: Any) -> Any:
     return data
 
 
+=======
+>>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
 class SubmitConfig(_StrictModel):
     services: dict[str, ServiceConfig]
     compute: dict[str, ComputeConfig]
     driver: DriverConfig
     job: JobConfig
 
+<<<<<<< HEAD
     @model_validator(mode="before")
     @classmethod
     def _resolve_host_env_vars(cls, data: Any) -> Any:
         return _resolve_env_refs(data)
 
+=======
+>>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":
         compute_names = set(self.compute)

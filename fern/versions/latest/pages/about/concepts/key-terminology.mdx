@@ -7,7 +7,7 @@ Essential vocabulary for model training, RL workflows, and NeMo Gym. This glossa
 ## Rollout & Data Collection Terms
 **Rollout / Trajectory**
 
-**Rollout** (verb) refers to the process of executing a policy in an environment to generate data: stepping through the environment, taking actions, and recording what happens. **Rollout** (noun) is also used synonymously with **trajectory**: the resulting sequence of states, actions, and rewards: the ordered record of what happened. In practice, many people use "rollout" and "trajectory" interchangeably since a rollout produces exactly one trajectory.
+**Rollout** (verb) is the process of executing a policy in an environment. **Rollout** (noun) is one execution and its result. A **trajectory** is the ordered record of what happened during that execution. The terms are often used informally as synonyms, but a Responses API result or rollout metrics record is not necessarily a complete standardized trajectory record. See the [trajectory capability matrix](/reference/trajectory-capabilities).
 
 **Rollout Batch**
 
@@ -125,7 +125,7 @@ Models invoking external capabilities (APIs, calculators, databases) to accompli
 
 **Responses API**
 
-OpenAI's standard interface for rollouts, including function calls and multi-turn conversations. NeMo Gym's native format.
+OpenAI's interface for model interactions, including function calls and multi-turn conversation items. NeMo Gym uses it as its native agent/model protocol. It does not include every trajectory field, such as executor timing and resolution status.
 
 **Chat Completions API**
 

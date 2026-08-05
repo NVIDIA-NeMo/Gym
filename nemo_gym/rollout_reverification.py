@@ -43,6 +43,7 @@ from nemo_gym.rollout_collection import (
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
     _get_max_rollout_attempts,
+    _rollout_for_wandb,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -774,9 +775,11 @@ class RolloutReverificationHelper(BaseModel):
         # reused for both the W&B rollouts export and aggregate metrics so the file is never re-read.
         results, agg_rows = _load_reverified_results(output_fpaths.output)
 
-        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
+        if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            get_wandb_run().log({"Rollouts": Table(data=[[orjson.dumps(r)] for r in results], columns=["Rollout"])})
+            wandb_run.log(
+                {"Rollouts": Table(data=[[orjson.dumps(_rollout_for_wandb(r))] for r in results], columns=["Rollout"])}
+            )
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
         if config.disable_aggregation:

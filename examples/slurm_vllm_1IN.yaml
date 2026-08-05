@@ -1,9 +1,9 @@
 compute:
   cluster:
     type: slurm
-    hostname: cw-dfw-cs-001-login-01.cw-dfw-cs-001.hpc.nvidia.com
+    hostname: myslurmcluster
     walltime: "00:30:00"
-    account: coreai_dlalgo_nemorl
+    account: myaccount
     node_pools:
       compute:
         partition: batch
@@ -42,5 +42,5 @@ driver:
         config_paths: # if services include pre-defined service types, some configs might be created and added to the command automatically
           - benchmarks/ifbench/config.yaml
 job:
-  output_path: /lustre/fsw/portfolios/coreai/users/oyilmaz/orch_tests
+  output_path: /lustre/fsw/my-path
 
