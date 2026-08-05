@@ -366,6 +366,21 @@ class NeMoGymResponse(Response):
     usage: Optional[NeMoGymResponseUsage] = None
 
 
+def accumulate_response_usage(total: NeMoGymResponseUsage, addend: NeMoGymResponseUsage) -> None:
+    """Fold one turn's usage into a running multi-turn total, in place.
+
+    Every counter is summed, including the token details. Agents used to sum the top-level counts
+    and reset ``cached_tokens``/``reasoning_tokens`` to 0, which discarded the per-turn detail the
+    model server had already reported. A turn whose provider reported no detail contributes 0, so
+    the total is the sum over the turns that did report.
+    """
+    total.input_tokens += addend.input_tokens
+    total.output_tokens += addend.output_tokens
+    total.total_tokens += addend.total_tokens
+    total.input_tokens_details.cached_tokens += addend.input_tokens_details.cached_tokens
+    total.output_tokens_details.reasoning_tokens += addend.output_tokens_details.reasoning_tokens
+
+
 ########################################
 # Chat Completion API outputs
 ########################################

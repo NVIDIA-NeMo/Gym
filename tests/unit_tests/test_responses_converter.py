@@ -15,7 +15,7 @@
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
 import pytest
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -566,6 +566,72 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
     )
 
     assert expected_response == actual_response
+
+
+def _chat_completion_with_usage(usage: CompletionUsage) -> NeMoGymChatCompletion:
+    return NeMoGymChatCompletion(
+        id="",
+        created=0,
+        model="",
+        object="chat.completion",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason="stop",
+                message=NeMoGymChatCompletionMessage(role="assistant", content="hi", tool_calls=[]),
+            )
+        ],
+        usage=usage,
+    )
+
+
+def _converted_usage(converter: ResponsesConverter, usage: CompletionUsage) -> NeMoGymResponseUsage:
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
+        chat_completion=_chat_completion_with_usage(usage),
+    )
+    return response.usage
+
+
+def test_chat_completion_to_response_propagates_usage_details(converter: ResponsesConverter):
+    """A provider-reported cache/reasoning count must survive the dialect conversion.
+
+    These were previously hard-coded to 0, so a real cache hit was recorded as a miss.
+    """
+    usage = _converted_usage(
+        converter,
+        CompletionUsage(
+            prompt_tokens=100,
+            completion_tokens=20,
+            total_tokens=120,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=64),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=12),
+        ),
+    )
+
+    assert usage.input_tokens_details.cached_tokens == 64
+    assert usage.output_tokens_details.reasoning_tokens == 12
+
+
+def test_chat_completion_to_response_usage_details_default_to_zero(converter: ResponsesConverter):
+    """The Responses schema types both counts as required ints, so an absent or explicitly-null
+    upstream detail folds to 0 rather than propagating None (which would fail validation)."""
+    absent = _converted_usage(converter, CompletionUsage(prompt_tokens=1, completion_tokens=2, total_tokens=3))
+    assert absent.input_tokens_details.cached_tokens == 0
+    assert absent.output_tokens_details.reasoning_tokens == 0
+
+    explicit_null = _converted_usage(
+        converter,
+        CompletionUsage(
+            prompt_tokens=1,
+            completion_tokens=2,
+            total_tokens=3,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=None),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=None),
+        ),
+    )
+    assert explicit_null.input_tokens_details.cached_tokens == 0
+    assert explicit_null.output_tokens_details.reasoning_tokens == 0
 
 
 # ===========================================================================

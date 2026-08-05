@@ -62,6 +62,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    accumulate_response_usage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import (
@@ -189,13 +190,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 agent_response.usage = None
 
             if usage and agent_response.usage:
-                usage.input_tokens += agent_response.usage.input_tokens
-                usage.output_tokens += agent_response.usage.output_tokens
-                usage.total_tokens += agent_response.usage.total_tokens
-
-                # TODO support more advanced token details
-                usage.input_tokens_details.cached_tokens = 0
-                usage.output_tokens_details.reasoning_tokens = 0
+                accumulate_response_usage(usage, agent_response.usage)
 
             if agent_response.incomplete_details:
                 break
