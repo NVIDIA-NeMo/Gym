@@ -22,14 +22,25 @@ MONITOR_BATCH="${CHECKOUT}/benchmarks/gdpval/slurm/run_gdpval_continuation_monit
 VALIDATOR="${CHECKOUT}/benchmarks/gdpval/validate_gdpval_batch.py"
 RESUME_VALIDATOR="${CHECKOUT}/benchmarks/gdpval/slurm/validate_gdpval_resume_state.py"
 PYTHON_BIN="${CHECKOUT}/.venv/bin/python"
-LAUNCH_INPUT="${RUN_ROOT}/input/afterquery_gdpval_subset_100_20260721.launch.jsonl"
-REFERENCE_OVERRIDES="${CHECKOUT}/benchmarks/gdpval/data/afterquery_gdpval_subset_100_20260721.reference_overrides.json"
+# Dataset profile (source a datasets/*.env). run_gdpval_rollouts.sh names the
+# launch copy after the source basename, so derive the same name here.
+SOURCE_INPUT="${GDPVAL_INPUT_JSONL-}"
+if [[ -n "${GDPVAL_LAUNCH_INPUT-}" ]]; then
+  LAUNCH_INPUT="${GDPVAL_LAUNCH_INPUT}"
+elif [[ -n "${SOURCE_INPUT}" ]]; then
+  LAUNCH_INPUT="${RUN_ROOT}/input/$(basename "${SOURCE_INPUT}" .jsonl).launch.jsonl"
+else
+  echo "ERROR: set GDPVAL_INPUT_JSONL (or GDPVAL_LAUNCH_INPUT) from your dataset profile" >&2
+  exit 1
+fi
+# Optional: batches with no prompt-backed reference repairs leave this unset.
+REFERENCE_OVERRIDES="${GDPVAL_REFERENCE_OVERRIDES-}"
 RESULTS_DIR="${RUN_ROOT}/results"
 FULL_OUTPUT="${RESULTS_DIR}/rollouts.jsonl"
 FULL_MATERIALIZED="${RESULTS_DIR}/rollouts_materialized_inputs.jsonl"
 FULL_FAILURES="${RESULTS_DIR}/rollouts_failures.jsonl"
 DELIVERABLES_DIR="${RUN_ROOT}/deliverables"
-SMOKE_TASK_ID="${GDPVAL_SMOKE_TASK_ID:-AQ-09135}"
+SMOKE_TASK_ID="${GDPVAL_SMOKE_TASK_ID-}"
 SMOKE_OUTPUT="${RESULTS_DIR}/smoke_${SMOKE_TASK_ID}.jsonl"
 SMOKE_MATERIALIZED="${RESULTS_DIR}/smoke_${SMOKE_TASK_ID}_materialized_inputs.jsonl"
 SMOKE_FAILURES="${RESULTS_DIR}/smoke_${SMOKE_TASK_ID}_failures.jsonl"
@@ -115,24 +126,33 @@ line_count() {
   fi
 }
 
+# Profile-driven validator arguments. Without --task-id-pattern and
+# --reference-mode the validator falls back to its own defaults, which is how a
+# gate silently rejects every row of a batch it was not written for.
+profile_validator_args() {
+  local -a args=(--input "${LAUNCH_INPUT}")
+  [[ -n "${GDPVAL_EXPECTED_COUNT-}" ]] && args+=(--expected-count "${GDPVAL_EXPECTED_COUNT}")
+  [[ -n "${EXPECTED_LAUNCH_SHA256-}" ]] && args+=(--expected-sha256 "${EXPECTED_LAUNCH_SHA256}")
+  [[ -n "${REFERENCE_OVERRIDES}" ]] && args+=(--reference-overrides "${REFERENCE_OVERRIDES}")
+  [[ -n "${GDPVAL_TASK_ID_PATTERN-}" ]] && args+=(--task-id-pattern "${GDPVAL_TASK_ID_PATTERN}")
+  [[ -n "${GDPVAL_REFERENCE_MODE-}" ]] && args+=(--reference-mode "${GDPVAL_REFERENCE_MODE}")
+  printf '%s\n' "${args[@]}"
+}
+
 validate_full() {
-  "${PYTHON_BIN}" "${VALIDATOR}" \
-    --input "${LAUNCH_INPUT}" \
-    --expected-count 100 \
-    --expected-sha256 "${EXPECTED_LAUNCH_SHA256}" \
-    --reference-overrides "${REFERENCE_OVERRIDES}" \
+  local -a args=()
+  mapfile -t args < <(profile_validator_args)
+  "${PYTHON_BIN}" "${VALIDATOR}" "${args[@]}" \
     --rollouts "${FULL_OUTPUT}" \
     --deliverables-dir "${DELIVERABLES_DIR}" \
     --expected-response-model "${EXPECTED_MODEL_NAME}"
 }
 
 validate_smoke() {
-  "${PYTHON_BIN}" "${VALIDATOR}" \
-    --input "${LAUNCH_INPUT}" \
-    --expected-count 100 \
-    --expected-sha256 "${EXPECTED_LAUNCH_SHA256}" \
-    --reference-overrides "${REFERENCE_OVERRIDES}" \
-    --smoke-task-id "${SMOKE_TASK_ID}" \
+  local -a args=()
+  mapfile -t args < <(profile_validator_args)
+  [[ -n "${SMOKE_TASK_ID}" ]] && args+=(--smoke-task-id "${SMOKE_TASK_ID}")
+  "${PYTHON_BIN}" "${VALIDATOR}" "${args[@]}" \
     --rollouts "${SMOKE_OUTPUT}" \
     --deliverables-dir "${SMOKE_DELIVERABLES}" \
     --require-deliverable \
@@ -251,9 +271,11 @@ verify_captured_state_identity() {
   fi
 }
 
-for path in "${SUBMITTER}" "${MONITOR_BATCH}" "${VALIDATOR}" "${RESUME_VALIDATOR}" "${PYTHON_BIN}" "${LAUNCH_INPUT}" "${REFERENCE_OVERRIDES}"; do
+for path in "${SUBMITTER}" "${MONITOR_BATCH}" "${VALIDATOR}" "${RESUME_VALIDATOR}" "${PYTHON_BIN}" "${LAUNCH_INPUT}"; do
   require_file "${path}"
 done
+# Optional -- only required when the profile declares one.
+[[ -n "${REFERENCE_OVERRIDES}" ]] && require_file "${REFERENCE_OVERRIDES}"
 for command_name in sbatch squeue sacct awk sha256sum; do
   command -v "${command_name}" >/dev/null
 done
