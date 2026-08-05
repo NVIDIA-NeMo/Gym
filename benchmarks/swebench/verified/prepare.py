@@ -17,7 +17,7 @@
 
 from pathlib import Path
 
-from ..prepare_utils import prepare
+from ..prepare_utils import prepare_helper
 
 
 BENCHMARK_DIR = Path(__file__).parent.parent
@@ -26,5 +26,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_FPATH = DATA_DIR / "swebench_verified_benchmark.jsonl"
 
 
+def prepare():
+    return prepare_helper(hf_path="princeton-nlp/SWE-bench_Verified", output_fpath=OUTPUT_FPATH)
+
+
 if __name__ == "__main__":
-    prepare(hf_path="princeton-nlp/SWE-bench_Verified", output_fpath=OUTPUT_FPATH)
+    prepare()

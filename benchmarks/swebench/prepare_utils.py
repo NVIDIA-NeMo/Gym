@@ -19,7 +19,7 @@ from pathlib import Path
 from datasets import load_dataset
 
 
-def prepare(hf_path: str, output_fpath: Path) -> Path:
+def prepare_helper(hf_path: str, output_fpath: Path) -> Path:
     ds = load_dataset(hf_path, split="test")
 
     with output_fpath.open("w", encoding="utf-8") as fout:
