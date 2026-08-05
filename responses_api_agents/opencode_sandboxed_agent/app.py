@@ -78,6 +78,7 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_results_fpath: str
     opencode_run_stdout: str
     opencode_run_stderr: str
+    opencode_no_export_found: bool
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
@@ -297,9 +298,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_local_fpath = results_dir / export_fname
         if self.config.debug:
             print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-        await sandbox.download(str(results_remote_fpath), results_local_fpath)
+        try:
+            await sandbox.download(str(results_remote_fpath), results_local_fpath)
+        except:
+            print(f"Failed to download export results to {results_local_fpath}", file=sys.stderr)
 
-        opencode_export = json.loads(results_local_fpath.read_text().strip() or "{}")
+        opencode_export = dict()
+        if results_local_fpath.exists():
+            opencode_export = json.loads(results_local_fpath.read_text().strip() or "{}")
+
         output = []
         usage = None
         if opencode_export:
@@ -311,6 +318,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_results_fpath": str(results_local_fpath),
             "opencode_run_stdout": result.stdout,
             "opencode_run_stderr": result.stderr,
+            "opencode_no_export_found": bool(opencode_export),
         }
 
         return NeMoGymResponse(
