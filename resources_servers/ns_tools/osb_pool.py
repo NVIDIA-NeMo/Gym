@@ -12,46 +12,53 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Static pool of long-lived OpenSandbox pods that serve the NeMo-Skills sandbox HTTP protocol.
+"""A fixed set of long-lived, SHARED OpenSandbox pods serving the NeMo-Skills sandbox
+HTTP protocol, with sessions multiplexed across them by sticky routing.
 
-Each pod runs an unmodified NeMo-Skills sandbox server on a declared port; clients reach it
-through the OpenSandbox server proxy endpoint (resolved via ``AsyncSandbox.endpoint``), so the
-data path is plain HTTP request/response. The pool pins each NS session uuid to one pod
-(dict-assignment stickiness, least-loaded first), heals dead pods in place through a token
-bucket, and collapses total-outage into the NS client's existing timeout contract.
+Sharing is what makes large batches feasible: 16k concurrent sessions ride K pods
+(each pod's NS server multiplexes many sessions), instead of 16k pods. The
+OpenSandbox SDK's client-side pool (``SandboxPoolAsync``) is the create/heal engine:
+it keeps warm spares and health-checks acquisitions, so filling a slot at warmup or
+replacing a dead pod is one ``acquire()`` — create retries, readiness, and warm
+inventory are SDK-owned, not reimplemented here.
 
-This module is imported only when ns_tools selects the ``opensandbox_pool`` backend; the
-default ``local`` backend never touches it.
+This module is imported only when ns_tools selects the ``opensandbox_pool`` backend;
+the default ``local`` backend never touches it.
 """
 
 import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
-from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.providers.base import SandboxSpec
-
 
 LOGGER = logging.getLogger(__name__)
 
+_PREPARED_MARKER = "/opt/ns/.pool_prepared"
 
-def _provider_domain_and_key(provider: Dict[str, Any]) -> Tuple[str, str]:
-    """Pull connection.domain/api_key out of a single-key provider config dict."""
+
+def _parse_connection(provider: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull the connection kwargs out of a single-key provider config dict."""
     if not isinstance(provider, dict) or len(provider) != 1:
         raise ValueError("opensandbox_pool.provider must be a single-key provider config dict")
     kwargs = next(iter(provider.values())) or {}
-    connection = kwargs.get("connection") or {}
-    return str(connection.get("domain") or ""), str(connection.get("api_key") or "")
+    connection = dict(kwargs.get("connection") or {})
+    if not connection.get("domain") or not connection.get("api_key"):
+        raise ValueError(
+            "opensandbox_pool backend selected but the provider connection has an empty "
+            "domain or api_key — set OPENSANDBOX_BASE_URL / OPENSANDBOX_API_KEY"
+        )
+    return connection
 
 
 @dataclass
 class _Slot:
     index: int
-    sandbox: Optional[AsyncSandbox] = None
+    sandbox: Any = None  # opensandbox.Sandbox
     base_url: str = ""
     headers: Dict[str, str] = field(default_factory=dict)
     healthy: bool = False
@@ -61,11 +68,12 @@ class _Slot:
 
 
 class OpenSandboxPool:
-    """K long-lived NS-sandbox pods with sticky session routing and in-slot healing.
+    """K shared NS-sandbox pods with sticky session routing; slots fill and heal
+    through the SDK's warm client-side pool.
 
-    The constructor is pure (config validation only); ``start()`` kicks a budgeted,
-    non-blocking warmup plus the heal and idle-sweep loops. ``route()`` lazily starts
-    the pool as a safety net if the owning server never called ``start()``.
+    The constructor is pure (validation only); ``start()`` kicks the SDK pool, a
+    budgeted non-blocking warmup, and the health/idle-sweep loops. ``route()``
+    lazily starts everything as a safety net if the owner never called ``start()``.
     """
 
     def __init__(
@@ -75,54 +83,51 @@ class OpenSandboxPool:
         image: str,
         port: int = 6000,
         size: int = 8,
+        warm_spares: int = 2,
         ttl_s: Optional[float] = None,
         env: Optional[Dict[str, str]] = None,
         entrypoint: Optional[list] = None,
-        resources: Optional[Dict[str, Any]] = None,
+        resources: Optional[Dict[str, str]] = None,
         setup_files: Optional[Dict[str, str]] = None,
         setup_commands: Optional[list] = None,
         service_command: Optional[str] = None,
         health_path: str = "/health",
-        warmup_create_concurrency: int = 8,
+        warmup_fill_concurrency: int = 8,
         health_interval_s: float = 15.0,
         health_timeout_s: float = 10.0,
         heal_creates_per_s: float = 0.5,
         session_idle_sweep_s: float = 7200.0,
         run_label: Optional[str] = None,
     ) -> None:
-        domain, api_key = _provider_domain_and_key(provider)
-        if not domain or not api_key:
-            raise ValueError(
-                "opensandbox_pool backend selected but the provider connection has an empty "
-                "domain or api_key — set OPENSANDBOX_BASE_URL / OPENSANDBOX_API_KEY"
-            )
+        self._connection_kwargs = _parse_connection(provider)
         if not image:
             raise ValueError("opensandbox_pool backend selected but image is empty — set NS_SANDBOX_IMAGE")
         if int(size) < 1:
             raise ValueError(f"opensandbox_pool.size must be >= 1, got {size}")
-        self._provider_config = provider
         self._image = image
         self._port = int(port)
         self._size = int(size)
-        self._ttl_s = ttl_s
+        self._warm_spares = int(warm_spares)
+        self._ttl_s = float(ttl_s) if ttl_s else None
         self._env = dict(env or {})
         self._entrypoint = list(entrypoint) if entrypoint else None
-        self._resources = dict(resources or {})
+        self._resources = {k: str(v) for k, v in (resources or {}).items()}
         self._setup_files = dict(setup_files or {})
         self._setup_commands = list(setup_commands or [])
         self._service_command = service_command
         self._health_path = health_path
-        self._warmup_create_concurrency = warmup_create_concurrency
+        self._warmup_fill_concurrency = warmup_fill_concurrency
         self._health_interval_s = health_interval_s
         self._health_timeout_s = health_timeout_s
         self._heal_min_interval_s = 1.0 / heal_creates_per_s if heal_creates_per_s > 0 else 0.0
         self._session_idle_sweep_s = session_idle_sweep_s
-        self._run_label = run_label
+        self._run_label = run_label or "ns-tools-pool"
 
         self._slots = [_Slot(index=i) for i in range(self._size)]
         self._session_to_slot: Dict[str, int] = {}
         self._session_last_used: Dict[str, float] = {}
         self._lock = asyncio.Lock()
+        self._sdk_pool: Any = None
         self._started = False
         self._warmup_done = False
         self._closed = False
@@ -133,10 +138,33 @@ class OpenSandboxPool:
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
-        """Kick warmup + maintenance loops; returns immediately (warmup is budgeted, not blocking)."""
+        """Start the SDK pool and kick warmup + maintenance loops; returns immediately."""
         if self._started or self._closed:
             return
         self._started = True
+        from opensandbox._async_pool_store import InMemoryAsyncPoolStateStore
+        from opensandbox.config.connection import ConnectionConfig
+        from opensandbox.pool_async import SandboxPoolAsync
+        from opensandbox.pool_types import PoolCreationSpec
+
+        self._sdk_pool = SandboxPoolAsync(
+            pool_name=self._run_label,
+            max_idle=self._warm_spares,
+            state_store=InMemoryAsyncPoolStateStore(),
+            connection_config=ConnectionConfig(**self._connection_kwargs),
+            creation_spec=PoolCreationSpec(
+                image=self._image,
+                entrypoint=self._entrypoint,
+                env=self._env or None,
+                resource=self._resources or None,
+                metadata={"purpose": "ns-tools-sandbox-pool", "run": self._run_label},
+            ),
+            warmup_sandbox_preparer=self._prepare if self._needs_prepare else None,
+            # Warm creates and renewals use idle_timeout as the sandbox TTL; the SDK default
+            # (24h) exceeds the server's configured maximum (8h on cell-2).
+            idle_timeout=timedelta(seconds=self._ttl_s or 14400.0),
+        )
+        await self._sdk_pool.start()
         self._tasks.append(asyncio.create_task(self._warmup(), name="osb-pool-warmup"))
         self._tasks.append(asyncio.create_task(self._heal_loop(), name="osb-pool-heal"))
         self._tasks.append(asyncio.create_task(self._sweep_loop(), name="osb-pool-sweep"))
@@ -154,34 +182,63 @@ class OpenSandboxPool:
         for slot in self._slots:
             if slot.sandbox is not None:
                 try:
-                    await asyncio.wait_for(slot.sandbox.stop(), timeout=30.0)
+                    await asyncio.wait_for(slot.sandbox.kill(), timeout=30.0)
                 except Exception as exc:
                     LOGGER.warning("pool slot %d teardown failed (TTL will reap): %s", slot.index, exc)
                 slot.sandbox = None
                 slot.healthy = False
+        if self._sdk_pool is not None:
+            try:
+                await self._sdk_pool.shutdown(graceful=True)
+            except Exception as exc:
+                LOGGER.warning("SDK pool shutdown failed: %s", exc)
         await self._http.aclose()
 
-    def _spec(self) -> SandboxSpec:
-        metadata = {"purpose": "ns-tools-sandbox-pool"}
-        if self._run_label:
-            metadata["run"] = self._run_label
-        return SandboxSpec(
-            image=self._image,
-            ttl_s=self._ttl_s,
-            env=self._env,
-            entrypoint=self._entrypoint,
-            resources=self._resources,
-            metadata=metadata,
-            ports=(self._port,),
-        )
+    # ------------------------------------------------------------------ slot fill
+
+    @property
+    def _needs_prepare(self) -> bool:
+        return bool(self._setup_files or self._setup_commands or self._service_command)
+
+    async def _prepare(self, sandbox: Any) -> None:
+        """Bootstrap a pod that is not a baked self-starting image. Idempotent via marker."""
+        for target_path, local_path in self._setup_files.items():
+            with open(local_path, "rb") as fh:
+                await sandbox.files.write_file(target_path, fh.read())
+        for command in self._setup_commands:
+            execution = await sandbox.commands.run(command)
+            if (execution.exit_code or 0) != 0:
+                raise RuntimeError(f"setup command failed rc={execution.exit_code}: {command!r}")
+        if self._service_command:
+            execution = await sandbox.commands.run(self._service_command)
+            if (execution.exit_code or 0) != 0:
+                raise RuntimeError(f"service command failed rc={execution.exit_code}")
+        await sandbox.commands.run(f"touch {_PREPARED_MARKER}")
+
+    async def _ensure_prepared(self, sandbox: Any) -> None:
+        """Direct-created acquisitions bypass the SDK warmup preparer; prepare them here."""
+        if not self._needs_prepare:
+            return
+        execution = await sandbox.commands.run(f"test -f {_PREPARED_MARKER}")
+        if (execution.exit_code or 0) != 0:
+            await self._prepare(sandbox)
+
+    def _normalize_endpoint(self, resolved: Any) -> Tuple[str, Dict[str, str]]:
+        url = str(getattr(resolved, "endpoint", "") or "")
+        if not url:
+            raise RuntimeError("SDK returned an empty sandbox endpoint")
+        if "://" not in url:
+            domain = str(self._connection_kwargs.get("domain") or "")
+            scheme = "https" if domain.startswith("https://") else "http"
+            url = f"{scheme}://{url}"
+        headers = dict(getattr(resolved, "headers", None) or {})
+        if not headers and self._connection_kwargs.get("api_key"):
+            headers["OPEN-SANDBOX-API-KEY"] = str(self._connection_kwargs["api_key"])
+        return url.rstrip("/"), headers
 
     async def _create_slot(self, slot: _Slot) -> None:
-        """Create, bootstrap, health-gate, and admit one pod into its slot.
-
-        Exactly one create may be in flight per slot: a duplicate create landing late
-        would overwrite base_url under pinned sessions (breaking stickiness) and leak
-        the earlier pod until its TTL.
-        """
+        """Fill one slot from the SDK pool. Single-flight per slot: a duplicate landing
+        late would overwrite base_url under pinned sessions and leak a pod until TTL."""
         if slot.creating:
             return
         slot.creating = True
@@ -191,31 +248,22 @@ class OpenSandboxPool:
             slot.creating = False
 
     async def _create_slot_inner(self, slot: _Slot) -> None:
-        sandbox = AsyncSandbox(provider=dict(self._provider_config), spec=self._spec())
-        await sandbox.start()
+        sandbox_timeout = timedelta(seconds=self._ttl_s) if self._ttl_s else None
+        sandbox = await self._sdk_pool.acquire(sandbox_timeout=sandbox_timeout)
         try:
-            for target_path, local_path in self._setup_files.items():
-                await sandbox.upload(local_path, target_path)
-            for command in self._setup_commands:
-                result = await sandbox.exec(command, timeout_s=600)
-                if result.return_code != 0:
-                    raise RuntimeError(f"setup command failed rc={result.return_code}: {command!r}: {result.stderr[:500]}")
-            if self._service_command:
-                result = await sandbox.exec(self._service_command, timeout_s=30)
-                if result.return_code != 0:
-                    raise RuntimeError(f"service command failed rc={result.return_code}: {result.stderr[:500]}")
-            resolved = await sandbox.endpoint(self._port)
-            base_url = resolved.endpoint.rstrip("/")
-            await self._wait_healthy(base_url, dict(resolved.headers), budget_s=120.0)
+            await self._ensure_prepared(sandbox)
+            resolved = await sandbox.get_endpoint(self._port)
+            base_url, headers = self._normalize_endpoint(resolved)
+            await self._wait_healthy(base_url, headers, budget_s=120.0)
         except Exception:
             try:
-                await sandbox.stop()
+                await sandbox.kill()
             except Exception:
                 pass
             raise
         slot.sandbox = sandbox
         slot.base_url = base_url
-        slot.headers = dict(resolved.headers)
+        slot.headers = headers
         slot.strikes = 0
         slot.healthy = True
 
@@ -235,7 +283,7 @@ class OpenSandboxPool:
         raise RuntimeError(f"pod never became healthy through the proxy: {last_error}")
 
     async def _warmup(self) -> None:
-        semaphore = asyncio.Semaphore(self._warmup_create_concurrency)
+        semaphore = asyncio.Semaphore(self._warmup_fill_concurrency)
 
         async def one(slot: _Slot) -> None:
             async with semaphore:
@@ -249,12 +297,14 @@ class OpenSandboxPool:
         self._warmup_done = True
         LOGGER.info("pool ready %d/%d", ready, self._size)
 
+    # ------------------------------------------------------------------ maintenance
+
     async def _heal_loop(self) -> None:
         while not self._closed:
             await asyncio.sleep(self._health_interval_s)
             if not self._warmup_done:
                 # Warmup owns every slot until it finishes; healing in parallel would
-                # race duplicate creates into the same slot.
+                # race duplicate acquisitions into the same slot.
                 continue
             for slot in self._slots:
                 if slot.creating:
@@ -277,14 +327,15 @@ class OpenSandboxPool:
                     await self._drop_slot_sessions(slot)
                     if slot.sandbox is not None:
                         try:
-                            await slot.sandbox.stop()
+                            await slot.sandbox.kill()
                         except Exception:
                             pass
                         slot.sandbox = None
                     await self._heal_slot(slot)
 
     async def _heal_slot(self, slot: _Slot) -> None:
-        """Replace a dead pod in the SAME slot, rate-limited so heals can never storm the cell."""
+        """Replace a dead pod in the SAME slot, rate-limited; the SDK's warm spares make
+        the replacement itself near-instant."""
         now = time.monotonic()
         wait = self._last_heal_create + self._heal_min_interval_s - now
         if wait > 0:
