@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -61,7 +62,9 @@ class TestApp:
         post_responses = []
         for response in responses:
             post_response_mock = AsyncMock()
+            post_response_mock.ok = True
             post_response_mock.json.return_value = response
+            post_response_mock.read.return_value = json.dumps(response).encode()
             post_responses.append(post_response_mock)
 
         if additional_responses_present:

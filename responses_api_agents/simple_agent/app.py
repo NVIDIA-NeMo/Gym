@@ -195,21 +195,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         cookies = response.cookies
 
         response_json = await get_response_json(response)
-        if self.config.skip_verification:
-            return SimpleAgentVerifyResponse.model_validate(
-                self.build_skipped_verify_response_payload(body, response_json)
+        return SimpleAgentVerifyResponse.model_validate(
+            await self.call_verify_or_skip(
+                body=body,
+                response=response_json,
+                resources_server_name=self.config.resources_server.name,
+                verify_request_type=SimpleAgentVerifyRequest,
+                verify_response_type=SimpleAgentVerifyResponse,
+                cookies=cookies,
             )
-
-        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": response_json})
-
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
         )
-        await raise_for_status(verify_response)
-        return SimpleAgentVerifyResponse.model_validate(await get_response_json(verify_response))
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
