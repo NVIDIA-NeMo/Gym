@@ -836,7 +836,8 @@ async def _assert_opensandbox_connect_after_create_preserves_request_timeout(mon
     assert handle.sandbox_id == "sdk-sandbox-1"
     assert isinstance(handle.raw, FakeSDKSandbox)
     connect_call = FakeSDKSandbox.connect_calls[0]
-    assert connect_call["skip_health_check"] is True
+    # This provider does not opt out, so the reconnect health-checks too.
+    assert connect_call["skip_health_check"] is False
     connection_kwargs = dict(connect_call["connection_config"].kwargs)
     # Transport identity is asserted in test_opensandbox_provider.py.
     connection_kwargs.pop("transport", None)

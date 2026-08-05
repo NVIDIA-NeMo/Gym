@@ -218,8 +218,12 @@ sandbox:                      # name referenced by the agent's sandbox_provider
       use_server_proxy: true
     create:
       request_timeout_s: 1200
-      timeout_s: 1200
-      skip_health_check: true
+      # Must exceed the spec's ready_timeout_s above: this bounds the whole
+      # create call, which includes the readiness wait.
+      timeout_s: 1500
+      # Skipping the check lets the first command race a pod whose exec
+      # daemon is not listening yet, which returns a 502.
+      skip_health_check: false
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0

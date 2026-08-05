@@ -847,7 +847,7 @@ class OpenSandboxProvider:
                         handle.sandbox_id,
                         connection_config=self._connection_config(),
                         connect_timeout=timedelta(seconds=attempt_timeout_s),
-                        skip_health_check=True,
+                        skip_health_check=self._create.skip_health_check,
                     ),
                     timeout=attempt_timeout_s,
                 )
