@@ -973,6 +973,57 @@ class TestRolloutCollection:
         if redact_payloads:
             assert "data:image/png;base64,secret" not in orjson.dumps(results[0]).decode()
 
+    async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+
+        # Indices that would derive "0-0" plus an explicit id. The explicit id has to win on both
+        # sides, or the writer and the reader key the same rollout differently and the readback
+        # finds nothing.
+        source_row = {
+            "responses_create_params": {"input": []},
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            ROLLOUT_ID_KEY_NAME: "step7.0-0",
+        }
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                store.record(
+                    "step7.0-0",
+                    {"model_call_id": "call", "dialect": "responses", "request": {}, "response": {}},
+                )
+                future = Future()
+                future.set_result((example, {"response": {"usage": {}}}))
+                return [future]
+
+        results = await Helper().run_from_config(config)
+
+        assert results[0][ROLLOUT_ID_KEY_NAME] == "step7.0-0"
+        assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["call"]
+        # Nothing was filed under the derived id, so the explicit id replaced it rather than
+        # sitting alongside it.
+        assert store.read("0-0") == []
+
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [

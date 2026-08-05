@@ -44,6 +44,7 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -809,6 +810,10 @@ class RolloutCollectionHelper(BaseModel):
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
             if ATTEMPT_INDEX_KEY_NAME in row:
                 result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+            if ROLLOUT_ID_KEY_NAME in row:
+                # Capture readback recomputes the id from the finished record, so an explicit id
+                # has to travel from the dispatched row onto the result the same way the indices do.
+                result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
