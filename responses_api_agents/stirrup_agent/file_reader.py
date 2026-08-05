@@ -42,6 +42,27 @@ from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS
 
 MAX_TOTAL_CHARS = 20_000
 
+# Run state the agent writes into the SAME directory as its deliverables. These
+# are not model output, and `.json` is in TEXT_EXTS, so without this the judge is
+# shown the agent's own transcript and grades it as work product. Single source:
+# every judging path imports it from here.
+IGNORE_FILES = frozenset(
+    {
+        "finish_params.json",
+        "history.json",
+        "history.pkl",
+        "inprogress_history.json",
+        "metadata.json",
+        "log.txt",
+        "reference_files",
+    }
+)
+
+
+def is_deliverable(path: Path) -> bool:
+    """True if *path* is agent-produced output rather than run state."""
+    return path.is_file() and path.name not in IGNORE_FILES
+
 
 def read_deliverable_files(output_dir: str) -> str:
     """Read text from all deliverable files in *output_dir*.
@@ -68,7 +89,7 @@ def read_deliverable_files(output_dir: str) -> str:
     total_len = 0
 
     for fpath in files:
-        if not fpath.is_file():
+        if not is_deliverable(fpath):
             continue
 
         ext = fpath.suffix.lower()
@@ -429,12 +450,12 @@ def convert_deliverables_to_content_blocks(
     # sidecar Plan.pptx.pdf, and the ordinary sibling Plan.pdf.
     consumed_pdfs: set[Path] = set()
     for entry in entries:
-        if entry.is_file() and entry.suffix.lower() in OFFICE_EXTS:
+        if is_deliverable(entry) and entry.suffix.lower() in OFFICE_EXTS:
             sidecar = entry.with_name(entry.name + ".pdf")
             consumed_pdfs.add(sidecar if sidecar.is_file() else entry.with_suffix(".pdf"))
 
     for fpath in entries:
-        if not fpath.is_file() or fpath in consumed_pdfs:
+        if not is_deliverable(fpath) or fpath in consumed_pdfs:
             continue
 
         ext = fpath.suffix.lower()
