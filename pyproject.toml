@@ -150,10 +150,10 @@ dependencies = [
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Sun Jun 22, 2026 with mlflow>=3.14.0 (CVE remediation)
+    # Updated Mon Aug 04, 2026 with mlflow>=3.15.1 (security bump)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.14.0",
-    "mlflow>=3.14.0",
+    "mlflow-skinny>=3.15.1",
+    "mlflow>=3.15.1",
 
     # aiohttp: async http backend
     # Updated Sun Jun 29, 2026 with aiohttp>=3.14.1 (CVE mitigation)
@@ -226,6 +226,15 @@ dependencies = [
 [project.optional-dependencies]
 all = [
     "nemo-gym[dev,sandbox]",
+]
+
+vllm = [
+    # Pin to the same version used by local_vllm_model / genrm_model server venvs.
+    "vllm==0.20.0",
+    # Pin flashinfer to the exact version vllm 0.20.0 specifies, ensuring pre-compiled
+    # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
+    # flashinfer>=0.2 bundles compiled kernels in the python package directly.
+    "flashinfer-python==0.6.8.post1",
 ]
 
 sandbox = [

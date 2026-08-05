@@ -530,6 +530,18 @@ COMMANDS = {
             MODEL_API_KEY,
         ),
     ),
+    "env prefetch": Command(
+        target="nemo_gym.cli.env:prefetch",
+        summary="Pre-warm per-server venvs without starting servers.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+        ),
+    ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
