@@ -1,0 +1,29 @@
+langchain_docs_qa_resources_server:
+  resources_servers:
+    langchain_docs_qa:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Question answering over the LangChain docs with a search tool and a verifiable reward.
+      value: Trains retrieval-grounded question answering over a documentation corpus.
+      retrieval_backend: bm25
+      reward_mode: mcqa
+      corpus_path: environments/langchain_docs_qa/data/chunks.jsonl
+langchain_docs_qa_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: langchain_docs_qa_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/langchain_docs_qa/data/example.jsonl
+      - name: langchain_docs_qa
+        type: train
+        jsonl_fpath: environments/langchain_docs_qa/data/langchain_docs_qa.jsonl
+        license: MIT
