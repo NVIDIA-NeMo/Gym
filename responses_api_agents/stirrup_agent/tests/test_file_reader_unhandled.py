@@ -131,3 +131,36 @@ def test_legacy_encoded_text_is_shown_not_withheld(tmp_path: Path):
     out = _text_of(convert_deliverables_to_content_blocks(str(d)))
     assert "notes.oldtxt" in out
     assert "NOT missing" not in out
+
+
+def test_zip_member_contents_are_read_not_just_named(tmp_path: Path):
+    """Rubrics ask whether what is inside the bundle is correct."""
+    d = tmp_path / "repeat_0"
+    d.mkdir()
+    with zipfile.ZipFile(d / "bundle.zip", "w") as zf:
+        zf.writestr("src/main.py", "def handler():\n    return 42\n")
+        zf.writestr("logo.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+
+    out = _text_of(convert_deliverables_to_content_blocks(str(d)))
+    assert "src/main.py" in out
+    assert "def handler()" in out, "member listed but its contents withheld"
+    assert "\x89PNG" not in out, "a binary member was dumped as text"
+
+
+def test_zip_container_documents_are_not_treated_as_archives(tmp_path: Path):
+    """.odt/.xlsm open cleanly as zips; summarising them lists XML internals."""
+    import io
+
+    d = tmp_path / "repeat_0"
+    d.mkdir()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+        zf.writestr("content.xml", "<office:document-content/>")
+        zf.writestr("META-INF/manifest.xml", "<manifest/>")
+    (d / "Report.odt").write_bytes(buf.getvalue())
+
+    out = _text_of(convert_deliverables_to_content_blocks(str(d)))
+    assert "Report.odt" in out
+    assert "content.xml" not in out
+    assert "META-INF" not in out

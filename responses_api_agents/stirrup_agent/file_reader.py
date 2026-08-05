@@ -209,7 +209,28 @@ HANDLED_EXTS = TEXT_EXTS | OFFICE_EXTS | IMAGE_EXTS | AUDIO_EXTS | VIDEO_EXTS | 
 
 TEXT_SNIFF_BYTES = 8192
 MAX_TEXT_CHARS_PER_FILE = 20_000
-MAX_ARCHIVE_MEMBERS = 200
+MAX_ARCHIVE_ENTRIES = 200
+MAX_ARCHIVE_TEXT_CHARS = 120_000
+MAX_ARCHIVE_MEMBER_BYTES = 2_000_000
+
+# Document formats that happen to BE zip containers. Without this they open
+# cleanly as archives and the judge is handed a listing of OOXML/ODF internals
+# (`word/document.xml`, `[Content_Types].xml`) instead of the document.
+ARCHIVE_DOC_EXTS = {
+    ".xlsm",
+    ".docm",
+    ".pptm",
+    ".xlsb",
+    ".odt",
+    ".ods",
+    ".odp",
+    ".odg",
+    ".epub",
+    ".jar",
+    ".whl",
+    ".apk",
+    ".ipa",
+}
 # Audio/video (AUDIO_EXTS / VIDEO_EXTS, imported above) are only passed through
 # when the judge is AV-capable (e.g. MiniMax M3); image-only judges can't decode
 # them, so they are otherwise skipped. Every extension in those sets needs an
@@ -273,19 +294,56 @@ def _sniffs_as_text(fpath: Path) -> bool:
 
 
 def _archive_manifest(fpath: Path) -> str | None:
-    """Member listing, or None if not a readable archive."""
+    """Member listing plus text-member contents, or None if not a readable archive.
+
+    Rubrics ask both whether a bundle contains X and whether what is inside is
+    correct, so names alone cannot answer them.
+    """
     import zipfile
+
+    # Must come first: these open cleanly as zips and would otherwise be
+    # summarised as their own XML internals.
+    if fpath.suffix.lower() in ARCHIVE_DOC_EXTS:
+        return None
 
     try:
         with zipfile.ZipFile(fpath) as zf:
-            names = zf.namelist()
+            infos = zf.infolist()
+            lines = [f"  {i.filename} ({i.file_size:,} bytes)" for i in infos[:MAX_ARCHIVE_ENTRIES]]
+            if len(infos) > MAX_ARCHIVE_ENTRIES:
+                lines.append(f"  ... and {len(infos) - MAX_ARCHIVE_ENTRIES:,} more entries")
+
+            # Read IN MEMORY, never extracted: nothing is written to disk, so
+            # there is no zip-slip to defend against. Bounded by per-member size,
+            # aggregate characters, and the caller's own text budget.
+            bodies: list[str] = []
+            spent = 0
+            for info in infos:
+                if info.is_dir() or info.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+                    continue
+                if Path(info.filename).suffix.lower() not in TEXT_EXTS:
+                    continue
+                if spent >= MAX_ARCHIVE_TEXT_CHARS:
+                    bodies.append("[archive text budget exhausted; remaining members listed above but not shown]")
+                    break
+                try:
+                    raw = zf.read(info)
+                except Exception:
+                    continue
+                text = raw.decode("utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                take = text[: MAX_ARCHIVE_TEXT_CHARS - spent]
+                spent += len(take)
+                truncated = "\n[...member truncated]" if len(take) < len(text) else ""
+                bodies.append(f"--- {info.filename} ---\n{take}{truncated}")
     except Exception:
         return None
-    shown = names[:MAX_ARCHIVE_MEMBERS]
-    lines = "\n".join(f"  {n}" for n in shown)
-    if len(names) > len(shown):
-        lines += f"\n  ... and {len(names) - len(shown)} more member(s)"
-    return f"{len(names)} member(s):\n{lines}"
+
+    out = f"{len(infos)} member(s):\n" + "\n".join(lines)
+    if bodies:
+        out += "\n\n" + "\n\n".join(bodies)
+    return out
 
 
 def _truncated(text: str) -> str:
