@@ -5,6 +5,11 @@ claude_code_agent:
       resources_server:
         type: resources_servers
         name: ???
+      # This harness returns output with no token ids, so training on its rollouts requires
+      # capture: set this true and the agent's model calls are correlated, captured, and rebuilt
+      # into a token-bearing response. Off by default because evaluation does not need it and
+      # capture costs a write per model call.
+      token_id_capture: false
       concurrency: 32
       model: claude-sonnet-4-6
       anthropic_api_key: ${anthropic_api_key}
