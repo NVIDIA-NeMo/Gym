@@ -67,6 +67,26 @@ def _message_content_to_text(content: Any) -> str:
     return "".join(part.get("text", "") for part in content or [] if isinstance(part, dict))
 
 
+def _optional_token_count(value: Any) -> Optional[int]:
+    """Return a provider-reported token count without coercing missing/invalid values to zero."""
+    return value if type(value) is int and value >= 0 else None
+
+
+def _usage_detail(usage: Any, detail_group: str, detail_name: str, *top_level_aliases: str) -> Optional[int]:
+    """Read one canonical nested token detail, then named provider aliases."""
+    details = getattr(usage, detail_group, None)
+    value = details.get(detail_name) if isinstance(details, dict) else getattr(details, detail_name, None)
+    value = _optional_token_count(value)
+    if value is not None:
+        return value
+    for name in top_level_aliases:
+        value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+        value = _optional_token_count(value)
+        if value is not None:
+            return value
+    return None
+
+
 class ResponsesConverterState(BaseModel):
     return_token_id_information: bool
 
@@ -263,7 +283,10 @@ class ResponsesConverter(BaseModel):
         match m["role"]:
             case "assistant":
                 final_content = ""
-                if isinstance(m["content"], list):
+                if m["content"] is None:
+                    # Tool-call only turns have "None" according to the official API spec.
+                    pass
+                elif isinstance(m["content"], list):
                     content_str = "".join([part.get("text", "") for part in m["content"]])
                     final_content += content_str
                 elif isinstance(m["content"], str):
@@ -486,19 +509,30 @@ class ResponsesConverter(BaseModel):
 
         usage = None
         if chat_completion.usage:
-            cc_usage = chat_completion.usage
-            cached_tokens = (
-                (cc_usage.prompt_tokens_details.cached_tokens or 0) if cc_usage.prompt_tokens_details else 0
+            cached_tokens = _usage_detail(
+                chat_completion.usage,
+                "prompt_tokens_details",
+                "cached_tokens",
+                "cached_input_tokens",
+                "cache_read_input_tokens",
             )
-            reasoning_tokens = (
-                (cc_usage.completion_tokens_details.reasoning_tokens or 0) if cc_usage.completion_tokens_details else 0
+            reasoning_tokens = _usage_detail(
+                chat_completion.usage,
+                "completion_tokens_details",
+                "reasoning_tokens",
+                "reasoning_output_tokens",
             )
             usage = NeMoGymResponseUsage(
                 input_tokens=chat_completion.usage.prompt_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(
+                    cached_tokens=cached_tokens if cached_tokens is not None else 0,
+                ),
                 output_tokens=chat_completion.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-                total_tokens=chat_completion.usage.prompt_tokens + chat_completion.usage.completion_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=reasoning_tokens if reasoning_tokens is not None else 0
+                ),
+                # Provider totals can use accounting that differs from prompt + completion.
+                total_tokens=chat_completion.usage.total_tokens,
             )
 
         incomplete_details = None
@@ -534,6 +568,7 @@ class ResponsesConverter(BaseModel):
             metadata=responses_create_params.metadata,
             instructions=responses_create_params.instructions,
             user=responses_create_params.user,
+            status="incomplete" if incomplete_details is not None else "completed",
             incomplete_details=incomplete_details,
             usage=usage,
         )

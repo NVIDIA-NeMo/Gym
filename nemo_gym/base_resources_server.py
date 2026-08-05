@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from enum import Enum
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -66,9 +68,17 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metrics", "mcp"})
 
 
+class ReverifyMode(str, Enum):
+    STATELESS = "stateless"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
+
+
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
+    # The mode of reverification (for gym eval reverify) of this server.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
 
 class BaseResourcesServer(BaseServer):
@@ -130,8 +140,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
-        app.post("/verify")(self.verify)
+        app.post("/verify")(judge_failsafe(self.verify))
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.get("/reverify_mode")(self.get_reverify_mode)
 
         return app
 
@@ -172,3 +183,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
         )
+
+    async def get_reverify_mode(self) -> ReverifyMode:
+        return self.config.REVERIFY_MODE

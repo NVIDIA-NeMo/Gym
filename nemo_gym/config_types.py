@@ -168,6 +168,10 @@ class ConfigMissingValuesError(ConfigError, ValueError):
     """One or more required config values are still unset (OmegaConf '???') after merging."""
 
 
+class ConfigInterpolationError(ConfigError, ValueError):
+    """An `${...}` interpolation references a key that is not present in the merged config."""
+
+
 class ServerRefNotFoundError(ConfigError, ValueError):
     """A server cross-reference points to an instance that is not defined in the merged config."""
 
