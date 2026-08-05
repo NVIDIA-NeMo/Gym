@@ -161,6 +161,34 @@ _MIN_COMPLETION_TOKENS = 1024
 # on long-context servers can degrade output quality for reasoning models.
 _DEFAULT_MAX_COMPLETION_TOKENS_CAP = 64000
 
+# ---------------------------------------------------------------------------
+# Thinking-overrun recovery
+#
+# Measured on a 200-task GDPVal run (GLM-5.2 FP8, 27.4 M output tokens across
+# 10,448 calls): 68 calls burned the entire 64 k completion budget emitting a
+# ``<think>`` block and returned *no tool call*.  That is 28.5 h of decode —
+# 15.8% of all model time — spent on turns that advanced their task zero steps.
+#
+# The failure is sticky rather than isolated.  Those 68 calls form 33 runs, 18
+# of them longer than one turn (run lengths 1x15, 2x6, 3x9, 4x1, 5x2), because
+# Stirrup answers a tool-call-less turn with a generic "Please continue the
+# task" — which invites the model straight back into another unbounded think.
+#
+# Shrinking the budget on the retry is the obvious fix and it is wrong: of the
+# 26 turns that *did* recover with a tool call, the median emitted 34,653
+# tokens (max 61,551) because the model dumps the whole deliverable at once.
+# Clamping the budget would convert recoveries into truncated tool calls.
+#
+# So the retry keeps its full token budget and instead removes the thing that
+# overran: thinking is disabled for that one turn and a short instruction says
+# the previous turn was discarded.  Costs nothing when no overrun happens.
+_TRUNCATION_RECOVERY_NUDGE = (
+    "SYSTEM NOTICE: your previous response hit the output token limit before it "
+    "produced a tool call, so it was discarded and none of that reasoning was "
+    "saved. Do not start that analysis over. Act now on what you already know: "
+    "respond with a tool call and keep any preamble to a few sentences."
+)
+
 
 def _load_tokenizer(model_id: Optional[str]):
     """Load a HuggingFace tokenizer, tolerating version differences in transformers."""
@@ -203,6 +231,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         top_p: float = 0.95,
         enable_thinking: bool = True,
         max_completion_tokens_cap: int = _DEFAULT_MAX_COMPLETION_TOKENS_CAP,
+        truncation_recovery: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -211,6 +240,11 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         self._top_p = top_p
         self._enable_thinking = enable_thinking
         self._max_completion_tokens_cap = max_completion_tokens_cap
+        self._truncation_recovery = truncation_recovery
+        # Set when the previous call exhausted its completion budget without
+        # emitting a tool call; consumed by the very next generate().
+        self._recover_from_truncation = False
+        self._truncation_overruns = 0
         self._tokenizer = _load_tokenizer(model_id)
         if model_id and self._tokenizer is None:
             LOGGER.warning(
@@ -306,6 +340,18 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         tools: dict[str, Tool],
     ) -> AssistantMessage:
         provider_messages = to_provider_openai_messages(messages)
+
+        # Recovery turn: the previous call spent its whole completion budget
+        # thinking and never reached a tool call. Steer this one turn — thinking
+        # off, explicit instruction — but leave the token budget alone, because
+        # the recovery itself is usually a large single-shot deliverable write.
+        # The nudge is transient: it is sent to the server but never enters the
+        # agent's message history, so trajectories stay clean.
+        recovering = self._recover_from_truncation and self._truncation_recovery
+        self._recover_from_truncation = False
+        if recovering:
+            provider_messages = [*provider_messages, {"role": "user", "content": _TRUNCATION_RECOVERY_NUDGE}]
+
         input_tokens = self._count_input_tokens(provider_messages, tools)
         context_window = self._max_tokens
         dynamic_max = max(
@@ -322,7 +368,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             "temperature": self._temperature,
             "top_p": self._top_p,
             "max_completion_tokens": capped_max,
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": self._enable_thinking}},
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": self._enable_thinking and not recovering}},
             **self._kwargs,
         }
         if tools:
@@ -400,6 +446,22 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             )
             for tc in (msg.tool_calls or [])
         ]
+
+        # A call that exhausted its completion budget *and* produced no tool call
+        # advanced the task by nothing. Arm the recovery turn (see
+        # _TRUNCATION_RECOVERY_NUDGE). A truncated call that still carried a tool
+        # call made progress and is left alone.
+        if choice.finish_reason in ("length", "max_tokens") and not tool_calls:
+            self._truncation_overruns += 1
+            self._recover_from_truncation = True
+            LOGGER.warning(
+                "completion budget (%d tokens) exhausted with no tool call [overrun #%d]; %s",
+                capped_max,
+                self._truncation_overruns,
+                "next turn will run with thinking disabled"
+                if self._truncation_recovery
+                else "truncation_recovery is off, retrying unchanged",
+            )
 
         return AssistantMessage(
             reasoning=reasoning,

@@ -398,6 +398,7 @@ async def _run_stirrup_agent(
     top_p: float = 0.95,
     enable_thinking: bool = True,
     max_completion_tokens_cap: int = 64000,
+    truncation_recovery: bool = True,
     tavily_api_key: Optional[Union[str, List[str]]] = None,
     tavily_max_sweeps: int = 1,
 ) -> Dict[str, Any]:
@@ -465,6 +466,7 @@ async def _run_stirrup_agent(
         top_p=top_p,
         enable_thinking=enable_thinking,
         max_completion_tokens_cap=max_completion_tokens_cap,
+        truncation_recovery=truncation_recovery,
     )
 
     if exec_provider_class:
@@ -901,6 +903,16 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "context_window - input_tokens - completion_token_buffer, then caps to this value. "
         "Set to match the training-side response-length budget for RL.",
     )
+    truncation_recovery: bool = Field(
+        default=True,
+        description="When a model call spends its entire completion budget without emitting a "
+        "tool call, run the next call with thinking disabled plus a transient instruction not to "
+        "restart the analysis. Targets a measured failure mode where the model loops on unbounded "
+        "reasoning: on a 200-task GDPVal run these turns burned 15.8% of all model time. The token "
+        "budget is deliberately NOT reduced, because recovery turns are usually large single-shot "
+        "deliverable writes (median 34.6k tokens). The instruction is sent to the server but not "
+        "recorded in the trajectory; set False for RL rollouts that require an unsteered policy.",
+    )
     tavily_api_key: Optional[Union[str, List[str]]] = Field(
         default=None,
         description="Tavily API key(s) for the ``web_search`` / ``fetch_web_page`` tools. "
@@ -1094,6 +1106,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "top_p": getattr(body, "top_p", None) or self.config.top_p,
             "enable_thinking": self.config.enable_thinking,
             "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
+            "truncation_recovery": self.config.truncation_recovery,
             "tavily_api_key": self.config.tavily_api_key,
             "tavily_max_sweeps": self.config.tavily_max_sweeps,
         }
