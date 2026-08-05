@@ -12,5 +12,3 @@ mini_swe_agent_2_swebench_verified:
           jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
           prepare_script: benchmarks/swebench/verified/prepare.py
           num_repeats: 3
-
-# Dummy comment
