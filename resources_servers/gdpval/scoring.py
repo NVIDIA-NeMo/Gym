@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from pathlib import Path
@@ -39,6 +40,12 @@ from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwa
 # ---------------------------------------------------------------------------
 FINAL_SCORE_TAG = "FINAL_SCORE"
 MAX_POSSIBLE_SCORE_TAG = "MAX_POSSIBLE_SCORE"
+# The OpenAI SDK otherwise applies a 600-second timeout plus automatic retries.
+# Image-dense local-judge requests can legitimately run longer, so allow one
+# bounded 60-minute attempt and disable SDK-level multiplication of that bound.
+STRUCTURED_JUDGE_REQUEST_TIMEOUT_SECONDS = float(
+    os.environ.get("GDPVAL_STRUCTURED_JUDGE_REQUEST_TIMEOUT_SECONDS", "3600")
+)
 
 STRUCTURED_JUDGE_PROMPT = (
     "Given a task description, reference files, an evaluation rubric, and submission file(s) for the task-- "
@@ -393,7 +400,7 @@ async def score_with_rubric_structured(
     Returns ``(normalized_score, metadata)`` where *normalized_score* is in
     [0, 1] and *metadata* contains per-trial scores and percentages.
     """
-    from openai import AsyncOpenAI
+    from openai import APITimeoutError, AsyncOpenAI
 
     rng = rng or random.Random()
     # One AsyncOpenAI client per distinct upstream (base_url, api_key), reused
@@ -403,7 +410,12 @@ async def score_with_rubric_structured(
     def _client_for(judge: ResolvedJudge) -> Any:
         key = (judge.base_url, judge.api_key)
         if key not in client_cache:
-            client_cache[key] = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+            client_cache[key] = AsyncOpenAI(
+                base_url=judge.base_url,
+                api_key=judge.api_key,
+                timeout=STRUCTURED_JUDGE_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         return client_cache[key]
 
     # Compute max possible score from rubric. Different upstream formats name
@@ -474,7 +486,11 @@ async def score_with_rubric_structured(
                 resp_text = (response.choices[0].message.content or "").strip()
             except Exception as e:
                 err_str = str(e).lower()
-                is_retryable = any(m in err_str for m in ("429", "503", "504", "rate", "timeout"))
+                # A full request-budget timeout is retried by the persisted
+                # rollout/resume path, not inside the same verify call.
+                is_retryable = not isinstance(e, APITimeoutError) and any(
+                    marker in err_str for marker in ("429", "503", "504", "rate", "timeout")
+                )
                 if is_retryable and retry < formatting_retries - 1:
                     delay = 5.0 * (2**retry)
                     print(
