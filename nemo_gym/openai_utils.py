@@ -66,7 +66,6 @@ from openai.types.responses.response_create_params import (
     ResponsesModel,
     ResponseTextConfigParam,
     ToolChoice,
-    ToolParam,
 )
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
@@ -85,7 +84,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -331,8 +330,11 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     temperature: Optional[float] = None
     text: Optional[ResponseTextConfigParam] = None
     tool_choice: ToolChoice = "auto"  # OpenAI default
-    # Override the Iterable to avoid lazy iterators in Pydantic validation.
-    tools: List[ToolParam] = Field(default_factory=list)
+    # Override with List[Any] (instead of List[ToolParam]) so that Pydantic does not apply
+    # TypedDict schema normalization to tool dicts. With List[ToolParam], Pydantic v2 adds
+    # openai 2.53.0's new TypedDict fields (allowed_callers, defer_loading, output_schema)
+    # as None to every function tool dict, corrupting round-tripped params.
+    tools: List[Any] = Field(default_factory=list)
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
     truncation: Optional[Literal["auto", "disabled"]] = None
@@ -344,23 +346,13 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     def _strip_new_function_tool_fields(cls, data: Any) -> Any:
         # openai 2.53.0 added new fields to FunctionTool/FunctionToolParam. Strip
         # None-valued ones before validation so that callers using FunctionTool.model_dump()
-        # still validate correctly against FunctionToolParam.
+        # still validate correctly.
         if isinstance(data, dict):
             for tool in data.get("tools") or []:
                 if isinstance(tool, dict) and tool.get("type") == "function":
                     for field in _FUNCTION_TOOL_NEW_FIELDS_2_53_0:
                         if tool.get(field) is None:
                             tool.pop(field, None)
-        return data
-
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        data = super().model_dump(**kwargs)
-        # Strip new openai 2.53.0 FunctionTool fields that Pydantic adds when serializing
-        # the ToolParam TypedDict union (Pydantic includes all TypedDict fields, even absent ones).
-        for tool in data.get("tools") or []:
-            if isinstance(tool, dict) and tool.get("type") == "function":
-                for field in _FUNCTION_TOOL_NEW_FIELDS_2_53_0:
-                    tool.pop(field, None)
         return data
 
 
@@ -373,7 +365,9 @@ NeMoGymResponseOutputItem = NeMoGymResponseInputItem
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
-    cache_write_tokens: int = 0
+    # openai 2.53.0 made cache_write_tokens required. Default to 0 and exclude
+    # from serialization to preserve backward-compat output format.
+    cache_write_tokens: int = Field(default=0, exclude=True)
 
 
 class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
@@ -401,14 +395,19 @@ class NeMoGymResponse(Response):
     prompt_cache_options: Optional[Any] = Field(default=None, exclude=True)
     prompt_cache_retention: Optional[Any] = Field(default=None, exclude=True)
 
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        data = super().model_dump(**kwargs)
-        # openai 2.53.0 added new optional fields to FunctionTool. Strip them so
-        # serialized responses are indistinguishable from pre-2.53.0 output.
-        for tool in data.get("tools") or []:
-            if isinstance(tool, dict):
-                for field in _FUNCTION_TOOL_NEW_FIELDS_2_53_0:
-                    tool.pop(field, None)
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any, info: Any = None) -> dict[str, Any]:
+        # Use model_serializer (not model_dump override) so the hook applies to BOTH
+        # Python serialization (model_dump) and Rust/JSON serialization (model_dump_json,
+        # FastAPI responses). model_dump overrides are bypassed by Pydantic's Rust path.
+        data = handler(self)
+        if isinstance(data, dict):
+            # openai 2.53.0 added new optional fields to FunctionTool (the response type).
+            # Strip them so serialized responses are indistinguishable from pre-2.53.0 output.
+            for tool in data.get("tools") or []:
+                if isinstance(tool, dict):
+                    for field in _FUNCTION_TOOL_NEW_FIELDS_2_53_0:
+                        tool.pop(field, None)
         return data
 
 
