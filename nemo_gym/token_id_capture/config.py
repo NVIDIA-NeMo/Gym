@@ -50,6 +50,14 @@ capture silently falls back to the file store, or writes nothing at all when no
 
 ``install_token_sink`` remains for programmatic use and is subject to the same
 constraint, so call it at module import of the app, not from a parent process.
+
+Choosing who reads them back
+----------------------------
+``rebuild_response`` says whether Gym reads a rollout's records after it finishes
+and swaps the rebuilt trajectory into ``response.output``. Set it false when you
+read the records yourself through a ``TokenSource``; Gym then stops after the
+write. It is independent of where records were written, so a run can install a
+sink and still let Gym read back, or keep the file store and read it itself.
 """
 
 from __future__ import annotations
@@ -83,6 +91,12 @@ class TokenIdCaptureSettings(BaseModel):
     # transport needs wiring, and a zero-argument one could only get it from ambient state. Use
     # ``${oc.env:VAR}`` for anything secret rather than writing it here.
     sink_kwargs: dict[str, Any] = {}
+    # Whether Gym reads a rollout's records back after it finishes, builds the trajectory, swaps
+    # it into response.output, attaches the build metrics and retires the records. False when the
+    # caller reads through its own TokenSource; without it, a run capturing to its own transport
+    # has Gym reading a store nothing wrote to, warning per rollout and reporting healthy runs as
+    # failed rebuilds.
+    rebuild_response: bool = True
 
 
 class TokenIdCaptureConfig(BaseModel):
