@@ -124,7 +124,7 @@ opencode_sandboxed_agent:
           apply_patch: true
           webfetch: false
           websearch: false
-          task: false
+          task: true
           skill: false
           todowrite: true
 
