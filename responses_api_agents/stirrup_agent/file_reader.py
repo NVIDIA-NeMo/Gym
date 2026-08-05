@@ -513,11 +513,23 @@ def convert_deliverables_to_content_blocks(
     # A PDF an Office file renders from must not also be emitted standalone, or
     # the judge sees the same pages twice. Both spellings count: the same-stem
     # sidecar Plan.pptx.pdf, and the ordinary sibling Plan.pdf.
+    # How many Office files share each stem. `Report.docx` and `Report.pptx` both
+    # point at `Report.pdf`, which cannot say which of them it renders, so the
+    # plain sibling is only trustworthy when the stem is unambiguous. preconvert
+    # writes an injective `Report.docx.pdf` sidecar for the ambiguous case.
+    office_stem_counts: dict[str, int] = {}
+    for entry in entries:
+        if is_deliverable(entry) and entry.suffix.lower() in OFFICE_EXTS:
+            office_stem_counts[entry.stem] = office_stem_counts.get(entry.stem, 0) + 1
+
     consumed_pdfs: set[Path] = set()
     for entry in entries:
         if is_deliverable(entry) and entry.suffix.lower() in OFFICE_EXTS:
             sidecar = entry.with_name(entry.name + ".pdf")
-            consumed_pdfs.add(sidecar if sidecar.is_file() else entry.with_suffix(".pdf"))
+            if sidecar.is_file():
+                consumed_pdfs.add(sidecar)
+            elif office_stem_counts.get(entry.stem, 0) == 1:
+                consumed_pdfs.add(entry.with_suffix(".pdf"))
 
     for fpath in entries:
         if not is_deliverable(fpath) or fpath in consumed_pdfs:
@@ -541,7 +553,14 @@ def convert_deliverables_to_content_blocks(
                 # below would delete someone else's artifact.
                 sidecar = fpath.with_name(fpath.name + ".pdf")
                 sibling = fpath.with_suffix(".pdf")
-                pdf_path = sidecar if sidecar.is_file() else (sibling if sibling.is_file() else None)
+                if sidecar.is_file():
+                    pdf_path = sidecar
+                elif sibling.is_file() and office_stem_counts.get(fpath.stem, 0) == 1:
+                    pdf_path = sibling
+                else:
+                    # Ambiguous stem with no sidecar: rendering it ourselves is the
+                    # only way to know which file the PDF belongs to.
+                    pdf_path = None
                 if pdf_path is None:
                     scratch = Path(tempfile.mkdtemp(prefix="gdpval-render-"))
                     scratch_dirs.append(scratch)
