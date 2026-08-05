@@ -94,6 +94,18 @@ VALIDATOR="${REPO_ROOT}/benchmarks/gdpval/validate_gdpval_batch.py"
 SERVER_PID=""
 LOCK_DIR=""
 
+# Emit only the profile knobs the dataset actually set. Passing an empty value
+# is NOT the same as omitting the flag: `--expected-count ""` is an argparse
+# error, and `--reference-overrides ""` resolves to the cwd.
+profile_args() {
+  local -a a=()
+  [[ -n "${EXPECTED_COUNT}" ]] && a+=(--expected-count "${EXPECTED_COUNT}")
+  [[ -n "${TASK_ID_PATTERN}" ]] && a+=(--task-id-pattern "${TASK_ID_PATTERN}")
+  [[ -n "${REFERENCE_MODE}" ]] && a+=(--reference-mode "${REFERENCE_MODE}")
+  [[ -n "${REFERENCE_OVERRIDES}" ]] && a+=(--reference-overrides "${REFERENCE_OVERRIDES}")
+  printf '%s\n' ${a[@]+"${a[@]}"}
+}
+
 usage() {
   cat <<'EOF'
 Usage: run_gdpval_rollouts.sh ACTION
@@ -202,17 +214,6 @@ configure_apptainer() {
 }
 
 local_check() {
-# Emit only the profile knobs the dataset actually set. Passing an empty value
-# is NOT the same as omitting the flag: `--expected-count ""` is an argparse
-# error, and `--reference-overrides ""` resolves to the cwd.
-profile_args() {
-  local -a a=()
-  [[ -n "${EXPECTED_COUNT}" ]] && a+=(--expected-count "${EXPECTED_COUNT}")
-  [[ -n "${TASK_ID_PATTERN}" ]] && a+=(--task-id-pattern "${TASK_ID_PATTERN}")
-  [[ -n "${REFERENCE_MODE}" ]] && a+=(--reference-mode "${REFERENCE_MODE}")
-  [[ -n "${REFERENCE_OVERRIDES}" ]] && a+=(--reference-overrides "${REFERENCE_OVERRIDES}")
-  printf '%s\n' ${a[@]+"${a[@]}"}
-}
 
   local lc_extra=() lc_priv=()
   if [[ -n "${REFERENCE_OVERRIDES}" ]]; then
@@ -222,7 +223,8 @@ profile_args() {
     lc_priv=(--require-private-files)
   fi
   local -a lc_profile=()
-  mapfile -t lc_profile < <(profile_args)
+  lc_profile=()
+  while IFS= read -r _pa_line; do lc_profile+=("$_pa_line"); done < <(profile_args)
   local -a lc_sha=()
   [[ -n "${EXPECTED_SOURCE_SHA256}" ]] && lc_sha=(--expected-sha256 "${EXPECTED_SOURCE_SHA256}")
   "${PYTHON_BIN}" "${VALIDATOR}" \
@@ -338,7 +340,8 @@ runtime_preflight() {
     "${SMOKE_DELIVERABLES_DIR}"
   local -a validator_args=(--input "${SOURCE_INPUT}")
   local -a vp=()
-  mapfile -t vp < <(profile_args)
+  vp=()
+  while IFS= read -r _pa_line; do vp+=("$_pa_line"); done < <(profile_args)
   validator_args+=(${vp[@]+"${vp[@]}"})
   [[ -n "${EXPECTED_SOURCE_SHA256}" ]] && validator_args+=(--expected-sha256 "${EXPECTED_SOURCE_SHA256}")
   validator_args+=(--write-launch-input "${LAUNCH_INPUT}")
@@ -562,7 +565,8 @@ collect() {
 
 validate_smoke() {
   local -a priv=() prof=() lsha=()
-  mapfile -t prof < <(profile_args)
+  prof=()
+  while IFS= read -r _pa_line; do prof+=("$_pa_line"); done < <(profile_args)
   [[ -n "${EXPECTED_LAUNCH_SHA256}" ]] && lsha=(--expected-sha256 "${EXPECTED_LAUNCH_SHA256}")
   if [[ "${REQUIRE_PRIVATE_FILES}" == "true" ]]; then
     priv=(--require-private-files)
@@ -581,7 +585,8 @@ validate_smoke() {
 
 validate_full() {
   local -a priv=() prof=() lsha=()
-  mapfile -t prof < <(profile_args)
+  prof=()
+  while IFS= read -r _pa_line; do prof+=("$_pa_line"); done < <(profile_args)
   [[ -n "${EXPECTED_LAUNCH_SHA256}" ]] && lsha=(--expected-sha256 "${EXPECTED_LAUNCH_SHA256}")
   if [[ "${REQUIRE_PRIVATE_FILES}" == "true" ]]; then
     priv=(--require-private-files)

@@ -141,7 +141,8 @@ profile_validator_args() {
 
 validate_full() {
   local -a args=()
-  mapfile -t args < <(profile_validator_args)
+  args=()
+  while IFS= read -r _pa_line; do args+=("$_pa_line"); done < <(profile_validator_args)
   "${PYTHON_BIN}" "${VALIDATOR}" "${args[@]}" \
     --rollouts "${FULL_OUTPUT}" \
     --deliverables-dir "${DELIVERABLES_DIR}" \
@@ -150,7 +151,8 @@ validate_full() {
 
 validate_smoke() {
   local -a args=()
-  mapfile -t args < <(profile_validator_args)
+  args=()
+  while IFS= read -r _pa_line; do args+=("$_pa_line"); done < <(profile_validator_args)
   [[ -n "${SMOKE_TASK_ID}" ]] && args+=(--smoke-task-id "${SMOKE_TASK_ID}")
   "${PYTHON_BIN}" "${VALIDATOR}" "${args[@]}" \
     --rollouts "${SMOKE_OUTPUT}" \
