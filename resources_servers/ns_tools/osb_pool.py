@@ -88,6 +88,7 @@ class OpenSandboxPool:
         env: Optional[Dict[str, str]] = None,
         entrypoint: Optional[list] = None,
         resources: Optional[Dict[str, str]] = None,
+        resource_requests: Optional[Dict[str, str]] = None,
         setup_files: Optional[Dict[str, str]] = None,
         setup_commands: Optional[list] = None,
         service_command: Optional[str] = None,
@@ -112,6 +113,9 @@ class OpenSandboxPool:
         self._env = dict(env or {})
         self._entrypoint = list(entrypoint) if entrypoint else None
         self._resources = {k: str(v) for k, v in (resources or {}).items()}
+        # k8s schedules on REQUESTS; keeping them far below limits packs many more pods
+        # (= sessions) per node while bursts still get the limit headroom.
+        self._resource_requests = {k: str(v) for k, v in (resource_requests or {}).items()}
         self._setup_files = dict(setup_files or {})
         self._setup_commands = list(setup_commands or [])
         self._service_command = service_command
@@ -163,11 +167,30 @@ class OpenSandboxPool:
             # Warm creates and renewals use idle_timeout as the sandbox TTL; the SDK default
             # (24h) exceeds the server's configured maximum (8h on cell-2).
             idle_timeout=timedelta(seconds=self._ttl_s or 14400.0),
+            # PoolCreationSpec cannot express the requests/limits split; a custom creator
+            # calls Sandbox.create with resource_requests for both warmup and direct-create.
+            sandbox_creator=self._create_sandbox_with_requests if self._resource_requests else None,
         )
         await self._sdk_pool.start()
         self._tasks.append(asyncio.create_task(self._warmup(), name="osb-pool-warmup"))
         self._tasks.append(asyncio.create_task(self._heal_loop(), name="osb-pool-heal"))
         self._tasks.append(asyncio.create_task(self._sweep_loop(), name="osb-pool-sweep"))
+
+    async def _create_sandbox_with_requests(self, context: Any) -> Any:
+        from opensandbox import Sandbox
+
+        return await Sandbox.create(
+            image=self._image,
+            entrypoint=self._entrypoint,
+            env=self._env or None,
+            metadata={"purpose": "ns-tools-sandbox-pool", "run": self._run_label},
+            resource=self._resources or None,
+            resource_requests=self._resource_requests or None,
+            timeout=context.idle_timeout,
+            ready_timeout=context.ready_timeout,
+            skip_health_check=context.skip_health_check,
+            connection_config=context.connection_config,
+        )
 
     async def aclose(self) -> None:
         self._closed = True
