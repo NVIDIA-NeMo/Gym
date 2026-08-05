@@ -52,7 +52,7 @@ else:
     # avoids JIT compilation on first generation. Must stay in sync with pyproject.toml [vllm].
     # Updated Mon Aug 04, 2026 with flashinfer-python==0.6.12
     # License: Apache 2.0 https://github.com/flashinfer-ai/flashinfer/blob/main/LICENSE
-    dependencies.append("flashinfer-python==0.6.8.post1")
+    dependencies.append("flashinfer-python==0.6.12")
 
 
 setuptools.setup(install_requires=dependencies)
