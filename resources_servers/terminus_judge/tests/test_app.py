@@ -15,6 +15,7 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
 import pytest
 from pytest import fixture
 
@@ -537,6 +538,7 @@ class TestTerminusJudgeResourcesServerVerify:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -575,6 +577,7 @@ class TestTerminusJudgeResourcesServerVerify:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -615,6 +618,7 @@ class TestTerminusJudgeResourcesServerVerify:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -1000,6 +1004,7 @@ class TestVerifyWithRubricsV4JudgeResponse:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -1039,6 +1044,7 @@ class TestVerifyWithRubricsV4JudgeResponse:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -1081,6 +1087,7 @@ class TestVerifyWithRubricsV4JudgeResponse:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -1120,6 +1127,7 @@ class TestVerifyWithRubricsV4JudgeResponse:
                 "tools": [],
             }
         )
+        mock_response.read = AsyncMock(return_value=orjson.dumps(mock_response.json.return_value))
         resources_server.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server.verify(request)
@@ -1397,6 +1405,11 @@ class TestVerifyAdditionalScenarios:
 
         mock_response = MagicMock()
         mock_response.json = mock_json
+
+        async def mock_read():
+            return orjson.dumps(await mock_json())
+
+        mock_response.read = mock_read
         resources_server_with_swap.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server_with_swap.verify(request)
@@ -1440,6 +1453,11 @@ class TestVerifyAdditionalScenarios:
 
         mock_response = MagicMock()
         mock_response.json = mock_json
+
+        async def mock_read():
+            return orjson.dumps(await mock_json())
+
+        mock_response.read = mock_read
         resources_server_with_swap.server_client.post = AsyncMock(return_value=mock_response)
 
         response = await resources_server_with_swap.verify(request)
