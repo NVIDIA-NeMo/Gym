@@ -24,7 +24,10 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import Field
+from pydantic import Field, PrivateAttr
+
+
+LOG = logging.getLogger(__name__)
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -49,6 +52,7 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.token_id_capture import current_capture_context
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -166,6 +170,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
+
+    # Supply the engine the exact tokens of the call this request continues, instead of letting the
+    # chat template re-render them from text. See _apply_prefix_supply below. Off by default: it
+    # requires a backend that honours required_prefix_token_ids; a stock vLLM server does not.
+    supply_prefix_token_ids: bool = False
 
     # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
     is_responses_native: bool = False
@@ -603,6 +612,58 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
+        body_dict = self._apply_prefix_supply(body_dict)
+
+        return body_dict
+
+    # [supplied, eligible]. A plain list so it is mutable without a pydantic field.
+    _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0])
+
+    def _apply_prefix_supply(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Hand the engine the previous call's exact tokens, so this prompt extends them.
+
+        Without this the engine builds every prompt by re-rendering the whole
+        conversation through the chat template. Two things go wrong. Re-tokenizing
+        an assistant turn can produce a different (equally valid) split than the
+        one the model sampled, so the new prompt does not extend the old
+        prompt-plus-generation. And for a reasoning model the template drops
+        earlier thinking entirely, so the tokens are not merely re-split, they are
+        gone. Either way the trajectory cannot be chained and training silently
+        collapses to the first call.
+
+        Supplying the parent's cumulative ids makes a backend that implements the splice keep them
+        verbatim and append only the newly rendered tail, so contiguity holds by
+        construction and stripped reasoning is restored.
+
+        The rule is conservative on purpose: the splice applies whatever it is
+        given without checking that it belongs to this conversation, so a wrong
+        prefix would silently generate from a conversation the harness never
+        asked for. Supply only on a unique, verified parent; otherwise send the
+        request untouched and let it start a new chain. A fallback costs a cold
+        KV cache and a shorter trained chain, never a wrong answer.
+        """
+        if not self.config.supply_prefix_token_ids:
+            return body_dict
+        self._prefix_supply_counts[1] += 1
+        context = current_capture_context()
+        if context is None:
+            # Not a correlated rollout call, so there is no lineage to supply from.
+            return body_dict
+        # Resolved before dispatch, from the request as the server received it. Resolving here
+        # instead would run against a body that Responses-to-Chat conversion and preprocessing
+        # have already reshaped, which is not the representation the index was built from.
+        if not context.parent_tokens:
+            return body_dict
+        body_dict["required_prefix_token_ids"] = list(context.parent_tokens)
+        # Record that this call's prefix was supplied, both on the durable record (so a run can be
+        # audited afterwards from the capture files) and as a running ratio in the log. Supply only
+        # fires on a unique, verified parent, so supplied/total is the honest measure of how often
+        # it applied rather than falling back to re-rendering.
+        context.prefix_supplied = True
+        self._prefix_supply_counts[0] += 1
+        supplied, total = self._prefix_supply_counts[0], self._prefix_supply_counts[1]
+        if total and supplied % 10 == 0:
+            LOG.info("prefix supply: %d/%d calls supplied (%.0f%%)", supplied, total, 100.0 * supplied / total)
         return body_dict
 
     async def chat_completions(

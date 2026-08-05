@@ -46,7 +46,8 @@ TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_prob
 #   1  rollout and call identity, the token arrays, the output items and their carrier index
 #   2  parent_call_id, cum_len and digest, added when calls began being linked to their parent
 #   3  parent resolution and compact continuation lookup metadata
-TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 3
+#   4  prefix_supplied, added when the model server gained the ability to supply a prefix
+TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 4
 
 # Records below schema 3 never left development.
 # Current records always carry a request-time parent decision.
@@ -151,6 +152,13 @@ class TokenEntry(BaseModel):
     parent_resolution_reason: str = ""
     # Identify the continuation fingerprint algorithm.
     fingerprint_version: int | None = None
+
+    # --- Added with prefix supply (schema version 4).
+    # Whether the model server handed the engine this call's prefix verbatim rather than letting
+    # the chat template re-render it. Recorded per call so a run can be audited afterwards:
+    # supply fires only on a unique parent whose conversation still matches, so supplied over
+    # total is the honest measure of how often it applied rather than falling back.
+    prefix_supplied: bool = False
 
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":
