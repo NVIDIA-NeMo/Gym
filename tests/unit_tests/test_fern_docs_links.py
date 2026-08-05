@@ -108,6 +108,25 @@ class TestFernDocsLinks(unittest.TestCase):
                 self.assertEqual([], broken_links)
                 self.assertEqual(2, canonical_links)
 
+    def test_internal_pages_are_linked_by_path_not_by_absolute_url(self):
+        """An absolute docs.nvidia.com link pins the reader to the default version.
+
+        Relative paths keep the reader inside the version they are already reading.
+        Prose that names the domain without linking to it is fine.
+
+        Scoped to `latest`. The frozen versions carry the same pattern but are left as
+        they shipped.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        absolute_links = []
+
+        for page in pages.rglob("*.mdx"):
+            for line_number, line in enumerate(page.read_text().splitlines(), start=1):
+                if re.search(r'(?:\]\(|href=")https?://docs\.nvidia\.com/nemo/gym', line):
+                    absolute_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
+
+        self.assertEqual([], absolute_links)
+
     def test_private_cli_compat_api_link_redirects_to_the_public_cli_page(self):
         redirects = read("fern/docs.yml")
         expected_redirect = """  - source: "/nemo/gym/nemo-gym/nemo_gym/cli/_compat"
