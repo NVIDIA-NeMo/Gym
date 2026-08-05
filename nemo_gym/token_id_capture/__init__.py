@@ -32,7 +32,22 @@ failed to capture, so it would train on an incomplete rollout without knowing.
 Serving that alongside the records is what a remote read path would need first.
 """
 
+from nemo_gym.token_id_capture.builder import (
+    Chain,
+    assert_prefix_contiguity,
+    per_request,
+    prefix_merging,
+    project_chain_to_output_items,
+    project_main_chain_response,
+    run_builder,
+)
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.consumer import (
+    clear_token_captures_for_rollouts,
+    token_id_capture_dirs_from_config,
+    trajectories_for_rollout,
+    trajectories_from_source,
+)
 from nemo_gym.token_id_capture.protocols import (
     TokenSink,
     TokenSource,
@@ -56,6 +71,7 @@ from nemo_gym.token_id_capture.store import TokenCaptureStore, make_token_store,
 
 
 __all__ = [
+    "Chain",
     "TokenIdCaptureConfig",
     "TokenEntry",
     "TOKEN_ENTRY_RECORD_SCHEMA_VERSION",
@@ -73,4 +89,14 @@ __all__ = [
     "reset_token_sink",
     "capture_tokens",
     "commit_entry",
+    "per_request",
+    "prefix_merging",
+    "project_chain_to_output_items",
+    "project_main_chain_response",
+    "run_builder",
+    "assert_prefix_contiguity",
+    "trajectories_for_rollout",
+    "clear_token_captures_for_rollouts",
+    "trajectories_from_source",
+    "token_id_capture_dirs_from_config",
 ]
