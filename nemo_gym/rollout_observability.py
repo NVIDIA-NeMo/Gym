@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Small shared contract for observations exposed by Agent integrations."""
+"""Shared contracts for rollout observations and trajectories."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Literal, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -35,6 +35,51 @@ class ModelCallRef(ObservationModel):
         if not self.model_call_id and not (self.model_ref is not None and self.response_id):
             raise ValueError("model_call_id or both model_ref and response_id are required")
         return self
+
+
+class TrajectoryTokenStats(ObservationModel):
+    prompt_tokens: Optional[int] = Field(default=None, ge=0)
+    completion_tokens: Optional[int] = Field(default=None, ge=0)
+    reasoning_tokens: Optional[int] = Field(default=None, ge=0)
+    total_tokens: Optional[int] = Field(default=None, ge=0)
+    cached_tokens: Optional[int] = Field(default=None, ge=0)
+
+
+class TrajectoryResponseMetadata(ObservationModel):
+    response_id: Optional[str] = None
+    model_ref: Optional[ModelServerRef] = None
+    model: Optional[str] = None
+    dialect: Optional[str] = None
+    status_code: Optional[int] = None
+    response_status: Optional[str] = None
+    finish_reason: Optional[str] = None
+    error_category: Optional[str] = None
+    latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
+
+
+class TrajectoryModelCall(ObservationModel):
+    model_call_id: Optional[str] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    duration_ms: Optional[float] = Field(default=None, ge=0)
+    request: Optional[Any] = None
+    response: Optional[Any] = None
+    response_metadata: TrajectoryResponseMetadata = Field(default_factory=TrajectoryResponseMetadata)
+    token_stats: TrajectoryTokenStats = Field(default_factory=TrajectoryTokenStats)
+
+
+class TrajectoryTurn(ObservationModel):
+    invocation_id: str
+    task_id: str
+    rollout_id: str
+    turn_no: int = Field(ge=1, description="Turn number within this invocation.")
+    timestamp: float
+    question: Optional[Any] = None
+    answer: Optional[Any] = None
+    reasoning_content: Optional[Any] = None
+    resolved: Optional[bool] = None
+    step_count: int = Field(ge=0, description="Producer-reported cumulative step count within this invocation.")
+    model_calls: list[ModelCallRef] = Field(default_factory=list)
 
 
 class AgentInvocation(ObservationModel):
@@ -79,6 +124,12 @@ class ToolCallObservation(ObservationModel):
         if self.started_at is not None and self.completed_at is not None and self.completed_at < self.started_at:
             raise ValueError("completed_at must not precede started_at")
         return self
+
+
+class TrajectoryToolCall(ToolCallObservation):
+    """Tool observation enriched with the model-visible output in a trajectory record."""
+
+    output: Optional[Any] = None
 
 
 class SandboxObservation(ObservationModel):
@@ -188,6 +239,35 @@ class AgentObservationBundle(ObservationModel):
                     break
                 current = parent
             checked.update(chain)
+        return self
+
+
+class TrajectoryRecord(ObservationModel):
+    schema_version: Literal["1.0"] = "1.0"
+    task_id: str
+    rollout_id: str
+    invocations: list[AgentInvocation] = Field(default_factory=list)
+    turns: list[TrajectoryTurn] = Field(default_factory=list)
+    model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
+    tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
+    gaps: list[ObservationGap] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> "TrajectoryRecord":
+        invocation_ids = [invocation.invocation_id for invocation in self.invocations]
+        if len(invocation_ids) != len(set(invocation_ids)):
+            raise ValueError("invocation_id must be unique within a trajectory")
+        model_call_ids = [call.model_call_id for call in self.model_calls if call.model_call_id]
+        if len(model_call_ids) != len(set(model_call_ids)):
+            raise ValueError("model_call_id must be unique within a trajectory")
+        keys: set[tuple[str, int]] = set()
+        for turn in self.turns:
+            if turn.task_id != self.task_id or turn.rollout_id != self.rollout_id:
+                raise ValueError("turn identity must match the trajectory")
+            key = (turn.invocation_id, turn.turn_no)
+            if key in keys:
+                raise ValueError("turn number must be unique within an invocation")
+            keys.add(key)
         return self
 
 

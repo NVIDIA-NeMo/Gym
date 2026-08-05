@@ -126,6 +126,7 @@ class FakeUUID:
 
 COMMON_RESPONSE_PARAMS = dict(
     parallel_tool_calls=True,
+    status="completed",
     tool_choice="auto",
 )
 
@@ -2577,7 +2578,7 @@ class TestApp:
         ]
 
         expected_response = NeMoGymResponse(
-            **COMMON_RESPONSE_PARAMS,
+            **(COMMON_RESPONSE_PARAMS | {"status": "incomplete"}),
             id="resp_123",
             object="response",
             tools=[],

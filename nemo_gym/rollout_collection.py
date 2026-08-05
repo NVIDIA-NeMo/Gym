@@ -15,6 +15,7 @@
 import asyncio
 import glob as glob_module
 import json
+import logging
 import os
 import warnings
 from asyncio import Future, Semaphore
@@ -51,6 +52,18 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    ToolCallObservation,
+    TrajectoryModelCall,
+    TrajectoryRecord,
+    TrajectoryTokenStats,
+    TrajectoryToolCall,
+    TrajectoryTurn,
+)
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
@@ -65,6 +78,8 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
 
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Failure-routing sentinels (set by agent servers, read by the dispatcher).
@@ -95,8 +110,253 @@ from nemo_gym.skills import SkillsConfig, load_skill_directory
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+NG_TRAJECTORY_KEY = "ng_trajectory"
+_MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _nonnegative_int(value: Any) -> Optional[int]:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
+    for key in (NG_TRAJECTORY_KEY, "ng_agent_observations"):
+        observations = result.get(key)
+        gaps = observations.get("gaps") if isinstance(observations, dict) else None
+        if isinstance(gaps, list) and any(isinstance(gap, dict) and gap.get("code") == code for gap in gaps):
+            return True
+    return False
+
+
+def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    task_id = next(
+        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        str(row[TASK_INDEX_KEY_NAME]),
+    )
+    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    return task_id, rollout_id
+
+
+def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
+    task_id, rollout_id = _trajectory_identity(row)
+    gaps: list[ObservationGap] = []
+    invocations: list[AgentInvocation] = []
+    turns: list[TrajectoryTurn] = []
+    tools: list[TrajectoryToolCall] = []
+    model_calls: list[TrajectoryModelCall] = []
+
+    raw_trajectory = result.get(NG_TRAJECTORY_KEY)
+    if isinstance(raw_trajectory, dict):
+        try:
+            trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+            mismatches = [
+                field
+                for field, producer, canonical in (
+                    ("task_id", trajectory.task_id, task_id),
+                    ("rollout_id", trajectory.rollout_id, rollout_id),
+                )
+                if producer != canonical
+            ]
+            if mismatches:
+                gaps.append(ObservationGap(code="producer_trajectory_identity_mismatch", detail=",".join(mismatches)))
+                turns = [
+                    turn.model_copy(update={"task_id": task_id, "rollout_id": rollout_id}) for turn in trajectory.turns
+                ]
+            else:
+                turns = trajectory.turns
+            gaps.extend(trajectory.gaps)
+            invocations = trajectory.invocations
+            tools = trajectory.tool_calls
+            model_calls = trajectory.model_calls
+        except Exception as exc:
+            gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
+
+    raw_observations = result.get("ng_agent_observations")
+    if raw_observations is not None:
+        try:
+            observations = AgentObservationBundle.model_validate(raw_observations)
+            gaps.extend(observations.gaps)
+            observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
+            producer_invocation_ids = {record.invocation_id for record in invocations}
+            invocations.extend(
+                record for record in observed_invocations if record.invocation_id not in producer_invocation_ids
+            )
+            observed_tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
+            if observed_tools:
+                outputs = {
+                    (invocation.invocation_id, item.call_id): item.output
+                    for invocation in invocations
+                    for item in invocation.conversation
+                    if getattr(item, "type", None) == "function_call_output"
+                }
+                positions = {(tool.invocation_id, tool.tool_call_id): index for index, tool in enumerate(tools)}
+                for observed in observed_tools:
+                    key = (observed.invocation_id, observed.tool_call_id)
+                    position = positions.get(key)
+                    existing = tools[position] if position is not None else None
+                    merged = existing.model_dump(mode="json") if existing is not None else {}
+                    update = observed.model_dump(mode="json", exclude_none=True)
+                    if existing is not None and observed.status == "unknown" and existing.status != "unknown":
+                        update.pop("status", None)
+                    merged.update(update)
+                    if key in outputs:
+                        merged["output"] = outputs[key]
+                    projected = TrajectoryToolCall.model_validate(merged)
+                    if position is None:
+                        positions[key] = len(tools)
+                        tools.append(projected)
+                    else:
+                        tools[position] = projected
+        except Exception as exc:
+            gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
+
+    turns.sort(key=lambda turn: (turn.timestamp, turn.invocation_id, turn.turn_no))
+
+    capture = result.get("ng_model_call_capture")
+    capture = capture if isinstance(capture, dict) else {}
+    raw_calls = capture.get("calls") or []
+    model_call_positions = {
+        call.model_call_id: index for index, call in enumerate(model_calls) if call.model_call_id is not None
+    }
+    for raw_call in raw_calls:
+        if not isinstance(raw_call, dict):
+            continue
+        model_call_id = raw_call.get("model_call_id")
+        metadata = {
+            key: raw_call[key]
+            for key in (
+                "response_id",
+                "model_ref",
+                "model",
+                "dialect",
+                "status_code",
+                "response_status",
+                "finish_reason",
+                "error_category",
+                "latency_ttft_ms",
+            )
+            if raw_call.get(key) is not None
+        }
+        response = raw_call.get("response")
+        if isinstance(response, dict) and isinstance(response.get("status"), str):
+            metadata.setdefault("response_status", response["status"])
+        projected = TrajectoryModelCall(
+            model_call_id=model_call_id,
+            started_at=raw_call.get("started_at"),
+            completed_at=raw_call.get("completed_at"),
+            duration_ms=raw_call.get("latency_total_ms"),
+            request=raw_call.get("request") if raw_call.get("request") is not None else raw_call.get("request_raw"),
+            response=raw_call.get("response")
+            if raw_call.get("response") is not None
+            else raw_call.get("response_raw"),
+            response_metadata=metadata,
+            token_stats=TrajectoryTokenStats(
+                prompt_tokens=_nonnegative_int(raw_call.get("tokens_in")),
+                completion_tokens=_nonnegative_int(raw_call.get("tokens_out")),
+                reasoning_tokens=_nonnegative_int(raw_call.get("tokens_reasoning")),
+                total_tokens=_nonnegative_int(raw_call.get("tokens_total")),
+                cached_tokens=_nonnegative_int(raw_call.get("cached_tokens")),
+            ),
+        )
+        position = model_call_positions.pop(model_call_id, None) if model_call_id is not None else None
+        if position is None:
+            model_calls.append(projected)
+        else:
+            merged = model_calls[position].model_dump(mode="json")
+            update = projected.model_dump(mode="json", exclude_none=True)
+            for key in ("response_metadata", "token_stats"):
+                merged[key].update(update.pop(key))
+            merged.update(update)
+            projected = TrajectoryModelCall.model_validate(merged)
+            model_calls[position] = projected
+
+    for raw_gap in capture.get("gaps") or []:
+        if isinstance(raw_gap, dict):
+            try:
+                gaps.append(ObservationGap.model_validate(raw_gap))
+            except Exception:
+                gaps.append(ObservationGap(code="model_call_capture_gap_invalid"))
+    if not model_calls:
+        gaps.append(ObservationGap(code="model_calls_unavailable"))
+    if not turns:
+        gaps.append(ObservationGap(code="turns_unavailable"))
+    if not any(invocation.conversation for invocation in invocations):
+        gaps.append(ObservationGap(code="conversation_unavailable"))
+
+    return TrajectoryRecord(
+        task_id=task_id,
+        rollout_id=rollout_id,
+        invocations=invocations,
+        turns=turns,
+        model_calls=model_calls,
+        tool_calls=tools,
+        gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
+    )
+
+
+def _strip_capture_payloads(result: dict[str, Any]) -> None:
+    capture = result.get("ng_model_call_capture")
+    calls = capture.get("calls") if isinstance(capture, dict) else None
+    for call in calls if isinstance(calls, list) else []:
+        if isinstance(call, dict):
+            for key in _MODEL_CALL_PAYLOAD_KEYS:
+                call.pop(key, None)
+
+
+def _rollout_for_wandb(result: dict[str, Any]) -> dict[str, Any]:
+    """Return a W&B view without the complete trajectory or raw capture payloads."""
+    sanitized = dict(result)
+    sanitized.pop(NG_TRAJECTORY_KEY, None)
+    sanitized.pop("ng_model_call_capture", None)
+    capture = result.get("ng_model_call_capture")
+    if isinstance(capture, dict):
+        sanitized_capture = dict(capture)
+        calls = capture.get("calls")
+        if isinstance(calls, list):
+            sanitized_capture["calls"] = [
+                {key: value for key, value in call.items() if key not in _MODEL_CALL_PAYLOAD_KEYS}
+                for call in calls
+                if isinstance(call, dict)
+            ]
+        else:
+            sanitized_capture.pop("calls", None)
+        sanitized["ng_model_call_capture"] = sanitized_capture
+    return sanitized
+
+
+def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
+    try:
+        result[NG_TRAJECTORY_KEY] = _build_trajectory_record(row, result).model_dump(mode="json")
+    except Exception as exc:
+        result.pop(NG_TRAJECTORY_KEY, None)
+        logger.warning("Could not project standardized trajectory evidence.", exc_info=True)
+        gap = ObservationGap(code="trajectory_projection_failed", detail=type(exc).__name__).model_dump(
+            mode="json", exclude_none=True
+        )
+        target = result.get("ng_model_call_capture")
+        if not isinstance(target, dict):
+            target = result.get("ng_agent_observations")
+        gap_attached = False
+        if isinstance(target, dict):
+            gaps = target.setdefault("gaps", [])
+            if isinstance(gaps, list):
+                gaps.append(gap)
+                gap_attached = True
+        if not gap_attached:
+            try:
+                task_id, rollout_id = _trajectory_identity(row)
+                result[NG_TRAJECTORY_KEY] = TrajectoryRecord(
+                    task_id=task_id,
+                    rollout_id=rollout_id,
+                    gaps=[ObservationGap.model_validate(gap)],
+                ).model_dump(mode="json")
+            except Exception:
+                logger.warning("Could not retain the trajectory projection failure gap.", exc_info=True)
+    else:
+        # Raw capture payloads remain as a fallback on failure. After success,
+        # ng_trajectory owns them, so remove only the duplicate copies.
+        _strip_capture_payloads(result)
 
 
 def _get_max_rollout_attempts() -> int:
@@ -476,6 +736,13 @@ class RolloutCollectionHelper(BaseModel):
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
+        # Create the output directory up front: every artifact this run writes (materialized inputs,
+        # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
+        # parent, and the materialized-inputs write below is the first one. Keep this above that
+        # write -- a user pointing --output at a not-yet-existing directory is the common case
+        # outside a git clone.
+        output_fpath.parent.mkdir(parents=True, exist_ok=True)
+
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
                 input_rows,
@@ -516,7 +783,6 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
-        output_fpath.parent.mkdir(exist_ok=True, parents=True)
         failures_fpath = failures_path_for(output_fpath)
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
@@ -547,7 +813,14 @@ class RolloutCollectionHelper(BaseModel):
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
             if capture_dirs:
-                merge_model_call_capture_into_record(result, capture_dirs)
+                merge_model_call_capture_into_record(
+                    result,
+                    capture_dirs,
+                    include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+                )
+
+            if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
+                _attach_trajectory_record(row, result)
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -555,7 +828,6 @@ class RolloutCollectionHelper(BaseModel):
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
-            result_strs.append([serialized])
 
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
@@ -591,9 +863,10 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
+        if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
+            result_strs = [[orjson.dumps(_rollout_for_wandb(result))] for result in results]
+            wandb_run.log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
 
         print("Sorting results to ensure consistent ordering")
@@ -661,6 +934,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                         "responses_create_params",
                         "ng_agent_observations",
                         "ng_model_call_capture",
+                        NG_TRAJECTORY_KEY,
                     )
                 }
                 usage = (r.get("response") or {}).get("usage")

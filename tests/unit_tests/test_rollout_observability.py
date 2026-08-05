@@ -14,6 +14,8 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     SandboxObservation,
     ToolCallObservation,
+    TrajectoryModelCall,
+    TrajectoryRecord,
     join_model_call_observations,
 )
 
@@ -61,6 +63,24 @@ def test_observation_bundle_allows_missing_parent() -> None:
 def test_observation_models_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError, match="producer_extension"):
         ModelCallRef.model_validate({"model_call_id": "call-1", "producer_extension": "unexpected"})
+    with pytest.raises(ValidationError, match="output"):
+        ToolCallObservation.model_validate(
+            {"invocation_id": "root", "tool_call_id": "tool-1", "output": "trajectory-only"}
+        )
+
+
+def test_turns_are_versioned_trajectory_records_not_legacy_observations() -> None:
+    with pytest.raises(ValidationError, match="turn"):
+        AgentObservationBundle.model_validate({"source": "test", "records": [{"kind": "turn"}]})
+
+
+def test_trajectory_rejects_duplicate_model_call_ids() -> None:
+    with pytest.raises(ValidationError, match="model_call_id must be unique"):
+        TrajectoryRecord(
+            task_id="task",
+            rollout_id="rollout",
+            model_calls=[TrajectoryModelCall(model_call_id="call-1"), TrajectoryModelCall(model_call_id="call-1")],
+        )
 
 
 @pytest.mark.parametrize(

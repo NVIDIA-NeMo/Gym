@@ -319,6 +319,20 @@ def _merge_config_paths(overrides: list[str]) -> list[str]:
     return ([f"+config_paths=[{','.join(paths)}]"] if paths else []) + rest
 
 
+def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.orchestration.api import SubmitConfig
+    from nemo_gym.orchestration.submit import submit
+
+    merged = OmegaConf.merge(
+        OmegaConf.load(args.config),
+        OmegaConf.from_dotlist([t.lstrip("+") for t in overrides]) if overrides else OmegaConf.create(),
+    )
+    config = SubmitConfig.model_validate(OmegaConf.to_container(merged, resolve=True))
+    submit(config, dry_run=args.dry_run)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
@@ -530,6 +544,18 @@ COMMANDS = {
             MODEL_API_KEY,
         ),
     ),
+    "env prefetch": Command(
+        target="nemo_gym.cli.env:prefetch",
+        summary="Pre-warm per-server venvs without starting servers.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+        ),
+    ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
         target="nemo_gym.cli.eval:prepare_benchmark",
@@ -649,6 +675,22 @@ COMMANDS = {
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection."),
         ),
     ),
+    "eval submit": Command(
+        target=_eval_submit,
+        summary="Submit a job.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--dry-run", action="store_true", help="Print generated job scripts without submitting."
+                ),
+            ),
+        ),
+    ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
 }
 
@@ -657,7 +699,10 @@ def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Comman
     leaf = subparsers.add_parser(name, help=command.summary, description=command.summary)
     # `_parser=leaf` so error reporting (and flag "did you mean?" hints) uses this command's own options/prog.
     leaf.set_defaults(_command=command, _parser=leaf)
-    leaf.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
+    # SUPPRESS so an absent trailing `-v` can't overwrite one given before the subcommand (see build_parser).
+    leaf.add_argument(
+        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="Set logging level to DEBUG."
+    )
     for flag in command.flags:
         flag.register(leaf)
 
@@ -667,6 +712,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _GymArgumentParser(prog="gym", add_help=True)
     parser.add_argument("--version", action="store_true", help="Show the NeMo Gym version and exit.")
     parser.add_argument("--json", action="store_true", help="With --version, output as JSON.")
+    # Also registered on every leaf, so `-v` is accepted before or after the subcommand.
+    parser.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
     parser.set_defaults(_parser=parser)
 
     subparsers = parser.add_subparsers()
@@ -770,7 +817,12 @@ def main() -> None:
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        hints = "".join(did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
+        # A flag rejected for its position (not for being unknown) is still in known_options, so exclude it
+        # from its own candidate set — otherwise it matches itself and is suggested as its own correction.
+        hints = "".join(
+            did_you_mean(name, [opt for opt in known_options if opt != name])
+            for name in (flag.split("=", 1)[0] for flag in unknown_flags)
+        )
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
     # set NEMO_GYM_EXTRA_ROOTS from --search-dir for the duration of the command

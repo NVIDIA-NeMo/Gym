@@ -25,7 +25,7 @@ dynamic = [
 ]
 description = "NeMo Gym is a library for building reinforcement learning environments"
 license = {file = "LICENSE"}
-requires-python = ">=3.12"
+requires-python = ">=3.13.14"
 authors = [{ name = "NVIDIA" }]
 maintainers = [{ name = "NVIDIA" }]
 
@@ -57,7 +57,7 @@ classifiers = [
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Mathematics",
@@ -200,6 +200,12 @@ dependencies = [
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
     "python-multipart>=0.0.22",
 
+    # pyarrow: columnar data library (transitive dependency via mlflow, pinned for security)
+    # mlflow caps pyarrow<25; versions >=23.0.1 have cp313 wheels and address use-after-free.
+    # Updated: Tue Jul 29, 2026 with pyarrow>=23.0.1
+    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
+    "pyarrow>=23.0.1",
+
     # wandb: E2E rollout collection data and metrics upload
     # Updated: Mon May 19, 2026 with wandb==0.27.0
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
@@ -226,6 +232,15 @@ dependencies = [
 [project.optional-dependencies]
 all = [
     "nemo-gym[dev,sandbox]",
+]
+
+vllm = [
+    # Pin to the same version used by local_vllm_model / genrm_model server venvs.
+    "vllm==0.20.0",
+    # Pin flashinfer to the exact version vllm 0.20.0 specifies, ensuring pre-compiled
+    # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
+    # flashinfer>=0.2 bundles compiled kernels in the python package directly.
+    "flashinfer-python==0.6.8.post1",
 ]
 
 sandbox = [
@@ -312,10 +327,21 @@ required-version = ">=0.9.30"
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
 ]
+# override-dependencies overrides transitive dep version pins that conflict with
+# Python 3.13 wheel availability. Server venvs inherit this via the editable
+# nemo-gym install (uv >=0.11.24).
+override-dependencies = [
+    # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
+    "spacy>=3.8.13",
+]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Don't add a package any
 # server needs. Context: https://github.com/NVIDIA-NeMo/Gym/pull/1835
 exclude-dependencies = [
+    # fasttext-wheel has no cp313 wheels and fails to compile on Python 3.13
+    # (missing #include <cstdint> in src/args.cc). Excluded as a transitive dep
+    # of unbabel-comet; wmt_translation does not import fasttext at runtime.
+    "fasttext-wheel",
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",
@@ -554,7 +580,7 @@ exclude_also = [
 [tool.ruff]
 # Line length configuration
 line-length = 119
-target-version = "py312"
+target-version = "py313"
 
 cache-dir = "cache/.ruff_cache"
 # Exclude common directories that shouldn't be linted
