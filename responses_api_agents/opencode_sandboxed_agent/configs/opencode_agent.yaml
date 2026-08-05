@@ -12,9 +12,120 @@ opencode_sandboxed_agent:
       opencode_version: 1.17.11
       opencode_config:
         permission:
-          bash: allow
-          edit: allow
-          webfetch: allow
+          edit:
+            "**": allow
+
+          bash:
+            "*": allow
+
+            # process termination
+            "*killall*": deny
+            "*pkill*": deny
+            "*kill -1*": deny
+            "*kill 0*": deny
+
+            # filesystem destruction
+            "*rm -rf /": deny
+            "*rm -rf /*": deny
+            "*rm -rf /bin*": deny
+            "*rm -rf /usr*": deny
+            "*rm -rf /etc*": deny
+            "*rm -rf /var*": deny
+            "*rm -rf /home*": deny
+            "*rm -rf /root*": deny
+            "*rm -rf /opt*": deny
+            "*rm -rf /lib*": deny
+            "*rm -rf /lib64*": deny
+            "*rm -rf /sbin*": deny
+            "*rm -rf /boot*": deny
+            "*rm -rf /dev*": deny
+            "*rm -rf /proc*": deny
+            "*rm -rf /sys*": deny
+
+            # system control
+            # "*shutdown*": deny
+            # "*reboot*": deny
+            # "*poweroff*": deny
+            # "*halt*": deny
+            # "init 0*": deny
+            # "init 6*": deny
+
+            # disk devices
+            "dd *of=/dev/sd*": deny
+            "dd *of=/dev/nvme*": deny
+            "dd *of=/dev/hd*": deny
+            "dd *of=/dev/null*": deny
+
+            # git network
+            "*git fetch*": deny
+            "*git pull*": deny
+            "*git clone*": deny
+            "*git ls-remote*": deny
+            "*git remote add*": deny
+            "*git remote set-url*": deny
+            "*git remote set-head*": deny
+            "*git remote update*": deny
+            "*git remote rename*": deny
+            "*git remote set-branches*": deny
+            "*git submodule add*": deny
+            "*git submodule update*": deny
+            "*git submodule sync*": deny
+            "*git submodule init*": deny
+            "*git archive*--remote*": deny
+            "*git *://*": deny
+            "*git *@*:*": deny
+
+            # git history mining
+            "*git log*--all*": deny
+            "*git log*--branches*": deny
+            "*git log*--remotes*": deny
+            "*git log*--walk-reflogs*": deny
+            "*git log*--grep*": deny
+            "*git rev-list*--all*": deny
+            "*git rev-list*--branches*": deny
+            "*git rev-list*--remotes*": deny
+            "*git rev-list*--grep*": deny
+            "*git shortlog*--all*": deny
+            "*git reflog*": deny
+            "*git cat-file*": deny
+            "*git fsck*": deny
+            "*git verify-pack*": deny
+            "*git unpack-objects*": deny
+            "*git cherry*": deny
+            "*git show*": deny
+            "*git merge-base*--is-ancestor*": deny
+            "*git branch*--contains*": deny
+            "*git tag*--contains*": deny
+            "*git for-each-ref*--contains*": deny
+
+            # git internals (substring match on path)
+            "*.git/logs*": deny
+            "*.git/packed-refs*": deny
+            "*.git/ORIG_HEAD*": deny
+            "*.git/FETCH_HEAD*": deny
+            "*.git/refs*": deny
+
+            # online lookups
+            "*curl *github.com*": deny
+            "*wget *github.com*": deny
+            "*curl *githubusercontent.com*": deny
+            "*wget *githubusercontent.com*": deny
+            "*curl *github.io*": deny
+            "*wget *github.io*": deny
+
+        tools:
+          bash: true
+          edit: true
+          read: true
+          glob: true
+          grep: true
+          write: true
+          apply_patch: true
+          webfetch: false
+          websearch: false
+          task: false
+          skill: false
+          todowrite: true
 
       sandbox_timeout: 1800  # 30 min default for harness execution
 
