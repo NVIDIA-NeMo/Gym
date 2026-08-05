@@ -41,6 +41,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.browsecomp_agent.app import (
     BrowsecompAgent,
@@ -210,3 +211,51 @@ async def test_contained_for_any_server_error(status: int) -> None:
     agent = _make_agent(_RunServerClient(responses_status=status))
     result = await _run(agent)
     assert result.reward == 0.0
+
+
+class TestInfrastructureFailureIsRetryableNotScored:
+    """Containing a HARNESS failure must not also record it as a result.
+
+    Job 5877505 lost 198 samples this way and its Exa twin 304. The 4h cluster
+    cap forced a chain-hop; `gym eval run` restarted its own FastAPI servers and
+    the agent was answering ~54s before policy_model finished booting. Every
+    remaining sample took a 500 and was written to the MAIN rollouts jsonl as a
+    scored zero, where `_load_from_cache` treats it as permanently done -- so no
+    resume could ever retry it. See the contract at nemo_gym/rollout_collection.py.
+    """
+
+    async def test_responses_5xx_is_not_persisted(self) -> None:
+        agent = _make_agent(_RunServerClient(responses_status=500))
+        result = (await _run(agent)).model_dump()
+        assert result[NG_NO_PERSIST_KEY] is True
+        assert result[NG_FAILURE_CLASS_KEY] == "kill_shaped"
+
+    async def test_verify_5xx_is_not_persisted(self) -> None:
+        agent = _make_agent(_RunServerClient(verify_status=500))
+        result = (await _run(agent)).model_dump()
+        assert result[NG_NO_PERSIST_KEY] is True
+
+    async def test_still_scored_zero_and_countable(self) -> None:
+        """Routing is additive: the contained-failure contract is unchanged."""
+        agent = _make_agent(_RunServerClient(responses_status=500))
+        result = (await _run(agent)).model_dump()
+        assert result["reward"] == 0.0
+        assert "ClientResponseError" in result["agent_error"]
+
+    async def test_sample_shaped_failure_is_still_persisted(self) -> None:
+        """A rollout's OWN failure stays scored 0 and persisted -- not retried."""
+        client = _RunServerClient()
+
+        async def _boom(**kwargs):
+            raise ValueError("malformed tool arguments")
+
+        client.post = _boom
+        result = (await _run(_make_agent(client))).model_dump()
+        assert result["reward"] == 0.0
+        assert "ValueError" in result["agent_error"]
+        assert NG_NO_PERSIST_KEY not in result, "a sample failure must not be re-dispatched forever"
+
+    async def test_happy_path_carries_no_routing_keys(self) -> None:
+        result = (await _run(_make_agent(_RunServerClient(reward=1.0)))).model_dump()
+        assert NG_NO_PERSIST_KEY not in result
+        assert NG_FAILURE_CLASS_KEY not in result

@@ -19,6 +19,7 @@ import traceback
 from pathlib import Path
 from typing import List, Optional
 
+import aiohttp
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
@@ -46,6 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_models.vllm_model.app import VLLMConverter
 
@@ -179,6 +181,23 @@ class BrowsecompAgentVerifyRequest(BaseVerifyRequest):
 
 class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+def _is_infrastructure_failure(exc: BaseException) -> bool:
+    """True when the harness failed, not the sample.
+
+    A 5xx from a sibling Gym server, or a connection/timeout error, means
+    policy_model or the resources server was unreachable. The canonical case is
+    a chain-hop restart: `gym eval run` starts its own FastAPI servers AFTER the
+    Slurm-level vLLM gate has passed, so on resume the agent can be answering
+    while policy_model is still booting.
+
+    4xx stays sample-shaped -- a malformed request is this rollout's own fault
+    and is still scored 0.
+    """
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return exc.status >= 500
+    return isinstance(exc, (aiohttp.ClientConnectionError, TimeoutError))
 
 
 class BrowsecompAgent(SimpleResponsesAPIAgent):
@@ -734,6 +753,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         qid = _qid(json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in rcp_input], default=str))
         print(f"[browsecomp][start][{qid}] question={question_text[:200]!r}", flush=True)
 
+        # Initialised BEFORE the try: the except block reads last_response_json, so binding it
+        # any later means a failure during /seed_session raises UnboundLocalError *inside the
+        # handler*. That escapes containment and makes /run return 500 -- the exact run-killing
+        # path the handler exists to prevent.
+        last_verify_response = None
+        last_response_json = None
         try:
             seed_session_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -744,8 +769,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_session_response)
             cookies = seed_session_response.cookies
 
-            last_verify_response = None
-            last_response_json = None
             for attempt in range(self.config.max_run_retries):
                 # Seed snapshot keys so responses() can name per-reset/-final files.
                 # (ported from gym-gitlab fe9845ee)
@@ -805,7 +828,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             return last_verify_response
         except Exception as e:
-            print(f"[browsecomp][abort][{qid}] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
+            infra = _is_infrastructure_failure(e)
+            print(
+                f"[browsecomp][abort][{qid}] error_type={type(e).__name__} "
+                f"class={'infra' if infra else 'sample'} error={str(e)[:300]}",
+                flush=True,
+            )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
             # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
             # and every remaining sample dies with it — that cost two full 8-node allocations,
@@ -826,6 +854,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     tool_choice="none",
                     tools=[],
                 ).model_dump()
+            # EXCEPT when the HARNESS is what broke. Then nothing about this sample failed, so
+            # scoring it 0 is wrong, and persisting a row is worse: _load_from_cache keys on
+            # (task_index, rollout_index) and would treat it as permanently done. NG_NO_PERSIST_KEY
+            # writes no row at all (nemo_gym/rollout_collection.py), so resume's set-difference
+            # re-dispatches it on the next chain-hop. The 4h cluster cap makes chain-hops
+            # unavoidable on a 1266-sample run, so this path is load-bearing, not a corner case.
+            # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.
+            routing = {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "kill_shaped"} if infra else {}
             return BrowsecompAgentVerifyResponse.model_validate(
                 body.model_dump()
                 | {
@@ -833,6 +869,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     "reward": 0.0,
                     "agent_error": f"{type(e).__name__}: {str(e)[:300]}",
                 }
+                | routing
             )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
