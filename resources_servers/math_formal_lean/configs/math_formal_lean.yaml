@@ -19,6 +19,10 @@ math_formal_lean:
             create:
               timeout_s: 90
               retries: 3
+            # Long compiles poll short status requests instead of holding one stream
+            # (survives proxy/LB stream caps; Gym PR 2296).
+            operations:
+              background_exec: true
         image: ${oc.env:NS_SANDBOX_IMAGE,}
         max_concurrent: ${oc.env:LEAN_SANDBOX_MAX_CONCURRENT,8}
       compilation_timeout: 30.0

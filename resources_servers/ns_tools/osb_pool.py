@@ -33,7 +33,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Dict, Optional, Tuple
 
-import httpx
+import aiohttp
+import httpx  # exception types only: the nemo_skills client contract catches httpx errors
 
 
 LOGGER = logging.getLogger(__name__)
@@ -137,9 +138,17 @@ class OpenSandboxPool:
         self._closed = False
         self._tasks: list = []
         self._last_heal_create = 0.0
-        self._http = httpx.AsyncClient(timeout=self._health_timeout_s)
+        self._http: Any = None  # aiohttp session; created lazily on the serving loop
 
     # ------------------------------------------------------------------ lifecycle
+
+    def _http_session(self) -> aiohttp.ClientSession:
+        if self._http is None or self._http.closed:
+            self._http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=512, ttl_dns_cache=300),
+                timeout=aiohttp.ClientTimeout(total=self._health_timeout_s),
+            )
+        return self._http
 
     async def start(self) -> None:
         """Start the SDK pool and kick warmup + maintenance loops; returns immediately."""
@@ -215,7 +224,8 @@ class OpenSandboxPool:
                 await self._sdk_pool.shutdown(graceful=True)
             except Exception as exc:
                 LOGGER.warning("SDK pool shutdown failed: %s", exc)
-        await self._http.aclose()
+        if self._http is not None and not self._http.closed:
+            await self._http.close()
 
     # ------------------------------------------------------------------ slot fill
 
@@ -296,11 +306,11 @@ class OpenSandboxPool:
         last_error: Optional[str] = None
         while time.monotonic() < deadline:
             try:
-                response = await self._http.get(f"{base_url}{self._health_path}", headers=headers)
-                if response.status_code == 200:
-                    return
-                last_error = f"HTTP {response.status_code}"
-            except httpx.HTTPError as exc:
+                async with self._http_session().get(f"{base_url}{self._health_path}", headers=headers) as response:
+                    if response.status == 200:
+                        return
+                    last_error = f"HTTP {response.status}"
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 last_error = repr(exc)
             await asyncio.sleep(2.0)
         raise RuntimeError(f"pod never became healthy through the proxy: {last_error}")
@@ -336,9 +346,11 @@ class OpenSandboxPool:
                     await self._heal_slot(slot)
                     continue
                 try:
-                    response = await self._http.get(f"{slot.base_url}{self._health_path}", headers=slot.headers)
-                    ok = response.status_code == 200
-                except httpx.HTTPError:
+                    async with self._http_session().get(
+                        f"{slot.base_url}{self._health_path}", headers=slot.headers
+                    ) as response:
+                        ok = response.status == 200
+                except (aiohttp.ClientError, asyncio.TimeoutError):
                     ok = False
                 if ok:
                     slot.strikes = 0

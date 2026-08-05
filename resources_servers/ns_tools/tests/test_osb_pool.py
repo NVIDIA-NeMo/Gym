@@ -138,6 +138,38 @@ class TestRouting:
         assert all("sess-a" not in s.sessions for s in pool._slots)
 
 
+class _FakeAiohttpResponse:
+    def __init__(self, status: int, text: str = ""):
+        self.status = status
+        self._text = text
+
+    async def text(self):
+        return self._text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeAiohttpSession:
+    """Stands in for aiohttp.ClientSession; scripts responses per call."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+        self.closed = False
+
+    def post(self, url, data=None, headers=None, timeout=None):
+        self.calls.append(("POST", url, dict(headers or {})))
+        return self.responses.pop(0)
+
+    def delete(self, url, headers=None, timeout=None):
+        self.calls.append(("DELETE", url, dict(headers or {})))
+        return self.responses.pop(0)
+
+
 class TestSandboxBackend:
     """The nemo_skills subclass; skipped when nemo_skills is not installed (per-server dep)."""
 
@@ -163,57 +195,52 @@ class TestSandboxBackend:
         assert sandboxes["opensandbox_pool"] is osb_sandbox.OpenSandboxPoolSandbox
 
     def test_send_request_routes_with_pool_headers_and_session(self, backend):
-        seen = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen["url"] = str(request.url)
-            seen["headers"] = dict(request.headers)
-            return httpx.Response(200, json={"process_status": "completed", "stdout": "", "stderr": ""})
-
-        backend.http_session = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        ok = '{"process_status": "completed", "stdout": "", "stderr": ""}'
+        backend._aiohttp = _FakeAiohttpSession([_FakeAiohttpResponse(200, ok)])
         result = asyncio.run(backend._send_request({"generated_code": "1+1", "session_id": "sess-a"}, timeout=10.0))
         assert result["process_status"] == "completed"
-        assert seen["url"].endswith("/proxy/6000/execute")
-        assert seen["headers"]["open-sandbox-api-key"] == "k"
-        assert seen["headers"]["x-session-id"] == "sess-a"
+        method, url, headers = backend._aiohttp.calls[0]
+        assert method == "POST" and url.endswith("/proxy/6000/execute")
+        assert headers["OPEN-SANDBOX-API-KEY"] == "k"
+        assert headers["X-Session-ID"] == "sess-a"
 
     def test_non_200_normalizes_to_the_timeout_contract(self, backend):
-        backend.http_session = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: httpx.Response(500, text="boom"))
-        )
+        backend._aiohttp = _FakeAiohttpSession([_FakeAiohttpResponse(500, "boom")])
         with pytest.raises(httpx.TimeoutException):
             asyncio.run(backend._send_request({"generated_code": "1+1", "session_id": "s"}, timeout=10.0))
 
     def test_502_retries_exactly_once_then_succeeds(self, backend):
-        calls = {"n": 0}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return httpx.Response(502, text="bad gateway")
-            return httpx.Response(200, json={"process_status": "completed", "stdout": "", "stderr": ""})
-
-        backend.http_session = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        ok = '{"process_status": "completed", "stdout": "", "stderr": ""}'
+        backend._aiohttp = _FakeAiohttpSession(
+            [_FakeAiohttpResponse(502, "bad gateway"), _FakeAiohttpResponse(200, ok)]
+        )
         result = asyncio.run(backend._send_request({"generated_code": "1+1", "session_id": "s"}, timeout=10.0))
         assert result["process_status"] == "completed"
-        assert calls["n"] == 2
+        assert len(backend._aiohttp.calls) == 2
+
+    def test_transport_errors_normalize_to_httpx_timeout(self, backend):
+        import aiohttp as _aiohttp
+
+        class _Raising:
+            closed = False
+
+            def post(self, *a, **k):
+                raise _aiohttp.ClientConnectionError("conn reset")
+
+        backend._aiohttp = _Raising()
+        with pytest.raises(httpx.TimeoutException):
+            asyncio.run(backend._send_request({"generated_code": "1", "session_id": "s"}, timeout=10.0))
 
     def test_delete_session_routes_to_the_pinned_pod_and_releases(self, backend):
-        seen = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen["method"] = request.method
-            seen["url"] = str(request.url)
-            return httpx.Response(200)
-
         async def main():
             await backend._pool.route("sess-a")
-            backend.http_session = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            backend._aiohttp = _FakeAiohttpSession([_FakeAiohttpResponse(200)])
             await backend.delete_session("sess-a")
 
         asyncio.run(main())
-        assert seen["method"] == "DELETE"
-        assert seen["url"].endswith("/sessions/sess-a")
+        method, url, _ = backend._aiohttp.calls[0]
+        assert method == "DELETE"
+        assert url.endswith("/sessions/sess-a")
         assert "sess-a" not in backend._pool._session_to_slot
 
 
