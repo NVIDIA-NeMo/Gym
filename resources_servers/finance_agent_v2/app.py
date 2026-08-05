@@ -17,12 +17,12 @@ Finance Agent v2 (FABv2) Resource Server.
 
 Tools-only reuse of Vals's official finance-agent-v2 benchmark: this server
 imports the upstream ``finance_agent.tools.*`` ``Tool`` classes directly (no
-reimplementation) and exposes each as an HTTP endpoint, so the existing
-nemo-gym ``finance_agent`` agent loop can drive them. The public FABv2 release
-ships no official grader, so scoring uses **our own** approximation: the
-``/verify`` endpoint reuses the v1 ``[[0]]/[[1]]/[[2]]`` judge from
-``resources_servers/finance_sec_search``. (The Vals private rubric grader is
-deliberately not reproduced here — it derives from privately licensed material.)
+reimplementation) and exposes each as an HTTP endpoint, so the ``finance_agent_v2``
+agent loop can drive them. The public FABv2 release ships no official grader, so
+scoring uses **our own** approximation: ``/verify`` judges each criterion of the
+dataset's ``rubric`` separately and decides it by majority vote. (The Vals private
+rubric grader is deliberately not reproduced here — it derives from privately
+licensed material.)
 
 Upstream tool surface (``finance_agent.tools``):
   - web_search (TavilyWebSearch)        — needs Tavily API key
@@ -41,10 +41,9 @@ reads), which this server scopes by HTTP session cookie.
 import asyncio
 import json
 import logging
-import re
 import time
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, NamedTuple, Optional
 
 import yaml
 from fastapi import Body, FastAPI
@@ -69,6 +68,7 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -103,9 +103,25 @@ except ImportError:  # pragma: no cover - exercised only under flat entrypoint e
 
 logger = logging.getLogger(__name__)
 
+# Ceiling on the escalated judge output budget (see _judge_attempt). Only reached
+# when a judge repeatedly runs out of room, which a correct judge never does: on
+# the 27Q set gpt-5.2 answers this prompt in ~200 output tokens at effort=high.
+_JUDGE_MAX_OUTPUT_TOKENS_CAP = 32768
+# How much failed-reply text to keep per criterion, for debugging. Bounded on both
+# axes because these ride along in every rollout row.
+_MAX_FAILED_REPLY_SAMPLES = 3
+_FAILED_REPLY_SAMPLE_CHARS = 600
+
 
 class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the Finance Agent v2 resource server."""
+
+    # verify() is a pure function of (request body, server config): it reads the
+    # question, the submitted answer, and the rubric off the body and calls the
+    # judge. The per-session tool state (parse_html_page -> retrieve_information)
+    # is a tool-time concern that verify only clears, never reads — so rescoring a
+    # stored rollout with `gym eval reverify` is safe.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     # --- Tool API keys (external services the upstream tools call) -----------
     tavily_api_key: Optional[str] = Field(default=None, description="Tavily API key for the web_search tool.")
@@ -278,7 +294,25 @@ class RubricJudgement(BaseModel):
     # One entry per successful vote, in the same order as ``votes``.
     evidence: List[str] = Field(default_factory=list)
     reasons: List[str] = Field(default_factory=list)
+    # The first few failed replies, error-tagged and clipped. A parse failure is
+    # only diagnosable from the raw text, and without this the unresolved criteria
+    # of a finished run cannot be explained from the rollout file at all.
+    failed_reply_samples: List[str] = Field(default_factory=list)
     error: Optional[str] = None
+
+
+class _JudgeAttempt(NamedTuple):
+    """One judge call's outcome.
+
+    ``score`` None means the attempt must be retried; ``starved`` marks the subset
+    of those failures a larger output budget can actually fix (the model hit
+    max_output_tokens or emitted nothing), which is what gates escalation.
+    """
+
+    score: Optional[int]
+    error: Optional[str]
+    reply: str
+    starved: bool
 
 
 class FinanceAgentV2VerifyResponse(BaseVerifyResponse):
@@ -635,7 +669,45 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         return criteria
 
     @staticmethod
-    def _extract_score(judge_text: str) -> Optional[int]:
+    def _json_objects(text: str) -> List[str]:
+        """Return the top-level ``{...}`` spans of ``text``, in order.
+
+        A brace-counting scan that tracks JSON string state, rather than a regex.
+        The judge quotes the answer verbatim as evidence, and finance answers carry
+        LaTeX-style subscripts (``EBITDAR_{WMT}``, ``FCCR_{WMT}``); a ``{.*?}``
+        regex ends its match at the brace inside that quote, fails to parse, and —
+        because findall does not backtrack — leaves every later candidate
+        misaligned. That silently cost one question its whole score in the first
+        27Q run, so the scan must understand strings and nesting.
+        """
+        spans: List[str] = []
+        depth = 0
+        start = -1
+        in_string = False
+        escaped = False
+        for i, ch in enumerate(text):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}" and depth:
+                depth -= 1
+                if depth == 0:
+                    spans.append(text[start : i + 1])
+        return spans
+
+    @classmethod
+    def _extract_score(cls, judge_text: str) -> Optional[int]:
         """Pull the binary ``score`` out of a judge reply, or None if unusable.
 
         Accepts a bare JSON object or one fenced in markdown, and scans candidate
@@ -647,8 +719,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         if not judge_text or not judge_text.strip():
             return None
 
-        candidates = re.findall(r"\{.*?\}", judge_text, re.DOTALL)
-        for blob in reversed(candidates):
+        for blob in reversed(cls._json_objects(judge_text)):
             try:
                 payload = json.loads(blob)
             except (json.JSONDecodeError, TypeError):
@@ -675,30 +746,29 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                     text += chunk
         return text
 
-    async def _judge_attempt(self, prompt: str, attempt: int) -> tuple[Optional[int], Optional[str], str]:
-        """Make one judge call. Returns (score, error, raw_reply_text).
+    async def _judge_attempt(self, prompt: str, budget_escalations: int) -> _JudgeAttempt:
+        """Make one judge call.
 
-        ``score`` is None when the call failed or the reply could not be parsed;
-        ``error`` describes which. Callers retry either case.
+        ``budget_escalations`` counts prior attempts on this criterion that ran out
+        of output budget; each one doubles ``max_output_tokens`` (and stretches the
+        timeout to match). Escalation is keyed to that failure rather than to the
+        attempt number because the ordinary failure is an unparseable reply, which a
+        bigger budget does not fix — and blanket-lowering reasoning effort on every
+        retry, as an earlier version did, just makes the judge worse at the numeric
+        comparisons this rubric is full of.
         """
         params = (
             self.config.judge_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
         ).model_copy(deep=True)
         params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
 
-        # Escalate after a failed attempt. Reasoning judge models can spend the
-        # entire max_output_tokens budget on hidden reasoning and emit no visible
-        # text, so retrying with identical params reproduces the empty output.
-        # Give later attempts a real chance: raise the output budget and lower the
-        # reasoning effort so the model actually emits the JSON verdict.
-        if attempt > 0:
-            if getattr(params, "max_output_tokens", None):
-                params.max_output_tokens = min(max(params.max_output_tokens, 4096) * 2, 32768)
-            if getattr(params, "reasoning", None) is not None:
-                try:
-                    params.reasoning.effort = "low"
-                except Exception:  # noqa: BLE001
-                    pass
+        timeout = self.config.judge_call_timeout
+        if budget_escalations and params.max_output_tokens:
+            params.max_output_tokens = min(
+                params.max_output_tokens * 2**budget_escalations, _JUDGE_MAX_OUTPUT_TOKENS_CAP
+            )
+            if timeout is not None:
+                timeout *= min(2**budget_escalations, 4)
 
         try:
             response = await asyncio.wait_for(
@@ -707,22 +777,26 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                     url_path="/v1/responses",
                     json=params,
                 ),
-                timeout=self.config.judge_call_timeout,
+                timeout=timeout,
             )
             judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
         except Exception as e:  # noqa: BLE001
-            return None, f"judge call failed: {type(e).__name__}: {e}", ""
+            return _JudgeAttempt(None, f"judge call failed: {type(e).__name__}: {e}", "", False)
 
         reply = self._judge_reply_text(judge_response)
         score = self._extract_score(reply)
-        if score is None:
-            error = (
-                "judge returned empty output (likely token budget exhausted by reasoning)"
-                if not reply.strip()
-                else "judge reply had no integer 0/1 score"
-            )
-            return None, error, reply
-        return score, None, reply
+        if score is not None:
+            return _JudgeAttempt(score, None, reply, False)
+
+        incomplete_reason = getattr(getattr(judge_response, "incomplete_details", None), "reason", None)
+        if incomplete_reason:
+            error = f"judge reply incomplete (incomplete_details.reason={incomplete_reason})"
+        elif not reply.strip():
+            error = "judge returned empty output"
+        else:
+            error = "judge reply had no integer 0/1 score"
+        starved = incomplete_reason == "max_output_tokens" or not reply.strip()
+        return _JudgeAttempt(None, error, reply, starved)
 
     async def _judge_criterion(
         self, question: str, generated_answer: str, criterion: Dict[str, Any]
@@ -744,24 +818,29 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         record = RubricJudgement(criteria=criterion["criteria"], operator=criterion.get("operator"))
         needed = max(1, self.config.judge_required_successes)
         last_error: Optional[str] = None
+        budget_escalations = 0
 
         max_attempts = max(1, self.config.judge_max_attempts)
         for attempt in range(max_attempts):
             if len(record.votes) >= needed:
                 break
             record.attempts_used += 1
-            score, error, reply = await self._judge_attempt(prompt, attempt)
+            result = await self._judge_attempt(prompt, budget_escalations)
 
-            if score is None:
-                last_error = error
-                if reply:
+            if result.score is None:
+                last_error = result.error
+                if result.reply:
                     record.parse_failures += 1
                 else:
                     record.api_failures += 1
+                if result.starved:
+                    budget_escalations += 1
+                if len(record.failed_reply_samples) < _MAX_FAILED_REPLY_SAMPLES:
+                    record.failed_reply_samples.append(f"{result.error}: {result.reply[:_FAILED_REPLY_SAMPLE_CHARS]}")
                 logger.warning(
                     "Rubric judge attempt %d failed (%s) for criterion: %.80s",
                     record.attempts_used,
-                    error,
+                    result.error,
                     criterion["criteria"],
                 )
                 # Back off between failures only, capped so a flaky judge cannot
@@ -771,8 +850,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                     await asyncio.sleep(min(2**attempt, 8))
                 continue
 
-            record.votes.append(score)
-            payload = self._extract_json_payload(reply)
+            record.votes.append(result.score)
+            payload = self._extract_json_payload(result.reply)
             record.evidence.append(str(payload.get("extracted_evidence", ""))[:1000])
             record.reasons.append(str(payload.get("reason", ""))[:1000])
 
@@ -800,14 +879,14 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             )
         return record
 
-    @staticmethod
-    def _extract_json_payload(judge_text: str) -> Dict[str, Any]:
+    @classmethod
+    def _extract_json_payload(cls, judge_text: str) -> Dict[str, Any]:
         """Return the scored JSON object from a reply, or {} if not found.
 
         Mirrors _extract_score's last-object-wins scan so the recorded evidence
         and reason come from the same object the verdict came from.
         """
-        for blob in reversed(re.findall(r"\{.*?\}", judge_text or "", re.DOTALL)):
+        for blob in reversed(cls._json_objects(judge_text or "")):
             try:
                 payload = json.loads(blob)
             except (json.JSONDecodeError, TypeError):

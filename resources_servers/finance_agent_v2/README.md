@@ -270,11 +270,20 @@ Per criterion, the judge is asked for a binary verdict (`1` = the answer asserts
 this claim, `0` = it does not) as JSON. Calls repeat until
 `judge_required_successes` (default 3) replies parse into an integer 0/1, capped at
 `judge_max_attempts` (default 10); API errors, timeouts, and unparseable replies
-consume an attempt and are retried with a raised output budget and lowered
-reasoning effort. The criterion's score is the majority of those verdicts — an odd
-count cannot tie — and every vote is retained in `rubric_judgements` with its
-evidence and reason. Criteria are judged concurrently up to
-`judge_max_concurrency`.
+consume an attempt and are retried. Only a reply that ran out of output budget
+escalates anything (the budget doubles, and the timeout with it) — an unparseable
+reply is not a budget problem, and lowering reasoning effort to chase one would
+just make the judge worse at the numeric comparisons this rubric is full of. The
+criterion's score is the majority of those verdicts — an odd count cannot tie —
+and every vote is retained in `rubric_judgements` with its evidence and reason.
+Criteria are judged concurrently up to `judge_max_concurrency`.
+
+Verdict JSON is located by a brace-balanced, string-aware scan rather than a
+regex. This is load-bearing: the judge quotes the answer verbatim as evidence, and
+finance answers carry LaTeX-style subscripts (`EBITDAR_{WMT}`), so a `{.*?}` regex
+ends its match inside the quote and every retry fails identically. Failed replies
+are sampled into `rubric_judgements[].failed_reply_samples` so the next parse bug
+is diagnosable from the rollout file instead of only from live logs.
 
 | Field | Meaning |
 |---|---|
@@ -283,6 +292,7 @@ evidence and reason. Criteria are judged concurrently up to
 | `rubric_passed` / `rubric_total` | the same counts unnormalized |
 | `rubric_unresolved` | criteria that never got 3 parsable verdicts |
 | `rubric_judgements[].votes` / `.unanimous` | per-criterion vote record; non-unanimous means the judge contradicted itself |
+| `rubric_judgements[].failed_reply_samples` | first few failed judge replies, error-tagged and clipped |
 | `judge_error` | set when scoring could not complete (no rubric, or any unresolved criterion) — **filter these out rather than reading them as zeros** |
 
 A criterion the judge never resolved is a judge failure, not a miss, so it scores
@@ -297,6 +307,56 @@ comparable to Vals's published numbers. The judge prompt lives in
 `prompt_templates/finance_agent_v2_rubric_judge.yaml`; override it inline with
 `rubric_judge_prompt_template` or point `rubric_judge_prompt_template_fpath`
 elsewhere.
+
+### Reading these metrics against the Vals leaderboard
+
+Only one of our metrics has a counterpart in Vals's
+[published methodology](https://www.vals.ai/benchmarks/fabv2), and it is not the
+one that looks closest.
+
+Vals reports two scores. Their leaderboard's **Accuracy** column is *Partial
+Credit*: a dealbreaker-gated, severity-weighted average of per-check scores,
+where failing any check flagged as a dealbreaker zeroes the question outright.
+*All-Pass* is their secondary metric — 100% only if every check passes. Both are
+computed on the private 450-question Test split, as the mean of three runs, and
+graded by a jury of GPT-5.4, Gemini-3.1-Pro, and Claude Sonnet 4.6.
+
+- `mean/rubric_all_pass` matches their **All-Pass** definition exactly. It is
+  still not a reproduction of a leaderboard cell, because we measure it on the
+  27 public questions rather than their private Test split.
+- `mean/rubric_fraction` is ungated and unweighted, so it has **no counterpart**
+  on the leaderboard and must not be placed next to the Accuracy column. The
+  27Q `gpt-5.6-luna` run scored `rubric_fraction` 0.822 against a published
+  Accuracy of 55.04% — reported side by side that reads as beating the
+  leaderboard by 27 points, when the two measure different things. Keep it as
+  the internal partial-credit and regression signal it is.
+
+Partial Credit cannot be reproduced from public data at all. The upstream CSV
+carries four columns (`Question`, `Question Type`, `Expert time (mins)`,
+`Rubric`), and every one of the 239 public criteria holds only `operator` and
+`criteria` — no severity weight and no dealbreaker flag. That metadata lives in
+Vals's platform behind the `finance_agent_v2_operator` name, so the gating and
+weighting their primary metric depends on are not in the open release.
+
+`verify` is a pure function of the request body plus this server's config, so the
+server declares `REVERIFY_MODE = STATELESS`: after changing the judge prompt or
+parameters you can rescore stored rollouts without re-running the policy, and
+without `--force`.
+
+```bash
+gym eval reverify --benchmark finance_agent_v2 --model-type openai_model \
+  --inputs results/<run>_materialized_inputs.jsonl \
+  --rollouts results/<run>.jsonl \
+  --output results/<run>_rejudged.jsonl --concurrency 4
+```
+
+Select the **same** config the rollouts were collected with. Reverify routes each
+row by the agent name stored on it, so rescoring a benchmark run against
+`--resources-server finance_agent_v2` fails with
+`KeyError: 'finance_agent_v2_benchmark_agent'` — that config declares the
+`finance_agent_v2` agent instead. `--model-type` is required either way, because
+the resources server's `retrieval_model_server` reference must resolve even though
+reverify only calls `/verify`.
 
 ## File structure
 

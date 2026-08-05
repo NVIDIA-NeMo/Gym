@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -137,13 +138,9 @@ def _make_verify_request(response: NeMoGymResponse, expected_answer=None, rubric
     )
 
 
-def _judge_response_json(text: str) -> str:
-    return NeMoGymResponse(
-        id="judge_resp",
-        created_at=0.0,
-        model="judge",
-        object="response",
-        output=[
+def _judge_response_json(text: str, incomplete_reason: str | None = None) -> str:
+    output = (
+        [
             {
                 "id": "judge_msg",
                 "content": [{"annotations": [], "text": text, "type": "output_text"}],
@@ -151,10 +148,21 @@ def _judge_response_json(text: str) -> str:
                 "status": "completed",
                 "type": "message",
             }
-        ],
+        ]
+        if text
+        else []
+    )
+    return NeMoGymResponse(
+        id="judge_resp",
+        created_at=0.0,
+        model="judge",
+        object="response",
+        output=output,
         parallel_tool_calls=False,
         tool_choice="none",
         tools=[],
+        status="incomplete" if incomplete_reason else "completed",
+        incomplete_details={"reason": incomplete_reason} if incomplete_reason else None,
     ).model_dump_json()
 
 
@@ -179,6 +187,19 @@ def _verdict(score: int, evidence: str = "the relevant span", reason: str = "mat
     return json.dumps({"extracted_evidence": evidence, "score": score, "reason": reason})
 
 
+class _Starved:
+    """Scripted reply for a judge that hit max_output_tokens and emitted nothing."""
+
+
+# The verdict that broke the first 27Q run: gpt-5.2 quoted the answer's LaTeX-style
+# subscripts as evidence, putting literal braces inside a JSON string value.
+_LATEX_EVIDENCE_VERDICT = (
+    '{\n  "extracted_evidence": "\u201cEBITDAR_{WMT}=29,348+12,973+2,347=44,668\u201d and '
+    '\u201cFCCR_{WMT}=44,668/4,596=9.72\u00d7\u201d",\n  "score": 1,\n'
+    '  "reason": "The answer states WMT EBITDAR as 44,668 ($ millions)."\n}'
+)
+
+
 def _rubric(*criteria: str) -> str:
     return json.dumps([{"operator": "finance_agent_v2_operator", "criteria": c} for c in criteria])
 
@@ -192,16 +213,19 @@ class _JudgeStub:
     """Scripted judge endpoint, keyed by criterion rather than by call order.
 
     Criteria are judged concurrently, so calls do not arrive in a fixed order and
-    an index-keyed script would be flaky. ``script`` maps criterion text to the
+    an index-keyed script would be flaky.     ``script`` maps criterion text to the
     replies its successive calls get, where a reply is an int (turned into a
-    well-formed verdict), a str (returned verbatim, for parse-failure cases), or
-    an exception instance (raised, for API-failure cases).
+    well-formed verdict), a str (returned verbatim, for parse-failure cases), a
+    ``_Starved`` instance (empty reply truncated at max_output_tokens), or an
+    exception instance (raised, for API-failure cases).
     """
 
     def __init__(self, script: dict) -> None:
         self._script = {criterion: list(replies) for criterion, replies in script.items()}
         self.calls: Counter = Counter()
         self.prompts: list[str] = []
+        # max_output_tokens per call, in call order, to assert on retry escalation.
+        self.budgets: list = []
         self.max_in_flight = 0
         self._in_flight = 0
 
@@ -209,6 +233,7 @@ class _JudgeStub:
         params = json
         prompt = params.input[0].content
         self.prompts.append(prompt)
+        self.budgets.append(params.max_output_tokens)
 
         criterion_section = prompt.rsplit(_CRITERION_MARKER, 1)[-1]
         criterion = next((c for c in self._script if c in criterion_section), None)
@@ -228,9 +253,12 @@ class _JudgeStub:
             reply = queue.pop(0) if queue else "ran out of scripted replies"
             if isinstance(reply, BaseException):
                 raise reply
+            response = MagicMock()
+            if isinstance(reply, _Starved):
+                response.read = AsyncMock(return_value=_judge_response_json("", incomplete_reason="max_output_tokens"))
+                return response
             if isinstance(reply, int):
                 reply = _verdict(reply)
-            response = MagicMock()
             response.read = AsyncMock(return_value=_judge_response_json(reply))
             return response
         finally:
@@ -267,6 +295,12 @@ def no_sleep(monkeypatch):
 class TestInitialization:
     def test_server_instantiates(self) -> None:
         assert _make_server() is not None
+
+    @pytest.mark.asyncio
+    async def test_declares_stateless_reverification(self) -> None:
+        """verify() reads only the request body and config, so rescoring stored
+        rollouts with `gym eval reverify` needs no --force."""
+        assert await _make_server().get_reverify_mode() == ReverifyMode.STATELESS
 
     def test_all_tools_available_with_keys(self) -> None:
         server = _make_server()
@@ -463,6 +497,24 @@ class TestScoreExtraction:
         text = f"I recall the format {_verdict(0)} but for this answer: {_verdict(1)}"
         assert FinanceAgentV2ResourcesServer._extract_score(text) == 1
 
+    @pytest.mark.parametrize("text", [_LATEX_EVIDENCE_VERDICT, f"```json\n{_LATEX_EVIDENCE_VERDICT}\n```"])
+    def test_braces_inside_quoted_evidence(self, text) -> None:
+        """Regression: the 27Q run lost a whole question to this reply shape.
+
+        The evidence quote carries the answer's LaTeX subscripts (``EBITDAR_{WMT}``),
+        so a non-greedy ``{.*?}`` regex ended its match on the inner brace and every
+        retry failed the same way. Extraction has to be brace-balanced.
+        """
+        assert FinanceAgentV2ResourcesServer._extract_score(text) == 1
+        assert "EBITDAR_{WMT}" in FinanceAgentV2ResourcesServer._extract_json_payload(text)["extracted_evidence"]
+
+    def test_nested_object_scores(self) -> None:
+        assert FinanceAgentV2ResourcesServer._extract_score('{"detail": {"unit": "millions"}, "score": 0}') == 0
+
+    def test_escaped_quote_before_brace(self) -> None:
+        """An escaped quote must not end string tracking early."""
+        assert FinanceAgentV2ResourcesServer._extract_score('{"extracted_evidence": "a \\" b_{c}", "score": 1}') == 1
+
     @pytest.mark.parametrize(
         "text",
         [
@@ -475,6 +527,7 @@ class TestScoreExtraction:
             '{"score": 2}',  # nor out-of-range ints
             '{"reason": "no score key"}',
             "{not valid json}",
+            '{"extracted_evidence": "x", "score": 1',  # truncated: never closed
         ],
     )
     def test_unusable_replies(self, text) -> None:
@@ -569,6 +622,43 @@ class TestVerifyRubricJudge:
 
         assert res.rubric_judgements[0].api_failures == 1
         assert res.rubric_judgements[0].parse_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_starved_reply_escalates_output_budget(self, no_sleep) -> None:
+        """Running out of output budget is the one failure a bigger budget fixes."""
+        server, stub = _rubric_server(
+            {_C1: [_Starved(), _Starved(), 1, 1, 1]},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1000),
+        )
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        # Doubles per starved attempt, then holds once replies come back.
+        assert stub.budgets == [1000, 2000, 4000, 4000, 4000]
+        assert res.rubric_judgements[0].score == 1
+        assert "max_output_tokens" in res.rubric_judgements[0].failed_reply_samples[0]
+
+    @pytest.mark.asyncio
+    async def test_parse_failure_does_not_escalate_budget(self, no_sleep) -> None:
+        """An unparseable reply is not a budget problem, so retries must not inflate
+        the budget (nor, as an earlier version did, degrade reasoning effort)."""
+        server, stub = _rubric_server(
+            {_C1: ["I think it passes.", 1, 1, 1]},
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1000),
+        )
+        await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        assert stub.budgets == [1000] * 4
+
+    @pytest.mark.asyncio
+    async def test_failed_replies_sampled_for_debugging(self, no_sleep) -> None:
+        """Failed reply text is what identifies a parse bug, so keep a bounded sample."""
+        server, _ = _rubric_server({_C1: ["nope"] * 5 + [1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        samples = res.rubric_judgements[0].failed_reply_samples
+        assert len(samples) == 3  # capped, though 5 attempts failed
+        assert res.rubric_judgements[0].parse_failures == 5
+        assert all("no integer 0/1 score" in s and "nope" in s for s in samples)
 
     @pytest.mark.asyncio
     async def test_exhausted_attempts_leave_criterion_unresolved(self, no_sleep) -> None:

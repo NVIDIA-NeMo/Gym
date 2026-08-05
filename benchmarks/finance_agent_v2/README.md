@@ -126,5 +126,11 @@ FABv2 release (subject to that project's terms). The public release ships **no
 official grader** — reward is computed by **our own** judge, run once per criterion
 of the public `rubric` field and voted over repeated calls. Vals's private grader
 is licensed and deliberately not reproduced here, so scores are not comparable to
-their published numbers. Details:
+their published numbers. Licensing detail:
 [resources-server README](../../resources_servers/finance_agent_v2/README.md#licensing).
+
+Before comparing anything here to the Vals leaderboard, read
+[reading these metrics against the Vals leaderboard](../../resources_servers/finance_agent_v2/README.md#reading-these-metrics-against-the-vals-leaderboard):
+their headline Accuracy is dealbreaker-gated Partial Credit on a private split,
+`mean/rubric_all_pass` is the only metric of ours that matches a Vals definition,
+and `rubric_fraction` has no counterpart there.
