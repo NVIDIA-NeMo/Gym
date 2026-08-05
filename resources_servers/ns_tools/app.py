@@ -95,6 +95,11 @@ class NSToolsConfig(BaseResourcesServerConfig):
     # The model receives a warning in stderr instead of restored state.
     disable_session_restore: bool = False
 
+    # Staged guard for tool calls arriving WITHOUT a gym session cookie (each such call
+    # silently mints a fresh sandbox session today). False = log + count (default,
+    # behavior-neutral); True = reject with 400 once the cookie path is proven end-to-end.
+    strict_session_cookie: bool = False
+
 
 # ============================================================
 # Run/Verify Request/Response Models
@@ -138,6 +143,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
+    _missing_cookie_count: int = 0
     _uses_python_tool_sidecar: bool = False
 
     def setup_webserver(self) -> FastAPI:
@@ -332,8 +338,19 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         # Get session ID for stateful execution
         session_id = request.session.get(SESSION_ID_KEY)
         if not session_id:
+            # A missing gym cookie means every call mints a fresh sandbox session — silent
+            # per-call state loss. Staged fix: count + log by default; reject only once the
+            # cookie path is proven end-to-end and strict_session_cookie is flipped.
+            self._missing_cookie_count += 1
+            if self.config.strict_session_cookie:
+                return PlainTextResponse(
+                    json.dumps({"error": "missing session cookie; stateful tools require a session"}),
+                    status_code=400,
+                )
             session_id = str(uuid.uuid4())
-            logger.warning(f"No session ID found, using fallback: {session_id}")
+            logger.warning(
+                f"No session ID found (occurrence {self._missing_cookie_count}), using fallback: {session_id}"
+            )
 
         if session_id not in self._timing_by_session:
             self._timing_by_session[session_id] = []
