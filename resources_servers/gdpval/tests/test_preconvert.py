@@ -37,7 +37,9 @@ class TestFindConvertibleFiles:
         (tmp_path / "c.pdf").write_text("p")
         files = pcv.find_convertible_files(str(tmp_path))
         # Sorted by full path: top-level b.docx < sub/a.xlsx; c.pptx skipped (sibling .pdf exists).
-        assert [p.name for p in files] == ["b.docx", "a.xlsx"]
+        # Entries are (source, explicit_destination); destination is None unless the stem is ambiguous.
+        assert [src.name for src, _dest in files] == ["b.docx", "a.xlsx"]
+        assert all(dest is None for _src, dest in files)
 
 
 class TestConvertToPdfErrors:
