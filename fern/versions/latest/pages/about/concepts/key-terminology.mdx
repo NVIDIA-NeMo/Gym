@@ -42,7 +42,7 @@ The **model** is the LLM you call — local weights or a remote API endpoint. In
 | --- | --- |
 | **Task** | One problem for the agent to solve — one dataset row (`responses_create_params` + `verifier_metadata`). |
 | **Dataset** | Collection of tasks plus metadata needed for scoring (usually JSONL). See [Prepare Data](/data). |
-| **Rollout / trajectory** | **Rollout** (verb): execute a policy in an environment — take actions and record what happens. **Rollout** (noun) / **trajectory**: the ordered record of one attempt (states, actions, rewards). In Gym these names are aliases; architecture calls the resulting trajectory a *rollout*. Multiple rollouts per task support metrics like pass@k. See [trajectory capabilities](/reference/trajectory-capabilities). |
+| **Rollout / trajectory** | **Rollout** (verb): execute an agent in an environment — take actions and record what happens. **Rollout** (noun) / **trajectory**: the ordered record of one attempt (states, actions, rewards). In Gym these names are aliases; architecture calls the resulting trajectory a *rollout*. Multiple rollouts per task support metrics like pass@k. See [trajectory capabilities](/reference/trajectory-capabilities). |
 | **Task attempt** | One rollout for a specific task. Multiple attempts per task capture different approaches and support pass@k. |
 | **Trace** | Debug-oriented log of a rollout (timing, tool I/O, metadata) beyond the scored trajectory. |
 | **Rollout batch** | Multiple rollouts generated together (across tasks for throughput, or grouped on one task for methods like GRPO). |
