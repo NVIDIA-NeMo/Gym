@@ -29,7 +29,23 @@ import ``nemo_gym.token_id_capture.routes`` / ``.reader`` directly from server
 code.
 """
 
+from nemo_gym.token_id_capture.builder import (
+    BuildOutput,
+    Chain,
+    assert_prefix_contiguity,
+    per_request,
+    prefix_merging,
+    project_chain_to_output_items,
+    project_main_chain_response,
+    run_builder,
+)
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.consumer import (
+    clear_token_captures_for_rollouts,
+    token_id_capture_dirs_from_config,
+    trajectories_for_rollout,
+    trajectories_from_source,
+)
 from nemo_gym.token_id_capture.protocols import (
     TokenSink,
     TokenSource,
@@ -53,6 +69,8 @@ from nemo_gym.token_id_capture.store import TokenCaptureStore, validate_rollout_
 
 
 __all__ = [
+    "BuildOutput",
+    "Chain",
     "TokenIdCaptureConfig",
     "TokenEntry",
     "TOKEN_ENTRY_RECORD_SCHEMA_VERSION",
@@ -70,4 +88,14 @@ __all__ = [
     "capture_tokens",
     "commit_entry",
     "canonicalize_tool_arguments",
+    "per_request",
+    "prefix_merging",
+    "project_chain_to_output_items",
+    "project_main_chain_response",
+    "run_builder",
+    "assert_prefix_contiguity",
+    "trajectories_for_rollout",
+    "clear_token_captures_for_rollouts",
+    "trajectories_from_source",
+    "token_id_capture_dirs_from_config",
 ]
