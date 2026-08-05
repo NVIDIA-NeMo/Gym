@@ -56,14 +56,29 @@ from nemo_gym.token_id_capture import (
     TokenEntry,
     TokenIdCaptureConfig,
     commit_entry,
+    compute_digest,
+    cumulative_tokens,
     extract_token_fields,
     install_token_sink,
     reset_token_sink,
     set_token_sink,
+    stamp_lineage,
+)
+from nemo_gym.token_id_capture.lineage import (
+    LineageIndex,
+    RolloutLineage,
+    assistant_fingerprint,
+    conversation_digest,
 )
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
+
+_ASSISTANT_TURN = {
+    "role": "assistant",
+    "content": "checking",
+    "tool_calls": [{"function": {"name": "search", "arguments": '{"q":"alpha"}'}}],
+}
 
 PTOKS = [1, 2, 3]
 GTOKS = [4, 5]
@@ -563,7 +578,9 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
     finally:
         reset_token_sink(token)
     assert len(installed_sink.entries) == 1
-    assert installed_sink.entries[0].generation_token_ids == GTOKS
+    # The commit half is what stamps lineage, so a caller that skips extraction still gets it.
+    assert installed_sink.entries[0].cum_len == len(PTOKS) + len(GTOKS)
+    assert installed_sink.entries[0].digest
 
 
 def test_records_carry_a_schema_version():
@@ -602,6 +619,237 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
         "the rollout lost a call and must not look complete"
     )
     assert entry_ctor is TokenEntry  # patch scoped
+
+
+def test_capture_stamps_cum_len_and_digest(tmp_path):
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    client.post("/ng-rollout/lineage0-roll0/v1/responses", json={"input": "hi"})
+    (entry,) = TokenCaptureStore(tmp_path).read_entries("lineage0-roll0")
+    assert entry.cum_len == len(PTOKS) + len(GTOKS)
+    assert entry.digest == compute_digest(PTOKS + GTOKS)
+    # No parent index yet, so the link is absent and the builder matches prefixes instead.
+    assert entry.parent_call_id is None
+
+
+def test_digest_round_trip_and_stamp_lineage():
+    entry = TokenEntry(
+        rollout_id="r",
+        model_call_id="c",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.5],
+    )
+    stamp_lineage(entry, "parent-1")
+    assert cumulative_tokens(entry) == [1, 2, 3]
+    assert entry.cum_len == 3
+    assert entry.parent_call_id == "parent-1"
+    assert entry.digest == compute_digest([1, 2, 3])
+    # Distinct sequences must not collide, and the empty sequence is well defined.
+    assert compute_digest([1, 2, 3]) != compute_digest([1, 2, 4])
+    assert compute_digest([]) == compute_digest([])
+    with pytest.raises(ValueError):
+        compute_digest([-1])
+
+
+def test_fingerprint_ignores_non_assistant_turns():
+    """Only assistant turns identify lineage: they are what we produced. User and
+    tool content varies with the environment and is irrelevant."""
+    a = assistant_fingerprint([{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}])
+    b = assistant_fingerprint([{"role": "user", "content": "DIFFERENT"}, {"role": "assistant", "content": "a"}])
+    assert a == b != ""
+    # No assistant turn at all is a new conversation, not a match.
+    assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
+
+
+def test_fingerprint_survives_tool_argument_reserialization():
+    """Harnesses re-serialize tool-call arguments between turns, compact one
+    turn, pretty-printed the next. Without canonicalization the same call would
+    not compare equal to itself and every tool-using turn would miss."""
+    compact = [
+        {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "f", "arguments": '{"b":1,"a":2}'}}]}
+    ]
+    pretty = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "f", "arguments": '{\n  "a": 2,\n  "b": 1\n}'}}],
+        }
+    ]
+    assert assistant_fingerprint(compact) == assistant_fingerprint(pretty)
+
+
+def test_lineage_resolves_the_parent_across_a_turn():
+    lineage = RolloutLineage()
+    first_request = [{"role": "user", "content": "hello"}]
+    lineage.record("call-1", first_request + [{"role": "assistant", "content": "hi"}], [1, 2, 3], "d1")
+
+    # The next request echoes the assistant turn, as any harness must to continue.
+    second_request = first_request + [{"role": "assistant", "content": "hi"}, {"role": "user", "content": "more"}]
+    parent = lineage.resolve(second_request)
+    assert parent is not None and parent.call_id == "call-1"
+    assert parent.cum_tokens == [1, 2, 3] and parent.cum_len == 3
+
+
+def test_lineage_misses_on_a_rewritten_history():
+    """A compacted or rewritten context is a new root, not a wrong parent."""
+    lineage = RolloutLineage()
+    lineage.record("call-1", [{"role": "assistant", "content": "hi"}], [1, 2, 3], "d1")
+    assert lineage.resolve([{"role": "assistant", "content": "a summary of the above"}]) is None
+
+
+def test_lineage_refuses_an_ambiguous_parent():
+    """Two recorded calls with byte-identical output cannot be told apart. Guessing
+    would attribute tokens to the wrong parent, so a unique match is required."""
+    lineage = RolloutLineage()
+    messages = [{"role": "assistant", "content": "same"}]
+    lineage.record("call-a", messages, [1, 2], "da")
+    lineage.record("call-b", messages, [3, 4], "db")
+    assert lineage.resolve(messages) is None
+
+
+def test_lineage_is_a_tree_so_forks_get_the_parent_not_the_previous_call():
+    """Two sub-agents branching from one parent must BOTH resolve to that parent.
+
+    A running cursor ("the last call") would hand the second branch a prefix
+    containing the first branch's generation, and the splice applies a supplied
+    prefix unconditionally, so that would be silently wrong rather than merely wasteful.
+    """
+    lineage = RolloutLineage()
+    shared = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "plan"}]
+    lineage.record("parent", shared, [1, 2, 3], "dp")
+    lineage.record(
+        "branch-a",
+        shared + [{"role": "user", "content": "a"}, {"role": "assistant", "content": "A"}],
+        [1, 2, 3, 4],
+        "da",
+    )
+
+    # The second branch continues the PARENT, not branch-a.
+    second = shared + [{"role": "user", "content": "b"}]
+    parent = lineage.resolve(second)
+    assert parent is not None and parent.call_id == "parent"
+    assert parent.cum_tokens == [1, 2, 3]
+
+
+def test_lineage_index_is_bounded():
+    """An abandoned rollout is never read again, so eviction cannot wait for
+    consumption. Losing an entry costs a fallback, never a wrong answer."""
+    index = LineageIndex(max_rollouts=3)
+    for i in range(10):
+        index.for_rollout(f"r{i}")
+    assert len(index) == 3
+
+
+def test_served_calls_link_to_their_parent(tmp_path):
+    """End to end: a second call whose request echoes the first call's assistant
+    turn is recorded with parent_call_id pointing at it."""
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    first = [{"role": "user", "content": "hello"}]
+    client.post("/ng-rollout/lin0-roll0/v1/chat/completions", json={"messages": first})
+    entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
+    assert len(entries) == 1 and entries[0].parent_call_id is None
+
+    content = entries[0].output_items[0]["content"]
+    served_text = content if isinstance(content, str) else content[0]["text"]
+    second = first + [{"role": "assistant", "content": served_text}, {"role": "user", "content": "more"}]
+    client.post("/ng-rollout/lin0-roll0/v1/chat/completions", json={"messages": second})
+
+    entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
+    assert len(entries) == 2
+    assert entries[1].parent_call_id == entries[0].model_call_id
+
+
+def test_fingerprint_matches_across_openai_and_anthropic_tool_shapes():
+    """A tool-using turn must match itself across dialects.
+
+    We record the turn we produced in OpenAI shape (``tool_calls``), but Claude
+    Code echoes it back in Anthropic shape (``content`` blocks of type
+    ``tool_use``). If those hash differently, the parent is never resolved for
+    exactly the turns that create multi-turn rollouts, which is what happened
+    in the first live multi-turn run: every record came back with
+    ``parent_call_id: None`` even though the calls chained perfectly.
+    """
+    recorded = [
+        {
+            "role": "assistant",
+            "content": "Let me compute that.",
+            "tool_calls": [{"function": {"name": "Bash", "arguments": '{"command":"echo 6"}'}}],
+        }
+    ]
+    echoed = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me compute that."},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "echo 6"}},
+            ],
+        }
+    ]
+    assert assistant_fingerprint(recorded) == assistant_fingerprint(echoed) != ""
+
+
+def test_fingerprint_agrees_across_all_three_dialects():
+    """The same turn must hash identically however the harness represents it.
+
+    Chat puts tool calls on the message, Anthropic nests them in content blocks, and Responses
+    emits a standalone function_call item with no role. A role-only check misses the Responses
+    case entirely, which would silently disable parent resolution and prefix supply for every
+    harness that speaks it.
+    """
+
+    anthropic = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"cmd": "ls"}}]},
+    ]
+    chat = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"function": {"name": "Bash", "arguments": '{"cmd":"ls"}'}}],
+        },
+    ]
+    responses = [
+        {"type": "message", "role": "user", "content": "hi"},
+        {"type": "function_call", "name": "Bash", "arguments": '{"cmd":"ls"}', "call_id": "c1"},
+    ]
+
+    assert assistant_fingerprint(anthropic) == assistant_fingerprint(chat) == assistant_fingerprint(responses)
+    assert assistant_fingerprint(responses) != ""
+
+
+def test_responses_tool_calls_are_distinguished():
+    """Two Responses turns differing only in tool arguments must not collide, or the index
+    treats them as the same call and refuses to resolve either."""
+
+    def turn(cmd):
+        return [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "checking"}]},
+            {"type": "function_call", "name": "Bash", "arguments": '{"cmd":"%s"}' % cmd, "call_id": "c1"},
+        ]
+
+    assert assistant_fingerprint(turn("ls")) != assistant_fingerprint(turn("rm -rf /"))
+
+
+def test_lineage_resolves_a_tool_using_turn_echoed_in_anthropic_shape():
+    lineage = RolloutLineage()
+    produced = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": "Bash", "arguments": '{"command":"factor 420"}'}}],
+    }
+    lineage.record("call-1", [{"role": "user", "content": "factor 420"}, produced], [1, 2, 3], "d1")
+
+    # The harness continues the conversation, echoing the turn as Anthropic blocks
+    # and appending the tool result.
+    next_request = [
+        {"role": "user", "content": "factor 420"},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "factor 420"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "content": "420: 2 2 3 5 7"}]},
+    ]
+    parent = lineage.resolve(next_request)
+    assert parent is not None and parent.call_id == "call-1"
+    assert parent.cum_tokens == [1, 2, 3]
 
 
 @pytest.mark.parametrize("bad", ["", "a/b", "../escape", "a b"])
@@ -841,3 +1089,205 @@ def test_a_newer_record_in_the_store_fails_the_read_rather_than_being_skipped(tm
 
     with pytest.raises(ValidationError):
         store.read_entries("r0")
+
+
+def test_digest_and_cum_len_are_filled_for_every_entry():
+    """Both describe the entry's own tokens, so they are computable even with no generation.
+    A consumer verifying a parent link needs them present on every record, not most."""
+    empty = TokenEntry(
+        rollout_id="r",
+        model_call_id="e",
+        prompt_token_ids=[],
+        generation_token_ids=[],
+        generation_log_probs=[],
+    )
+    stamp_lineage(empty, None)
+    assert empty.cum_len == 0 and empty.digest == compute_digest([])
+
+    normal = TokenEntry(
+        rollout_id="r",
+        model_call_id="n",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+    )
+    stamp_lineage(normal, None)
+    assert normal.cum_len == 3 and normal.digest == compute_digest([1, 2, 3])
+
+
+def test_a_rewritten_conversation_does_not_resolve_to_the_original_call():
+    """A node's tokens encode the conversation as it was when the call was made. A harness that
+    compacts or summarizes earlier turns while echoing the same model output produces the same
+    assistant fingerprint, so the lookup alone would match. Supplying those tokens would then
+    generate from a conversation the harness did not send, which is why the earlier turns are
+    verified before the node is returned."""
+    lineage = RolloutLineage()
+    original = [{"role": "user", "content": "solve task ALPHA"}]
+    lineage.record("call-1", original + [_ASSISTANT_TURN], cum_tokens=[1, 2, 3], digest="d1")
+
+    compacted = [{"role": "user", "content": "SUMMARY: we were working on task BETA"}, _ASSISTANT_TURN]
+
+    assert lineage.resolve(compacted) is None
+
+
+def test_appending_a_tool_result_still_resolves():
+    """The case the fingerprint exists for. A continuation appends to the conversation and
+    echoes the model's turn unchanged, so it must still find its parent; a check strict enough
+    to reject the rewrite above must not reject this."""
+    lineage = RolloutLineage()
+    sent = [{"role": "user", "content": "q"}]
+    lineage.record("call-1", sent + [_ASSISTANT_TURN], cum_tokens=[1, 2, 3], digest="d1")
+
+    continuation = sent + [_ASSISTANT_TURN, {"role": "tool", "content": "search result"}]
+
+    resolved = lineage.resolve(continuation)
+    assert resolved is not None and resolved.call_id == "call-1"
+
+
+def test_two_calls_with_identical_output_resolve_to_neither():
+    """Nothing distinguishes them, and picking either would attribute the next call's tokens to
+    the wrong parent. A harness retry produces exactly this, because capture records a response
+    the client may never have accepted."""
+    lineage = RolloutLineage()
+    messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    lineage.record("call-1", messages, cum_tokens=[1, 2], digest="d1")
+    lineage.record("call-2", messages, cum_tokens=[9, 9], digest="d2")
+
+    assert lineage.resolve(messages) is None
+
+
+def test_a_conversation_with_no_model_turn_starts_a_new_root():
+    """There is nothing to continue from, so it must not match some earlier call that happens to
+    share a user message."""
+    lineage = RolloutLineage()
+    lineage.record("call-1", [{"role": "user", "content": "q"}, _ASSISTANT_TURN], cum_tokens=[1], digest="d")
+
+    assert lineage.resolve([{"role": "user", "content": "a brand new task"}]) is None
+    assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
+
+
+def test_two_forks_of_one_call_both_resolve_to_it():
+    """The index is keyed by call rather than being a running cursor, so a call can have several
+    children. Two sub-agents branching from the same turn each continue that turn, so both get
+    its tokens rather than one of them getting the other's."""
+    lineage = RolloutLineage()
+    base = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    lineage.record("parent", base, cum_tokens=[1, 2, 3], digest="dp")
+
+    a = lineage.resolve(base + [{"role": "tool", "content": "branch A"}])
+    b = lineage.resolve(base + [{"role": "tool", "content": "branch B"}])
+
+    assert a is not None and b is not None
+    assert a.call_id == b.call_id == "parent"
+    assert a.cum_tokens == b.cum_tokens == [1, 2, 3]
+
+
+def test_recording_a_child_does_not_mutate_its_parent():
+    """Sub-agents are recorded concurrently, so a write for one must not disturb another's
+    entry. Nodes are added and never updated in place."""
+    lineage = RolloutLineage()
+    base = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    lineage.record("parent", base, cum_tokens=[1, 2, 3], digest="dp")
+    before = list(lineage.by_call_id["parent"].cum_tokens)
+
+    for i in range(5):
+        lineage.record(f"child-{i}", base + [{"role": "tool", "content": str(i)}], [7, 7], "dc")
+
+    assert lineage.by_call_id["parent"].cum_tokens == before
+
+
+def test_an_evicted_rollout_resolves_to_nothing_rather_than_to_another_rollout():
+    """The index is bounded, so entries are dropped under pressure. Losing one has to cost a
+    fallback to matching the parent by token prefix, not a match against a different
+    rollout that happens to share an assistant turn."""
+    index = LineageIndex(max_rollouts=2, max_tokens=10_000_000)
+    for name in ("r1", "r2", "r3"):
+        index.for_rollout(name).record(name, [{"role": "user", "content": "q"}, _ASSISTANT_TURN], [1], "d")
+
+    assert index.for_rollout("r1").resolve([{"role": "user", "content": "q"}, _ASSISTANT_TURN]) is None
+
+
+def test_the_last_rollout_is_kept_even_over_budget():
+    """At long context one rollout can exceed the token budget by itself. Evicting it would turn
+    the bound into a switch that disables lineage entirely."""
+    index = LineageIndex(max_rollouts=1, max_tokens=1)
+    messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    index.for_rollout("r1").record("c1", messages, [1] * 100, "d")
+
+    assert index.for_rollout("r1").resolve(messages) is not None
+
+
+def test_a_response_echoed_as_several_items_still_resolves():
+    """One served response can come back as more than one message.
+
+    A Responses harness echoes assistant text and a tool call as separate items. Indexing the
+    served items as they are keeps both sides comparable; rebuilding them into a single turn
+    first would not, and this is the shape every multi-turn tool-calling rollout takes.
+    """
+    served = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "let me look"}]},
+        {"type": "function_call", "name": "search", "arguments": '{"q":"x"}'},
+    ]
+    sent = [{"role": "user", "content": "find x"}]
+    lineage = RolloutLineage()
+    lineage.record("call-1", sent + served, cum_tokens=[1, 2, 3], digest="d", context_len=len(sent))
+
+    continuation = sent + served + [{"type": "function_call_output", "output": "42"}]
+
+    resolved = lineage.resolve(continuation)
+    assert resolved is not None and resolved.call_id == "call-1"
+
+
+def test_reasoning_the_harness_drops_does_not_break_resolution():
+    """A harness need not echo standalone reasoning items, and the chat dialect carries
+    reasoning in a field the fingerprint does not read. Counting it would make the key depend
+    on which dialect is speaking and on whether the model's thinking was sent back."""
+    served = [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}]
+    sent = [{"role": "user", "content": "q"}]
+    lineage = RolloutLineage()
+    lineage.record(
+        "call-1",
+        sent + [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]}] + served,
+        cum_tokens=[1, 2],
+        digest="d",
+        context_len=len(sent),
+    )
+
+    resolved = lineage.resolve(sent + served)
+    assert resolved is not None and resolved.call_id == "call-1"
+
+
+@pytest.mark.parametrize(
+    "before, after",
+    [
+        # Responses: the payload is on the item, under `output`.
+        (
+            [{"type": "function_call_output", "call_id": "c1", "output": "42 files"}],
+            [{"type": "function_call_output", "call_id": "c1", "output": "[truncated]"}],
+        ),
+        # Anthropic: a tool_result block, whose payload is under `content` rather than `text`.
+        (
+            [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "42 files"}]}],
+            [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "[truncated]"}]}],
+        ),
+        # Chat: a plain string content.
+        (
+            [{"role": "tool", "tool_call_id": "c1", "content": "42 files"}],
+            [{"role": "tool", "tool_call_id": "c1", "content": "[truncated]"}],
+        ),
+    ],
+)
+def test_a_rewritten_tool_result_changes_the_conversation_digest(before, after):
+    """A harness that summarizes, redacts or truncates an earlier tool result changes what the
+    model is being asked to continue from. The digest has to see that, or a stale parent verifies
+    clean and its tokens are supplied for a conversation that no longer matches."""
+    assert conversation_digest(before) != conversation_digest(after)
+
+
+def test_the_fingerprint_still_ignores_tool_results():
+    """The fingerprint is the lookup key and has to survive a tool result being appended, which
+    is the ordinary way a conversation continues. Only the digest covers tool results."""
+    turn = [{"role": "assistant", "content": "ok"}]
+    assert assistant_fingerprint(turn) == assistant_fingerprint(
+        turn + [{"type": "function_call_output", "output": "42 files"}]
+    )

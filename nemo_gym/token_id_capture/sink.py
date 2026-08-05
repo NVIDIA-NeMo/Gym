@@ -34,19 +34,40 @@ from __future__ import annotations
 import logging
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from nemo_gym.token_id_capture.lineage import LineageIndex
 from nemo_gym.token_id_capture.protocols import TokenSink
 from nemo_gym.token_id_capture.records import (
     TokenEntry,
+    cumulative_tokens,
     extract_token_fields,
     response_to_output_items,
+    stamp_lineage,
     strip_token_fields,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+# Which recorded call each request continues, per rollout. Process-wide because the
+# capture path is per request; bounded, so an abandoned rollout cannot leak. Losing an
+# entry costs a fallback to prefix matching, never a wrong answer.
+#
+# Being process-wide means it does not span uvicorn workers. With num_workers > 1 the
+# calls of one rollout can be handled by different workers, and a call landing on a
+# worker that did not record its parent resolves nothing: parent_call_id stays unset and
+# the builder matches the parent by token prefix instead. Prefix supply, which needs a
+# resolved parent, does not fire for those calls. Both degrade rather than break, and
+# parent_link_fallbacks reports the rate. The file store is unaffected because it is keyed
+# per rollout and appends under a file lock, which holds across processes.
+_LINEAGE = LineageIndex()
+
+
+def lineage_index() -> LineageIndex:
+    return _LINEAGE
 
 
 @dataclass
@@ -64,6 +85,14 @@ class CaptureContext:
     model_call_id: str
     sink: TokenSink
     model: str = ""
+    # Which recorded call this request continues, resolved once before the request is
+    # dispatched. Both consumers read it from here rather than resolving for themselves:
+    # prefix supply needs the tokens before the engine is called, capture needs the id
+    # afterwards, and resolving twice invites the two to disagree. ``parent_resolved``
+    # separates "resolved to nothing" from "never resolved".
+    parent_resolved: bool = False
+    parent_call_id: str | None = None
+    parent_tokens: list[int] = field(default_factory=list)
 
 
 _TOKEN_SINK: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_token_sink", default=None)
@@ -77,7 +106,37 @@ def reset_token_sink(token: Token) -> None:
     _TOKEN_SINK.reset(token)
 
 
-async def capture_tokens(response: Any) -> None:
+def resolve_parent(request_messages: list | None) -> None:
+    """Resolve which recorded call this request continues, before it is dispatched.
+
+    Called with the request as the server received it, ahead of any dialect conversion. The
+    index was built from the same representation, so the two agree by construction rather than
+    by two code paths canonicalizing their way back to each other. Resolving here also means it
+    happens once: the prefix a request is given and the parent its record names are the same
+    decision, so they cannot diverge.
+
+    No-op for untagged traffic. A miss is normal and leaves the link unset.
+    """
+    sink = _TOKEN_SINK.get()
+    if sink is None or request_messages is None:
+        return
+    sink.parent_resolved = True
+    try:
+        parent = _LINEAGE.for_rollout(sink.rollout_id).resolve(request_messages)
+    except Exception:
+        logger.warning("Could not resolve a parent for rollout %s.", sink.rollout_id, exc_info=True)
+        return
+    if parent is None:
+        return
+    sink.parent_call_id = parent.call_id
+    sink.parent_tokens = list(parent.cum_tokens)
+
+
+async def capture_tokens(
+    response: Any,
+    parent_call_id: str | None = None,
+    request_messages: list | None = None,
+) -> None:
     """Record a ``TokenEntry`` from a complete model response when a sink is set.
 
     ``response`` is a served response as a pydantic model or dict. No-op when no
@@ -105,7 +164,16 @@ async def capture_tokens(response: Any) -> None:
             return
         # Content only: the arrays live on the entry, not on the items as well.
         content_items, token_item_index = strip_token_fields(response_to_output_items(payload))
-
+        # Which call does this one continue? Normally decided before dispatch by
+        # ``resolve_parent``, so the record names the same call whose tokens were supplied.
+        # A caller that did not resolve first still gets a link, from the same messages.
+        lineage = _LINEAGE.for_rollout(sink.rollout_id)
+        if parent_call_id is None:
+            if sink.parent_resolved:
+                parent_call_id = sink.parent_call_id
+            elif request_messages is not None:
+                parent = lineage.resolve(request_messages)
+                parent_call_id = parent.call_id if parent is not None else None
         entry = TokenEntry(
             rollout_id=sink.rollout_id,
             model_call_id=sink.model_call_id,
@@ -123,10 +191,30 @@ async def capture_tokens(response: Any) -> None:
     except Exception:
         _capture_failed(sink, "build")
         return
-    await commit_entry(entry)
+    await commit_entry(entry, parent_call_id)
+    # Index this call by the conversation a continuation of it would carry, so the next
+    # request resolves to it. Indexing lives here rather than in ``commit_entry`` because it
+    # is keyed on the request the server saw, which an engine-side caller does not have. The
+    # digest it reads is stamped during the commit above.
+    if request_messages is not None:
+        try:
+            # Index the served items as they are, not a turn rebuilt from them. The next request
+            # echoes those items back, and the fingerprint canonicalizes both sides the same way,
+            # so anything in between is a chance for the two to disagree. One response can also
+            # echo as several items, which a single rebuilt turn cannot represent.
+            lineage.record(
+                sink.model_call_id,
+                list(request_messages) + list(entry.output_items or []),
+                cumulative_tokens(entry),
+                entry.digest or "",
+                context_len=len(request_messages),
+            )
+        except Exception:
+            # Only costs the next call its parent link, which falls back to prefix matching.
+            logger.warning("Could not index lineage for rollout %s.", sink.rollout_id, exc_info=True)
 
 
-async def commit_entry(entry: TokenEntry) -> None:
+async def commit_entry(entry: TokenEntry, parent_call_id: str | None = None) -> None:
     """Durably record a finished entry against the in-flight call.
 
     Public and separate from ``capture_tokens`` because the two halves are useful apart.
@@ -143,6 +231,9 @@ async def commit_entry(entry: TokenEntry) -> None:
     if sink is None:
         return
     try:
+        # cum_len/digest describe this call and are always computable; the parent
+        # link is filled only when the model server resolved one.
+        stamp_lineage(entry, parent_call_id)
         await sink.sink.put(entry)
     except Exception:
         _capture_failed(sink, "write")
