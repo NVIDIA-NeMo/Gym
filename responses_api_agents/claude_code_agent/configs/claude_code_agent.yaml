@@ -5,6 +5,13 @@ claude_code_agent:
       resources_server:
         type: resources_servers
         name: ???
+      # This harness returns output with no token ids, so training on its rollouts requires
+      # capture: its model calls are correlated, captured, and rebuilt into a token-bearing
+      # response. On for this agent because it is an external harness, which is the case the
+      # flag exists to identify; a native agent leaves it off, since it carries token ids inline
+      # and rebuilding would replace them with a reconstruction. This costs nothing on its own:
+      # the run-level token_id_capture.enabled switch still has to be on for anything to happen.
+      token_id_capture: true
       concurrency: 32
       model: claude-sonnet-4-6
       anthropic_api_key: ${anthropic_api_key}

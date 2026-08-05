@@ -67,6 +67,18 @@ from nemo_gym.server_utils import (
     BaseServer,
     SimpleServer,
 )
+from nemo_gym.token_id_capture import (
+    CaptureContext,
+    capture_tokens,
+    installed_token_sink,
+    reset_token_sink,
+    set_token_sink,
+)
+
+# The read route and its store factory need Gym's server stack, so they are not
+# re-exported from the leaf package (see nemo_gym/token_id_capture/__init__.py).
+from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +86,26 @@ logger = logging.getLogger(__name__)
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
+
+
+def _request_messages(body: Any) -> list[dict]:
+    """The conversation a request carries, across the three dialects.
+
+    Used only to identify which recorded call this request continues (see
+    ``token_id_capture.lineage``): the assistant turns in it are the ones we
+    produced. Chat and Anthropic both use ``messages``; Responses carries
+    ``input``, which is a string for a first turn and a list of items after that.
+    """
+    if body is None:
+        return []
+    getter = body.get if isinstance(body, dict) else lambda key, default=None: getattr(body, key, default)
+    messages = getter("messages", None)
+    if isinstance(messages, list):
+        return [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
+    items = getter("input", None)
+    if isinstance(items, list):
+        return [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
+    return []
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
@@ -90,7 +122,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(app, capture_config, model_server_name=self.config.name)
+        install_model_call_capture(
+            app,
+            capture_config,
+            model_server_name=self.config.name,
+            global_config_dict=self.server_client.global_config_dict,
+        )
 
         app.post("/v1/chat/completions")(self.chat_completions_dispatch)
 
@@ -192,8 +229,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
         if "request" in inspect.signature(self.chat_completions).parameters:
-            return await self.chat_completions(request=request, body=params)
-        return await self.chat_completions(body=params)
+            completion = await self.chat_completions(request=request, body=params)
+        else:
+            completion = await self.chat_completions(body=params)
+        await capture_tokens(completion)
+        return completion
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
@@ -222,8 +262,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # `body`. Dispatch on whichever this server declares so the default messages() works for
         # all of them.
         if "request" in inspect.signature(self.responses).parameters:
-            return await self.responses(request=request, body=params)
-        return await self.responses(body=params)
+            response = await self.responses(request=request, body=params)
+        else:
+            response = await self.responses(body=params)
+        # Capture here rather than at the route: the streaming dispatch returns a StreamingResponse
+        # and the Anthropic mapping drops the token fields, so this is the last point where the
+        # assembled response still carries them, for every dialect.
+        await capture_tokens(response)
+        return response
 
 
 def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStreaming:
@@ -1026,10 +1072,22 @@ class _CaptureMiddleware:
     prefix and forwards only.
     """
 
-    def __init__(self, app: Any, *, store: Optional[CaptureStore], model_server_name: Optional[str]) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        store: CaptureStore | None,
+        model_server_name: str | None,
+        token_store: Any = None,
+        configured_sink: Any = None,
+    ) -> None:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        # When set, correlated+observed calls also record training tokens via a per-request sink.
+        self._token_store = token_store
+        # Built from token_id_capture.sink, once, in this process.
+        self._configured_sink = configured_sink
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -1044,24 +1102,44 @@ class _CaptureMiddleware:
             path = prefix_match.group("rest")
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
-        # Capture disabled: the prefix is already stripped (routing preserved), so just forward.
-        if self._store is None:
-            await self._app(scope, receive, send)
-            return
-
-        # Only explicitly correlated model calls are captured. An unprefixed call is forwarded
-        # unchanged rather than being mixed with unrelated calls under a shared fallback key.
-        if rollout_from_path is None:
-            await self._app(scope, receive, send)
-            return
-
         dialect = _OBSERVED_PATHS.get(path)
-        if dialect is None:
-            await self._app(scope, receive, send)  # not observed (or a stripped non-/v1 path)
+
+        # Nothing to capture: neither store is active, the call isn't correlated to a rollout, or the
+        # path isn't an observed model endpoint. The prefix is already stripped, so just forward.
+        # An unprefixed call is forwarded rather than mixed with unrelated calls under a shared key.
+        # Destination order: a sink configured for this process, then one installed
+        # programmatically, then the file store. Both sink routes exist because a framework may
+        # send records to its own transport instead of disk; the configured one is preferred
+        # because it is built inside this process at app startup and so survives num_workers > 1,
+        # where a sink installed by a launcher does not reach the spawned workers at all. The
+        # installed sink is still resolved per request, so one installed after the app is built
+        # still takes effect.
+        token_sink = self._configured_sink or installed_token_sink() or self._token_store
+        if (self._store is None and token_sink is None) or rollout_from_path is None or dialect is None:
+            await self._app(scope, receive, send)
             return
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+
+        # Hand the model server a per-request token sink keyed to this call. It records token ids
+        # from its complete response. The middleware cannot: token ids are dropped on the SSE wire.
+        sink_token = None
+        if token_sink is not None:
+            sink_token = set_token_sink(
+                CaptureContext(rollout_id=rollout_id, model_call_id=model_call_id, sink=token_sink)
+            )
+
+        # Training-token capture only: no evaluation record, so skip the response buffering entirely
+        # and just forward with the sink live.
+        if self._store is None:
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                if sink_token is not None:
+                    reset_token_sink(sink_token)
+            return
+
         request_body = bytearray()
 
         async def _receive() -> dict[str, Any]:
@@ -1143,6 +1221,10 @@ class _CaptureMiddleware:
             finally:
                 await _flush_deferred_response()
             raise
+        finally:
+            # The sink is only needed while the model server produces the response.
+            if sink_token is not None:
+                reset_token_sink(sink_token)
 
         completed_at = time.time()
         latency_ms = (time.perf_counter() - start) * 1000.0
@@ -1210,21 +1292,38 @@ class _CaptureMiddleware:
 
 
 def install_model_call_capture(
-    app: Any, config: ModelCallCaptureConfig, *, model_server_name: Optional[str] = None
+    app: Any,
+    config: ModelCallCaptureConfig,
+    *,
+    model_server_name: str | None = None,
+    global_config_dict: Any = None,
 ) -> None:
     """Install model-call capture middleware.
 
     Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
     regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
-    prefixed model call). When capture is enabled the middleware additionally records each observed
-    call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
-    unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
-    durable capture write).
+    prefixed model call). When evaluation capture is enabled the middleware additionally records each
+    observed call's request + response into a rollout-keyed CaptureStore while forwarding bytes
+    downstream unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event
+    follows the durable capture write).
+
+    Training-token capture is a separate, independently-gated concern that reuses the same
+    correlation point: when enabled, the middleware hands the model server a per-request token sink
+    (keyed by the same rollout id and model_call_id) and the server records token ids from its
+    complete response. The read route is registered only when that capture is enabled.
     """
+    token_store = make_token_store(global_config_dict) if global_config_dict is not None else None
+    # Built here, at app startup, so every uvicorn worker constructs its own. A sink installed by a
+    # launcher process is not inherited by spawned workers and would silently go unused.
+    configured_sink = (
+        token_id_capture_config(global_config_dict).build_sink() if global_config_dict is not None else None
+    )
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
         model_server_name=model_server_name,
+        token_store=token_store,
+        configured_sink=configured_sink,
     )
 
 

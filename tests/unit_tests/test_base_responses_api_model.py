@@ -1087,6 +1087,48 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
         maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})
 
 
+def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
+    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+
+    base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
+    # A caller that restarts index numbering per dispatch derives the same id twice, which would
+    # give two dispatches one capture key. The explicit id is how it keeps them apart.
+    assert maybe_rollout_id_from_run_body({**base, "_ng_rollout_id": "s7-3-2"}) == "s7-3-2"
+    # A retry of an explicitly keyed rollout still keys separately from its first attempt, or the
+    # retry's calls would append onto the first attempt's records.
+    assert maybe_rollout_id_from_run_body({"_ng_rollout_id": "s7-3-2", "_ng_attempt_index": 1}) == "s7-3-2-a1"
+    # The explicit id stands alone: no indices needed.
+    assert maybe_rollout_id_from_run_body({"_ng_rollout_id": "abc"}) == "abc"
+
+
+@pytest.mark.parametrize("bad", [".hidden", "has/slash", "has space", "", 7, None])
+def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
+    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+
+    body = {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_rollout_id": bad}
+    if bad is None:
+        # Absent and null both mean "no explicit id", so the derivation still runs.
+        assert maybe_rollout_id_from_run_body(body) == "3-2"
+        return
+    # An id that cannot survive the round trip is refused rather than rewritten: correlating under
+    # a sanitized id would file records under a key the caller cannot look up afterwards.
+    with pytest.raises(ValueError):
+        maybe_rollout_id_from_run_body(body)
+
+
+def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
+    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+
+    # The id becomes a path segment, so every id the body accepts has to be one the middleware
+    # gives back unchanged. A charset the two disagreed on would correlate calls to nothing.
+    for candidate in ["s7-3-2", "step7.task3", "a", "A_b-1.2"]:
+        rollout_id = maybe_rollout_id_from_run_body({"_ng_rollout_id": candidate})
+        match = RolloutContextMiddleware._PREFIX.match(f"/ng-rollout/{rollout_id}/v1/responses")
+        assert match is not None and match.group("rollout_id") == candidate
+        assert match.group("rest") == "/v1/responses"
+
+
 def _capture_exchange(dialect, model_server, usage, response):
     return {
         "model_call_id": f"call-{model_server}",
