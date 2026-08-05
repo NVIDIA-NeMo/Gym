@@ -32,6 +32,10 @@ reasoning_gym_claude_code_agent_model_server:
       model_server:
         type: responses_api_models
         name: policy_model
+      # An external harness: its returned output has no token ids, so its model calls are
+      # captured and rebuilt when the run-level token_id_capture.enabled switch is on. Inert
+      # otherwise, so this is safe for the evaluation showcase above.
+      token_id_capture: true
       concurrency: 32
       model: ${policy_model_name}
       anthropic_api_key: EMPTY  # pragma: allowlist secret
