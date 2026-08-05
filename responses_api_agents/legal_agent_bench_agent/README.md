@@ -59,9 +59,14 @@ proxy as `LAB_POLICY_MODEL_URL`, keeping model credentials out of the sandbox.
 An explicit `sandbox_model_base_url` is used unchanged and disables that ECS
 tunnel. Before importing the selected harness, the in-container runner
 performs a bounded TCP connectivity check and writes
-`runtime/runner_status.json`. Connectivity or harness failures set the
-`mask_sample` flag on the row, skip the judge, and are distinct from an ordinary zero-reward
-model result. For Hermes, the runner also disables its optional `/models`
+`runtime/runner_status.json`. Connectivity, harness, sandbox, and verifier
+failures set `mask_sample`, skip the judge when applicable, and carry
+`_ng_failure_class` so rollout collection sends them to the failure sidecar for
+bounded retry. Deterministic task and harness-configuration failures also carry
+`_ng_failure_terminal: true` and are not retried. `mask_sample` is a training
+hint, not the routing signal. Max-turn and context-limit stops are valid
+incomplete outcomes: the runner verifies their partial deliverables and keeps
+them in the main rollout JSONL. For Hermes, the runner also disables its optional `/models`
 pricing and context-metadata probes; Gym supplies the selected model explicitly,
 and actual model-call access logging is enabled.
 

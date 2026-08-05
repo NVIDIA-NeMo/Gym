@@ -240,6 +240,22 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
     return output_items, metadata
 
 
+def _is_context_limit_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "context length",
+            "context window",
+            "context_length_exceeded",
+            "maximum context",
+            "max context",
+            "too many tokens",
+            "token limit",
+        )
+    )
+
+
 def _kill_process_group(proc: Any) -> None:
     """Kill the codex subprocess and every child in its process group.
 
@@ -597,11 +613,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         if usage.get("errors"):
             LOG.warning("codex reported errors: %s", usage["errors"])
-            run_metadata.update(
-                status="failed",
-                error_type="stream_error",
-                stderr="; ".join(str(error) for error in usage["errors"]),
-            )
+            stream_error = "; ".join(str(error) for error in usage["errors"])
+            if all(_is_context_limit_error(str(error)) for error in usage["errors"]):
+                run_metadata.update(status="incomplete", error_type="context_limit", stderr=stream_error)
+            else:
+                run_metadata.update(status="failed", error_type="stream_error", stderr=stream_error)
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -620,8 +636,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
+        run_status = run_metadata.get("status")
+        run_error = " ".join(
+            str(value) for value in (run_metadata.get("error_type"), run_metadata.get("stderr")) if value
+        )
+        limit_reached = run_status != "completed" and _is_context_limit_error(run_error)
         failure_message = None
-        if run_metadata.get("status") != "completed":
+        if run_status != "completed" and not limit_reached:
             failure_message = str(run_metadata.get("error_type") or "codex_failed")
             stderr = str(run_metadata.get("stderr") or "").strip()
             if stderr:
@@ -630,10 +651,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            status="failed" if failure_message else "completed",
+            status="incomplete" if limit_reached else ("failed" if failure_message else "completed"),
             error=(
                 {"code": "server_error", "message": f"Codex failed: {failure_message}"} if failure_message else None
             ),
+            incomplete_details=({"reason": "max_output_tokens"} if limit_reached else None),
+            metadata=({"nemo_gym_stop_reason": "context_limit"} if limit_reached else None),
             model=model_name,
             object="response",
             output=output_items,

@@ -179,6 +179,40 @@ def _failed_response(
     )
 
 
+def _limit_response(
+    *,
+    body: NeMoGymResponseCreateParamsNonStreaming,
+    response: Optional[NeMoGymResponse],
+    output: list[Any],
+    usage: Any,
+    stop_reason: str,
+) -> NeMoGymResponse:
+    """Return a scoreable incomplete response for a normal agent-loop limit."""
+    base = response or NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=0,
+        model=body.model or "policy_model",
+        object="response",
+        output=[],
+        parallel_tool_calls=body.parallel_tool_calls,
+        tool_choice=body.tool_choice,
+        tools=body.tools,
+    )
+    metadata = dict(base.metadata or {})
+    metadata["nemo_gym_stop_reason"] = stop_reason
+    return NeMoGymResponse.model_validate(
+        base.model_dump(mode="json")
+        | {
+            "status": "incomplete",
+            "error": None,
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "metadata": metadata,
+            "output": output,
+            "usage": usage,
+        }
+    )
+
+
 class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
     """Run LAB's canonical tool loop through Gym's Responses API model server."""
 
@@ -291,12 +325,12 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                     )
                 )
 
-        return _failed_response(
+        return _limit_response(
             body=body,
             response=last_response,
             output=trajectory,
             usage=usage,
-            message=f"LAB agent reached the {self.config.max_turns}-turn limit",
+            stop_reason="max_turns",
         )
 
     async def run(self, request: Request, body: LegalAgentBenchNativeRunRequest):

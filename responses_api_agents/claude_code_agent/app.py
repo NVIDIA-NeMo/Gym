@@ -628,19 +628,22 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         input_tokens = run_metadata.get("input_tokens", 0)
         output_tokens = run_metadata.get("output_tokens", 0)
         run_status = str(run_metadata.get("status") or "incomplete")
+        limit_reached = run_status == "incomplete" and run_metadata.get("error_type") == "error_max_turns"
         failure_message = None
-        if run_status != "completed":
+        if run_status != "completed" and not limit_reached:
             failure_message = str(run_metadata.get("error_type") or run_status)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            status="failed" if failure_message else "completed",
+            status="incomplete" if limit_reached else ("failed" if failure_message else "completed"),
             error=(
                 {"code": "server_error", "message": f"Claude Code failed: {failure_message}"}
                 if failure_message
                 else None
             ),
+            incomplete_details=({"reason": "max_output_tokens"} if limit_reached else None),
+            metadata=({"nemo_gym_stop_reason": "max_turns"} if limit_reached else None),
             model=model_name,
             object="response",
             output=output_items,

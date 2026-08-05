@@ -50,6 +50,22 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
+def _is_context_limit_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "context length",
+            "context window",
+            "context_length_exceeded",
+            "maximum context",
+            "max context",
+            "too many tokens",
+            "token limit",
+        )
+    )
+
+
 def _usage_from_result(result: dict[str, Any]) -> NeMoGymResponseUsage:
     """Map Hermes' cumulative session counters to the Responses API usage schema."""
 
@@ -385,11 +401,23 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
 
         agent_error = result.get("error")
+        context_limit_reached = bool(agent_error) and _is_context_limit_error(str(agent_error))
+        max_turns_reached = bool(
+            not agent_error
+            and result.get("completed") is False
+            and int(result.get("api_calls") or 0) >= self.config.max_turns
+        )
+        limit_reached = context_limit_reached or max_turns_reached
+        stop_reason = "context_limit" if context_limit_reached else "max_turns"
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            status="failed" if agent_error else "completed",
-            error=({"code": "server_error", "message": str(agent_error)} if agent_error else None),
+            status="incomplete" if limit_reached else ("failed" if agent_error else "completed"),
+            error=(
+                {"code": "server_error", "message": str(agent_error)} if agent_error and not limit_reached else None
+            ),
+            incomplete_details=({"reason": "max_output_tokens"} if limit_reached else None),
+            metadata=({"nemo_gym_stop_reason": stop_reason} if limit_reached else None),
             model=model_name,
             object="response",
             output=output_items,
