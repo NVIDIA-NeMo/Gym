@@ -349,7 +349,7 @@ NeMoGymResponseOutputItem = NeMoGymResponseInputItem
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
-    pass
+    cache_write_tokens: int = 0
 
 
 class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):

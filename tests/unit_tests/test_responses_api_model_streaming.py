@@ -272,9 +272,10 @@ class TestSanitizeStreamingBody:
 
 class TestValidateStreamingParams:
     def test_prunes_nested_extra_fields(self) -> None:
-        # Codex sends `reasoning.context`, which the pinned SDK's Reasoning model forbids.
+        # Unknown nested fields should be dropped and validation retried.
+        # Note: reasoning.context was the motivating example but is now valid in openai>=2.53.0.
         params = validate_streaming_responses_params(
-            {"input": [], "reasoning": {"effort": "medium", "context": "all_turns"}}
+            {"input": [], "reasoning": {"effort": "medium", "unknown_future_field": "value"}}
         )
         assert params.reasoning == {"effort": "medium"}
 

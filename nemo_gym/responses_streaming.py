@@ -212,8 +212,7 @@ def _delete_loc(body: Any, loc: tuple) -> bool:
 def validate_streaming_responses_params(body: dict[str, Any]) -> NeMoGymResponseCreateParamsNonStreaming:
     """Validate a sanitized streaming-dialect body, pruning fields newer than the params model.
 
-    Harness wire formats evolve faster than the pinned OpenAI SDK types (e.g. Codex sending
-    ``reasoning.context``, which the SDK's ``Reasoning`` model forbids). Any field pydantic flags
+    Harness wire formats evolve faster than the pinned OpenAI SDK types. Any field pydantic flags
     as ``extra_forbidden`` is removed and validation retried, so only errors that cannot be fixed
     by dropping an unknown field surface to the client.
     """
