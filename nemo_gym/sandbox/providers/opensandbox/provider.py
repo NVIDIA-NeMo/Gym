@@ -1035,7 +1035,18 @@ class OpenSandboxProvider:
         endpoint_url = str(getattr(resolved, "endpoint", "") or "")
         if not endpoint_url:
             raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id} port {port}")
-        return SandboxEndpoint(endpoint=endpoint_url, headers=dict(getattr(resolved, "headers", None) or {}))
+        if "://" not in endpoint_url:
+            # The SDK returns the proxy endpoint without a scheme; borrow it from the
+            # configured server domain (plain HTTP on the current deployment).
+            domain = str(self._connection.domain or "")
+            scheme = "https" if domain.startswith("https://") else "http"
+            endpoint_url = f"{scheme}://{endpoint_url}"
+        headers = dict(getattr(resolved, "headers", None) or {})
+        if not headers and self._connection.api_key:
+            # Defensive: the SDK currently returns no headers for proxy endpoints; include
+            # the API key so authenticated proxy deployments work either way.
+            headers["OPEN-SANDBOX-API-KEY"] = str(self._connection.api_key)
+        return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     def _command_retry_count(self) -> int:
         return self._operations.command_retries

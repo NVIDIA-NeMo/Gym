@@ -73,9 +73,32 @@ def test_endpoint_rejects_an_empty_url() -> None:
         asyncio.run(_provider().endpoint(_handle(_RawWithEndpoint(endpoint="")), 6000))
 
 
-def test_endpoint_headers_default_to_empty_dict() -> None:
+def test_endpoint_headers_default_to_empty_dict_without_configured_key() -> None:
     resolved = asyncio.run(_provider().endpoint(_handle(_RawWithEndpoint(headers={})), 6000))
     assert resolved.headers == {}
+
+
+def test_schemeless_endpoint_is_absolutized_and_key_header_injected() -> None:
+    """The SDK returns proxy endpoints without a scheme and with empty headers (observed on
+    cell-2, SDK 0.1.15); the provider must produce an absolute URL and carry the API key."""
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "http://elb.example", "api_key": "secret"},
+        probe={"command": None},
+    )
+    raw = _RawWithEndpoint(endpoint="elb.example/v1/sandboxes/sbx-1/proxy/6000", headers={})
+    resolved = asyncio.run(provider.endpoint(_handle(raw), 6000))
+    assert resolved.endpoint == "http://elb.example/v1/sandboxes/sbx-1/proxy/6000"
+    assert resolved.headers == {"OPEN-SANDBOX-API-KEY": "secret"}
+
+
+def test_sdk_supplied_headers_are_never_overridden() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "http://elb.example", "api_key": "secret"},
+        probe={"command": None},
+    )
+    raw = _RawWithEndpoint(headers={"X-Route-Token": "t"})
+    resolved = asyncio.run(provider.endpoint(_handle(raw), 6000))
+    assert resolved.headers == {"X-Route-Token": "t"}
 
 
 def test_async_sandbox_endpoint_flows_through_the_provider() -> None:
