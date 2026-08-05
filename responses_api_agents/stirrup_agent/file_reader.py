@@ -352,8 +352,12 @@ def _truncated(text: str) -> str:
     return text[:MAX_TEXT_CHARS_PER_FILE] + f"\n[... truncated at {MAX_TEXT_CHARS_PER_FILE:,} characters]"
 
 
-def _convert_office_to_pdf(fpath: Path) -> Path | None:
+def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | None:
     """Convert a .docx/.xlsx/.pptx file to PDF using LibreOffice headless.
+
+    With *out_dir* the PDF is written there instead of beside *fpath*, so a
+    judging pass never writes into the directory it is reading. The in-place
+    default is kept because ``preconvert.py`` relies on it.
 
     Returns the path to the generated PDF, or None on failure.
     Uses a unique user profile to avoid lock conflicts in concurrent workers.
@@ -365,7 +369,8 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
     """
     profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
     user_install = f"file://{profile_dir.as_posix()}"
-    out_pdf = fpath.with_suffix(".pdf")
+    dest_dir = out_dir if out_dir is not None else fpath.parent
+    out_pdf = dest_dir / (fpath.stem + ".pdf")
     stage_dir: Path | None = None
     input_path = fpath
     has_whitespace = any(c.isspace() for c in fpath.name)
@@ -378,7 +383,7 @@ def _convert_office_to_pdf(fpath: Path) -> Path | None:
             shutil.copy2(fpath, input_path)
             lo_outdir = str(stage_dir)
         else:
-            lo_outdir = str(fpath.parent)
+            lo_outdir = str(dest_dir)
 
         cmd = [
             "libreoffice",
@@ -502,7 +507,7 @@ def convert_deliverables_to_content_blocks(
     images_and_text = media_mode == "images_and_text"
 
     blocks: list[dict[str, Any]] = []
-    converted_pdfs: list[Path] = []  # track for cleanup
+    scratch_dirs: list[Path] = []  # tempdirs holding PDFs this pass converted
 
     entries = sorted(output_path.iterdir())
     # A PDF an Office file renders from must not also be emitted standalone, or
@@ -538,9 +543,9 @@ def convert_deliverables_to_content_blocks(
                 sibling = fpath.with_suffix(".pdf")
                 pdf_path = sidecar if sidecar.is_file() else (sibling if sibling.is_file() else None)
                 if pdf_path is None:
-                    pdf_path = _convert_office_to_pdf(fpath)
-                    if pdf_path and pdf_path.exists():
-                        converted_pdfs.append(pdf_path)
+                    scratch = Path(tempfile.mkdtemp(prefix="gdpval-render-"))
+                    scratch_dirs.append(scratch)
+                    pdf_path = _convert_office_to_pdf(fpath, out_dir=scratch)
                 if pdf_path and pdf_path.exists():
                     data = pdf_path.read_bytes()
                     if images_and_text:
@@ -654,8 +659,7 @@ def convert_deliverables_to_content_blocks(
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 
-    # Clean up converted PDFs (they live next to the originals)
-    for pdf_path in converted_pdfs:
-        pdf_path.unlink(missing_ok=True)
+    for scratch in scratch_dirs:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     return blocks
