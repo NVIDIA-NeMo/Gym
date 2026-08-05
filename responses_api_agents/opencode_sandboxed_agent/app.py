@@ -299,7 +299,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
         await sandbox.download(str(results_remote_fpath), results_local_fpath)
 
-        opencode_export = json.loads(results_local_fpath.read_text())
+        opencode_export = json.loads(results_local_fpath.read_text().strip() or "{}")
+        output = []
+        usage = None
+        if opencode_export:
+            # Assume only one input message. May change with a system/developer message later on.
+            output = self._opencode_export_to_output_items(opencode_export)[1:]
+            usage = NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export))
 
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
             "opencode_results_fpath": str(results_local_fpath),
@@ -312,12 +318,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=body.model or self.config.model_server.name,
             object="response",
-            # Assume only one input message. May change with a system/developer message later on.
-            output=self._opencode_export_to_output_items(opencode_export)[1:],
+            output=output,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
-            usage=NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export)),
+            usage=usage,
         )
 
     async def run(
