@@ -42,8 +42,8 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
 
-ARG UV_VERSION=0.11.6
-ARG PYTHON_VERSION=3.12.11
+ARG UV_VERSION=0.11.29
+ARG PYTHON_VERSION=3.13.14
 ENV PATH="/root/.local/bin:$PATH"
 RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh && \
     uv python install ${PYTHON_VERSION}
