@@ -85,6 +85,9 @@ class CaptureContext:
     model_call_id: str
     sink: TokenSink
     model: str = ""
+    # Set by the model server when it supplied this call's prefix; read back at
+    # capture time so the evidence lands on the record rather than only in a log.
+    prefix_supplied: bool = False
     # Which recorded call this request continues, resolved once before the request is
     # dispatched. Both consumers read it from here rather than resolving for themselves:
     # prefix supply needs the tokens before the engine is called, capture needs the id
@@ -100,6 +103,11 @@ _TOKEN_SINK: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_token_sink
 
 def set_token_sink(sink: CaptureContext) -> Token:
     return _TOKEN_SINK.set(sink)
+
+
+def current_capture_context() -> CaptureContext | None:
+    """The capture context for the in-flight call, or None for untagged traffic."""
+    return _TOKEN_SINK.get()
 
 
 def reset_token_sink(token: Token) -> None:
@@ -187,6 +195,7 @@ async def capture_tokens(
             output_items=content_items,
             token_item_index=token_item_index,
             created_at=time.time(),
+            prefix_supplied=sink.prefix_supplied,
         )
     except Exception:
         _capture_failed(sink, "build")
