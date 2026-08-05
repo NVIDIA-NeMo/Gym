@@ -660,7 +660,16 @@ class OpenSandboxProvider:
         return {"sandbox_id": handle.sandbox_id}
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
-        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK."""
+        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
+
+        The health check is on by default here. A sandbox id only tells us the
+        workload exists, not that execd is listening yet: the server reports a
+        sandbox ready once its pod is Running with an IP, which happens before
+        execd binds its port. Returning an unchecked handle pushes that gap onto
+        the first real call, which then fails with a 502 instead of waiting.
+        Honour ``skip_health_check`` so callers that deliberately want an
+        unchecked handle can still opt out.
+        """
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         sandbox_id = str(descriptor["sandbox_id"])
         timeout_s = self._create.connect_attempt_timeout_s
@@ -669,7 +678,7 @@ class OpenSandboxProvider:
                 sandbox_id,
                 connection_config=self._connection_config(request_timeout_s=timeout_s),
                 connect_timeout=timedelta(seconds=timeout_s),
-                skip_health_check=True,
+                skip_health_check=self._create.skip_health_check,
             ),
             timeout=timeout_s,
         )

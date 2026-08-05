@@ -1329,5 +1329,7 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
     assert isinstance(handle.raw, FakeSDKSandbox)
     connect_call = FakeSDKSandbox.connect_calls[0]
     assert connect_call["sandbox_id"] == "sdk-sandbox-9"
-    assert connect_call["skip_health_check"] is True
+    # connect() health-checks by default so the handle it returns is usable;
+    # otherwise the first call pays the execd startup gap as a 502.
+    assert connect_call["skip_health_check"] is False
     assert connect_call["connection_config"].kwargs["domain"] == "sandbox.example"
