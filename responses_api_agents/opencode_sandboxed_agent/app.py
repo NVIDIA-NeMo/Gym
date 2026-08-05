@@ -209,7 +209,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         messages.append(
                             NeMoGymFunctionCallOutput(
                                 call_id=part["callID"],
-                                output=part["state"]["output"],
+                                # @bxyu-nvidia: Somehow the output here may be missing...
+                                output=part["state"].get("output", ""),
                             )
                         )
                     elif part["type"] in ("step-finish", "step-start", "patch"):
