@@ -16,7 +16,7 @@ gym env start \
 In a separate terminal:
 ```bash
 # If you haven't already, prepare SWE Bench benchmark data
-gym eval prepare --config benchmarks/swebench/verified/config.yaml
+gym eval prepare --config benchmarks/swebench/verified/opencode.yaml
 
 python resources_servers/swebench/client.py \
     +benchmark_jsonl=benchmarks/swebench/data/swebench_verified_benchmark.jsonl

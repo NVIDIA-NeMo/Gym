@@ -2,8 +2,6 @@
 
 Adds multiple SWE benchmarks to Gym. These are useable across agents/harnesses.
 
-TODO @bxyu-nvidia: Currently this is fixed to use Mini SWE agent harness.
-
 ## Details
 
 - Data source: `princeton-nlp/SWE-bench_Verified`
@@ -12,12 +10,12 @@ TODO @bxyu-nvidia: Currently this is fixed to use Mini SWE agent harness.
 
 ```bash
 # Prepare benchmark data
-gym eval prepare --config benchmarks/swebench/verified/config.yaml
+gym eval prepare --config benchmarks/swebench/verified/opencode.yaml
 
 # Running servers
 gym env start \
     --model-type vllm_model \
-    --config benchmarks/swebench/verified/config.yaml
+    --config benchmarks/swebench/verified/opencode.yaml
 
 # Collecting rollouts
 gym eval run --no-serve \
