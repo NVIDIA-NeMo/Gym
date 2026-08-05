@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,20 +18,28 @@ from unittest.mock import AsyncMock, MagicMock, call
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.context_compaction import (
+    ContextCompactionSession,
+    build_generation_contract,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.visual_history import VisualHistoryConfig
 from responses_api_agents.simple_agent.app import (
+    _CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE,
     ModelServerRef,
     ResourcesServerRef,
     SimpleAgent,
     SimpleAgentConfig,
+    SimpleAgentRunRequest,
 )
 
 
@@ -163,6 +171,308 @@ class TestApp:
             "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict
+
+    async def test_identity_shadow_observes_without_changing_requests(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="model",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="resources",
+            ),
+            visual_history={"enabled": True, "shadow_only": True},
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+
+        reasoning_response = {
+            "id": "response-1",
+            "created_at": 1.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "reasoning-1",
+                    "summary": [{"text": "thinking", "type": "summary_text"}],
+                    "status": "completed",
+                    "type": "reasoning",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        final_response = {
+            "id": "response-2",
+            "created_at": 2.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "message-1",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "done",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_http_response = AsyncMock()
+        model_http_response.read.side_effect = [
+            json.dumps(reasoning_response),
+            json.dumps(final_response),
+        ]
+        model_http_response.cookies = MagicMock()
+        server.server_client.post.return_value = model_http_response
+
+        response = client.post(
+            "/v1/responses",
+            json={
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,A",
+                                "detail": "auto",
+                            },
+                            {"type": "input_text", "text": "inspect"},
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        model_calls = [
+            call for call in server.server_client.post.call_args_list if call.kwargs["server_name"] == "model"
+        ]
+        assert len(model_calls) == 2
+        first_input = model_calls[0].kwargs["json"].input
+        second_input = model_calls[1].kwargs["json"].input
+        assert len(first_input) == 1
+        assert len(second_input) == 2
+        assert second_input[0] == first_input[0]
+        assert isinstance(second_input[1], NeMoGymResponseReasoningItem)
+        assert "visual_history" not in response.json()
+
+    async def test_responses_prefers_caller_owned_rollout_id_cookie(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="model",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="resources",
+            ),
+            visual_history={"enabled": True, "shadow_only": False},
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        model_http_response = AsyncMock()
+        model_http_response.read.return_value = json.dumps(
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "dummy",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [
+                            {
+                                "annotations": [],
+                                "text": "done",
+                                "type": "output_text",
+                            }
+                        ],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                        "prompt_token_ids": [10],
+                        "generation_token_ids": [11],
+                        "generation_log_probs": [-0.1],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        model_http_response.cookies = {}
+        server.server_client.post.return_value = model_http_response
+
+        response = client.post(
+            "/v1/responses",
+            cookies={_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE: "caller-rollout"},
+            json={"input": "task"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["context_compaction_contract"]["rollout_id"] == "caller-rollout"
+
+    async def test_run_preserves_authority_contract_across_resource_verification(
+        self,
+    ) -> None:
+        visual_history = VisualHistoryConfig(
+            enabled=True,
+            shadow_only=False,
+        )
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple_agent",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="model",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="resources",
+            ),
+            visual_history=visual_history,
+        )
+        responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="task")
+        session = ContextCompactionSession(
+            config=visual_history,
+            rollout_id="rollout-run",
+            generation_contract=build_generation_contract(
+                body=responses_create_params,
+                model_server=config.model_server,
+                visual_history=visual_history,
+            ),
+            initial_context=[
+                NeMoGymEasyInputMessage(
+                    role="user",
+                    content="task",
+                )
+            ],
+        )
+        prepared = await session.prepare_model_call(
+            legacy_request_input=[
+                NeMoGymEasyInputMessage(
+                    role="user",
+                    content="task",
+                )
+            ],
+            turn_id=1,
+        )
+        model_response = NeMoGymResponse.model_validate(
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "dummy",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [
+                            {
+                                "annotations": [],
+                                "text": "done",
+                                "type": "output_text",
+                            }
+                        ],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                        "prompt_token_ids": [10],
+                        "generation_token_ids": [11],
+                        "generation_log_probs": [-0.1],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        session.record_model_response(
+            call=prepared,
+            output_items=model_response.output,
+            finish_reason=None,
+        )
+        session.finalize()
+        compacted = session.build_response(
+            model_response,
+            output=model_response.output,
+            agent_input=[
+                NeMoGymEasyInputMessage(
+                    role="user",
+                    content="task",
+                )
+            ],
+        )
+        request_body = SimpleAgentRunRequest(
+            responses_create_params=responses_create_params,
+            context_compaction_rollout_id="rollout-run",
+            context_compaction_group_id="group-run",
+            context_compaction_task_id="task-run",
+            context_compaction_rollout_index=2,
+            context_compaction_attempt_index=1,
+        )
+
+        def http_response(payload, *, cookies=None):
+            result = AsyncMock()
+            result.ok = True
+            result.cookies = cookies or {}
+            result.read = AsyncMock(return_value=json.dumps(payload))
+            return result
+
+        verified_base_response = NeMoGymResponse.model_validate(compacted.model_dump())
+        server = SimpleAgent(
+            config=config,
+            server_client=MagicMock(spec=ServerClient),
+        )
+        server.server_client.post.side_effect = [
+            http_response({}, cookies={"resource": "cookie"}),
+            http_response(compacted.model_dump(mode="json")),
+            http_response(
+                {
+                    "responses_create_params": (responses_create_params.model_dump(mode="json")),
+                    "response": verified_base_response.model_dump(mode="json"),
+                    "reward": 1.0,
+                }
+            ),
+        ]
+        request = MagicMock()
+        request.cookies = {}
+
+        result = await server.run(request, request_body)
+
+        assert result.response.context_compaction_contract.rollout_id == ("rollout-run")
+        assert result.response.context_compaction_contract.group_id == "group-run"
+        assert result.response.context_compaction_contract.task_id == "task-run"
+        assert result.response.context_compaction_contract.rollout_index == 2
+        assert result.response.context_compaction_contract.attempt_index == 1
+        assert result.response.context_compaction_contract.schema_version == 3
+        assert len(result.response.model_call_metadata) == 1
+        assert not hasattr(result.response, "completion_evidence")
+        assert not hasattr(result.response, "agent_input")
+        assert not hasattr(result.response, "seed_obs")
+        inner_responses_call = server.server_client.post.call_args_list[1]
+        assert inner_responses_call.kwargs["cookies"][_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE] == ("rollout-run")
 
     async def test_responses_continues_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.
