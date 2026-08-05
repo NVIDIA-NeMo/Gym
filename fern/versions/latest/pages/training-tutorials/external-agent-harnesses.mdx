@@ -1,0 +1,270 @@
+---
+title: "Training on External Agent Harnesses"
+description: "Capture exact token ids and log probabilities when the agent harness drives its own model calls."
+position: 6
+---
+
+Some agent harnesses run their own model-calling loop. Gym starts them and points them at a model
+endpoint, but it does not mediate the calls they make: the harness decides when to call the model,
+what to send, and what to do with the reply, and hands back a finished transcript. The Claude Code
+CLI is the reference case, driving a multi-turn loop over Anthropic Messages.
+
+Two things follow. Gym never sees the individual calls as they happen, and the transcript that comes
+back carries no token ids, because the wire formats these harnesses speak have no field for them.
+
+RL trains on token ids. Re-tokenizing the returned text produces a sequence that differs from what
+the policy actually sampled, by an amount nobody measured. Token capture records the exact ids inside
+the model server, where they still exist, keyed to the rollout that produced them, and rebuilds a
+rollout's calls into one contiguous response.
+
+## When you need it
+
+The question is not where the harness runs, it is who makes the model calls and whether token ids
+survive the round trip.
+
+| Your agent | What you need |
+|---|---|
+| Calls the model server through Gym and returns Responses items carrying token ids | Nothing. Train as usual. |
+| Drives its own calls and returns text, or a dialect with no field for token ids | Token capture, described below. |
+| Drives its own calls but returns token ids in a shape Gym does not read | Token capture, and open an issue so the shape can be read directly. |
+
+## Turning it on
+
+Two settings turn capture on. Omit either and the run completes without error while teaching the
+model nothing.
+
+**1. Enable capture and give it node-local storage.** Writer and reader are on the same node, so a
+shared filesystem adds latency for nothing and lets two shards write the same file.
+
+```yaml
+env:
+  nemo_gym:
+    token_id_capture:
+      enabled: true
+      dir: /tmp/nemo_gym_token_id_captures
+```
+
+Everything run-wide about capture lives in that one block, and it is validated as a whole at
+startup. A typo in a key is an error rather than a run that looks configured and silently teaches
+the model nothing. Leaving the other settings in place with `enabled: false` is fine, so a config
+can carry a directory and toggle capture per run.
+
+**2. Opt the agent in.** The per-agent flag scopes capture to harnesses that need it, so a native
+agent in the same run is left alone.
+
+```yaml
+responses_api_agents:
+  claude_code_agent:
+    token_id_capture: true
+```
+
+Capture reads the ids off the served response, so the inference server has to be returning them.
+For vLLM that means a tokenizer:
+
+```yaml
+policy:
+  generation:
+    vllm_cfg:
+      skip_tokenizer_init: false
+```
+
+Sampling parameters also have to be pinned server-side. Harnesses built for interactive serving
+generally send none, so an unset parameter becomes the engine's own default rather than the value
+your policy is optimized under. Set `sampling_overrides` on the model server to your trainer's
+generation config.
+
+<Note>
+One setting that is not about capture, but that decides whether there is anything worth capturing.
+
+A **tool-call parser** turns the model's tool-call syntax into structured calls the harness can
+dispatch. Without one, the harness sees ordinary text, never calls a tool, and every rollout is a
+single model call. Capture still works perfectly and there is nothing to chain. This is configured
+on the inference server, for example `tool_parser: hermes` under
+`http_server_serving_chat_kwargs`, and the right value depends on the model.
+
+The failure is silent, so check `n_calls` on the first run rather than the reward.
+
+</Note>
+
+## What you get back
+
+Each rollout's model calls are stitched into a single Responses payload whose `output` items are
+contiguous: every item's `prompt_token_ids` is the running sequence, and its `generation_token_ids`
+is what the policy sampled at that step. Gym replaces the rollout's `response.output` with these
+items, so a trainer reads `response.output` the same way for a native agent and an external harness.
+
+The loss mask follows from that structure rather than being shipped separately. Prompt positions are
+context, generation positions are trainable.
+
+## What to watch on a first run
+
+Read these before the reward curve. A rollout can look healthy with a moving reward while most of it
+was never trained on.
+
+Gym attaches a metrics dict to each rollout under `_ng_token_capture`. Aggregate these across a step
+in whatever your framework already reports.
+
+| Key | Expect | If it is wrong |
+|---|---|---|
+| `n_calls` | above 1 | The harness never called a tool. Usually a missing tool parser. |
+| `chains` | 1 | The rollout split. Part of it is not reaching the optimizer. |
+| `delivered_fraction` | 1.0 | Sampled tokens were captured but not delivered. |
+| `quarantined_calls` | 0 | Two calls could not be told apart, so neither was used. |
+| `empty_generation_calls` | 0 | The output budget or a content filter is truncating generations. |
+| `mask_sample` | absent | The rollout lost a call and must not be trained on. |
+
+`n_calls` deserves particular attention. A value of exactly 1 means the agentic path was never
+exercised, and every other key will look correct.
+
+A rollout with no metrics dict at all was never rebuilt: its model calls were not correlated, so
+nothing was captured for it.
+
+## Integrating a training framework
+
+Gym owns the record shape and the code that builds a record. Where the record goes is yours.
+
+### The interfaces
+
+Two protocols in `nemo_gym.token_id_capture.protocols`. The module deliberately imports no web
+framework, cluster runtime or tensor library, so an inference worker can import it without pulling in
+Gym's server stack.
+
+```python
+class TokenSink(Protocol):
+    async def put(self, entry: TokenEntry) -> None: ...
+    def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None: ...
+
+class TokenSource(Protocol):
+    async def tokens_for(self, rollout_id: str) -> list[TokenEntry]: ...
+    async def drop(self, rollout_id: str) -> None: ...
+```
+
+`put` must be durable before it returns. A reader that runs after the rollout has to see the record,
+and that guarantee is what allows records to be deleted once consumed.
+
+`mark_incomplete` is the only signal that a rollout lost a call. The model call itself still
+succeeds, so a sink that drops it makes an incomplete rollout look complete.
+
+A transport with no delete operation implements `drop` as a no-op and lets whoever owns the storage
+retire the records.
+
+### Writing somewhere other than Gym's file store
+
+Name a class implementing `TokenSink` and Gym builds it instead of the file store. The capture path
+itself does not change: the model server still assembles the record, but the token arrays go to your
+transport rather than to disk, and never ride back through an HTTP response.
+
+```yaml
+env:
+  nemo_gym:
+    token_id_capture:
+      enabled: true
+      sink: my_pkg.sinks:MyDataPlaneSink   # module.path:ClassName
+      sink_kwargs:
+        endpoint: ${oc.env:MY_DATAPLANE_URL}
+        shard: ${oc.select:cluster_shard,0}
+      rebuild_response: false
+```
+
+`sink_kwargs` is passed to the constructor, so a sink can take the endpoint, client or credentials
+it needs rather than reaching for ambient state. Use `${oc.env:VAR}` for anything secret rather than
+writing it into the config. Kwargs the constructor cannot accept are an error at startup, as is a
+sink that does not implement `mark_incomplete`, which would otherwise make a rollout that lost a
+call look complete.
+
+`sink` replaces the store, so a `dir` alongside it is never read. That is a warning rather than an
+error, since nothing is lost, but expect no files on disk.
+
+`rebuild_response: false` tells Gym to stop after the write. Correlation and capture are unaffected;
+only the read-back after each rollout stops, because you do that yourself through your `TokenSource`
+whenever you want the records, and you retire them yourself with `drop`. Without it Gym keeps
+reading a store nothing wrote to, and reports every healthy rollout as a failed rebuild.
+
+Leaving `enabled` off is a different thing entirely: it disables capture, so an external harness
+yields rollouts with no token ids and nothing to train on. Use that only for evaluation.
+
+<Warning>
+Configure the sink rather than installing one from a launcher script, or set it up so that
+`install_token_sink` runs when the app module is imported.
+
+`install_token_sink` sets a process global. A model server with `num_workers > 1` is launched by
+uvicorn with an app string and `workers=N`, and uvicorn spawns those workers, re-importing the app
+module rather than inheriting the launcher's memory. A sink installed by a parent process therefore
+does not exist in any worker. Capture then falls back to the file store, or writes nothing at all
+when no `dir` is set, and logs no error in either case.
+
+The configured sink is constructed inside each worker at app startup, so it does not have this
+problem.
+</Warning>
+
+### Reading records back
+
+`TokenCaptureStore` satisfies both protocols and is the default, so a reader sitting alongside the
+store passes the store itself as its `TokenSource`. That is the case for `gym eval run` and for a
+trainer colocated with the model server, which is why the store's directory should be node-local.
+
+A framework staging records through its own transport reads them back through its own
+`TokenSource`, which lives wherever that transport does. Nothing about reading is node-local.
+
+What any source owes is an honest `is_incomplete`. It is how a consumer learns that a rollout lost a
+model call, and the records that did arrive can stitch into a chain that looks perfectly contiguous
+while missing a turn. A source that always answers `false` will train on such a rollout without
+knowing.
+
+Gym ships no HTTP reader. Nothing needed one, and a route serving records alone could not answer
+`is_incomplete`, so a client of it would have had to answer `false` and inherit exactly that
+problem.
+
+### Driving rollouts yourself
+
+`gym eval run` finalizes each record for you. A framework that calls `run_examples` directly does
+not go through that path, so it calls the same function on each finished record:
+
+```python
+from nemo_gym.token_id_capture.delivery import finalize_rollout_token_capture
+
+finalize_rollout_token_capture(result)
+```
+
+This rebuilds `response.output`, attaches the build metrics, and retires the consumed records. It
+mutates the record in place and never raises. Pass the global config and the store directories as
+the second and third arguments if you have them already; otherwise it resolves both itself.
+
+A rollout that could not be rebuilt is flagged with `mask_sample: true` at the top of its record.
+Drop those from the loss: the trajectory is missing a turn, or two candidate generations could not
+be told apart, and training on it is silently off-policy.
+
+### Rollout ids
+
+Capture keys each record by rollout id, which Gym derives from a run request's task and rollout
+indices. That assumes each dispatch gets a distinct pair. If your loop restarts numbering, for
+instance running the same indices once per training step, the derived id repeats and two dispatches
+share one capture key.
+
+Set `_ng_rollout_id` on the run body to key them yourself:
+
+```python
+row["_ng_rollout_id"] = f"step{step}.{task_index}-{rollout_index}"
+```
+
+The id becomes a URL path segment, so it is limited to letters, digits, dots, dashes and
+underscores, starting with a letter or digit. An id outside that is refused rather than rewritten.
+
+## Extensions
+
+### Sampling pin
+
+`sampling_overrides` on the model server forces the sampling parameters on every request, overriding
+whatever the harness sent. Generation KL error is the metric that tells you whether it is working.
+
+## Limitations
+
+**One trajectory per rollout.** A harness that forks sub-agents or retries a call produces a tree of
+model calls. Gym delivers the chain carrying the most sampled tokens and reports the rest through
+`delivered_fraction`, rather than dropping it silently. Training on the full tree needs a trainer
+contract that accepts one.
+
+**Harness calls outside the rollout.** A harness may generate a conversation title or a
+context-compaction summary. Those are real policy output and are currently trained on. A compaction
+summary is long enough that it can outweigh the rollout it summarizes, which shows up as
+`chains_per_rollout_mean` above 1 and `delivered_fraction_mean` below 1.0.
