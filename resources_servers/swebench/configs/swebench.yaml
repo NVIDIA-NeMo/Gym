@@ -20,7 +20,12 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
           # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
           # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
           disk_gib: 30
-        provider_options: {}
+        provider_options:
+          # Scheduling requests, kept below the limits so sandboxes pack densely.
+          resource_requests:
+            cpu: 0.5
+            memory_mib: 1024
+            disk_gib: 30
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
