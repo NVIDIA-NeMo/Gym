@@ -96,7 +96,7 @@ An agent can use both simultaneously — its own tools and the environment's too
 
 Servers communicate over async HTTP (aiohttp) with:
 - **Session cookies** propagated through the call stack for stateful environments
-- **Retry logic** with exponential backoff (3 attempts)
+- **Retry logic** for transient connection failures
 - **Connection pooling** via a singleton aiohttp client for high-concurrency workloads
 
 ## Next Steps

@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import atexit
+import errno as errno_module
 import json
 import resource
 import socket
@@ -21,11 +22,13 @@ import sys
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
+from enum import Enum
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, Dict, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import orjson
@@ -33,13 +36,18 @@ import ray
 import requests
 import uvicorn
 from aiohttp import (
+    ClientConnectionResetError,
+    ClientConnectorError,
+    ClientError,
     ClientOSError,
     ClientResponse,
     ClientResponseError,
     ClientSession,
     ClientTimeout,
     DummyCookieJar,
+    InvalidURL,
     ServerDisconnectedError,
+    ServerTimeoutError,
     TCPConnector,
 )
 from aiohttp.client import _RequestOptions
@@ -193,16 +201,153 @@ atexit.register(global_aiohttp_client_exit)
 # This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
 MAX_NUM_TRIES = 3
 
-_NUM_SERVER_DISCONNECTED_ERROR: int = 0
-_NUM_CLIENT_OS_ERROR: int = 0
-DISCONNECTED_CLIENT_OS_PRINT_INTERVAL: int = 100
-DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different scenarios previously:
-1. Too many open connections and not enough sockets due to the file descriptor limit being hit.
+
+class _RequestFailureKind(str, Enum):
+    """The categories `_classify_request_failure` sorts a failed `request()` call into.
+
+    Private to this module and specific to the `request()` path. This is not a general error
+    taxonomy for NeMo Gym.
+    """
+
+    # The connection was never established: `ClientConnectorError` and its DNS and proxy
+    # subclasses, for a refused connect, an unreachable host or network, or a failed lookup.
+    UNREACHABLE = "unreachable"
+    # A local resource ran out while connecting: EMFILE, ENFILE, ENOBUFS or ENOMEM, read from
+    # `ClientConnectorError.os_error`.
+    RESOURCE = "resource"
+    # A connection was established and then lost: `ServerDisconnectedError`,
+    # `ClientConnectionResetError`, a bare `ClientOSError`, or an unrecognised `ClientError`.
+    PEER_DROP = "peer_drop"
+    # A deadline expired: `ServerTimeoutError` and its connect and read subclasses, or
+    # `asyncio.TimeoutError`.
+    TIMEOUT = "timeout"
+    # A malformed URL (`InvalidURL`) or anything that is not a `ClientError` at all, which means a
+    # programming error rather than a network one.
+    FATAL = "fatal"
+
+
+_RESOURCE_ERRNOS = frozenset({errno_module.EMFILE, errno_module.ENFILE, errno_module.ENOBUFS, errno_module.ENOMEM})
+
+
+def _classify_request_failure(exc: BaseException) -> _RequestFailureKind:
+    """Sort an exception from `client.request()` into a `_RequestFailureKind`.
+
+    Every exception maps to a kind; there is no "unknown". Two fallbacks make that true. An
+    `aiohttp.ClientError` this function does not recognise is treated as `PEER_DROP`, so a new
+    exception type in a future aiohttp is retried and reported rather than raised immediately.
+    Anything that is not a `ClientError` at all is `FATAL`, on the grounds that it is a programming
+    error rather than a network one.
+
+    Order matters and breaking it is silent. `ClientConnectorError` subclasses `ClientOSError`, so
+    testing the parent first would swallow every refused connection into `PEER_DROP`, which is the
+    bug this classification exists to fix. `InvalidURL` is both a `ClientError` and a `ValueError`,
+    so it has to be tested before either.
+    """
+    if isinstance(exc, InvalidURL):
+        return _RequestFailureKind.FATAL
+    if isinstance(exc, ClientConnectorError):
+        # Includes the DNS and proxy subclasses. Read `.os_error` rather than `.errno`: a bare
+        # `ClientOSError` has neither, and this runs inside an `except` block where an
+        # `AttributeError` would turn a retryable failure into a crash.
+        os_error = getattr(exc, "os_error", None)
+        if os_error is not None and getattr(os_error, "errno", None) in _RESOURCE_ERRNOS:
+            return _RequestFailureKind.RESOURCE
+        return _RequestFailureKind.UNREACHABLE
+    if isinstance(exc, (ServerTimeoutError, asyncio.TimeoutError)):
+        return _RequestFailureKind.TIMEOUT
+    if isinstance(exc, (ServerDisconnectedError, ClientConnectionResetError, ClientOSError)):
+        return _RequestFailureKind.PEER_DROP
+    if isinstance(exc, ClientError):
+        # An aiohttp error we do not recognise. Retried rather than failed fast, so a new
+        # exception type in a future aiohttp is reported after retries instead of raised at once.
+        return _RequestFailureKind.PEER_DROP
+    return _RequestFailureKind.FATAL
+
+
+_UNREACHABLE_HELP_TEXT = """Nothing accepted a connection at that address, so this is a configuration or startup problem rather than load.
+1. Check the URL. For the policy model that is `policy_base_url` in `env.yaml`.
+    - Verify with: curl <base_url>/models
+    - A `localhost` URL means you serve the model yourself (e.g. vLLM) before collecting rollouts.
+2. If the endpoint is still starting up, this resolves on its own once it is serving."""
+
+_RESOURCE_HELP_TEXT = """Too many open connections and not enough sockets due to the file descriptor limit being hit.
     - Increase ulimit.
     - Bash example: https://github.com/NVIDIA-NeMo/RL/blob/de55be7777bbf034c04e41c40382c44725e8aa4b/ray.sub#L81
-    - Python example: https://github.com/NVIDIA-NeMo/Gym/blob/c74ffddb3d8190cd717508b0830916b19a26e6cd/nemo_gym/server_utils.py#L495
-2. Depending on the serving framework and config, the server may be overloaded and is dropping connections.
-    - Increase adapter server replicas."""
+    - Python example: https://github.com/NVIDIA-NeMo/Gym/blob/c74ffddb3d8190cd717508b0830916b19a26e6cd/nemo_gym/server_utils.py#L495"""
+
+_PEER_DROP_HELP_TEXT = """Depending on the serving framework and config, the server may be overloaded and is dropping connections.
+    - Increase adapter server replicas.
+    - If this is a file descriptor problem rather than load, it surfaces separately as `resource`."""
+
+_TIMEOUT_HELP_TEXT = """The endpoint accepted the connection but did not answer inside the deadline.
+    - Check whether the endpoint is saturated, or raise the timeout for this call."""
+
+_FAILURE_KIND_HELP_TEXT = {
+    _RequestFailureKind.UNREACHABLE: _UNREACHABLE_HELP_TEXT,
+    _RequestFailureKind.RESOURCE: _RESOURCE_HELP_TEXT,
+    _RequestFailureKind.PEER_DROP: _PEER_DROP_HELP_TEXT,
+    _RequestFailureKind.TIMEOUT: _TIMEOUT_HELP_TEXT,
+    _RequestFailureKind.FATAL: "",
+}
+
+# Reporting on the first failure is right for one request and wrong for sixteen thousand, so the
+# full diagnostic goes out once per endpoint and kind and is then summarised on this interval.
+# Keyed by (origin, kind) -> (when it was last reported, failures suppressed since). Grows with the
+# number of distinct endpoints a process talks to, not with the number of requests.
+_FAILURE_REPORT_INTERVAL_SECONDS: float = 30.0
+_FAILURE_REPORT_STATE: Dict[Tuple[str, _RequestFailureKind], Tuple[float, int]] = {}
+
+
+def _request_origin(url: str) -> str:
+    """`scheme://host:port` for `url`. Failures are grouped and reported per origin."""
+    split = urlsplit(url)
+    return f"{split.scheme}://{split.netloc}" if split.netloc else url
+
+
+def _next_failure_report(origin: str, kind: _RequestFailureKind, now: float) -> Optional[int]:
+    """Whether to report this failure, and what to say.
+
+    Returns 0 the first time an (origin, kind) pair is seen, meaning print the full diagnostic; a
+    positive count once the interval has passed, meaning report that many suppressed failures; and
+    `None` in between, meaning print nothing.
+    """
+    state = _FAILURE_REPORT_STATE.get((origin, kind))
+    if state is None:
+        _FAILURE_REPORT_STATE[(origin, kind)] = (now, 0)
+        return 0
+
+    last_reported, suppressed = state
+    suppressed += 1
+    if now - last_reported < _FAILURE_REPORT_INTERVAL_SECONDS:
+        _FAILURE_REPORT_STATE[(origin, kind)] = (last_reported, suppressed)
+        return None
+
+    _FAILURE_REPORT_STATE[(origin, kind)] = (now, 0)
+    return suppressed
+
+
+def _report_request_failure(url: str, exc: BaseException, kind: _RequestFailureKind, now: float) -> None:
+    """Print the diagnostic for a failed request, at most once per endpoint and kind per interval."""
+    origin = _request_origin(url)
+    suppressed = _next_failure_report(origin, kind, now)
+    if suppressed is None:
+        return
+
+    if suppressed:
+        print(
+            f"[request_retry url={origin} kind={kind.value}] "
+            f"{suppressed} more `{type(exc).__name__}` failures in the last "
+            f"{_FAILURE_REPORT_INTERVAL_SECONDS:.0f}s. Still retrying.",
+            flush=True,
+        )
+        return
+
+    help_text = _FAILURE_KIND_HELP_TEXT[kind]
+    print(
+        f"[request_retry url={url} kind={kind.value} error={type(exc).__name__}] {exc}"
+        + (f"\n{help_text}" if help_text else ""),
+        flush=True,
+    )
 
 
 async def request(
@@ -216,33 +361,14 @@ async def request(
 
     client = get_global_aiohttp_client()
     num_tries = 1
-    retries = 0
-    retry_start = time.monotonic()
     while True:
         try:
             return await client.request(method=method, url=url, **kwargs)
-        except ServerDisconnectedError:
-            global _NUM_SERVER_DISCONNECTED_ERROR
-            _NUM_SERVER_DISCONNECTED_ERROR += 1
-            retries += 1
-            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                print(
-                    f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                    f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                    flush=True,
-                )
-
-            await asyncio.sleep(0.5)
-        except ClientOSError:
-            global _NUM_CLIENT_OS_ERROR
-            _NUM_CLIENT_OS_ERROR += 1
-            retries += 1
-            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                print(
-                    f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                    f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                    flush=True,
-                )
+        except (ServerDisconnectedError, ClientOSError) as e:
+            # Both were already retried without a limit, and still are; the kind only selects the
+            # diagnostic. `ClientConnectorError` arrives here as a `ClientOSError` subclass, which
+            # is why a refused connection used to be reported as an overloaded server.
+            _report_request_failure(url, e, _classify_request_failure(e), time.monotonic())
 
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -251,10 +377,13 @@ async def request(
 
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
+                kind = _classify_request_failure(e)
+                help_text = _FAILURE_KIND_HELP_TEXT[kind]
                 print(
-                    f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+                    f"""Hit an exception while making a request (try {num_tries}, kind {kind.value}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
+                    + (f"{help_text}\n" if help_text else "")
                 )
                 if num_tries >= MAX_NUM_TRIES:
                     raise e
