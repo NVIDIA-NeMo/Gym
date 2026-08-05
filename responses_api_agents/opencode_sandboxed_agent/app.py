@@ -319,7 +319,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_results_fpath": str(results_local_fpath),
             "opencode_run_stdout": result.stdout,
             "opencode_run_stderr": result.stderr,
-            "opencode_no_export_found": bool(opencode_export),
+            "opencode_no_export_found": not bool(opencode_export),
         }
 
         return NeMoGymResponse(
