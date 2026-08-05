@@ -61,7 +61,7 @@ For complete development setup, CI/CD requirements, commit signing, and troubles
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync --extra dev
 pre-commit install
 ```
