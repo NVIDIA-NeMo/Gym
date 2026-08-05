@@ -3,7 +3,24 @@ math_formal_lean:
     math_formal_lean:
       entrypoint: app.py
       sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
-      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+            sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      # Sandbox backend: 'ns_http' (default — today's path, byte-identical with zero env
+      # vars set), 'opensandbox' (per-verify OpenSandbox pods via provider exec), or
+      # 'ns_http_proxy' (NS protocol through a full base_url — parity oracle).
+      sandbox_backend: ${oc.env:MATH_FORMAL_LEAN_BACKEND,ns_http}
+      # Read only when sandbox_backend == opensandbox; empty creds/image then = hard startup error.
+      opensandbox:
+        provider:
+          opensandbox:
+            connection:
+              domain: ${oc.env:OPENSANDBOX_BASE_URL,}
+              api_key: ${oc.env:OPENSANDBOX_API_KEY,}
+              use_server_proxy: true
+            create:
+              timeout_s: 90
+              retries: 3
+        image: ${oc.env:NS_SANDBOX_IMAGE,}
+        max_concurrent: ${oc.env:LEAN_SANDBOX_MAX_CONCURRENT,8}
       compilation_timeout: 30.0
       domain: math
       verified: false

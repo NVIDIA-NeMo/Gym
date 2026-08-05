@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -341,6 +341,15 @@ def build_correction_prompt(
 class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: int = 6000
+    # Sandbox backend: "ns_http" (default — today's NS server over host/port), "opensandbox"
+    # (per-verify OpenSandbox pods via provider exec), or "ns_http_proxy" (the NS HTTP protocol
+    # through a full base_url + headers, e.g. an OpenSandbox proxied endpoint; parity oracle).
+    sandbox_backend: str = "ns_http"
+    sandbox_base_url: str = ""
+    sandbox_extra_headers: Dict[str, str] = Field(default_factory=dict)
+    # OpenSandboxLean4Client kwargs (provider/image/max_concurrent/...) — read only when
+    # sandbox_backend == "opensandbox".
+    opensandbox: Dict[str, Any] = Field(default_factory=dict)
     compilation_timeout: float = 30.0
     max_output_characters: int = 1000
     extract_code_mode: str = "last"
@@ -384,11 +393,25 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._sandbox_client = Lean4SandboxClient(
-            host=self.config.sandbox_host,
-            port=self.config.sandbox_port,
-            max_output_characters=self.config.max_output_characters,
-        )
+        if self.config.sandbox_backend == "opensandbox":
+            from resources_servers.math_formal_lean.sandbox_client import OpenSandboxLean4Client
+
+            self._sandbox_client = OpenSandboxLean4Client(
+                max_output_characters=self.config.max_output_characters,
+                **self.config.opensandbox,
+            )
+        elif self.config.sandbox_backend == "ns_http_proxy":
+            self._sandbox_client = Lean4SandboxClient(
+                base_url=self.config.sandbox_base_url,
+                extra_headers=self.config.sandbox_extra_headers,
+                max_output_characters=self.config.max_output_characters,
+            )
+        else:
+            self._sandbox_client = Lean4SandboxClient(
+                host=self.config.sandbox_host,
+                port=self.config.sandbox_port,
+                max_output_characters=self.config.max_output_characters,
+            )
         self._proof_build_config = ProofBuildConfig(
             extract_code_mode=self.config.extract_code_mode,
             restate_formal_statement=self.config.restate_formal_statement,
