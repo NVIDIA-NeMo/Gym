@@ -28,6 +28,7 @@ from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -1009,6 +1010,32 @@ class OpenSandboxProvider:
         )
         raw_status = getattr(info, "status", None)
         return _to_sandbox_status(getattr(raw_status, "state", None) if raw_status is not None else None)
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve an HTTP(S) endpoint for a declared sandbox port.
+
+        The SDK returns the server-proxy route (`{domain}/v1/sandboxes/{id}/proxy/{port}`)
+        when the connection uses the server proxy, along with any headers the server
+        requires on every request to that endpoint (e.g. the API key header).
+        """
+        get_endpoint = getattr(handle.raw, "get_endpoint", None)
+        if get_endpoint is None:
+            raise NotImplementedError(
+                "The installed opensandbox SDK does not expose Sandbox.get_endpoint; "
+                "sandbox service endpoints require opensandbox>=0.1.15"
+            )
+        resolved = await self._await_sdk_operation(
+            lambda: get_endpoint(port),
+            operation="get_endpoint",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(self._connection.request_timeout_s)
+            if self._connection.request_timeout_s is not None
+            else None,
+        )
+        endpoint_url = str(getattr(resolved, "endpoint", "") or "")
+        if not endpoint_url:
+            raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id} port {port}")
+        return SandboxEndpoint(endpoint=endpoint_url, headers=dict(getattr(resolved, "headers", None) or {}))
 
     def _command_retry_count(self) -> int:
         return self._operations.command_retries

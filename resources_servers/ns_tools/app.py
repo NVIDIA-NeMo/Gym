@@ -78,6 +78,13 @@ class NSToolsConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: str = "6000"
 
+    # Sandbox backend: "local" (default — today's colocated server) or "opensandbox_pool"
+    # (disaggregated pods on OpenSandbox; requires the opensandbox_pool block below).
+    sandbox_type: str = "local"
+    # OpenSandboxPool constructor kwargs (see osb_pool.py). Only read when
+    # sandbox_type == "opensandbox_pool"; the default backend never touches it.
+    opensandbox_pool: Dict[str, Any] = Field(default_factory=dict)
+
     # Legacy python_tool HTTP server port (only used for pre-main HTTP PythonTool variants)
     python_tool_port: int = 8765
 
@@ -144,6 +151,12 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
+            if self.config.sandbox_type == "opensandbox_pool":
+                import osb_sandbox
+
+                if osb_sandbox.CURRENT_POOL is not None:
+                    # Budgeted, non-blocking warmup: kicks pod creation without gating server boot.
+                    await osb_sandbox.CURRENT_POOL.start()
             try:
                 async with main_app_lifespan(app) as maybe_state:
                     yield maybe_state
@@ -262,12 +275,16 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         context = {
             "sandbox": {
-                "sandbox_type": "local",
+                "sandbox_type": self.config.sandbox_type,
                 "host": self.config.sandbox_host,
                 "port": self.config.sandbox_port,
                 "disable_session_restore": self.config.disable_session_restore,
             }
         }
+        if self.config.sandbox_type == "opensandbox_pool":
+            import osb_sandbox  # noqa: F401 — registers the backend with the nemo_skills registry
+
+            context["sandbox"]["pool"] = dict(self.config.opensandbox_pool)
 
         overrides = {
             tool_name: dict(tool_config) for tool_name, tool_config in self.config.nemo_skills_tool_overrides.items()
@@ -464,6 +481,12 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         """Cleanup resources on server shutdown."""
         if self.tool_manager:
             await self.tool_manager.shutdown()
+
+        if self.config.sandbox_type == "opensandbox_pool":
+            import osb_sandbox
+
+            if osb_sandbox.CURRENT_POOL is not None:
+                await osb_sandbox.CURRENT_POOL.aclose()
 
         # Terminate the python_tool subprocess if one was started.
         if self._python_tool_process:

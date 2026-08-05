@@ -1,3 +1,6 @@
 -e nemo-gym[dev] @ ../../
 ## NeMo-Skills tools subpackage as of June 12, 2026
 nemo-skills-tools @ git+https://github.com/NVIDIA-NeMo/Skills.git@da85a881d972e6fec847b90cf553a0bf9bf10638#subdirectory=tools
+## OpenSandbox SDK — used only by the opt-in opensandbox_pool sandbox backend
+opensandbox==0.1.15
+tenacity

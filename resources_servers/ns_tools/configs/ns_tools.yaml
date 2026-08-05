@@ -40,7 +40,27 @@ ns_tools:
 
       # Disable session replay after sandbox worker restarts (improves stability)
       disable_session_restore: true
-      
+
+      # Sandbox backend switch: 'local' (default — today's colocated server, byte-identical
+      # with zero env vars set) or 'opensandbox_pool' (disaggregated pods on OpenSandbox).
+      sandbox_type: ${oc.env:NS_TOOLS_SANDBOX_TYPE,local}
+      # Pool settings; read only when sandbox_type == opensandbox_pool. Selecting that
+      # backend with an empty domain/api_key/image is a hard startup error, never a no-op.
+      opensandbox_pool:
+        provider:
+          opensandbox:
+            connection:
+              domain: ${oc.env:OPENSANDBOX_BASE_URL,}
+              api_key: ${oc.env:OPENSANDBOX_API_KEY,}
+              use_server_proxy: true
+            create:
+              timeout_s: 90
+              retries: 3
+        image: ${oc.env:NS_SANDBOX_IMAGE,}
+        port: 6000
+        size: ${oc.env:NS_SANDBOX_POOL_SIZE,8}
+        ttl_s: ${oc.env:NS_SANDBOX_TTL_S,14400}
+
       domain: agent
       verified: false
       description: NeMo Skills tool execution with math verification
