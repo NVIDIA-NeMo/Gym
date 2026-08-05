@@ -140,6 +140,7 @@ def _assemble(
         "delivered_fraction": notes.delivered_fraction,
         "generated_tokens_captured": notes.generated_tokens_captured,
         "generated_tokens_delivered": notes.generated_tokens_delivered,
+        "parent_link_fallbacks": dict(notes.parent_link_fallbacks),
         # Calls without generated tokens have no training signal.
         # A nonzero count can indicate an output-budget or content-filter cutoff.
         "empty_generation_calls": len(notes.empty_generation_calls),
