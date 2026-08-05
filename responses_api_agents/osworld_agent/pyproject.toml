@@ -16,7 +16,7 @@
 [project]
 name = "osworld-agent"
 version = "0.0.0"
-requires-python = ">=3.12"
+requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
     # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
