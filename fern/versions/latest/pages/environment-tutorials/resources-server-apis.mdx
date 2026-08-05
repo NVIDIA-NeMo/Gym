@@ -28,18 +28,18 @@ Each protocol has a matching built-in Agent Server: `simple_agent` for the `/see
 
 | Base protocol | Resources Server API | Matching built-in Agent Server | Reward contract |
 |---|---|---|---|
-| Native | `/seed_session` and `/verify` | `simple_agent` | `/verify` scores the completed trajectory once. |
+| Seed/verify | `/seed_session` and `/verify` | `simple_agent` | `/verify` scores the completed trajectory once. |
 | Gymnasium | `/reset` and `/step` | `gymnasium_agent` | Every `/step` returns a reward; `/run` accumulates them. |
 
-Pick one base protocol and build the Resources Server and Agent Server to match. `GymnasiumServer` replaces the native endpoints and does not expose `/verify`. `SimpleResourcesServer` defines the native endpoints but can be extended with additional environment-specific routes.
+Pick one base protocol and build the Resources Server and Agent Server to match. `GymnasiumServer` exposes `/reset` and `/step` and does not expose `/verify`. `SimpleResourcesServer` defines `/seed_session` and `/verify` but can be extended with additional environment-specific routes.
 
 <Note>
-The two base protocols do not describe every concrete Agent–Environment interface in the repository. Some environments extend the native protocol with custom transition endpoints. Other environments are embedded inside the Agent and do not use a Resources Server during `/run`.
+The two base protocols do not describe every concrete Agent–Environment interface in the repository. Some environments extend the seed/verify protocol with custom transition endpoints. Other environments are embedded inside the Agent and do not use a Resources Server during `/run`.
 </Note>
 
-### Native Protocol Extensions
+### Seed/Verify Protocol Extensions
 
-Several environments keep the native `/seed_session` and `/verify` lifecycle while adding bespoke transition APIs. These extensions require a matching Agent Server; sharing an endpoint name such as `/step` does not make their request and response contracts interchangeable.
+Several environments keep the `/seed_session` and `/verify` lifecycle while adding bespoke transition APIs. These extensions require a matching Agent Server; sharing an endpoint name such as `/step` does not make their request and response contracts interchangeable.
 
 | Environment | Episode flow | Extension contract |
 |---|---|---|
@@ -47,7 +47,7 @@ Several environments keep the native `/seed_session` and `/verify` lifecycle whi
 | ToolSandbox | `/seed_session` → repeated `/step` → `/close` → `/verify` | `/step` accepts function calls or a natural-language response for the user simulator. `/close` finalizes environment scoring before `/verify`. |
 | OpenEnv | `/seed_session` → interaction → `/verify` | Depending on its mode, interaction uses a custom `/step` action or direct per-tool HTTP routes. `/verify` returns the accumulated environment reward. |
 
-Some Agent Servers also use variants of the native sequence—for example, skipping a no-op `/seed_session`, treating it as optional, or calling `/verify` without tool execution. These are Agent Server behaviors built around the native API rather than new Resources Server base classes.
+Some Agent Servers also use variants of the seed/verify sequence—for example, skipping a no-op `/seed_session`, treating it as optional, or calling `/verify` without tool execution. These are Agent Server behaviors built around the seed/verify API rather than new Resources Server base classes.
 
 ### Agent-Embedded Environments
 
@@ -65,9 +65,9 @@ The episode protocol defines initialization, transitions, and scoring. The actio
 | Bespoke transition API | A matching Agent Server and Resources Server exchange environment-specific `/step`, `/close`, or other requests. |
 | Agent-embedded tools | The Agent Server or its benchmark harness executes tools internally without a Resources Server. |
 
-## Native Protocol: `seed_session()` and `verify()`
+## Seed/Verify Protocol: `seed_session()` and `verify()`
 
-The native protocol brackets the Agent harness with environment initialization and final verification:
+The seed/verify protocol brackets the Agent harness with environment initialization and final verification:
 
 ```text
 Client → Agent Server: POST /run
@@ -108,7 +108,7 @@ async def verify(
 
 ### Direct HTTP Tool-Calling Protocol
 
-The native episode protocol does not itself define how the Agent acts on the environment. `simple_agent` supplies a direct HTTP function-tool protocol inside `responses()`:
+The seed/verify episode protocol does not itself define how the Agent acts on the environment. `simple_agent` supplies a direct HTTP function-tool protocol inside `responses()`:
 
 1. The input row declares function schemas in `responses_create_params.tools`.
 2. The Agent Server sends those schemas to the Model Server.
@@ -155,7 +155,7 @@ For a model response such as:
 Resources Server tools can also be exposed over MCP. MCP changes the tool transport, not the episode protocol: the rollout can still use `/seed_session` and `/verify`. See [MCP Resources Server](/environment-tutorials/mcp-resources-server).
 </Info>
 
-### Minimal Native Environment
+### Minimal Seed/Verify Environment
 
 The complete server below combines the tool route with final trajectory verification:
 
@@ -203,7 +203,7 @@ if __name__ == "__main__":
     CalculatorServer.run_webserver()
 ```
 
-Choose the native protocol when:
+Choose the seed/verify protocol when:
 
 - The Agent harness should own model calls, tool dispatch, retries, or other orchestration.
 - Resources Server routes should be exposed directly as model tools.
@@ -315,7 +315,7 @@ Store rollout-specific state under the session ID so concurrent episodes remain 
 - **Lightweight**: store a counter, game board, or conversation state in memory.
 - **Heavyweight**: associate each session with a browser, database, or Docker container.
 
-### Native State
+### Seed/Verify State
 
 `SimpleResourcesServer` does not define a state container. Add one and read the session ID from the FastAPI request:
 
@@ -367,7 +367,7 @@ Do not put rollout-specific mutable data in an unkeyed server attribute.
 
 ### Session Cleanup
 
-- **Native protocol**: remove custom state in `verify()`, preferably in a `finally` block. `SimpleResourcesServer` does not automatically clear custom state.
+- **Seed/verify protocol**: remove custom state in `verify()`, preferably in a `finally` block. `SimpleResourcesServer` does not automatically clear custom state.
 - **Gymnasium protocol**: when `step()` returns `terminated=True` or `truncated=True`, `GymnasiumServer` calls `close_session()` and removes the entry from `self.session_state`.
 - **Heavyweight state**: override `close_session()`, release the external resource, and call `await super().close_session(session_id)`.
 
@@ -386,7 +386,7 @@ Ensure a Gymnasium environment returns a terminal or truncated result before the
 The Resources Server definition has the same YAML shape for both episode protocols. The paired Agent Server determines which protocol is used.
 
 <Tabs>
-<Tab title="Native">
+<Tab title="Seed/verify">
 
 ```yaml
 calculator:
@@ -445,8 +445,8 @@ The Agent Server's `resources_server.name` must match the top-level Resources Se
 
 ## Next Steps
 
-- Build a native environment in [Single-Step Environment](/environment-tutorials/single-step-environment).
+- Build a seed/verify environment in [Single-Step Environment](/environment-tutorials/single-step-environment).
 - Add per-rollout state in [Stateful Environment](/environment-tutorials/stateful-environment).
-- Expose native tools through [MCP Resources Server](/environment-tutorials/mcp-resources-server).
+- Expose Resources Server tools through [MCP Resources Server](/environment-tutorials/mcp-resources-server).
 - Review common reward designs in [Verification Patterns](/build-verifiers/verification-patterns).
 - See a multi-step Gymnasium implementation in [`resources_servers/blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack).
