@@ -16,7 +16,8 @@ a `/ng-rollout/<rollout_id>` Gym Model Server prefix. See [Model-call capture](/
 Captured request and response payloads are included in `ng_trajectory`. LabBench rows that report the
 `multimodal_history_redacted` gap omit those payload copies; direct provider calls are not captured. See
 [Model-call capture](/model-server/model-call-capture) for payload retention and access-control requirements. Token fields are
-`prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`; unavailable values are `null`.
+`prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`. The fields are nullable, and
+provider-reported details are preserved when available.
 
 ## Acceptance criteria
 
@@ -25,16 +26,18 @@ Captured request and response payloads are included in `ng_trajectory`. LabBench
 | C1 | Standard schema for per-model-call token statistics and response metadata |
 | C2 | Prompt, completion, reasoning, total, and cached token counts when available |
 | C3 | Task and rollout identity, turn number, timestamp, question, answer, reasoning, resolution, and step count per turn |
-| C4 | Model-visible input and output history can be reconstructed from the rollout record |
+| C4 | Model-visible input and output history can be reconstructed from persisted rollout JSONL |
 | C5 | Tool output, status, start and completion timestamps, and duration |
 | C6 | Independent timing for parallel tool calls |
 | C7 | Resource-server-backed and custom or sandbox-backed benchmarks |
 
 ## Agent coverage
 
-- `V`: complete under the documented observability configuration.
+- `V`: complete for the evaluated path under the documented observability configuration.
 - `O`: currently partial or path-dependent.
 - `X`: currently unavailable.
+
+For C1, C2, and C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternatives are outside capture.
 
 | Agent | C1 | C2 | C3 | C4 | C5 | C6 | C7 |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
