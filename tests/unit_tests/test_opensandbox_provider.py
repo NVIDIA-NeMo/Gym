@@ -1003,13 +1003,7 @@ def test_attribution_invalid_key_prefix_raises(key_prefix: str) -> None:
 
 
 async def test_connect_health_checks_by_default(fake_opensandbox_sdk: None) -> None:
-    """connect() must hand back a handle that is actually usable.
-
-    A sandbox id only proves the workload exists; the server reports a sandbox
-    ready once its pod is Running with an IP, which is before execd binds its
-    port. Skipping the check here defers that gap to the first real call, which
-    surfaces as a 502 rather than a wait.
-    """
+    """An unchecked handle would defer the exec-daemon startup gap to the first call."""
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
 
     await provider.connect({"sandbox_id": "sandbox-9"})
