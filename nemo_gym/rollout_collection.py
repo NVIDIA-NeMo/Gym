@@ -168,6 +168,115 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     reuse_existing_data_preparation: bool = False
 
 
+NG_ELAPSED_KEY = "elapsed_seconds"
+
+
+class DispatchLatencyTracker:
+    """Per-task latency observed by the dispatcher, and the drain margin from it.
+
+    Rollouts/hr is the number operators watch, and on its own it is misleading:
+    raising concurrency raises aggregate throughput while making every individual
+    task slower, so the run looks healthier right up until tasks start breaching
+    their per-task timeout. Reporting the latency percentiles next to the rate
+    makes that trade visible while there is still time to react to it.
+    """
+
+    def __init__(self) -> None:
+        self._durations: List[float] = []
+        self._drained = 0
+
+    def record(self, seconds: float) -> None:
+        if seconds > 0:
+            self._durations.append(seconds)
+
+    def record_drained(self) -> None:
+        self._drained += 1
+
+    @property
+    def drained(self) -> int:
+        return self._drained
+
+    def quantile(self, q: float) -> Optional[float]:
+        if not self._durations:
+            return None
+        ordered = sorted(self._durations)
+        pos = (len(ordered) - 1) * q
+        low = int(pos)
+        high = min(low + 1, len(ordered) - 1)
+        return ordered[low] * (1 - (pos - low)) + ordered[high] * (pos - low)
+
+    def drain_margin(self, configured: Optional[float]) -> Optional[float]:
+        """Seconds of headroom a task needs before it is worth starting.
+
+        An explicit value wins. Otherwise adapt to this run's own p75, once
+        enough tasks have finished for that to mean anything.
+        """
+        if configured is not None:
+            return configured
+        if len(self._durations) < 5:
+            return None
+        return self.quantile(0.75)
+
+    def summary(self) -> str:
+        if not self._durations:
+            return "No completed rollouts to report latency for."
+        total = sum(self._durations)
+        lines = [
+            f"Per-task latency over {len(self._durations)} completed rollout(s): "
+            f"median {self.quantile(0.5) / 60:.1f} min, "
+            f"p90 {self.quantile(0.9) / 60:.1f} min, "
+            f"p99 {self.quantile(0.99) / 60:.1f} min, "
+            f"max {max(self._durations) / 60:.1f} min",
+            f"Task-time delivered: {total / 3600:.1f} task-hours",
+        ]
+        if self._drained:
+            lines.append(
+                f"Drained (not dispatched, no time left in the budget): {self._drained}. "
+                "These wrote no row and will be re-dispatched on resume."
+            )
+        return "\n".join(lines)
+
+
+def _observed_elapsed(record: Dict[str, Any]) -> Optional[float]:
+    """Best-effort per-rollout wallclock from a result/failure row."""
+    for candidate in (
+        record.get(NG_ELAPSED_KEY),
+        ((record.get("response") or {}).get("metadata") or {}).get(NG_ELAPSED_KEY),
+    ):
+        try:
+            if candidate is not None:
+                value = float(candidate)
+                if value > 0:
+                    return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _get_max_rollout_attempts() -> int:
+    """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
+    raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+    try:
+        n = int(raw)
+        if n < 1:
+            raise ValueError(f"must be >= 1, got {n}")
+        return n
+    except (TypeError, ValueError) as e:
+        print(
+            f"WARNING: could not parse NEMO_GYM_MAX_ROLLOUT_ATTEMPTS={raw!r} ({e}); "
+            f"falling back to default {_DEFAULT_MAX_ROLLOUT_ATTEMPTS}.",
+            flush=True,
+        )
+        return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+
+def _failures_path_for(output_fpath: Path) -> Path:
+    """Sidecar path used by the dispatcher and ``_load_from_cache``."""
+    return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
+
+
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
     Perform a batch of rollout collection.
@@ -244,6 +353,39 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+
+    dispatch_budget_s: Optional[float] = Field(
+        default=None,
+        description=(
+            "Seconds from collection start during which new rollouts may be dispatched. Set it to "
+            "the usable walltime of the allocation (Slurm walltime minus startup and teardown). "
+            "Once the budget is spent, queued tasks are left undispatched rather than started and "
+            "killed mid-flight: they write no row, so a `resume_from_cache` run re-dispatches them "
+            "with a full allocation ahead of them. Unset (default) preserves the old behaviour of "
+            "dispatching everything regardless of how little time is left."
+        ),
+    )
+
+    drain_margin_s: Optional[float] = Field(
+        default=None,
+        description=(
+            "Refuse to dispatch a new rollout when fewer than this many seconds remain in "
+            "``dispatch_budget_s`` — a task that cannot finish is pure waste. When unset, the "
+            "margin adapts to the run's own observed p75 task duration (after 5 completions), "
+            "which needs no per-benchmark tuning. Ignored unless dispatch_budget_s is set."
+        ),
+    )
+
+    dispatch_longest_first: bool = Field(
+        default=False,
+        description=(
+            "Dispatch tasks with the longest previously-observed runtime first, so long tasks start "
+            "early in an allocation instead of straddling its boundary. Only affects runs resuming "
+            "from a cache that recorded timings; tasks never seen before keep their input order and "
+            "are dispatched after the known-long ones. Input-row features do not predict runtime "
+            "(measured), so no estimate is made for unseen tasks."
+        ),
+    )
 
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
