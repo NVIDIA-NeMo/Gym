@@ -17,6 +17,7 @@ excludes = [
     "alembic",
     "blinker",
     "cryptography",
+    "diskcache",
     "fasttext-wheel",
     "flask",
     "flask-cors",

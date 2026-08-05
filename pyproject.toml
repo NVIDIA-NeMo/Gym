@@ -361,6 +361,9 @@ exclude-dependencies = [
     "wcwidth",
     "werkzeug",
     "waitress",
+    # diskcache has unfixed CVEs and is no longer a transitive dep since vllm>=0.26.0.
+    # Explicitly block it to prevent re-introduction via future transitive pulls.
+    "diskcache",
 ]
 
 [tool.setuptools.package-data]
