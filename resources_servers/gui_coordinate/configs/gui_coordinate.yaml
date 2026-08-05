@@ -16,3 +16,7 @@ gui_coordinate_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/gui_coordinate/data/example.jsonl
