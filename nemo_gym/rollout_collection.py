@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
+from aiohttp import ClientResponseError
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
@@ -114,6 +115,55 @@ NG_TRAJECTORY_KEY = "ng_trajectory"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+# `/run` answered with an HTTP error, so this rollout never produced a result. Non-terminal: the
+# assumption is that an agent unreachable on one attempt is often reachable on the next, so resume
+# re-dispatches these up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`.
+AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
+
+
+def _agent_request_failure_result(response: Any, error: ClientResponseError) -> Dict:
+    """The row written to the failures sidecar when `/run` answers with an HTTP error.
+
+    Carries `reward` 0.0 so the row has the same shape as a scored rollout, and the upstream body
+    truncated to 2000 characters so one large error response cannot dominate the sidecar.
+    """
+    content = getattr(error, "response_content", b"") or b""
+    if isinstance(content, bytes):
+        content = content.decode(errors="replace")
+
+    return {
+        "reward": 0.0,
+        NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS,
+        "error": f"/run returned HTTP {getattr(response, 'status', None)}: {content[:2000]}",
+    }
+
+
+def summarize_rollout_failures(results: List[Dict]) -> Dict[str, int]:
+    """Count the dispatched rollouts that produced a failure row, by class."""
+    counts: Dict[str, int] = {}
+    for result in results:
+        failure_class = result.get(NG_FAILURE_CLASS_KEY)
+        if failure_class is not None:
+            counts[failure_class] = counts.get(failure_class, 0) + 1
+
+    return counts
+
+
+def format_rollout_failure_summary(counts: Dict[str, int], num_results: int, failures_fpath: Any) -> str:
+    """The end-of-run line reporting how many rollouts produced a failure row.
+
+    Reports rather than judges. What failure rate is acceptable depends on the job, so the counts
+    and the sidecar path go to the user and the exit code is left alone. `_ng_failure_class` on each
+    sidecar row is the machine-readable form.
+    """
+    total = sum(counts.values())
+    by_class = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+    return (
+        f"{total} / {num_results} rollouts produced a failure row ({by_class}), written to "
+        f"{failures_fpath} rather than the rollouts jsonl. Aggregate metrics exclude them, so the "
+        f"scores above cover the {num_results - total} rollouts that produced a result."
+    )
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -895,6 +945,10 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
+        failure_counts = summarize_rollout_failures(results)
+        if failure_counts:
+            print(format_rollout_failure_summary(failure_counts, len(results), failures_fpath))
+
         return results
 
     async def _call_aggregate_metrics(
@@ -1014,7 +1068,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)
-                except Exception:
+                except Exception as e:
                     if is_global_aiohttp_client_request_debug_enabled():
                         print(
                             "[rollout_collection] /run failed "
@@ -1022,7 +1076,12 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                             flush=True,
                         )
-                    raise
+                    # Only an HTTP error from the agent becomes a failure row. Anything else
+                    # raised here is a bug in this dispatcher rather than a rollout outcome, and
+                    # must still end the run.
+                    if not isinstance(e, ClientResponseError):
+                        raise
+                    return row, _agent_request_failure_result(res, e)
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(
