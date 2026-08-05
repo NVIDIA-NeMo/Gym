@@ -215,3 +215,45 @@ class TestSandboxBackend:
         assert seen["method"] == "DELETE"
         assert seen["url"].endswith("/sessions/sess-a")
         assert "sess-a" not in backend._pool._session_to_slot
+
+
+class TestHealWarmupRace:
+    """The heal loop must never race duplicate creates into a slot warmup still owns —
+    a late duplicate overwrites base_url under pinned sessions and breaks stickiness
+    (observed in Gate 1a on a slow cell)."""
+
+    def test_create_slot_is_single_flight(self):
+        pool = _pool()
+        calls = {"n": 0}
+
+        async def fake_inner(slot):
+            calls["n"] += 1
+            await asyncio.sleep(0.05)
+
+        pool._create_slot_inner = fake_inner
+
+        async def main():
+            await asyncio.gather(pool._create_slot(pool._slots[0]), pool._create_slot(pool._slots[0]))
+
+        asyncio.run(main())
+        assert calls["n"] == 1, "second concurrent create for the same slot must be a no-op"
+
+    def test_heal_loop_waits_for_warmup(self):
+        pool = _pool()
+        assert pool._warmup_done is False
+        healed = []
+        pool._heal_slot = lambda slot: healed.append(slot.index)
+
+        async def one_heal_pass():
+            pool._health_interval_s = 0.01
+            task = asyncio.create_task(pool._heal_loop())
+            await asyncio.sleep(0.05)
+            pool._closed = True
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(one_heal_pass())
+        assert healed == [], "heal loop must not touch slots before warmup completes"

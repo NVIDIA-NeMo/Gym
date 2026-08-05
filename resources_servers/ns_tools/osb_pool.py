@@ -56,6 +56,7 @@ class _Slot:
     headers: Dict[str, str] = field(default_factory=dict)
     healthy: bool = False
     strikes: int = 0
+    creating: bool = False
     sessions: set = field(default_factory=set)
 
 
@@ -123,6 +124,7 @@ class OpenSandboxPool:
         self._session_last_used: Dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._started = False
+        self._warmup_done = False
         self._closed = False
         self._tasks: list = []
         self._last_heal_create = 0.0
@@ -174,7 +176,21 @@ class OpenSandboxPool:
         )
 
     async def _create_slot(self, slot: _Slot) -> None:
-        """Create, bootstrap, health-gate, and admit one pod into its slot."""
+        """Create, bootstrap, health-gate, and admit one pod into its slot.
+
+        Exactly one create may be in flight per slot: a duplicate create landing late
+        would overwrite base_url under pinned sessions (breaking stickiness) and leak
+        the earlier pod until its TTL.
+        """
+        if slot.creating:
+            return
+        slot.creating = True
+        try:
+            await self._create_slot_inner(slot)
+        finally:
+            slot.creating = False
+
+    async def _create_slot_inner(self, slot: _Slot) -> None:
         sandbox = AsyncSandbox(provider=dict(self._provider_config), spec=self._spec())
         await sandbox.start()
         try:
@@ -230,12 +246,19 @@ class OpenSandboxPool:
 
         await asyncio.gather(*(one(slot) for slot in self._slots))
         ready = sum(1 for slot in self._slots if slot.healthy)
+        self._warmup_done = True
         LOGGER.info("pool ready %d/%d", ready, self._size)
 
     async def _heal_loop(self) -> None:
         while not self._closed:
             await asyncio.sleep(self._health_interval_s)
+            if not self._warmup_done:
+                # Warmup owns every slot until it finishes; healing in parallel would
+                # race duplicate creates into the same slot.
+                continue
             for slot in self._slots:
+                if slot.creating:
+                    continue
                 if slot.sandbox is None or not slot.healthy:
                     await self._heal_slot(slot)
                     continue
