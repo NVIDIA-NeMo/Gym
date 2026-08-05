@@ -57,9 +57,26 @@ from resources_servers.gdpval.judge_panel import (
     make_rng,
     panel_summary,
 )
+from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _is_invalid_judge_result(judge_result: Any) -> bool:
+    """True when the judge did not actually produce a usable judgement.
+
+    A missing result is obviously invalid, but the scorers also return a
+    *populated* metadata dict on failure -- ``no_valid_scores`` when every trial
+    failed to parse, ``truncated_json`` when only a partial score was salvaged,
+    ``no_score_in_response`` when the reply carried no score. Each yields 0.0 or a
+    biased-low partial, and testing only for ``None`` lands them in the mean
+    looking like real scores, indistinguishable from a poor deliverable.
+    """
+    if judge_result is None:
+        return True
+    return isinstance(judge_result, dict) and bool(judge_result.get(SCORING_ERROR_KEY))
+
 
 _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_prompt.j2")
 _DEFAULT_REFERENCE_ELO = 1000.0
@@ -599,7 +616,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             reward=float(reward),
             verify_mode="rubric",
             judge_response=judge_result,
-            invalid_judge_response=(judge_result is None),
+            invalid_judge_response=_is_invalid_judge_result(judge_result),
         )
 
     async def _preconvert_and_log(self, target_dir: Path, *, label: str) -> None:
