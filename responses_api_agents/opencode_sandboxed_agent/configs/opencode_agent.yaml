@@ -130,7 +130,7 @@ opencode_sandboxed_agent:
           skill: false
           todowrite: true
 
-      sandbox_timeout: 1800  # 30 min default for harness execution
+      sandbox_timeout: 5400  # 1.5hr default for harness execution
 
       sandbox_provider: sandbox
       sandbox_config:
