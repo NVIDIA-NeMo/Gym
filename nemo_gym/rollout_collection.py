@@ -700,7 +700,7 @@ class RolloutCollectionHelper(BaseModel):
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         latency_tracker = DispatchLatencyTracker()
-        if config.dispatch_budget_s:
+        if config.dispatch_budget_s is not None:
             print(
                 f"Dispatch budget: {config.dispatch_budget_s / 60:.0f} min. New rollouts stop being "
                 + (
@@ -736,24 +736,27 @@ class RolloutCollectionHelper(BaseModel):
 
             rows.append(row)
             results.append(result)
-            serialized = orjson.dumps(result)
-            result_strs.append([serialized])
 
             if no_persist:
-                # kill_shaped: don't write anywhere. Set-difference on resume
-                # naturally re-dispatches; per-task timeout bounds wallclock.
+                # kill_shaped: don't write anywhere -- not the jsonl, not the
+                # sidecar, and not the W&B table either. Set-difference on
+                # resume naturally re-dispatches; per-task timeout bounds
+                # wallclock.
                 pass
-            elif failure_class is not None:
-                # Non-kill_shaped failure → sidecar. The aggregator only reads
-                # the main jsonl, so this keeps win-rate uncontaminated.
-                failures_file.write(serialized + b"\n")
-                failures_file.flush()
             else:
-                # Success → main jsonl.
-                results_file.write(serialized + b"\n")
-                results_file.flush()
-                persisted_rows.append(row)
-                persisted_results.append(result)
+                serialized = orjson.dumps(result)
+                result_strs.append([serialized])
+                if failure_class is not None:
+                    # Non-kill_shaped failure → sidecar. The aggregator only
+                    # reads the main jsonl, so this keeps win-rate uncontaminated.
+                    failures_file.write(serialized + b"\n")
+                    failures_file.flush()
+                else:
+                    # Success → main jsonl.
+                    results_file.write(serialized + b"\n")
+                    results_file.flush()
+                    persisted_rows.append(row)
+                    persisted_results.append(result)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -922,7 +925,9 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         server_client = self.setup_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
         tracker = latency_tracker if latency_tracker is not None else DispatchLatencyTracker()
-        deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s else None
+        # `is not None`, not truthiness: 0.0 is a real budget that is already
+        # spent, and must drain rather than disable the check.
+        deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
@@ -965,8 +970,16 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 tracker.record(time.monotonic() - started)
                 return row, result
 
+        # Materialise the tasks in input order. `asyncio.as_completed` builds its
+        # own task set from `set(fs)`, which discards iteration order before any
+        # coroutine reaches the semaphore -- so passing bare coroutines makes
+        # `dispatch_longest_first` a no-op. Scheduling them here means `call_soon`
+        # queues them FIFO and they acquire the semaphore in the order given;
+        # `as_completed` then only decides the order completions are *yielded*.
+        ordered_tasks = [asyncio.ensure_future(_post_subroutine(row)) for row in examples]
+
         return tqdm.as_completed(
-            map(_post_subroutine, examples),
+            ordered_tasks,
             desc="Collecting rollouts",
             miniters=10,
             total=len(examples),

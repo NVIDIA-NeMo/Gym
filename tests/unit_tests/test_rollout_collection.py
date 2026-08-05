@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from asyncio import Future
 from collections import Counter
@@ -1231,6 +1232,24 @@ class TestDispatchBudget:
         # prints rather than being skipped.
         assert "No completed rollouts to report latency for." in out
 
+    async def test_zero_budget_drains_rather_than_disabling_the_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """0.0 is a spent budget, not an absent one -- truthiness gets this wrong."""
+        posted: list = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+
+        tracker = DispatchLatencyTracker()
+        results = [
+            await future
+            for future in self._helper(posted).run_examples(
+                [self._row(0)], dispatch_budget_s=0.0, latency_tracker=tracker
+            )
+        ]
+
+        assert posted == []
+        assert tracker.drained == 1
+        assert results[0][1][NG_NO_PERSIST_KEY] is True
+
     async def test_generous_budget_still_dispatches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
@@ -1249,6 +1268,48 @@ class TestDispatchBudget:
         assert results[0][1] == {"reward": 1.0}
         # The completed rollout is timed, so the adaptive margin has a basis.
         assert tracker.quantile(0.5) is not None
+
+
+class TestDispatchOrderReachesTheServer:
+    """List order is not dispatch order unless the tasks are scheduled in order.
+
+    `asyncio.as_completed` builds its task set from `set(fs)`, so handing it bare
+    coroutines scrambles them before any of them reaches the semaphore -- which
+    made `dispatch_longest_first` a no-op while its unit test still passed.
+    """
+
+    async def test_rows_hit_the_server_in_list_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+
+        posted: list = []
+
+        async def post(server_name, url_path, json):  # noqa: A002
+            posted.append(json[TASK_INDEX_KEY_NAME])
+            await asyncio.sleep(0)
+            return MagicMock(status=200)
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(side_effect=post)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: i,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for i in range(12)
+        ]
+        # Concurrency 1 so acquisition order is unambiguous.
+        semaphore = asyncio.Semaphore(1)
+        for future in MockHelper().run_examples(rows, semaphore=semaphore):
+            await future
+
+        assert posted == list(range(12))
 
 
 class TestLongestFirstDispatch:
