@@ -73,6 +73,7 @@ from nemo_gym.token_id_capture import (
     capture_tokens,
     installed_token_sink,
     reset_token_sink,
+    resolve_parent,
     set_token_sink,
 )
 
@@ -209,11 +210,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # chat_completions() signatures vary across servers: some take a leading `request`, some
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
+        # Resolve the parent before dispatching, from the request as this server received it.
+        # The lineage index was built from the same representation, so the prefix a request may
+        # be given and the parent its record names come from one decision rather than two.
+        resolve_parent(_request_messages(params))
         if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
         else:
             completion = await self.chat_completions(body=params)
-        await capture_tokens(completion)
+        await capture_tokens(
+            completion,
+            request_messages=_request_messages(params),
+        )
         return completion
 
     async def messages(self, request: Request, body: dict = Body()):
@@ -242,6 +250,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
         # all of them.
+        # Resolve the parent before dispatching, from the request as this server received it.
+        # The lineage index was built from the same representation, so the prefix a request may
+        # be given and the parent its record names come from one decision rather than two.
+        resolve_parent(_request_messages(params))
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:
@@ -249,7 +261,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
         # The assembled response still carries them here for every dialect.
-        await capture_tokens(response)
+        await capture_tokens(
+            response,
+            request_messages=_request_messages(params),
+        )
         return response
 
 
