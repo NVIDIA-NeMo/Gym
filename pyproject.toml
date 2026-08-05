@@ -228,6 +228,15 @@ all = [
     "nemo-gym[dev,sandbox]",
 ]
 
+vllm = [
+    # Pin to the same version used by local_vllm_model / genrm_model server venvs.
+    "vllm==0.20.0",
+    # Pin flashinfer to the exact version vllm 0.20.0 specifies, ensuring pre-compiled
+    # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
+    # flashinfer>=0.2 bundles compiled kernels in the python package directly.
+    "flashinfer-python==0.6.8.post1",
+]
+
 sandbox = [
     # Tenacity: Retry helpers used by sandbox providers.
     # Updated: Sat May 09, 2026 with tenacity==9.1.4
