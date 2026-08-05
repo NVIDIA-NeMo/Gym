@@ -17,7 +17,7 @@ The following table maps NeMo Gym versions to compatible NeMo RL containers for 
 
 **v0.4.0 and later:** NeMo RL plans to publish an NGC container for every Gym release. New rows should use NGC tags; Dockerfile references should not be added unless the same gap recurs.
 
-Match the container to your **model recipe**, not only your NeMo Gym version. For example, the [NeMo RL GRPO](/training-tutorials/nemo-rl-grpo) tutorial trains Nemotron Nano 9B v2 and uses the Nano NGC container from the v0.1.1 row below—not the v0.3.0 Ultra Dockerfile.
+Match the container to your **model recipe**, not only your NeMo Gym version. For example, the [NeMo RL GRPO](/tutorials/training-tutorials/nemo-rl-grpo) tutorial trains Nemotron Nano 9B v2 and uses the Nano NGC container from the v0.1.1 row below—not the v0.3.0 Ultra Dockerfile.
 
 | NeMo Gym Version | Container / Docker File | Recipe |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ Match the container to your **model recipe**, not only your NeMo Gym version. Fo
 | v0.1.1 | [`nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano`](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl/tags?version=v0.4.0) | [Nemotron 3 Nano](/model-recipes/nemotron-3-nano) |
 
 <Note>
-[NeMo RL GRPO](/training-tutorials/nemo-rl-grpo) for the NeMo RL training tutorial.
+[NeMo RL GRPO](/tutorials/training-tutorials/nemo-rl-grpo) for the NeMo RL training tutorial.
 
 </Note>
 
@@ -38,7 +38,7 @@ Match the container to your **model recipe**, not only your NeMo Gym version. Fo
 The NeMo Gym integration with Unsloth is tested on `unsloth==2026.1.4` and `unsloth_zoo==2026.1.4`. Other versions are not guaranteed to work.
 
 <Note>
-[Unsloth](/training-tutorials/unsloth) for the Unsloth training tutorial.
+[Unsloth](/tutorials/training-tutorials/unsloth) for the Unsloth training tutorial.
 
 </Note>
 
@@ -49,6 +49,6 @@ The NeMo Gym integration with Unsloth is tested on `unsloth==2026.1.4` and `unsl
 NeMo Gym 0.2.1+ is compatible with verl pinned to the commit in [`REQUIRED_VERL.txt`](https://github.com/verl-project/verl-recipe/blob/main/nemo_gym/REQUIRED_VERL.txt), tested on the `verlai/verl:vllm017.latest` container (vLLM 0.17.0). Other versions are not guaranteed to work.
 
 <Note>
-[Training with VeRL](/training-tutorials/verl) for the verl training tutorial.
+[Training with VeRL](/tutorials/training-tutorials/verl) for the verl training tutorial.
 
 </Note>
