@@ -108,11 +108,13 @@ ng_model_call_capture = {
 }
 ```
 
-`metrics.num_calls` is the number of captured model calls. Attached calls omit raw request and
-response payloads; those remain in `CaptureStore`. [`ng_trajectory`](/reference/trajectory-capabilities) includes payload copies
-in the rollout record, except for LabBench rows carrying the `multimodal_history_redacted` gap. Each call stores the exact model
-request, so cumulative multi-turn inputs can make rollout records large and should be handled with the same access controls as
-the capture directory. Resume attempts use an
+`metrics.num_calls` is the number of captured model calls. After successful trajectory projection, attached calls omit request
+and response payloads; those remain in `CaptureStore`. If projection fails, they remain attached with a
+`trajectory_projection_failed` gap. [`ng_trajectory`](/reference/trajectory-capabilities) includes payload copies in the rollout
+record, except for LabBench rows carrying the `multimodal_history_redacted` gap. Each call stores the exact model request, so
+cumulative multi-turn inputs can make rollout records large and should be handled with the same access controls as the capture
+directory. Persisted rollout JSONL retains these payloads; W&B rollout tables omit `ng_trajectory` and model-call request and
+response payloads. Resume attempts use an
 `-a<n>` suffix so their data does not mix with an earlier attempt. Before dispatch, the collector clears any existing capture
 for that exact rollout-attempt id, including a kill-shaped attempt being redispatched.
 

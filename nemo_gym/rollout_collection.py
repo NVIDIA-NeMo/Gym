@@ -111,6 +111,7 @@ NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 NG_TRAJECTORY_KEY = "ng_trajectory"
+_MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
@@ -177,8 +178,10 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             observations = AgentObservationBundle.model_validate(raw_observations)
             gaps.extend(observations.gaps)
             observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
-            if observed_invocations:
-                invocations = observed_invocations
+            producer_invocation_ids = {record.invocation_id for record in invocations}
+            invocations.extend(
+                record for record in observed_invocations if record.invocation_id not in producer_invocation_ids
+            )
             observed_tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
             if observed_tools:
                 outputs = {
@@ -297,8 +300,29 @@ def _strip_capture_payloads(result: dict[str, Any]) -> None:
     calls = capture.get("calls") if isinstance(capture, dict) else None
     for call in calls if isinstance(calls, list) else []:
         if isinstance(call, dict):
-            for key in ("request", "response", "request_raw", "response_raw"):
+            for key in _MODEL_CALL_PAYLOAD_KEYS:
                 call.pop(key, None)
+
+
+def _rollout_for_wandb(result: dict[str, Any]) -> dict[str, Any]:
+    """Return a W&B view without the complete trajectory or raw capture payloads."""
+    sanitized = dict(result)
+    sanitized.pop(NG_TRAJECTORY_KEY, None)
+    sanitized.pop("ng_model_call_capture", None)
+    capture = result.get("ng_model_call_capture")
+    if isinstance(capture, dict):
+        sanitized_capture = dict(capture)
+        calls = capture.get("calls")
+        if isinstance(calls, list):
+            sanitized_capture["calls"] = [
+                {key: value for key, value in call.items() if key not in _MODEL_CALL_PAYLOAD_KEYS}
+                for call in calls
+                if isinstance(call, dict)
+            ]
+        else:
+            sanitized_capture.pop("calls", None)
+        sanitized["ng_model_call_capture"] = sanitized_capture
+    return sanitized
 
 
 def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
@@ -329,7 +353,7 @@ def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> No
                 ).model_dump(mode="json")
             except Exception:
                 logger.warning("Could not retain the trajectory projection failure gap.", exc_info=True)
-    finally:
+    else:
         _strip_capture_payloads(result)
 
 
@@ -796,7 +820,6 @@ class RolloutCollectionHelper(BaseModel):
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
-            result_strs.append([serialized])
 
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
@@ -832,9 +855,10 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
+        if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
+            result_strs = [[orjson.dumps(_rollout_for_wandb(result))] for result in results]
+            wandb_run.log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
         del result_strs
 
         print("Sorting results to ensure consistent ordering")

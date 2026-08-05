@@ -51,7 +51,7 @@ Captured request and response payloads are included in `ng_trajectory`. LabBench
 | `harbor_agent` | X | X | X | X | X | X | X |
 | `hermes_agent` | V | V | X | V | X | X | X |
 | `kilocode_agent` | V | V | X | V | X | X | X |
-| `labbench2_vlm_agent` | V | V | V | O | O | X | V |
+| `labbench2_vlm_agent` | V | V | O | O | O | X | V |
 | `langgraph_agent` | X | X | X | X | X | X | X |
 | `mini_swe_agent` | X | X | X | X | X | X | X |
 | `mini_swe_agent_2` | V | V | X | V | X | X | X |
@@ -64,7 +64,7 @@ Captured request and response payloads are included in `ng_trajectory`. LabBench
 | `proof_refinement_agent` | V | V | X | V | X | X | X |
 | `remote_agent` | X | O | X | X | X | X | X |
 | `scicode_agent` | X | X | X | X | X | X | X |
-| `simple_agent` | V | V | V | V | O | X | V |
+| `simple_agent` | V | V | O | V | O | X | V |
 | `speed_bench_agent` | V | V | X | V | X | X | X |
 | `stirrup_agent` | O | O | X | O | X | X | X |
 | `swe_agents` | X | X | X | X | X | X | X |
@@ -73,7 +73,8 @@ Captured request and response payloads are included in `ng_trajectory`. LabBench
 | `toolsandbox_agent` | V | V | X | V | X | X | X |
 | `verifiers_agent` | X | X | X | X | X | X | X |
 
-Current `O` values reflect the CVDP Simple path, Finance and Remote aggregate usage, LabBench image redaction, OSWorld M3 and
-Pointer direct-provider routes, omitted raised failures in Simple-derived agents, and Stirrup calls outside its policy path. The
-matrix reports producer output, not schema capacity.
+Simple and LabBench C3 support is partial because verifier responses may omit resolution status. Current `O` values reflect the
+CVDP Simple path, Finance and Remote aggregate usage, LabBench image redaction, OSWorld M3 and Pointer direct-provider routes,
+omitted raised failures in Simple-derived agents, and Stirrup calls outside its policy path. The matrix reports producer output,
+not schema capacity.
 C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.

@@ -41,6 +41,7 @@ from nemo_gym.rollout_collection import (
     _expand_input_glob,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _rollout_for_wandb,
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
@@ -106,6 +107,16 @@ class TestRolloutCollection:
             "ng_trajectory": {
                 "task_id": "2",
                 "rollout_id": "2-3",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "status": "completed",
+                        "conversation": [
+                            {"type": "function_call_output", "call_id": "tool-1", "output": "result"},
+                            {"type": "function_call_output", "call_id": "observed-only", "output": "new"},
+                        ],
+                    }
+                ],
                 "tool_calls": [
                     {"invocation_id": "root", "tool_call_id": "producer-only", "output": "kept"},
                     {
@@ -125,10 +136,10 @@ class TestRolloutCollection:
                     {
                         "kind": "agent_invocation",
                         "invocation_id": "root",
-                        "conversation": [
-                            {"type": "function_call_output", "call_id": "tool-1", "output": "result"},
-                            {"type": "function_call_output", "call_id": "observed-only", "output": "new"},
-                        ],
+                    },
+                    {
+                        "kind": "agent_invocation",
+                        "invocation_id": "observed",
                     },
                     {
                         "kind": "tool_call",
@@ -152,6 +163,9 @@ class TestRolloutCollection:
         trajectory = _build_trajectory_record(row, result)
         producer_only, merged, observed_only = trajectory.tool_calls
 
+        assert [invocation.invocation_id for invocation in trajectory.invocations] == ["root", "observed"]
+        assert trajectory.invocations[0].status == "completed"
+        assert len(trajectory.invocations[0].conversation) == 2
         assert [call.model_call_id for call in trajectory.model_calls] == ["capture-only"]
         assert producer_only.tool_call_id == "producer-only" and producer_only.output == "kept"
         assert (merged.output, merged.status, merged.started_at, merged.completed_at, merged.duration_ms) == (
@@ -227,8 +241,8 @@ class TestRolloutCollection:
 
         assert "ng_trajectory" not in result
         assert result["ng_model_call_capture"]["gaps"][-1]["code"] == "trajectory_projection_failed"
-        assert "request" not in result["ng_model_call_capture"]["calls"][0]
-        assert "response" not in result["ng_model_call_capture"]["calls"][0]
+        assert result["ng_model_call_capture"]["calls"][0]["request"] == {"input": "question"}
+        assert result["ng_model_call_capture"]["calls"][0]["response"] == {"output": "answer"}
 
     def test_trajectory_projection_failure_without_attachment_keeps_gap(self, monkeypatch) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
@@ -240,6 +254,39 @@ class TestRolloutCollection:
         assert result["ng_trajectory"]["gaps"] == [
             {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
         ]
+
+    def test_rollout_for_wandb_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
+        result = {
+            "response": {"output": "existing rollout content"},
+            "ng_trajectory": {"invocations": [{"conversation": ["trajectory secret"]}]},
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "model-1",
+                        "request": {"input": "request secret"},
+                        "response": {"output": "response secret"},
+                        "request_raw": "raw request secret",
+                        "response_raw": "raw response secret",
+                    }
+                ],
+            },
+        }
+
+        sanitized = _rollout_for_wandb(result)
+
+        assert "ng_trajectory" not in sanitized
+        assert sanitized["ng_model_call_capture"]["calls"] == [{"model_call_id": "model-1"}]
+        assert sanitized["response"] == result["response"]
+        assert result["ng_model_call_capture"]["calls"][0]["request"] == {"input": "request secret"}
+        assert "ng_trajectory" in result
+        malformed = (
+            {"ng_model_call_capture": "secret"},
+            {"ng_model_call_capture": {"calls": {"request": "secret"}}},
+            {"ng_model_call_capture": {"calls": ["secret", {"request": "secret"}]}},
+        )
+        for malformed_result in malformed:
+            sanitized = _rollout_for_wandb(malformed_result)
+            assert b"secret" not in orjson.dumps(sanitized)
 
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
     async def test_run_examples_logs_failed_run_when_request_debug_enabled(
