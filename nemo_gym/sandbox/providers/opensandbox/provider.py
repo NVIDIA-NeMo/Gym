@@ -678,7 +678,12 @@ class OpenSandboxProvider:
         return {"sandbox_id": handle.sandbox_id}
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
-        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK."""
+        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
+
+        Health-checks unless the caller opts out: a sandbox id only proves the
+        workload exists, not that its exec daemon is listening yet, so an
+        unchecked handle turns that gap into a 502 on the first call.
+        """
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         sandbox_id = str(descriptor["sandbox_id"])
         timeout_s = self._create.connect_attempt_timeout_s
@@ -687,7 +692,7 @@ class OpenSandboxProvider:
                 sandbox_id,
                 connection_config=self._connection_config(request_timeout_s=timeout_s),
                 connect_timeout=timedelta(seconds=timeout_s),
-                skip_health_check=True,
+                skip_health_check=self._create.skip_health_check,
             ),
             timeout=timeout_s,
         )
@@ -856,7 +861,7 @@ class OpenSandboxProvider:
                         handle.sandbox_id,
                         connection_config=self._connection_config(),
                         connect_timeout=timedelta(seconds=attempt_timeout_s),
-                        skip_health_check=True,
+                        skip_health_check=self._create.skip_health_check,
                     ),
                     timeout=attempt_timeout_s,
                 )
