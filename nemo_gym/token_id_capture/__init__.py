@@ -25,6 +25,9 @@ Its ``snapshot_id`` identifies the exact frozen state.
 Framework transports may provide their own sink and source.
 There is no HTTP token reader.
 This leaf package avoids imports from Gym's server stack.
+The rollout-record finalizer needs Gym's server stack.
+It is deliberately not re-exported here.
+Import ``nemo_gym.token_id_capture.delivery`` from server-side code.
 """
 
 from nemo_gym.token_id_capture.builder import (

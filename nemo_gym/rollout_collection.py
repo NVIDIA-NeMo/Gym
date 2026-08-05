@@ -85,6 +85,13 @@ from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.token_id_capture import (
+    TokenCaptureStore,
+    TokenIdCaptureConfig,
+    clear_token_captures_for_rollouts,
+    token_id_capture_dirs_from_config,
+)
+from nemo_gym.token_id_capture.delivery import finalize_rollout_token_capture
 
 
 logger = logging.getLogger(__name__)
@@ -790,13 +797,31 @@ class RolloutCollectionHelper(BaseModel):
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        global_config = get_global_config_dict()
+        capture_dirs = model_call_capture_dirs_from_config(global_config)
+        # Resolve the training-token store dir once, so each rollout's captured tokens can be built
+        # into a trajectory below. Independent of eval capture; empty (and a no-op) when token
+        # capture is off.
+        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
+        # Where the rebuild below reads records from and retires them. None when this run is not
+        # reading them back: capture off, no directory, or rebuild_response off because the caller
+        # reads through its own transport. The store is still written and still cleared in that last
+        # case, since clearing is about a rerun reusing a deterministic id, not about readback.
+        token_source = None
+        if token_capture_dirs and TokenIdCaptureConfig.model_validate(global_config).token_id_capture.rebuild_response:
+            token_source = TokenCaptureStore(token_capture_dirs[0])
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+        if token_capture_dirs:
+            # Same reason, for the token store: rollout ids are deterministic and the store appends,
+            # so without this a fresh run would build a trajectory that merges a previous attempt's
+            # calls with this one's.
+            print("Clearing existing token captures for rollouts being dispatched")
+            clear_token_captures_for_rollouts(input_rows, token_capture_dirs)
 
         # Intermediate status printing
         pcts_to_print = list(range(1, 100)) + [99.5]
@@ -833,6 +858,11 @@ class RolloutCollectionHelper(BaseModel):
 
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
+
+            # Build this rollout's captured tokens into a trajectory and attach it (no-op when token
+            # capture is off or no tokens were captured for the rollout). Never alters output/reward.
+            # A caller that drives run_examples itself calls the same function on each record.
+            await finalize_rollout_token_capture(result, token_source)
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
