@@ -49,7 +49,22 @@ dependencies = [
     "lxml>=6.0.2",
     "math-verify",
     "matplotlib",
-    "nltk",
+    # nltk 3.10.1 (2026-08-01) added nltk/inisec.py: a meta-path finder that raises
+    # ImportError for ANY nltk-initiated import whose resolved origin lies under the
+    # process CWD. Gym always runs with a venv beneath the CWD -- server processes and
+    # benchmark prep helpers run with CWD == <server dir>, whose venv is <server dir>/.venv,
+    # and the deployment container runs with CWD == the Gym install root (/opt/Gym), which
+    # contains every server venv. Either way the whole of site-packages counts as "under
+    # CWD", so `import nltk` dies inside nltk/text.py on `import regex`. That kills data
+    # prep for every vlm_eval_kit benchmark on a cold venv (the benchmark JSONL is never
+    # written, and the run fails later with a misleading FileNotFoundError at aggregation)
+    # and kills the nltk-backed scorers (OCRBench_v2 BLEU/METEOR) at verify time.
+    # PYTHONSAFEPATH / -P do NOT help despite what the ImportError message suggests:
+    # site-packages is on sys.path via sys.prefix, so the origin is still under CWD.
+    # Moving the CWD is not a fix either -- Gym resolves relative dataset/config paths
+    # against the CWD, so there is no CWD outside every venv that keeps that model intact.
+    # Revisit if upstream narrows the hook to sys.path[0] or drops it.
+    "nltk<3.10.1",
     "num2words",
     "numpy",
     "omegaconf>=2.4.0.dev4",
