@@ -117,7 +117,9 @@ def read_deliverable_files(output_dir: str) -> str:
 
 def _extract_text(fpath: Path, ext: str) -> str:
     """Dispatch to the right extractor based on file extension."""
-    if ext in (".txt", ".md", ".csv", ".json", ".html", ".xml", ".log"):
+    # TEXT_EXTS, not a second shorter list: a .ts/.py/.yaml deliverable was source
+    # on the block path and "[Binary file: ...]" here.
+    if ext in TEXT_EXTS:
         return _read_text(fpath)
     elif ext == ".docx":
         return _read_docx(fpath)
