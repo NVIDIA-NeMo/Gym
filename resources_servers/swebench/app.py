@@ -17,12 +17,12 @@ from pathlib import Path
 from time import time
 from typing import Any, Dict, Optional, Tuple
 
-from docker.models.containers import ExecResult
 from fastapi import Request
 from pydantic import BaseModel
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
+from docker.models.containers import ExecResult
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -227,8 +227,6 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         test_spec = self._make_test_spec(body)
 
-        original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
-
         start_time = time()
         eval_sandbox = await self._create_sandbox(test_spec)
         eval_sandbox_start_time_taken = time() - start_time
@@ -237,8 +235,10 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
+            original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
             original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
             model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
+            await original_sandbox.stop()
             model_patch = model_patch_result.stdout
 
         run_id = request.session[SESSION_ID_KEY]
