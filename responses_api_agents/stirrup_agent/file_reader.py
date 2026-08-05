@@ -208,7 +208,14 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}
 HANDLED_EXTS = TEXT_EXTS | OFFICE_EXTS | IMAGE_EXTS | AUDIO_EXTS | VIDEO_EXTS | {".pdf"}
 
 TEXT_SNIFF_BYTES = 8192
-MAX_TEXT_CHARS_PER_FILE = 20_000
+# Per-file ceiling, and the aggregate across all text blocks in one request.
+# Upstream has no cap at all: a big generated log produced a 720k-token request
+# that the judge rejected outright, leaving the task silently unjudged.
+MAX_TEXT_BLOCK_CHARS = 200_000
+MAX_TOTAL_TEXT_BLOCK_CHARS = 400_000
+# Header and truncation notice per block; reserved before allotting because
+# it is tokens too.
+TEXT_BLOCK_OVERHEAD_CHARS = 120
 MAX_ARCHIVE_ENTRIES = 200
 MAX_ARCHIVE_TEXT_CHARS = 120_000
 MAX_ARCHIVE_MEMBER_BYTES = 2_000_000
@@ -346,10 +353,25 @@ def _archive_manifest(fpath: Path) -> str | None:
     return out
 
 
-def _truncated(text: str) -> str:
-    if len(text) <= MAX_TEXT_CHARS_PER_FILE:
-        return text
-    return text[:MAX_TEXT_CHARS_PER_FILE] + f"\n[... truncated at {MAX_TEXT_CHARS_PER_FILE:,} characters]"
+def _fair_text_allowances(sizes: list[int], total_budget: int, per_file_cap: int) -> list[int]:
+    """Max-min fair split of *total_budget* across text deliverables of *sizes*.
+
+    Smallest first: each file may take an equal share of what is left divided by
+    how many still need one. Files under their share take only what they need and
+    hand back the surplus, so a small real deliverable is never starved by a large
+    one that happens to sort earlier -- renaming a file must not change the score.
+    Returned in the order *sizes* was given.
+    """
+    allowances = [0] * len(sizes)
+    remaining = total_budget
+    order = sorted(range(len(sizes)), key=lambda i: sizes[i])
+    for position, idx in enumerate(order):
+        still_to_serve = len(order) - position
+        share = remaining // still_to_serve
+        take = max(0, min(sizes[idx], per_file_cap, share))
+        allowances[idx] = take
+        remaining -= take
+    return allowances
 
 
 def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | None:
@@ -531,6 +553,47 @@ def convert_deliverables_to_content_blocks(
             elif office_stem_counts.get(entry.stem, 0) == 1:
                 consumed_pdfs.add(entry.with_suffix(".pdf"))
 
+    # Which files the judge receives AS TEXT. Decided once and reused by both the
+    # allotment and the dispatch loop: deciding it twice lets a file be emitted as
+    # text while holding no allowance, i.e. truncated to nothing.
+    texty = {
+        p
+        for p in entries
+        if is_deliverable(p)
+        and p not in consumed_pdfs
+        and (p.suffix.lower() in TEXT_EXTS or (p.suffix.lower() not in HANDLED_EXTS and _sniffs_as_text(p)))
+    }
+    text_files = [p for p in entries if p in texty]
+    body_budget = max(0, MAX_TOTAL_TEXT_BLOCK_CHARS - len(text_files) * TEXT_BLOCK_OVERHEAD_CHARS)
+    allowance_by_name = dict(
+        zip(
+            (p.name for p in text_files),
+            _fair_text_allowances([p.stat().st_size for p in text_files], body_budget, MAX_TEXT_BLOCK_CHARS),
+        )
+    )
+
+    emitted_chars = 0
+    omitted_names: list[str] = []
+
+    def _text_block(header: str, body: str, allowance: int) -> dict[str, Any] | None:
+        """A text block for *body*, trimmed to *allowance*.
+
+        None once the aggregate budget is spent: with enough files even the headers
+        alone would blow the request, so past that point they are summarised in one
+        block rather than named individually.
+        """
+        nonlocal emitted_chars
+        if emitted_chars >= MAX_TOTAL_TEXT_BLOCK_CHARS:
+            return None
+        cap = max(0, min(MAX_TEXT_BLOCK_CHARS, allowance))
+        if len(body) > cap:
+            shown = body[:cap] + f"\n[...truncated: {len(body) - cap:,} of {len(body):,} chars omitted]"
+        else:
+            shown = body
+        block = {"type": "text", "text": f"\n{header}\n{shown}"}
+        emitted_chars += len(block["text"])
+        return block
+
     for fpath in entries:
         if not is_deliverable(fpath) or fpath in consumed_pdfs:
             continue
@@ -538,14 +601,13 @@ def convert_deliverables_to_content_blocks(
         ext = fpath.suffix.lower()
 
         try:
-            if ext in TEXT_EXTS:
+            if fpath in texty:
                 text = fpath.read_text(encoding="utf-8", errors="replace").strip()
                 if text:
-                    blocks.append({"type": "text", "text": f"\n{fpath.name}:\n{_truncated(text)}"})
+                    block = _text_block(f"{fpath.name}:", text, allowance_by_name.get(fpath.name, 0))
                 else:
-                    blocks.append(
-                        {"type": "text", "text": f"\n{fpath.name}: [present but EMPTY (0 bytes of content)]"}
-                    )
+                    block = _text_block(f"{fpath.name}:", "[present but EMPTY (0 bytes of content)]", 200)
+                blocks.append(block) if block else omitted_names.append(fpath.name)
 
             elif ext in OFFICE_EXTS:
                 # Prefer a PDF preconvert already rendered. Reconverting is
@@ -587,7 +649,8 @@ def convert_deliverables_to_content_blocks(
                     # Fallback to text extraction
                     text = _extract_text(fpath, ext)
                     if text:
-                        blocks.append({"type": "text", "text": f"\n{fpath.name} (text fallback):\n{text}"})
+                        block = _text_block(f"{fpath.name} (text fallback):", text, MAX_TEXT_BLOCK_CHARS)
+                        blocks.append(block) if block else omitted_names.append(fpath.name)
 
             elif ext == ".pdf":
                 data = fpath.read_bytes()
@@ -663,7 +726,7 @@ def convert_deliverables_to_content_blocks(
                     body = "[present but EMPTY (0 bytes)]"
                 elif _sniffs_as_text(fpath):
                     text = fpath.read_text(encoding="utf-8", errors="replace").strip()
-                    body = f"\n{_truncated(text)}" if text else "[present but EMPTY (0 bytes of content)]"
+                    body = text if text else "[present but EMPTY (0 bytes of content)]"
                 else:
                     manifest = _archive_manifest(fpath)
                     if manifest is not None:
@@ -674,10 +737,23 @@ def convert_deliverables_to_content_blocks(
                             f"content not extractable in this format. Statements in other files about "
                             f"its contents are unverified assertions, not evidence.]"
                         )
-                blocks.append({"type": "text", "text": f"\n{fpath.name}: {body}"})
+                block = _text_block(f"{fpath.name}:", body, MAX_TEXT_BLOCK_CHARS)
+                blocks.append(block) if block else omitted_names.append(fpath.name)
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 
+    if omitted_names:
+        shown = ", ".join(omitted_names[:20])
+        if len(omitted_names) > 20:
+            shown += f", and {len(omitted_names) - 20} more"
+        blocks.append(
+            {
+                "type": "text",
+                "text": f"\n[{len(omitted_names)} text deliverable(s) omitted, budget exhausted: {shown}]",
+            }
+        )
+
+    # Clean up only what this pass created; it all lives in tempdirs.
     for scratch in scratch_dirs:
         shutil.rmtree(scratch, ignore_errors=True)
 
