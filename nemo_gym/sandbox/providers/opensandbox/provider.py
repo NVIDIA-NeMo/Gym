@@ -1158,6 +1158,9 @@ class OpenSandboxProvider:
             await asyncio.sleep(poll_interval)
             poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
 
+        # The execution has finished, so one call returns its whole buffer; the
+        # cursor this endpoint reports back is the end offset rather than a
+        # more-data flag, so there is no tail to follow.
         logs = await self._await_sdk_operation(
             lambda: handle.raw.commands.get_background_command_logs(execution_id),
             operation="command logs",
