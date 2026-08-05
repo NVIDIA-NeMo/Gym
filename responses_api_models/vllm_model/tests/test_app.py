@@ -758,6 +758,42 @@ class TestApp:
 
         assert client_indices[0] == client_indices[1]
 
+    def test_resolve_client_adds_session_affinity_header(self) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://router/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            default_headers={"X-Static": "keep"},
+            session_affinity_header="X-Session-ID",
+        )
+        model = VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        first_request = MagicMock(session={SESSION_ID_KEY: "session-0"})
+        second_request = MagicMock(session={SESSION_ID_KEY: "session-1"})
+
+        first_client = model._resolve_client(first_request)
+        second_client = model._resolve_client(second_request)
+
+        assert first_client.base_url == "http://router/v1"
+        assert first_client.default_headers == {
+            "X-Static": "keep",
+            "X-Session-ID": "session-0",
+        }
+        assert second_client.base_url == "http://router/v1"
+        assert second_client.default_headers == {
+            "X-Static": "keep",
+            "X-Session-ID": "session-1",
+        }
+        assert model._resolve_client(first_request) is first_client
+
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         app = server.setup_webserver()
