@@ -1,0 +1,36 @@
+# NeMo-Gym config for the interactive-browser environment (local Chromium).
+interactive_browser:
+  resources_servers:
+    interactive_browser:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Interactive browser environment — navigate/click/type/observe a live page; pluggable local (Playwright) or remote (CDP) browser backend.
+      # Single-key mapping {backend_name: {kwargs}} — see browser/registry.py.
+      backend:
+        local_playwright:
+          headless: true
+      max_elements: 50             # interactive elements collected + shown per observation
+      # To drive a browser that runs elsewhere, swap the block above for:
+      #   backend:
+      #     remote_cdp:
+      #       session_provider:
+      #         static_cdp: {cdp_url: "http://127.0.0.1:9222"}
+      # A hosted browser service plugs in as another session provider; see
+      # configs/lexmount.yaml and providers/ for a worked example.
+
+interactive_browser_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 12
+      resources_server:
+        type: resources_servers
+        name: interactive_browser
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/interactive_browser/data/example.jsonl

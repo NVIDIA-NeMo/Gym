@@ -12,18 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Lexmount interactive-browser resources server for NeMo-Gym.
+"""Interactive-browser resources server for NeMo-Gym.
 
 Stateful environment: each rollout (`session_id`) owns one isolated live browser
 context. The policy drives it via tool calls (navigate/click/type/observe/finish);
-`verify()` scores task completion against the live browser state. The browser
-itself is pluggable (`backend: playwright | lexmount`) — see `backend.py`.
+`verify()` scores task completion against the live browser state. Where that
+browser runs is a config choice — a local Chromium (`local_playwright`, the
+default) or one supplied over CDP by a session provider (`remote_cdp`) — and
+nothing else in the environment changes with it. See `browser/`.
 
 Session lifetime: a browser is released when the rollout is scored (`verify`) or
 when the same `session_id` is re-seeded. There is no independent episode TTL, so
 a rollout abandoned without either leaves its browser open until the process
-exits (local Playwright) or the provider reclaims it (`backend: lexmount` — see
-the known limits on `LexmountBackend`).
+exits (local) or the provider reclaims it (remote).
 """
 
 import re
@@ -43,26 +44,28 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
+
 try:  # package import (gym loads the resources server as a module)
-    from .backend import BrowserBackend, make_backend
+    from .browser import BrowserBackend, create_backend
 except ImportError:  # script/standalone import (python app.py, local tests)
-    from backend import BrowserBackend, make_backend
+    from browser import BrowserBackend, create_backend
 
 
 # Sparse outcome reward; extend with new spec keys as tasks need them.
 _SCORING_KEYS = ("final_url", "url_contains", "dom_contains", "answer_equals")
 
-
-class LexmountBrowserConfig(BaseResourcesServerConfig):
-    backend: str = "playwright"        # "playwright" (reference) | "lexmount"
-    headless: bool = True
-    endpoint: Optional[str] = None     # optional LEXMOUNT_BASE_URL override (backend: lexmount)
-    browser_mode: str = "normal"       # Lexmount cloud browser mode (backend: lexmount)
-    max_elements: int = 50             # elements collected + shown per observation
-    poll_timeout_sec: int = 150        # cloud session-create deadline (backend: lexmount)
+# Where the browser comes from when the config says nothing: a local Chromium,
+# which needs no account, no network and no quota.
+_DEFAULT_BACKEND: Dict[str, Any] = {"local_playwright": {"headless": True}}
 
 
-class LexmountSeedSessionRequest(BaseSeedSessionRequest):
+class InteractiveBrowserConfig(BaseResourcesServerConfig):
+    # Single-key mapping: {backend_name: {backend kwargs}} — see browser/registry.py.
+    backend: Dict[str, Any] = _DEFAULT_BACKEND
+    max_elements: int = 50  # elements collected + shown per observation
+
+
+class BrowserSeedSessionRequest(BaseSeedSessionRequest):
     model_config = ConfigDict(extra="allow")
     initial_url: str = "about:blank"
     # Grading spec, e.g. {"final_url": "..."} or {"dom_contains": "Success"}.
@@ -92,7 +95,7 @@ class ToolResponse(BaseModel):
     error: Optional[str] = None
 
 
-class LexmountVerifyRequest(BaseVerifyRequest):
+class BrowserVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
     verifier_metadata: Optional[Dict[str, Any]] = None
 
@@ -106,8 +109,8 @@ class _SessionState:
         self.gt = gt
 
 
-class LexmountBrowserResourcesServer(SimpleResourcesServer):
-    config: LexmountBrowserConfig
+class InteractiveBrowserResourcesServer(SimpleResourcesServer):
+    config: InteractiveBrowserConfig
     # Per-rollout session state. A private attr (leading underscore) so pydantic
     # does not try to build a schema for the non-pydantic _SessionState.
     _session_id_to_state: Dict[str, _SessionState] = {}
@@ -126,9 +129,7 @@ class LexmountBrowserResourcesServer(SimpleResourcesServer):
         return app
 
     # ----- lifecycle ----------------------------------------------------- #
-    async def seed_session(
-        self, request: Request, body: LexmountSeedSessionRequest
-    ) -> BaseSeedSessionResponse:
+    async def seed_session(self, request: Request, body: BrowserSeedSessionRequest) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
 
         # Resolve a repo-relative initial_url (e.g. "site/index.html") to an
@@ -146,23 +147,13 @@ class LexmountBrowserResourcesServer(SimpleResourcesServer):
             except Exception:
                 pass
 
-        backend = make_backend(
-            self.config.backend,
-            headless=self.config.headless,
-            endpoint=self.config.endpoint,
-            browser_mode=getattr(self.config, "browser_mode", "normal"),
-            poll_timeout_sec=getattr(self.config, "poll_timeout_sec", 150),
-        )
-        try:
-            await backend.open(initial_url)
-        except Exception:
-            try:
-                await backend.close()
-            finally:
-                raise
-        self._session_id_to_state[session_id] = _SessionState(
-            backend=backend, gt=(body.verifier_metadata or {})
-        )
+        # The rollout id travels with the session so a remote provider can tag
+        # (and later account for) the browser it hands out.
+        backend = create_backend(self.config.backend, session_metadata={"rollout_session_id": session_id})
+        # `open()` unwinds its own partial state — including any provider
+        # session it acquired — before it raises.
+        await backend.open(initial_url)
+        self._session_id_to_state[session_id] = _SessionState(backend=backend, gt=(body.verifier_metadata or {}))
         return BaseSeedSessionResponse()
 
     def _state(self, request: Request) -> Optional[_SessionState]:
@@ -224,7 +215,7 @@ class LexmountBrowserResourcesServer(SimpleResourcesServer):
         return ToolResponse(observation="", done=True)
 
     # ----- reward -------------------------------------------------------- #
-    async def verify(self, request: Request, body: LexmountVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, request: Request, body: BrowserVerifyRequest) -> BaseVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         st = self._session_id_to_state.get(session_id)
         reward = 0.0
@@ -259,10 +250,9 @@ class LexmountBrowserResourcesServer(SimpleResourcesServer):
         # rollout reward 0, which is indistinguishable from a policy that never
         # solves the task.
         raise ValueError(
-            f"verifier_metadata has no supported scoring key (got {sorted(gt)}; "
-            f"expected one of {list(_SCORING_KEYS)})"
+            f"verifier_metadata has no supported scoring key (got {sorted(gt)}; expected one of {list(_SCORING_KEYS)})"
         )
 
 
 if __name__ == "__main__":
-    LexmountBrowserResourcesServer.run_webserver()
+    InteractiveBrowserResourcesServer.run_webserver()
