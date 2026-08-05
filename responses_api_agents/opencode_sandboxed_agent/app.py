@@ -153,6 +153,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     },
                 }
             },
+            **self.config.opencode_config,
         }
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
