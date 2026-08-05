@@ -41,9 +41,9 @@ from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.openai_utils import (
+    _FUNCTION_TOOL_NEW_FIELDS_2_53_0,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputItem,
-    _FUNCTION_TOOL_NEW_FIELDS_2_53_0,
 )
 
 

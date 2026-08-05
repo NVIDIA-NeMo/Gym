@@ -85,7 +85,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -339,6 +339,30 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     user: Optional[str] = None
     stream: Optional[Literal[False]] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_new_function_tool_fields(cls, data: Any) -> Any:
+        # openai 2.53.0 added new fields to FunctionTool/FunctionToolParam. Strip
+        # None-valued ones before validation so that callers using FunctionTool.model_dump()
+        # still validate correctly against FunctionToolParam.
+        if isinstance(data, dict):
+            for tool in data.get("tools") or []:
+                if isinstance(tool, dict) and tool.get("type") == "function":
+                    for field in _FUNCTION_TOOL_NEW_FIELDS_2_53_0:
+                        if tool.get(field) is None:
+                            tool.pop(field, None)
+        return data
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        data = super().model_dump(**kwargs)
+        # Strip new openai 2.53.0 FunctionTool fields that Pydantic adds when serializing
+        # the ToolParam TypedDict union (Pydantic includes all TypedDict fields, even absent ones).
+        for tool in data.get("tools") or []:
+            if isinstance(tool, dict) and tool.get("type") == "function":
+                for field in _FUNCTION_TOOL_NEW_FIELDS_2_53_0:
+                    tool.pop(field, None)
+        return data
+
 
 ########################################
 # Responses API outputs
@@ -361,7 +385,9 @@ class NeMoGymResponseUsage(ResponseUsage):
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
 
-_RESPONSE_NEW_FIELDS_2_53_0 = frozenset({"completed_at", "moderation", "prompt_cache_options", "prompt_cache_retention"})
+_RESPONSE_NEW_FIELDS_2_53_0 = frozenset(
+    {"completed_at", "moderation", "prompt_cache_options", "prompt_cache_retention"}
+)
 _FUNCTION_TOOL_NEW_FIELDS_2_53_0 = frozenset({"allowed_callers", "defer_loading", "output_schema"})
 
 
