@@ -202,6 +202,18 @@ configure_apptainer() {
 }
 
 local_check() {
+# Emit only the profile knobs the dataset actually set. Passing an empty value
+# is NOT the same as omitting the flag: `--expected-count ""` is an argparse
+# error, and `--reference-overrides ""` resolves to the cwd.
+profile_args() {
+  local -a a=()
+  [[ -n "${EXPECTED_COUNT}" ]] && a+=(--expected-count "${EXPECTED_COUNT}")
+  [[ -n "${TASK_ID_PATTERN}" ]] && a+=(--task-id-pattern "${TASK_ID_PATTERN}")
+  [[ -n "${REFERENCE_MODE}" ]] && a+=(--reference-mode "${REFERENCE_MODE}")
+  [[ -n "${REFERENCE_OVERRIDES}" ]] && a+=(--reference-overrides "${REFERENCE_OVERRIDES}")
+  printf '%s\n' ${a[@]+"${a[@]}"}
+}
+
   local lc_extra=() lc_priv=()
   if [[ -n "${REFERENCE_OVERRIDES}" ]]; then
     lc_extra=(--reference-overrides "${REFERENCE_OVERRIDES}")
@@ -209,13 +221,14 @@ local_check() {
   if [[ "${REQUIRE_PRIVATE_FILES}" == "true" ]]; then
     lc_priv=(--require-private-files)
   fi
+  local -a lc_profile=()
+  mapfile -t lc_profile < <(profile_args)
+  local -a lc_sha=()
+  [[ -n "${EXPECTED_SOURCE_SHA256}" ]] && lc_sha=(--expected-sha256 "${EXPECTED_SOURCE_SHA256}")
   "${PYTHON_BIN}" "${VALIDATOR}" \
     --input "${SOURCE_INPUT}" \
-    --expected-count "${EXPECTED_COUNT}" \
-    --expected-sha256 "${EXPECTED_SOURCE_SHA256}" \
-    --task-id-pattern "${TASK_ID_PATTERN}" \
-    --reference-mode "${REFERENCE_MODE}" \
-    ${lc_extra[@]+"${lc_extra[@]}"} \
+    ${lc_profile[@]+"${lc_profile[@]}"} \
+    ${lc_sha[@]+"${lc_sha[@]}"} \
     ${lc_priv[@]+"${lc_priv[@]}"}
 }
 
@@ -323,22 +336,22 @@ runtime_preflight() {
     "${LOG_DIR}" \
     "${DELIVERABLES_DIR}" \
     "${SMOKE_DELIVERABLES_DIR}"
-  local validator_args=(
-    --input "${SOURCE_INPUT}"
-    --expected-count "${EXPECTED_COUNT}"
-    --expected-sha256 "${EXPECTED_SOURCE_SHA256}"
-    --task-id-pattern "${TASK_ID_PATTERN}"
-    --reference-mode "${REFERENCE_MODE}"
-    --write-launch-input "${LAUNCH_INPUT}"
-    --smoke-task-id "${SMOKE_TASK_ID}"
-    --write-smoke-input "${SMOKE_INPUT}"
+  local -a validator_args=(--input "${SOURCE_INPUT}")
+  local -a vp=()
+  mapfile -t vp < <(profile_args)
+  validator_args+=(${vp[@]+"${vp[@]}"})
+  [[ -n "${EXPECTED_SOURCE_SHA256}" ]] && validator_args+=(--expected-sha256 "${EXPECTED_SOURCE_SHA256}")
+  validator_args+=(--write-launch-input "${LAUNCH_INPUT}")
+  # A smoke id is optional: without one the launch input is still written, there
+  # is just no one-row smoke file to write.
+  if [[ -n "${SMOKE_TASK_ID}" ]]; then
+    validator_args+=(--smoke-task-id "${SMOKE_TASK_ID}" --write-smoke-input "${SMOKE_INPUT}")
+  fi
+  validator_args+=(
     --check-model-endpoint
     --model-base-url "${POLICY_BASE_URL}"
     --model-name "${POLICY_MODEL_NAME}"
   )
-  if [[ -n "${REFERENCE_OVERRIDES}" ]]; then
-    validator_args+=(--reference-overrides "${REFERENCE_OVERRIDES}")
-  fi
   if [[ "${REQUIRE_PRIVATE_FILES}" == "true" ]]; then
     validator_args+=(--require-private-files)
   fi
@@ -548,22 +561,18 @@ collect() {
 }
 
 validate_smoke() {
-  local extra=() priv=()
-  if [[ -n "${REFERENCE_OVERRIDES}" ]]; then
-    extra=(--reference-overrides "${REFERENCE_OVERRIDES}")
-  fi
+  local -a priv=() prof=() lsha=()
+  mapfile -t prof < <(profile_args)
+  [[ -n "${EXPECTED_LAUNCH_SHA256}" ]] && lsha=(--expected-sha256 "${EXPECTED_LAUNCH_SHA256}")
   if [[ "${REQUIRE_PRIVATE_FILES}" == "true" ]]; then
     priv=(--require-private-files)
   fi
   "${PYTHON_BIN}" "${VALIDATOR}" \
     --input "${LAUNCH_INPUT}" \
-    --expected-count "${EXPECTED_COUNT}" \
-    --expected-sha256 "${EXPECTED_LAUNCH_SHA256}" \
-    --task-id-pattern "${TASK_ID_PATTERN}" \
-    --reference-mode "${REFERENCE_MODE}" \
-    ${extra[@]+"${extra[@]}"} \
+    ${prof[@]+"${prof[@]}"} \
+    ${lsha[@]+"${lsha[@]}"} \
     ${priv[@]+"${priv[@]}"} \
-    --smoke-task-id "${SMOKE_TASK_ID}" \
+    ${SMOKE_TASK_ID:+--smoke-task-id "${SMOKE_TASK_ID}"} \
     --rollouts "${SMOKE_OUTPUT}" \
     --deliverables-dir "${SMOKE_DELIVERABLES_DIR}" \
     --expected-response-model "${GDPVAL_EXPECTED_RESPONSE_MODEL:-${POLICY_MODEL_NAME}}" \
@@ -571,20 +580,16 @@ validate_smoke() {
 }
 
 validate_full() {
-  local extra=() priv=()
-  if [[ -n "${REFERENCE_OVERRIDES}" ]]; then
-    extra=(--reference-overrides "${REFERENCE_OVERRIDES}")
-  fi
+  local -a priv=() prof=() lsha=()
+  mapfile -t prof < <(profile_args)
+  [[ -n "${EXPECTED_LAUNCH_SHA256}" ]] && lsha=(--expected-sha256 "${EXPECTED_LAUNCH_SHA256}")
   if [[ "${REQUIRE_PRIVATE_FILES}" == "true" ]]; then
     priv=(--require-private-files)
   fi
   "${PYTHON_BIN}" "${VALIDATOR}" \
     --input "${LAUNCH_INPUT}" \
-    --expected-count "${EXPECTED_COUNT}" \
-    --expected-sha256 "${EXPECTED_LAUNCH_SHA256}" \
-    --task-id-pattern "${TASK_ID_PATTERN}" \
-    --reference-mode "${REFERENCE_MODE}" \
-    ${extra[@]+"${extra[@]}"} \
+    ${prof[@]+"${prof[@]}"} \
+    ${lsha[@]+"${lsha[@]}"} \
     ${priv[@]+"${priv[@]}"} \
     --rollouts "${FULL_OUTPUT}" \
     --deliverables-dir "${DELIVERABLES_DIR}" \

@@ -452,7 +452,13 @@ def _parse_args() -> argparse.Namespace:
         default="https",
         help="How reference locators are expressed: https URLs, absolute local paths, or either",
     )
-    parser.add_argument("--expected-count", type=int, default=100)
+    parser.add_argument(
+        "--expected-count",
+        type=int,
+        default=None,
+        help="Exact row count the batch must have. Omit to skip the check; a baked-in "
+        "default would silently validate one batch against another's size.",
+    )
     parser.add_argument("--expected-sha256", help="Expected SHA-256 of the immutable source JSONL")
     parser.add_argument("--reference-overrides", type=Path, help="Explicit prompt-backed reference repairs")
     parser.add_argument("--write-launch-input", type=Path, help="Write the validated, repaired launch JSONL")
