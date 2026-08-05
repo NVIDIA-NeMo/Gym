@@ -171,6 +171,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+    session_affinity_header: Optional[str] = Field(
+        default=None,
+        description="Header used to forward the NeMo Gym session ID to an upstream router.",
+    )
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -1095,6 +1099,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             # There is probably a better way to select the endpoint for this request. But this will do for now.
             client_idx = len(self._session_id_to_client) % len(self._clients)
             client = self._clients[client_idx]
+            if self.config.session_affinity_header is not None:
+                client = client.model_copy(
+                    update={
+                        "default_headers": client.default_headers | {self.config.session_affinity_header: session_id}
+                    }
+                )
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
