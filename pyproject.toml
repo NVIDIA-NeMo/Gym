@@ -212,9 +212,9 @@ dependencies = [
     "wandb",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
-    # Updated: Mon May 19, 2026 with GitPython>=3.1.50
+    # Updated: Mon Aug 04, 2026 with GitPython>=3.1.57
     # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
-    "GitPython>=3.1.50",
+    "GitPython>=3.1.57",
 
     # pyasn1: ASN.1 library (transitive dependency via google-auth, pinned for security)
     # Updated: Tue Jul 29, 2026 with pyasn1>=0.6.4
@@ -236,11 +236,12 @@ all = [
 
 vllm = [
     # Pin to the same version used by local_vllm_model / genrm_model server venvs.
-    "vllm==0.20.0",
-    # Pin flashinfer to the exact version vllm 0.20.0 specifies, ensuring pre-compiled
+    # Updated: Mon Aug 04, 2026 with vllm==0.26.0
+    "vllm==0.26.0",
+    # Pin flashinfer to the exact version vllm 0.26.0 specifies, ensuring pre-compiled
     # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
     # flashinfer>=0.2 bundles compiled kernels in the python package directly.
-    "flashinfer-python==0.6.8.post1",
+    "flashinfer-python==0.6.14",
 ]
 
 sandbox = [
