@@ -11,8 +11,3 @@ unbabel-comet>=2.2
 # scipy.stats) but uv's resolution doesn't pull it automatically here —
 # explicit pin avoids ModuleNotFoundError in the COMET Ray task.
 scipy
-# Compact Language Detector v2 (Google CLD2) Python binding. Pure C++
-# extension with no Python deps. Prebuilt wheels exist through cp313, so on
-# the repo-pinned 3.13.14 it installs from a wheel. On 3.14 there is
-# no wheel yet but it could be built from CLD2 source (needs a C++ compiler).
-pycld2>=0.42
