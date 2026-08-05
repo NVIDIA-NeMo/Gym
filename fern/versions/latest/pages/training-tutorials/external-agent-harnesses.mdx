@@ -215,6 +215,26 @@ Gym ships no HTTP reader. Nothing needed one, and a route serving records alone 
 `is_incomplete`, so a client of it would have had to answer `false` and inherit exactly that
 problem.
 
+## How a rollout's calls are linked
+
+By default the calls of a rollout are chained by their token prefixes: a call is parented to the
+earlier call whose prompt plus generation is the longest prefix of this call's prompt. That is
+correct, and it has one blind spot. If a harness retries a call, both attempts share a prompt and
+differ only in what they generated, so prefix matching cannot tell which one the harness kept.
+
+The model server therefore identifies the parent at request time instead. A harness must echo the
+conversation to continue it, so hashing the model-authored turns of an incoming request finds the
+call that produced the last one. Nothing is added to the wire and nothing depends on the harness
+preserving a field Gym invented.
+
+Two things are checked before a match is used. It must be unique, because two calls that produced
+byte-identical output cannot be told apart. And the conversation those turns arrived with must still
+match what that call was sent, which is what rules out a compacted or summarized history whose model
+output is unchanged.
+
+A miss is not a problem: the builder falls back to prefix matching, which is what it did before.
+`parent_link_fallbacks` on the per-rollout metrics reports how often that happened and why.
+
 ### Driving rollouts yourself
 
 `gym eval run` finalizes each record for you. A framework that calls `run_examples` directly does
@@ -252,6 +272,24 @@ underscores, starting with a letter or digit. An id outside that is refused rath
 
 ## Extensions
 
+### Prefix supply
+
+By default the inference engine builds each prompt by re-rendering the whole conversation through the
+chat template. That can produce a different sequence than the model sampled. A tool-call parser
+truncates the assistant turn at the tool call and discards anything generated after it; a chat
+template can re-tokenize an assistant turn differently; a reasoning model's template may drop earlier
+thinking entirely. In each case the new prompt no longer extends the previous one and the rollout
+cannot be chained.
+
+Prefix supply sends the engine the exact tokens of the call being continued, so the new prompt
+extends the previous one by construction. Enable it by overlaying
+`responses_api_models/vllm_model/configs/vllm_model_supply_prefix.yaml`.
+
+It requires a backend that honours `required_prefix_token_ids` on both the chat and the tokenize
+endpoints, and it applies only when a parent resolved. Otherwise the request is forwarded unchanged
+and starts a new chain, which costs a cold cache but is never wrong. Each record carries whether its
+prefix was supplied, so the rate is auditable after a run.
+
 ### Sampling pin
 
 `sampling_overrides` on the model server forces the sampling parameters on every request, overriding
@@ -268,3 +306,8 @@ contract that accepts one.
 context-compaction summary. Those are real policy output and are currently trained on. A compaction
 summary is long enough that it can outweigh the rollout it summarizes, which shows up as
 `chains_per_rollout_mean` above 1 and `delivered_fraction_mean` below 1.0.
+
+**Multiple server workers.** The index that identifies which call a request continues is per process.
+With more than one worker, calls from one rollout can be handled by different workers, and those
+calls fall back to matching the parent by token prefix. Prefix matching is correct but cannot
+disambiguate a retry, and prefix supply does not apply to them.
