@@ -1,0 +1,11 @@
+# nemo-gym brings fastapi + pydantic + the base server classes; required for the
+# gym-launched resources server (its per-component venv installs only this file).
+-e nemo-gym[dev] @ ../../
+
+# Drives the page for both shipped backends (a local Chromium, or one reached
+# over CDP). The only browser dependency this environment has.
+playwright>=1.40
+
+# Session providers for `backend: remote_cdp` bring their own SDKs, if any, and
+# are installed by the operator — deliberately not hard dependencies, so the
+# default backend and CI stay third-party-free. See providers/<name>/README.md.
