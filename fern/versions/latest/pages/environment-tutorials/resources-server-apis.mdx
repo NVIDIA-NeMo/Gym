@@ -1,35 +1,90 @@
 ---
 title: "Resources Server APIs"
-description: "Choose between the native seed-and-verify API and the Gymnasium reset-and-step API"
+description: "Understand the supported Resources Server protocol APIs and choose the appropriate one to build your Environment"
 position: 2
 ---
 
 # Resources Server APIs
 
-NeMo Gym resources servers support two episode interfaces. Choose the interface based on who should control the interaction loop and when the environment needs to return rewards.
+A Resources Server implements the Environment interface related to: its tools, state, and reward logic.
 
-| Interface | Episode flow | Choose it when |
-|---|---|---|
-| Native | `seed_session()` → agent loop → `verify()` | The agent should own tool execution and model turns, and the environment computes one final reward. |
-| Gymnasium | `reset()` → model response → `step()` → repeat | The environment must inspect every model response and decide the next observation, reward, or stopping condition. |
+<Info>
+**Agent Server context**
 
-Any agent can use either interface if it calls the matching HTTP endpoints and preserves the resources server's session cookie. The built-in `simple_agent` and `gymnasium_agent` are convenience implementations, not restrictions on which agents you can use.
+The Agent is the behavior that decides what to do next, typically using an LLM-based policy. 
+The Agent Server is the HTTP transport for two internal methods:
+
+- `run()` is exposed as `/run` and implements part of the episode orchestration associated with the Resources Server seed session, delegation of the Agent loop to responses() and call to the verifier.
+- `responses()` is exposed as `/v1/responses` and implements Agent behavior. Depending on the Agent Server, this can be a complete agent harness or one policy-model call.
+
+In `simple_agent`, `run()` delegates the Agent loop to `responses()` before requesting final verification. In `gymnasium_agent`, `run()` owns the model-and-environment loop and does not invoke `responses()` to the tool calling.
+</Info>
+
+## Resources Server Protocol Landscape
+
+NeMo Gym ships two framework-standard base protocols for coordinating an episode between the Agent and the Environment. Agent behavior and rollout orchestration are implemented by `responses()` and `run()` behind the Agent Server's HTTP endpoints; the Environment is implemented by the Resources Server.
+
+Each protocol has a matching built-in Agent Server: `simple_agent` for the `/seed_session` and `/verify` interface, and `gymnasium_agent` for the `/reset` and `/step` interface.
+
+| Base protocol | Resources Server API | Matching built-in Agent Server | Reward contract |
+|---|---|---|---|
+| Native | `/seed_session` and `/verify` | `simple_agent` | `/verify` scores the completed trajectory once. |
+| Gymnasium | `/reset` and `/step` | `gymnasium_agent` | Every `/step` returns a reward; `/run` accumulates them. |
+
+Pick one base protocol and build the Resources Server and Agent Server to match. `GymnasiumServer` replaces the native endpoints and does not expose `/verify`. `SimpleResourcesServer` defines the native endpoints but can be extended with additional environment-specific routes.
 
 <Note>
-Single-step grading works with either interface. Use the native API when final verification is enough. Use Gymnasium when you want the environment's behavior to compose naturally with multi-step games, scripted users, or per-step rewards.
+The two base protocols do not describe every concrete Agent–Environment interface in the repository. Some environments extend the native protocol with custom transition endpoints. Other environments are embedded inside the Agent and do not use a Resources Server during `/run`.
 </Note>
 
-## Native API: `seed_session()` and `verify()`
+### Native Protocol Extensions
 
-The native API separates the agent loop from reward computation:
+Several environments keep the native `/seed_session` and `/verify` lifecycle while adding bespoke transition APIs. These extensions require a matching Agent Server; sharing an endpoint name such as `/step` does not make their request and response contracts interchangeable.
+
+| Environment | Episode flow | Extension contract |
+|---|---|---|
+| Aviary | `/seed_session` → repeated `/step` → `/close` → `/verify` | `/step` receives an environment ID and a list of function-call actions, then returns an observation, reward, and `done`. |
+| ToolSandbox | `/seed_session` → repeated `/step` → `/close` → `/verify` | `/step` accepts function calls or a natural-language response for the user simulator. `/close` finalizes environment scoring before `/verify`. |
+| OpenEnv | `/seed_session` → interaction → `/verify` | Depending on its mode, interaction uses a custom `/step` action or direct per-tool HTTP routes. `/verify` returns the accumulated environment reward. |
+
+Some Agent Servers also use variants of the native sequence—for example, skipping a no-op `/seed_session`, treating it as optional, or calling `/verify` without tool execution. These are Agent Server behaviors built around the native API rather than new Resources Server base classes.
+
+### Agent-Embedded Environments
+
+Some Agent Servers embed the environment or an external benchmark harness in their own process. Examples include OSWorld, Tau2, SWE wrappers, Harbor, PinchBench, and Verifiers. Their `/run` implementation computes reward without calling a Resources Server, so they do not implement a Resources Server episode protocol.
+
+### Action and Tool Transports
+
+The episode protocol defines initialization, transitions, and scoring. The action transport separately defines how the Agent affects the Environment during the episode.
+
+| Transport | Interaction |
+|---|---|
+| Direct HTTP tools | The model emits a function call, and the Agent Server sends `POST /{tool_name}` to the Resources Server. |
+| MCP | An MCP-capable harness calls tools through the Resources Server's `/mcp` endpoint. |
+| Gymnasium step action | The Agent Server sends the complete model response to `/step`; the Resources Server interprets and executes it. |
+| Bespoke transition API | A matching Agent Server and Resources Server exchange environment-specific `/step`, `/close`, or other requests. |
+| Agent-embedded tools | The Agent Server or its benchmark harness executes tools internally without a Resources Server. |
+
+## Native Protocol: `seed_session()` and `verify()`
+
+The native protocol brackets the Agent harness with environment initialization and final verification:
 
 ```text
-POST /seed_session
-agent calls the model and any resources-server tools
-POST /verify
+Client → Agent Server: POST /run
+Agent Server → Resources Server: POST /seed_session
+Agent Server run() → Agent Server responses(): POST /v1/responses
+  responses() ↔ Model Server
+  responses() → Resources Server tool endpoint
+  ... repeat the model/tool Agent loop
+Agent Server → Resources Server: POST /verify
+Agent Server → Client: completed trajectory and reward
 ```
 
-`SimpleResourcesServer` exposes these methods:
+For the built-in `simple_agent`, `run()` performs the lifecycle orchestration and `responses()` implements the Agent loop. The Agent Server exposes those methods as `/run` and `/v1/responses`, respectively.
+
+### Lifecycle API
+
+`SimpleResourcesServer` exposes:
 
 ```python
 async def seed_session(
@@ -45,64 +100,134 @@ async def verify(
     ...
 ```
 
-- **`body` in `seed_session()`** contains fields used to initialize an episode. Define a subclass of `BaseSeedSessionRequest` for fields such as an initial board or sandbox image. The default implementation is a no-op.
+- **`body` in `seed_session()`** contains fields used to initialize an episode. Define a `BaseSeedSessionRequest` subclass for fields such as an initial board, task ID, or sandbox image. The default implementation is a no-op.
 - **`body.responses_create_params` in `verify()`** is the original model request.
-- **`body.response` in `verify()`** is the completed model response, including the trajectory accumulated by the agent.
+- **`body.response` in `verify()`** is the completed `NeMoGymResponse`, including the trajectory assembled by the Agent Server.
 - **Custom task metadata** requires a `BaseVerifyRequest` subclass. Declare fields such as `answer` or `expected_state`; undeclared fields are not retained by the base Pydantic model.
-- **`request: Request`**, when added to either method signature, gives stateful implementations access to the session ID.
+- **`request: Request`**, when added to either method signature, provides access to the per-rollout session ID.
 
-Choose this interface when:
+### Direct HTTP Tool-Calling Protocol
 
-- Existing resources-server endpoints should act as model tools.
-- The agent owns tool dispatch, retries, turn limits, or other orchestration.
-- Reward is computed once from the completed trajectory or final environment state.
-- You are pairing the server with `simple_agent` or a custom agent that speaks `/seed_session` and `/verify`.
+The native episode protocol does not itself define how the Agent acts on the environment. `simple_agent` supplies a direct HTTP function-tool protocol inside `responses()`:
 
-### Minimal native server
+1. The input row declares function schemas in `responses_create_params.tools`.
+2. The Agent Server sends those schemas to the Model Server.
+3. The model returns a structured `function_call` with `name`, `arguments`, and `call_id`.
+4. `simple_agent` parses `arguments` and sends `POST /{name}` to the Resources Server.
+5. The Resources Server's response becomes a `function_call_output` associated with the same `call_id`.
+6. `responses()` sends the updated trajectory back to the model and repeats until the model returns a final response or the step limit is reached.
 
-This stateless server grades one answer. It inherits the default no-op `seed_session()` and implements the required `verify()` method.
+The tool name in the input schema must match the Resources Server route:
 
 ```python
+class SquareRequest(BaseModel):
+    value: int
+
+
+class SquareResponse(BaseModel):
+    result: int
+
+
+class CalculatorServer(SimpleResourcesServer):
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/square")(self.square)
+        return app
+
+    async def square(self, body: SquareRequest) -> SquareResponse:
+        return SquareResponse(result=body.value**2)
+```
+
+For a model response such as:
+
+```json
+{
+  "type": "function_call",
+  "name": "square",
+  "arguments": "{\"value\": 4}",
+  "call_id": "call_123"
+}
+```
+
+`simple_agent` calls `POST /square` with `{"value": 4}`. The Agent Server performs this dispatch; the Resources Server only implements the endpoint.
+
+<Info>
+Resources Server tools can also be exposed over MCP. MCP changes the tool transport, not the episode protocol: the rollout can still use `/seed_session` and `/verify`. See [MCP Resources Server](/environment-tutorials/mcp-resources-server).
+</Info>
+
+### Minimal Native Environment
+
+The complete server below combines the tool route with final trajectory verification:
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from resources_servers.gymnasium import extract_text
 
 
-class AnswerVerifyRequest(BaseVerifyRequest):
-    answer: str
+class SquareRequest(BaseModel):
+    value: int
 
 
-class AnswerServer(SimpleResourcesServer):
-    async def verify(self, body: AnswerVerifyRequest) -> BaseVerifyResponse:
-        predicted = extract_text(body.response).strip()
+class SquareResponse(BaseModel):
+    result: int
+
+
+class CalculatorServer(SimpleResourcesServer):
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/square")(self.square)
+        return app
+
+    async def square(self, body: SquareRequest) -> SquareResponse:
+        return SquareResponse(result=body.value**2)
+
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        used_square = any(
+            item.type == "function_call" and item.name == "square"
+            for item in body.response.output
+        )
         return BaseVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
-            reward=float(predicted == body.answer),
+            reward=float(used_square),
         )
 
 
 if __name__ == "__main__":
-    AnswerServer.run_webserver()
+    CalculatorServer.run_webserver()
 ```
 
-The built-in `simple_agent` calls `/seed_session`, runs its model and tool loop, and calls `/verify` exactly once at the end.
+Choose the native protocol when:
 
-## Gymnasium API: `reset()` and `step()`
+- The Agent harness should own model calls, tool dispatch, retries, or other orchestration.
+- Resources Server routes should be exposed directly as model tools.
+- One final reward should be computed from the completed trajectory or final environment state.
+- You are pairing the environment with `simple_agent` or a custom Agent Server that implements `/seed_session`, an Agent harness, and `/verify`.
 
-The Gymnasium API gives the environment control after each model response:
+## Gymnasium Protocol: `reset()` and `step()`
+
+The Gymnasium protocol models the environment as a transition function. The Agent Server sends every model response to the Resources Server:
 
 ```text
-POST /reset
-model response → POST /step
-model response → POST /step
-... until terminated or truncated
+Client → Agent Server: POST /run
+Agent Server run() → Resources Server: POST /reset
+Agent Server run() → Model Server: POST /v1/responses
+Agent Server run() → Resources Server: POST /step
+... repeat model → step until terminated or truncated
+Agent Server → Client: trajectory and accumulated reward
 ```
 
-Subclass `GymnasiumServer` and implement `step()`. Override `reset()` only when the environment needs initialization or an initial observation.
+`gymnasium_agent` never calls `/verify`. `GymnasiumServer` does not register a `/verify` endpoint; `/step` provides both transitions and rewards.
+
+### Transition API
+
+Subclass `GymnasiumServer` and implement `step()`. Override `reset()` when the environment needs initialization or an initial observation.
 
 ```python
 async def reset(
@@ -121,8 +246,8 @@ async def step(
     ...
 ```
 
-- **`action`** is the model's response for the current step. Use `extract_text(action)` for text, or inspect `action.output` for structured function calls.
-- **`metadata`** contains extra top-level fields from the input JSONL row, such as `answer`, `category`, or task settings. It does not include `responses_create_params`.
+- **`action`** is the complete structured model response for the current step. It can contain assistant messages, reasoning items, or function calls.
+- **`metadata`** contains extra top-level fields from the input row, such as `answer`, `category`, or task settings. It does not include `responses_create_params`.
 - **`session_id`** identifies the rollout and keys per-episode state. Stateless environments can ignore it.
 
 `reset()` returns `(observation, info)`. A non-`None` observation is appended as a user message before the first model call.
@@ -130,47 +255,69 @@ async def step(
 `step()` returns `(observation, reward, terminated, truncated, info)`:
 
 - **`observation`**: the next user message, or `None` when no message is needed.
-- **`reward`**: reward for this step. `gymnasium_agent` sums step rewards for the episode.
+- **`reward`**: reward for this step. `gymnasium_agent` sums rewards across the episode.
 - **`terminated`**: `True` when the episode reaches a natural terminal state.
 - **`truncated`**: `True` when a limit or timeout cuts the episode short.
-- **`info`**: diagnostic metadata and optional `tool_outputs` returned to the agent.
+- **`info`**: diagnostic metadata and optional `tool_outputs` for the Agent Server.
 
-Choose this interface when:
+### Tool Calls as Gymnasium Actions
 
-- The environment decides what the model observes next.
-- Every model response must be validated or executed before continuing.
-- Rewards are naturally assigned per step.
-- The environment owns termination and truncation decisions.
-- You are pairing the server with `gymnasium_agent` or a custom agent that speaks `/reset` and `/step`.
+`gymnasium_agent` does not dispatch a function call to `POST /{name}`. Instead:
 
-### Minimal Gymnasium server
-
-This is the same stateless answer grader expressed as a one-step Gymnasium environment:
+1. The model returns a `NeMoGymResponse`.
+2. The Agent Server sends that response to `/step` as `action`.
+3. `step()` interprets text or structured function calls and executes the corresponding environment operation.
+4. For function calls, `step()` returns results in `info["tool_outputs"]`.
+5. The Agent Server converts those results into `function_call_output` items for the next model call.
 
 ```python
-from resources_servers.gymnasium import GymnasiumServer, extract_text
+import json
+
+from resources_servers.gymnasium import GymnasiumServer
 
 
-class AnswerEnv(GymnasiumServer):
+class CalculatorEnv(GymnasiumServer):
     async def step(self, action, metadata, session_id=None):
-        predicted = extract_text(action).strip()
-        reward = float(predicted == metadata["answer"])
-        return None, reward, True, False, {}
+        calls = [item for item in action.output if item.type == "function_call"]
 
+        if calls:
+            outputs = []
+            for call in calls:
+                args = json.loads(call.arguments)
+                if call.name == "square":
+                    result = {"result": args["value"] ** 2}
+                else:
+                    result = {"error": f"Unknown action: {call.name}"}
+                outputs.append(self.tool_output(call, result))
 
-if __name__ == "__main__":
-    AnswerEnv.run_webserver()
+            return None, 0.0, False, False, {"tool_outputs": outputs}
+
+        return None, 1.0, True, False, {}
 ```
 
-Returning `terminated=True` makes `gymnasium_agent` stop after the first response.
+Tool schemas still come from `responses_create_params.tools`, but they describe the actions the model can emit. The Resources Server does not need matching HTTP tool routes because `step()` performs the dispatch.
+
+Choose the Gymnasium protocol when:
+
+- The Resources Server must process every model response before the episode continues.
+- The environment decides the next observation and stopping condition.
+- Rewards are naturally assigned per transition.
+- The model response itself is the environment action.
+- You are pairing the environment with `gymnasium_agent` or a custom Agent Server that implements the `/reset` and `/step` loop.
 
 ## State Management
 
-Both interfaces use the resources server's session middleware. It assigns a unique `session_id` cookie and the agent sends that cookie on subsequent calls in the same rollout. Store mutable state under that ID so concurrent rollouts do not share episode data.
+Both episode protocols use the Resources Server's session middleware. It assigns a unique `session_id` cookie, and the Agent Server preserves that cookie across Resources Server calls in the same rollout.
 
-### Native state
+Store rollout-specific state under the session ID so concurrent episodes remain isolated. State can range from:
 
-Add `Request` to endpoint signatures, read `SESSION_ID_KEY`, and define a per-session mapping on the server:
+- **Stateless**: grade an answer directly from the response and task metadata.
+- **Lightweight**: store a counter, game board, or conversation state in memory.
+- **Heavyweight**: associate each session with a browser, database, or Docker container.
+
+### Native State
+
+`SimpleResourcesServer` does not define a state container. Add one and read the session ID from the FastAPI request:
 
 ```python
 from typing import Any
@@ -198,9 +345,11 @@ class StatefulServer(SimpleResourcesServer):
             self.session_state.pop(session_id, None)
 ```
 
-### Gymnasium state
+Tool endpoints can read the same `request.session[SESSION_ID_KEY]`, so `/seed_session`, tool calls, and `/verify` operate on the same environment instance.
 
-`GymnasiumServer` provides `self.session_state`. The framework passes the session ID directly to `reset()` and `step()`:
+### Gymnasium State
+
+`GymnasiumServer` provides `self.session_state` and passes the session ID to `reset()` and `step()`:
 
 ```python
 class StatefulEnv(GymnasiumServer):
@@ -214,18 +363,12 @@ class StatefulEnv(GymnasiumServer):
         return None, reward, done, False, {}
 ```
 
-State can range from:
+Do not put rollout-specific mutable data in an unkeyed server attribute.
 
-- **Stateless**: grade a math answer directly from the response and task metadata.
-- **Lightweight**: store a counter, game board, or conversation state in memory.
-- **Heavyweight**: associate each session ID with a browser, database, or Docker container.
+### Session Cleanup
 
-The isolation guarantee depends on using the session ID as the key. Do not put rollout-specific mutable data in an unkeyed server attribute.
-
-### Session cleanup
-
-- **Native API**: `SimpleResourcesServer` does not automatically clear custom state after verification. Remove state in `verify()`, preferably in a `finally` block, and close external resources there.
-- **Gymnasium API**: when `step()` returns `terminated=True` or `truncated=True`, `GymnasiumServer` calls `close_session()` and removes the entry from `self.session_state`.
+- **Native protocol**: remove custom state in `verify()`, preferably in a `finally` block. `SimpleResourcesServer` does not automatically clear custom state.
+- **Gymnasium protocol**: when `step()` returns `terminated=True` or `truncated=True`, `GymnasiumServer` calls `close_session()` and removes the entry from `self.session_state`.
 - **Heavyweight state**: override `close_session()`, release the external resource, and call `await super().close_session(session_id)`.
 
 ```python
@@ -236,55 +379,55 @@ async def close_session(self, session_id):
     await super().close_session(session_id)
 ```
 
-Make sure the environment itself returns a terminal or truncated result before the agent's `max_steps` is exhausted. Also use timeouts or stale-session reclamation for external resources so client failures cannot leak them indefinitely.
+Ensure a Gymnasium environment returns a terminal or truncated result before the Agent Server's `max_steps` is exhausted. Also use timeouts or stale-session reclamation so client failures cannot leak external resources indefinitely.
 
 ## YAML Configuration
 
-The resources server definition is the same for both interfaces. The paired agent determines which endpoint protocol is used.
+The Resources Server definition has the same YAML shape for both episode protocols. The paired Agent Server determines which protocol is used.
 
 <Tabs>
 <Tab title="Native">
 
 ```yaml
-answer_env:
+calculator:
   resources_servers:
-    answer_env:
+    calculator:
       entrypoint: app.py
       domain: knowledge
 
-answer_env_agent:
+calculator_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: answer_env
+        name: calculator
       model_server:
         type: responses_api_models
         name: policy_model
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/answer_env/data/example.jsonl
+        jsonl_fpath: resources_servers/calculator/data/example.jsonl
 ```
 
 </Tab>
 <Tab title="Gymnasium">
 
 ```yaml
-answer_env:
+calculator:
   resources_servers:
-    answer_env:
+    calculator:
       entrypoint: app.py
       domain: knowledge
 
-answer_env_agent:
+calculator_agent:
   responses_api_agents:
     gymnasium_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: answer_env
+        name: calculator
       model_server:
         type: responses_api_models
         name: policy_model
@@ -292,17 +435,18 @@ answer_env_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/answer_env/data/example.jsonl
+        jsonl_fpath: resources_servers/calculator/data/example.jsonl
 ```
 
 </Tab>
 </Tabs>
 
-The agent's `resources_server.name` must match the top-level resources server instance name. For Gymnasium environments, set `max_steps` high enough for normal episodes while still providing a safety bound.
+The Agent Server's `resources_server.name` must match the top-level Resources Server instance name.
 
 ## Next Steps
 
 - Build a native environment in [Single-Step Environment](/environment-tutorials/single-step-environment).
 - Add per-rollout state in [Stateful Environment](/environment-tutorials/stateful-environment).
+- Expose native tools through [MCP Resources Server](/environment-tutorials/mcp-resources-server).
 - Review common reward designs in [Verification Patterns](/build-verifiers/verification-patterns).
 - See a multi-step Gymnasium implementation in [`resources_servers/blackjack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack).
