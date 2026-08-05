@@ -36,12 +36,25 @@ from nemo_gym.rollout_collection import (
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    _agent_participates_in_token_capture,
     _expand_input_glob,
     _failures_path_for,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
+from nemo_gym.token_id_capture import TokenCaptureStore, TokenEntry, clear_token_captures_for_rollouts
+
+
+def test_agent_participates_in_token_capture_is_scoped_per_agent() -> None:
+    global_config = {
+        "ext_agent": {"responses_api_agents": {"claude_code_agent": {"token_id_capture": True}}},
+        "native_agent": {"responses_api_agents": {"simple_agent": {}}},
+    }
+    assert _agent_participates_in_token_capture(global_config, "ext_agent") is True
+    assert _agent_participates_in_token_capture(global_config, "native_agent") is False
+    assert _agent_participates_in_token_capture(global_config, "missing") is False
+    assert _agent_participates_in_token_capture(global_config, None) is False
 
 
 @pytest.fixture
@@ -1357,3 +1370,46 @@ class TestRolloutAggregationHelper:
         # though output_jsonl_fpath is used to derive the metrics path.
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
+
+
+class TestTokenCaptureRetention:
+    """Delete-on-consume and stale-record clearing.
+
+    Both directions matter because ``TokenCaptureStore.append`` opens in "ab"
+    mode and rollout ids are deterministic: without clearing, a rerun stitches
+    the previous attempt's calls together with this one's; without deleting,
+    the capture directory grows without bound across a run.
+    """
+
+    @staticmethod
+    def _entry(rollout_id: str, mcid: str) -> TokenEntry:
+        return TokenEntry(
+            rollout_id=rollout_id,
+            model_call_id=mcid,
+            prompt_token_ids=[1, 2, 3],
+            generation_token_ids=[4, 5],
+            generation_log_probs=[-0.1, -0.2],
+        )
+
+    def test_clear_removes_stale_records_before_dispatch(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        store.append(self._entry("0-0", "old"))
+        store.mark_incomplete("0-0", "old")
+        rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+
+        clear_token_captures_for_rollouts(rows, [tmp_path])
+
+        assert store.read_entries("0-0") == []
+        assert not store.is_incomplete("0-0")
+
+    def test_clear_is_a_noop_without_capture_dirs(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        store.append(self._entry("0-0", "keep"))
+        clear_token_captures_for_rollouts([{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}], [])
+        assert len(store.read_entries("0-0")) == 1
+
+    def test_clear_skips_rows_without_a_derivable_rollout_id(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        store.append(self._entry("0-0", "keep"))
+        clear_token_captures_for_rollouts([{"unrelated": True}], [tmp_path])
+        assert len(store.read_entries("0-0")) == 1
