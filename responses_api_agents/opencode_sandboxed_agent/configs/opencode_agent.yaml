@@ -13,8 +13,6 @@ opencode_sandboxed_agent:
       # Taken from https://github.com/sdevare-nv/nv-opencode/blob/f261004b4e4269a6e193fd242e5ec8ced9a7aec0/packages/opencode/src/bench/cli.ts#L198-L325
       opencode_config:
         permission:
-          "*": allow
-
           edit:
             "**": allow
 

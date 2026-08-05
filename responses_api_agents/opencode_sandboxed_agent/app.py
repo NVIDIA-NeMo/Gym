@@ -259,12 +259,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         opencode_thinking_str = "--thinking"
 
+        # --auto is to approve not explicitly denied requests.
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)}
+        && opencode run {opencode_debug_str} {opencode_thinking_str} --auto {quote(query)}
         """
 
         opencode_config_content = json.dumps(self._create_opencode_config())
