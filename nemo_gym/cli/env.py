@@ -428,6 +428,74 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
 
 
 @exit_cleanly_on_config_error
+def prefetch(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+):  # pragma: no cover
+    """
+    Pre-warm per-server venvs without starting any servers.
+
+    Accepts the same config format as 'gym env start'. For each server in the config,
+    creates its isolated venv and installs dependencies serially — similar to how
+    RL's prefetch_venvs.py installs actor venvs at container build time.
+
+    No Ray is initialised and no server processes are started. Intended for use in
+    Dockerfile builds so venvs are ready at runtime with no network access needed.
+
+    Configuration Parameter:
+        config_paths (List[str]): Paths to YAML configuration files. Specify via Hydra: `+config_paths="[file1.yaml,file2.yaml]"`
+
+    Examples:
+
+    ```bash
+    # Pre-warm venvs for a specific config
+    config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\\
+    resources_servers/math/configs/math.yaml"
+    gym env prefetch "+config_paths=[${config_paths}]"
+    ```
+    """
+    global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+    GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
+
+    top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
+
+    seen_dirs: set = set()
+    for top_level_path in top_level_paths:
+        server_config_dict = global_config_dict[top_level_path]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+
+        first_key = list(server_config_dict)[0]
+        server_config_dict = server_config_dict[first_key]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+        second_key = list(server_config_dict)[0]
+        server_config_dict = server_config_dict[second_key]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+
+        if "entrypoint" not in server_config_dict:
+            continue
+
+        dir_path = _resolve_server_dir(Path(first_key, second_key))
+        if dir_path in seen_dirs:
+            print(f"Skipping duplicate: {dir_path}")
+            continue
+        seen_dirs.add(dir_path)
+        print(f"Pre-warming venv for: {dir_path}")
+
+        # Run only the setup (venv creation + dep install) — no server start.
+        # Serial execution reduces uv cache size (same reasoning as dry_run in RunHelper.start).
+        setup_cmd = setup_env_command(dir_path, global_config_dict, top_level_path)
+        process = run_command(setup_cmd, dir_path, server_name=top_level_path)
+        returncode = process.wait()
+        if returncode != 0:
+            print(f"ERROR: prefetch failed for {dir_path} (exit {returncode})")
+            raise SystemExit(returncode)
+
+    print("Prefetch complete.")
+
+
+@exit_cleanly_on_config_error
 def run(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
 ):  # pragma: no cover
@@ -1077,9 +1145,12 @@ def pip_list():  # pragma: no cover
     && source .venv/bin/activate \\
     && {pip_list_cmd}"""
 
-    print(f"  Package list for: {config.entrypoint}")
-    print(f"Virtual environment: {venv_path.absolute()}")
-    print("-" * 72)
+    # Only in the default human view: an explicit --format (json, freeze) is meant to be piped, so stdout
+    # must carry nothing but `uv pip list` output.
+    if not config.format:
+        print(f"  Package list for: {config.entrypoint}")
+        print(f"Virtual environment: {venv_path.absolute()}")
+        print("-" * 72)
 
     proc = run_command(command, dir_path)
     return_code = proc.wait()

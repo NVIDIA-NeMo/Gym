@@ -40,13 +40,13 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_utils import get_response_json
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,6 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
             include_reference_passage=is_protocol,
             reference_passage=reference_passage,
         )
-
         reward = 1.0 if is_equal else 0.0
         return LabbenchVLMVerifyResponse(
             **body.model_dump(),
@@ -212,14 +211,15 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
 
         async with self._judge_sem:
             try:
-                raw = await self.server_client.post(
+                judge_response = await call_judge(
+                    self.server_client,
                     server_name=cfg.judge_model_server.name,
                     url_path="/v1/responses",
                     json=params,
+                    response_model=NeMoGymResponse,
                 )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(raw))
-            except Exception as e:
-                print(f"[labbench2_vlm] judge HTTP error: {type(e).__name__}: {e}", flush=True)
+            except JudgeError as e:
+                print(f"[labbench2_vlm] judge HTTP error: {e}", flush=True)
                 raise
 
         eval_record = JudgeEvaluation(
