@@ -22,6 +22,7 @@ construction, scoring, response building) is delegated to a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import shutil
@@ -952,6 +953,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
     config: StirrupAgentWrapperConfig
     sem: Semaphore = None
+    inflight: int = 0  # rollouts holding a concurrency slot right now
     task_strategy: TaskStrategy = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -1160,8 +1162,23 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
     # -- /run -------------------------------------------------------------
 
-    async def run(self, request: Request, body: StirrupRunRequest):
+    @contextlib.asynccontextmanager
+    async def _rollout_slot(self):
+        """Hold a concurrency slot and count it.
+
+        The count is stamped onto timeout failures so a resume can distinguish a
+        task starved by load from one that is pathological on its own.
+        """
         async with self.sem:
+            self.inflight += 1
+            try:
+                yield
+            finally:
+                self.inflight -= 1
+
+    async def run(self, request: Request, body: StirrupRunRequest):
+        async with self._rollout_slot():
+            attempt_started = time.monotonic()
             cookies = request.cookies
             body_dict = body.model_dump()
 
@@ -1252,6 +1269,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     instance_hint = task_info.get("instance_id", task_info.get("task_id", "unknown"))
                     print(f"[stirrup-judge_only-missing] {instance_hint}: {reason}", flush=True)
                     return self._build_failed_run_payload(
+                        attempt_started=attempt_started,
                         body_dict=body_dict,
                         fixed_params=fixed_params,
                         task_info=task_info,
@@ -1339,6 +1357,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                         flush=True,
                     )
                     return self._build_failed_run_payload(
+                        attempt_started=attempt_started,
                         body_dict=body_dict,
                         fixed_params=fixed_params,
                         task_info=task_info,
@@ -1371,6 +1390,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     reason = f"rerun_incomplete: rollout did not persist a finish marker at {deliverables_dir}"
                     print(f"[stirrup-incomplete] {instance_hint}: {reason}", flush=True)
                     return self._build_failed_run_payload(
+                        attempt_started=attempt_started,
                         body_dict=body_dict,
                         fixed_params=fixed_params,
                         task_info=task_info,
@@ -1426,6 +1446,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     flush=True,
                 )
                 return self._build_failed_run_payload(
+                    attempt_started=attempt_started,
                     body_dict=body_dict,
                     fixed_params=fixed_params,
                     task_info=task_info,
@@ -1531,6 +1552,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         reason: str,
         skipped: bool,
         error_class: Optional[str] = None,
+        attempt_started: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Return a verify-response-shaped dict for runs that never produced a deliverable.
 
@@ -1539,8 +1561,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
         - ``_ng_no_persist=True`` for ``kill_shaped``: not written anywhere;
           resume's set-difference on the main jsonl re-dispatches the task.
-        - ``_ng_failure_terminal=True`` for ``timeout_exceeded`` / ``skipped``:
-          one sidecar entry, never retried.
+        - ``_ng_failure_terminal=True`` for ``skipped``: one sidecar entry,
+          never retried (the sample itself is unusable).
         - Otherwise (``legitimate``, ``transient``, ``incomplete``): sidecar
           entry per attempt; retried up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` on
           chain resume.
@@ -1591,6 +1613,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         payload["reward"] = 0.0
         payload["skipped"] = skipped
         payload["error_message"] = reason
+        if attempt_started is not None:
+            # How long this attempt actually ran. Without it a timed-out task has
+            # no duration on record, so longest-first dispatch cannot order the
+            # very tasks it exists to help.
+            payload.setdefault("elapsed_seconds", max(0.0, time.monotonic() - attempt_started))
         if error_class is not None:
             payload["error_class"] = error_class
             payload[NG_FAILURE_CLASS_KEY] = error_class
@@ -1598,11 +1625,21 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 # Don't persist: resume's set-difference on the main jsonl
                 # naturally re-dispatches. Bounded across hops by per-task timeout.
                 payload[NG_NO_PERSIST_KEY] = True
-            elif error_class in ("timeout_exceeded", "skipped"):
-                # Sidecar entry written once; chain-hop 2 will not retry.
+            elif error_class == "skipped":
+                # The sample itself is unusable, so retrying cannot help.
                 payload[NG_TERMINAL_KEY] = True
-            # 'legitimate' / 'transient' / 'incomplete': sidecar entry per
-            # attempt; retried by chain-hop / resume up to
+            elif error_class == "timeout_exceeded":
+                # Retryable: a per-task timeout measures the attempt's conditions,
+                # not the task. Per-stream decode slows as in-flight count rises,
+                # so a task that overruns at concurrency 200 can finish well
+                # inside the cap at 16. Marking it terminal converted recoverable
+                # contention into permanent data loss -- and hid it, because
+                # aggregate rollouts/hr IMPROVES as this gets worse. The attempt
+                # counter still bounds a genuinely pathological task.
+                payload["_ng_timeout_inflight"] = self.inflight
+                payload["_ng_timeout_concurrency_limit"] = self.config.concurrency
+            # 'legitimate' / 'transient' / 'incomplete' / 'timeout_exceeded':
+            # sidecar entry per attempt; retried by chain-hop / resume up to
             # NEMO_GYM_MAX_ROLLOUT_ATTEMPTS (default 3).
         return payload
 
