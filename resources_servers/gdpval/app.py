@@ -329,6 +329,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
+        if self.config.judge_media_mode == "images_and_text":
+            from resources_servers.gdpval.media_conversion import validate_images_and_text_dependencies
+
+            # This mode promises both page images and supplemental PDF text.
+            # Refuse to start instead of silently grading with weaker input.
+            validate_images_and_text_dependencies()
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
