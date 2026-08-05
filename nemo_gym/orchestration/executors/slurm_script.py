@@ -75,7 +75,6 @@ def _render_pool_directives(pool_name: str, pool: NodePool) -> list[str]:
     return lines
 
 
-<<<<<<< HEAD
 def _resolve_env(env: dict[str, str]) -> str:
     return "\n".join(f"export {k}={shlex.quote(v)}" for k, v in env.items())
 
@@ -84,19 +83,12 @@ def _render_service_command(name: str, container: str, command: str, env: dict[s
     var = bash_var(name)
     env_block = _resolve_env(env) if env else ""
     prefix = f"{env_block}\n" if env_block else ""
-=======
-def _render_service_command(name: str, container: str, command: str) -> str:
-    var = bash_var(name)
->>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
     return (
         f"# service: {name}\n"
-<<<<<<< HEAD
         f"{prefix}"
-=======
->>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
         f"srun --overlap --no-container-mount-home --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
         f"{var}_PID=$!"
     )
@@ -129,11 +121,7 @@ def build_sbatch_script(
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     service_commands = "\n\n".join(
-<<<<<<< HEAD
         _render_service_command(name, service.container, _BUILDERS[type(service)](service), service.env or None)
-=======
-        _render_service_command(name, service.container, _BUILDERS[type(service)](service))
->>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
         for name, service in config.services.items()
     )
 
@@ -160,16 +148,11 @@ def build_sbatch_script(
         prepare_cmd=prepare_cmd,
     )
     prepare_command = ""
-<<<<<<< HEAD
     driver_env_block = _resolve_env(config.driver.env) if config.driver.env else ""
     driver_env_prefix = f"{driver_env_block}\n" if driver_env_block else ""
     driver_command = (
         f"{gym_cmd}\n"
         f"{driver_env_prefix}"
-=======
-    driver_command = (
-        f"{gym_cmd}\n"
->>>>>>> fcca3a82814101d5234f5994b8d8c8d34e2d1749
         f"srun --overlap --no-container-mount-home --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
