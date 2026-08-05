@@ -24,7 +24,10 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import Field
+from pydantic import Field, PrivateAttr
+
+
+LOG = logging.getLogger(__name__)
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -46,6 +49,7 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.token_id_capture import current_capture_context
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -162,6 +166,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
 
+    # Supply the engine the exact tokens of the call this request continues, instead of letting the
+    # chat template re-render them from text. See _apply_prefix_supply below. Off by default: it
+    # requires a backend that honours required_prefix_token_ids; a stock vLLM server does not.
+    supply_prefix_token_ids: bool = False
+
     # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
     is_responses_native: bool = False
 
@@ -171,16 +180,19 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # sent. On-policy RL requires generation to match the sampling distribution the policy is
     # optimized under, and nothing else in the request path supplies those values.
     #
-    # The usual case is an absent parameter, not a conflicting one. An external harness need not send
-    # sampling params at all -- across captured runs the Claude Code CLI sends only max_tokens and
-    # stream -- and the converters forward a field only when the caller set it, so the outbound body
-    # carries no temperature or top_p and the engine falls back to its own schema default. That
-    # default has no relationship to the trainer's config: NeMo-RL's worker asserts
-    # request.temperature == generation_config["temperature"] and fails the call outright. top_k is
-    # worth pinning for the same reason and is not mapped by the Anthropic converter at all.
+    # Two cases, both observed. Most often the parameter is absent: request handling is set-or-omit
+    # throughout, so a field the caller did not set is not forwarded, and harnesses built for
+    # interactive serving have no reason to send sampling params. The outbound body then carries no
+    # temperature or top_p and the engine applies its own schema default. Less often the parameter is
+    # present and wrong: a harness that sets temperature on its own auxiliary calls, such as context
+    # compression or title generation, sends a value that is not the trainer's.
     #
-    # A harness that does send sampling params would equally win over the trainer's config, so these
-    # replace rather than only fill in.
+    # Either way the engine runs at a distribution the policy is not optimized under. A training
+    # worker that validates the request against its generation config rejects the call outright; one
+    # that does not generates off-policy and reports nothing.
+    # Because both cases are real, these values replace rather than only fill in. top_k is pinned for
+    # the same reason and is not mapped by the Anthropic converter at all, so whatever arrives is
+    # always a default.
     #
     # The integrating training framework sets these to its generation sampling params; Gym only
     # enforces them and holds no knowledge of any specific framework. Unset means no override.
@@ -590,7 +602,61 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
-        return self._apply_sampling_overrides(body_dict)
+        body_dict = self._apply_sampling_overrides(body_dict)
+
+        body_dict = self._apply_prefix_supply(body_dict)
+
+        return body_dict
+
+    # [supplied, eligible]. A plain list so it is mutable without a pydantic field.
+    _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0])
+
+    def _apply_prefix_supply(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Hand the engine the previous call's exact tokens, so this prompt extends them.
+
+        Without this the engine builds every prompt by re-rendering the whole
+        conversation through the chat template. Two things go wrong. Re-tokenizing
+        an assistant turn can produce a different (equally valid) split than the
+        one the model sampled, so the new prompt does not extend the old
+        prompt-plus-generation. And for a reasoning model the template drops
+        earlier thinking entirely, so the tokens are not merely re-split, they are
+        gone. Either way the trajectory cannot be chained and training silently
+        collapses to the first call.
+
+        Supplying the parent's cumulative ids makes a backend that implements the splice keep them
+        verbatim and append only the newly rendered tail, so contiguity holds by
+        construction and stripped reasoning is restored.
+
+        The rule is conservative on purpose: the splice applies whatever it is
+        given without checking that it belongs to this conversation, so a wrong
+        prefix would silently generate from a conversation the harness never
+        asked for. Supply only on a unique, verified parent; otherwise send the
+        request untouched and let it start a new chain. A fallback costs a cold
+        KV cache and a shorter trained chain, never a wrong answer.
+        """
+        if not self.config.supply_prefix_token_ids:
+            return body_dict
+        self._prefix_supply_counts[1] += 1
+        context = current_capture_context()
+        if context is None:
+            # Not a correlated rollout call, so there is no lineage to supply from.
+            return body_dict
+        # Resolved before dispatch, from the request as the server received it. Resolving here
+        # instead would run against a body that Responses-to-Chat conversion and preprocessing
+        # have already reshaped, which is not the representation the index was built from.
+        if not context.parent_tokens:
+            return body_dict
+        body_dict["required_prefix_token_ids"] = list(context.parent_tokens)
+        # Record that this call's prefix was supplied, both on the durable record (so a run can be
+        # audited afterwards from the capture files) and as a running ratio in the log. Supply only
+        # fires on a unique, verified parent, so supplied/total is the honest measure of how often
+        # it applied rather than falling back to re-rendering.
+        context.prefix_supplied = True
+        self._prefix_supply_counts[0] += 1
+        supplied, total = self._prefix_supply_counts[0], self._prefix_supply_counts[1]
+        if total and supplied % 10 == 0:
+            LOG.info("prefix supply: %d/%d calls supplied (%.0f%%)", supplied, total, 100.0 * supplied / total)
+        return body_dict
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -758,8 +824,15 @@ class VLLMModel(SimpleResponsesAPIModel):
             # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
             # `prompt_str`) can be built with different chat template settings than
             # the actual generation request.
+            #
+            # ``required_prefix_token_ids`` is here for the same reason. Generation
+            # applies the supplied prefix, so without it here the recorded
+            # prompt_token_ids is a plain re-render of the conversation and does not
+            # extend the previous call, so the chain looks broken even though the
+            # engine generated from the right tokens. Measured: 0/9 links contiguous
+            # with supply on until this key was forwarded.
             tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
+            for key in ("model", "messages", "tools", "chat_template_kwargs", "required_prefix_token_ids"):
                 if key in body_dict:
                     tokenize_body_dict[key] = body_dict[key]
 
@@ -1038,8 +1111,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             out["return_token_ids"] = True
             out["return_tokens_as_token_ids"] = True
 
-        # This path never runs _preprocess_chat_completion_create_params -- chat_completions()
-        # branches here before preprocessing -- so the pin has to be applied again. vLLM accepts
+        # This path never runs _preprocess_chat_completion_create_params, because chat_completions()
+        # branches here before preprocessing, so the pin has to be applied again. vLLM accepts
         # the same sampling field names on /v1/completions, and the body is forwarded as raw JSON,
         # so params without a first-class OpenAI completion field (top_k, min_p) pass through.
         return self._apply_sampling_overrides(out)
