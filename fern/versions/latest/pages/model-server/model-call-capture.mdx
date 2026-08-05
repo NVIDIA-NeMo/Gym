@@ -81,8 +81,8 @@ totals = aggregate_model_call_metrics(store, rollout_id)
 `ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It
 contains a unique server-generated `model_call_id`, the protocol `response_id` when present, typed
 `model_ref`, wall-clock `started_at` and `completed_at`, a `call_index`, API dialect, token and cache
-usage, latency, error details, tool calls, reasoning content, and the captured request and response.
-`started_at` is recorded immediately
+usage, `response_status`, normalized `finish_reason`, latency, error details, tool calls, reasoning
+content, and the captured request and response. `started_at` is recorded immediately
 before invoking the downstream ASGI application; `completed_at` is recorded when that invocation
 returns or raises, before capture parsing and persistence. Both are UTC Unix seconds for external
 trace correlation; durations use the monotonic latency fields. `call_index` reflects durable append
@@ -108,9 +108,14 @@ ng_model_call_capture = {
 }
 ```
 
-`metrics.num_calls` is the number of captured model calls. Attached calls omit raw request and
-response payloads; those remain in `CaptureStore`. Resume attempts use an `-a<n>` suffix so their
-data does not mix with an earlier attempt. Before dispatch, the collector clears any existing capture
+`metrics.num_calls` is the number of captured model calls. After successful trajectory projection, attached calls omit request
+and response payloads; those remain in `CaptureStore`. If projection fails, they remain attached with a
+`trajectory_projection_failed` gap. [`ng_trajectory`](/reference/trajectory-capabilities) includes payload copies in the rollout
+record, except for LabBench rows carrying the `multimodal_history_redacted` gap. Each call stores the exact model request, so
+cumulative multi-turn inputs can make rollout records large and should be handled with the same access controls as the capture
+directory. Persisted rollout JSONL retains these payloads; W&B rollout tables omit `ng_trajectory` and model-call request and
+response payloads. Resume attempts use an
+`-a<n>` suffix so their data does not mix with an earlier attempt. Before dispatch, the collector clears any existing capture
 for that exact rollout-attempt id, including a kill-shaped attempt being redispatched.
 
 The attachment is additive: it does not replace or rewrite the existing response, reward,
@@ -119,17 +124,16 @@ and aggregate-metrics requests exclude it.
 
 ## Agent observations
 
-Supported Agent Servers may also attach `ng_agent_observations` when observability is enabled. It
-contains an unordered `records` list of typed agent invocations, tool-call intervals, explicit
-context-compaction events, and sandbox observations. `gaps` reports unavailable evidence. An
+Supported Agent Servers may also attach `ng_agent_observations` when observability is enabled. Agent evidence and model-call
+capture are collected independently. The attachment contains an unordered `records` list of typed agent invocations,
+tool-call intervals, explicit context-compaction events, and sandbox observations. `gaps` reports unavailable evidence. An
 invocation's `conversation` contains the ordered, normalized items exposed by that integration.
 
 Agent observations and model-call capture are separate evidence. Join an invocation's model-call
 references by `model_call_id`, or by the exact `(model_ref, response_id)` pair when the harness sees
 the protocol response ID. An integration may resolve an otherwise hidden call only through a
 producer-specific, unique exact match against its retained artifact and the raw capture. Ambiguous
-matches remain unowned; timestamps or list position alone are never sufficient. The full model
-request and response remain in `CaptureStore`; rollout attachments intentionally omit them.
+matches remain unowned; timestamps or list position alone are never sufficient.
 
 Compaction records distinguish the calls immediately before and after the context change from
 `model_calls` used to perform the compaction. Compaction calls are exact references to calls owned by
@@ -141,8 +145,9 @@ measured interval, and `timing_source` identifies executor, harness, or artifact
 
 Model-visible tool calls and results remain in `AgentInvocation.conversation` as `function_call` and
 `function_call_output` items. Execution timing and outcome, when observable, live in
-`ToolCallObservation` and join through `(invocation_id, tool_call_id)`. A tool observation may also
-reference its enclosing `sandbox_id`; concurrent calls retain independent timing and outcome.
+`ToolCallObservation` and join through `(invocation_id, tool_call_id)`. The `ng_trajectory` projection combines these fields
+with the matching model-visible output. A tool observation may also reference its enclosing `sandbox_id`; concurrent calls
+retain independent timing and outcome.
 
 Each `SandboxObservation` covers one sandbox execution. Usage fields contain measured values only;
 configured limits are never reported as usage. Integrations emit only facts available at their

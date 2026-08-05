@@ -36,9 +36,12 @@ from nemo_gym.rollout_collection import (
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    _attach_trajectory_record,
+    _build_trajectory_record,
     _expand_input_glob,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _rollout_for_wandb,
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
@@ -97,6 +100,198 @@ class TestRolloutCollection:
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
         }
+
+    def test_build_trajectory_record_merges_all_evidence_sources(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        result = {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "status": "completed",
+                        "conversation": [
+                            {"type": "function_call_output", "call_id": "tool-1", "output": "result"},
+                            {"type": "function_call_output", "call_id": "observed-only", "output": "new"},
+                        ],
+                    }
+                ],
+                "tool_calls": [
+                    {"invocation_id": "root", "tool_call_id": "producer-only", "output": "kept"},
+                    {
+                        "invocation_id": "root",
+                        "tool_call_id": "tool-1",
+                        "output": "stale",
+                        "status": "failed",
+                        "started_at": 10.2,
+                        "completed_at": 10.4,
+                        "duration_ms": 200.0,
+                    },
+                ],
+            },
+            "ng_agent_observations": {
+                "source": "test",
+                "records": [
+                    {
+                        "kind": "agent_invocation",
+                        "invocation_id": "root",
+                    },
+                    {
+                        "kind": "agent_invocation",
+                        "invocation_id": "observed",
+                    },
+                    {
+                        "kind": "tool_call",
+                        "invocation_id": "root",
+                        "tool_call_id": "tool-1",
+                    },
+                    {
+                        "kind": "tool_call",
+                        "invocation_id": "root",
+                        "tool_call_id": "observed-only",
+                        "status": "completed",
+                        "started_at": 10.2,
+                        "completed_at": 10.4,
+                        "duration_ms": 200.0,
+                    },
+                ],
+            },
+            "ng_model_call_capture": {"calls": [{"model_call_id": "capture-only"}]},
+        }
+
+        trajectory = _build_trajectory_record(row, result)
+        producer_only, merged, observed_only = trajectory.tool_calls
+
+        assert [invocation.invocation_id for invocation in trajectory.invocations] == ["root", "observed"]
+        assert trajectory.invocations[0].status == "completed"
+        assert len(trajectory.invocations[0].conversation) == 2
+        assert [call.model_call_id for call in trajectory.model_calls] == ["capture-only"]
+        assert producer_only.tool_call_id == "producer-only" and producer_only.output == "kept"
+        assert (merged.output, merged.status, merged.started_at, merged.completed_at, merged.duration_ms) == (
+            "result",
+            "failed",
+            10.2,
+            10.4,
+            200.0,
+        )
+        assert observed_only.tool_call_id == "observed-only" and observed_only.output == "new"
+
+    def test_build_trajectory_record_normalizes_identity_and_merges_model_calls(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3, "task_id": "collector-task"}
+        result = {
+            "ng_trajectory": {
+                "task_id": "producer-task",
+                "rollout_id": "producer-rollout",
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "producer-task",
+                        "rollout_id": "producer-rollout",
+                        "turn_no": 1,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                    }
+                ],
+                "model_calls": [
+                    {"model_call_id": "producer-only", "request": "kept"},
+                    {
+                        "model_call_id": "shared",
+                        "request": "stale",
+                        "response_metadata": {"model": "producer-model"},
+                    },
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "shared",
+                        "request": "captured",
+                        "response": {"status": "incomplete"},
+                        "response_status": "completed",
+                    },
+                    {"model_call_id": "capture-only", "request": "new"},
+                ]
+            },
+        }
+
+        trajectory = _build_trajectory_record(row, result)
+
+        assert (trajectory.task_id, trajectory.rollout_id) == ("collector-task", "2-3")
+        assert (trajectory.turns[0].task_id, trajectory.turns[0].rollout_id) == ("collector-task", "2-3")
+        assert {gap.code for gap in trajectory.gaps} >= {"producer_trajectory_identity_mismatch"}
+        assert [call.model_call_id for call in trajectory.model_calls] == ["producer-only", "shared", "capture-only"]
+        assert [call.request for call in trajectory.model_calls] == ["kept", "captured", "new"]
+        assert trajectory.model_calls[1].response_metadata.model_dump(exclude_none=True) == {
+            "model": "producer-model",
+            "response_status": "completed",
+        }
+
+    def test_trajectory_projection_failure_preserves_rollout(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        result = {
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "model-1",
+                        "latency_total_ms": -1,
+                        "request": {"input": "question"},
+                        "response": {"output": "answer"},
+                    }
+                ]
+            }
+        }
+
+        _attach_trajectory_record(row, result)
+
+        assert "ng_trajectory" not in result
+        assert result["ng_model_call_capture"]["gaps"][-1]["code"] == "trajectory_projection_failed"
+        assert result["ng_model_call_capture"]["calls"][0]["request"] == {"input": "question"}
+        assert result["ng_model_call_capture"]["calls"][0]["response"] == {"output": "answer"}
+
+    def test_trajectory_projection_failure_without_attachment_keeps_gap(self, monkeypatch) -> None:
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        result = {"ng_trajectory": {}}
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_build_trajectory_record", MagicMock(side_effect=ValueError))
+
+        _attach_trajectory_record(row, result)
+
+        assert result["ng_trajectory"]["gaps"] == [
+            {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
+        ]
+
+    def test_rollout_for_wandb_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
+        result = {
+            "response": {"output": "existing rollout content"},
+            "ng_trajectory": {"invocations": [{"conversation": ["trajectory secret"]}]},
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "model-1",
+                        "request": {"input": "request secret"},
+                        "response": {"output": "response secret"},
+                        "request_raw": "raw request secret",
+                        "response_raw": "raw response secret",
+                    }
+                ],
+            },
+        }
+
+        sanitized = _rollout_for_wandb(result)
+
+        assert "ng_trajectory" not in sanitized
+        assert sanitized["ng_model_call_capture"]["calls"] == [{"model_call_id": "model-1"}]
+        assert sanitized["response"] == result["response"]
+        assert result["ng_model_call_capture"]["calls"][0]["request"] == {"input": "request secret"}
+        assert "ng_trajectory" in result
+        malformed = (
+            {"ng_model_call_capture": "secret"},
+            {"ng_model_call_capture": {"calls": {"request": "secret"}}},
+            {"ng_model_call_capture": {"calls": ["secret", {"request": "secret"}]}},
+        )
+        for malformed_result in malformed:
+            sanitized = _rollout_for_wandb(malformed_result)
+            assert b"secret" not in orjson.dumps(sanitized)
 
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
     async def test_run_examples_logs_failed_run_when_request_debug_enabled(
@@ -664,8 +859,54 @@ class TestRolloutCollection:
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])
+    async def test_run_from_config_creates_missing_output_dir(
+        self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool
+    ) -> None:
+        """--output under a directory that doesn't exist yet must not raise.
+
+        The first artifact written is the materialized inputs, so a mkdir placed after it (or only
+        alongside the rollouts write) leaves this failing. resume_from_cache=True takes the same
+        path here because neither cached file exists, and must not be tripped up by the new dir.
+        """
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}}) + "\n"
+        )
+        # Two levels deep so `parents=True` is exercised, not just a single missing dir.
+        output_jsonl_fpath = tmp_path / "results" / "nested" / "rollouts.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=resume_from_cache,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {"usage": {"abc usage": 1}}}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_bytes(orjson.dumps([]))
+                return metrics_fpath
+
+        await Helper().run_from_config(config)
+
+        # All four artifacts share output_fpath's parent, so one mkdir has to cover all of them.
+        assert config.materialized_jsonl_fpath.exists()
+        assert output_jsonl_fpath.exists()
+        assert _failures_path_for(output_jsonl_fpath).exists()
+        assert output_jsonl_fpath.with_name("rollouts_aggregate_metrics.json").exists()
+
+    @pytest.mark.parametrize("resume_from_cache", [False, True])
+    @pytest.mark.parametrize("redact_payloads", [False, True])
     async def test_run_from_config_replaces_stale_capture_before_dispatch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool, redact_payloads: bool
     ) -> None:
         from nemo_gym.base_responses_api_model import CaptureStore
 
@@ -700,18 +941,37 @@ class TestRolloutCollection:
                 [example] = examples
                 assert example[TASK_INDEX_KEY_NAME] == 0 and example[ROLLOUT_INDEX_KEY_NAME] == 0
                 assert store.read("0-0") == []
+                request = {"input": [{"type": "input_image", "image_url": "data:image/png;base64,secret"}]}
                 store.record(
                     "0-0",
-                    {"model_call_id": "fresh", "dialect": "responses", "request": {}, "response": {}},
+                    {"model_call_id": "fresh", "dialect": "responses", "request": request, "response": {}},
                 )
                 future = Future()
-                future.set_result((example, {"response": {"usage": {}}}))
+                result = {"response": {"usage": {}}}
+                if redact_payloads:
+                    result["ng_trajectory"] = {
+                        "schema_version": "1.0",
+                        "task_id": "0",
+                        "rollout_id": "0-0",
+                        "gaps": [{"code": "multimodal_history_redacted"}],
+                    }
+                future.set_result((example, result))
                 return [future]
 
         results = await Helper().run_from_config(config)
 
         assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["fresh"]
         assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["fresh"]
+        trajectory_request = results[0]["ng_trajectory"]["model_calls"][0]["request"]
+        trajectory_response = results[0]["ng_trajectory"]["model_calls"][0]["response"]
+        if redact_payloads:
+            assert trajectory_request is None and trajectory_response is None
+        else:
+            assert trajectory_request["input"][0]["type"] == "input_image" and trajectory_response == {}
+        assert "request" not in results[0]["ng_model_call_capture"]["calls"][0]
+        assert store.read("0-0")[0]["request"]["input"][0]["type"] == "input_image"
+        if redact_payloads:
+            assert "data:image/png;base64,secret" not in orjson.dumps(results[0]).decode()
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -1000,6 +1260,7 @@ class TestRolloutCollection:
                 "response": {"usage": {"tokens": 10}},
                 "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
                 "ng_model_call_capture": {"calls": [{"request": "large"}]},
+                "ng_trajectory": {"model_calls": [{"request": "large"}]},
             },
             {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 12}}},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 8}}},
@@ -1031,6 +1292,7 @@ class TestRolloutCollection:
             assert "responses_create_params" not in item
             assert "ng_agent_observations" not in item
             assert "ng_model_call_capture" not in item
+            assert "ng_trajectory" not in item
             assert "usage" in item["response"]
 
     async def test_call_aggregate_metrics_multiple_agents(
