@@ -11,7 +11,7 @@ A Resources Server implements the Environment interface related to: its tools, s
 <Info>
 **Agent Server context**
 
-The Agent is the behavior that decides what to do next, typically using an LLM-based policy. 
+The Agent is the behavior that decides what to do next, typically with different components like a Harness and a policy-model. 
 The Agent Server is the HTTP transport for two internal methods:
 
 - `run()` is exposed as `/run` and implements part of the episode orchestration associated with the Resources Server seed session, delegation of the Agent loop to responses() and call to the verifier.
