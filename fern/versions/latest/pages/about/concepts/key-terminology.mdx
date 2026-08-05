@@ -24,7 +24,7 @@ Two compositions matter:
 | **Agent** | **Model** + **Agent harness** | The harness turns model calls into a loop with tools and stop conditions. |
 | **Environment** | **Dataset** + **Agent harness** + **Verifier** + **State** | Everything needed to run and score a task. The **model is outside** the environment. |
 
-The **model** is the LLM you call — local weights or a remote API endpoint. In Gym it is usually exposed by the **Model server** (or your harness can call an endpoint directly). The same environment can be used as a **benchmark** (fixed eval) or a **training environment** (learn from rewards / synthetic data).
+The **model** is the LLM you call — local weights or a remote API endpoint. In Gym it is usually exposed by the **Model server** (or your harness can call an endpoint directly). The same environment can be used rollout generation generation on a **benchmark** (fixed eval) or used for **policy-model training** (learn from rewards / synthetic data).
 
 | Concept | NeMo Gym component |
 | --- | --- |
