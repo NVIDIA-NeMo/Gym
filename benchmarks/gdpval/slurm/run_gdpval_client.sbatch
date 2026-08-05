@@ -54,9 +54,19 @@ set -a
 # is loaded second so stale placeholder endpoint values cannot win.
 # shellcheck disable=SC1090
 source "${PRIVATE_ENV}"
+# The dataset profile describes WHICH batch this run is, so it must beat the
+# private file's site defaults. Without this the profile arrives (the monitor
+# forwards GDPVAL_ENV_FILE through its --export allowlist) and is then dropped,
+# so every run silently validates against whatever batch the private file names.
+if [[ -n "${GDPVAL_ENV_FILE:-}" ]]; then
+  [[ -r "${GDPVAL_ENV_FILE}" ]] || { echo "ERROR: GDPVAL_ENV_FILE is not readable: ${GDPVAL_ENV_FILE}" >&2; exit 1; }
+  # shellcheck disable=SC1090
+  source "${GDPVAL_ENV_FILE}"
+fi
 # shellcheck disable=SC1090
 source "${ENDPOINT_ENV}"
 set +a
+# Already applied above; unset so the runner does not source it a second time.
 unset GDPVAL_ENV_FILE
 
 ACTION="${GDPVAL_ACTION:-run}"
