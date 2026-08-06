@@ -22,7 +22,7 @@
 # prepare script resolve relative to your working directory. Results land in
 # ./results/hle.
 #
-#   ./hle.sh                          # full benchmark (2158 questions)
+#   ./hle.sh                          # full benchmark (2158 questions x 1)
 #   LIMIT=3 ./hle.sh                  # quick smoke
 #   OUT=<dir> PARALLEL=<n> ./hle.sh   # output dir, concurrency
 #
