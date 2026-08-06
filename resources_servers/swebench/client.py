@@ -19,31 +19,34 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.server_utils import ServerClient
 
 
-global_config_dict = get_global_config_dict()
+async def main():
+    global_config_dict = get_global_config_dict()
+
+    with open(global_config_dict["benchmark_jsonl"]) as f:
+        first_example = json.loads(next(f))
+
+    first_example |= {
+        "responses_create_params": {"input": []},
+        "response": {
+            "output": [],
+            "id": "",
+            "created_at": 0,
+            "model": "",
+            "object": "response",
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+    }
+
+    server_client = ServerClient.load_from_global_config()
+    result = await server_client.post(
+        server_name="swebench_resources_server",
+        url_path="/verify",
+        json=first_example,
+    )
+    print(json.dumps(await result.json(), indent=4))
 
 
-with open(global_config_dict["benchmark_jsonl"]) as f:
-    first_example = json.loads(next(f))
-
-first_example |= {
-    "responses_create_params": {"input": []},
-    "response": {
-        "output": [],
-        "id": "",
-        "created_at": 0,
-        "model": "",
-        "object": "response",
-        "parallel_tool_calls": False,
-        "tool_choice": "auto",
-        "tools": [],
-    },
-}
-
-server_client = ServerClient.load_from_global_config()
-task = server_client.post(
-    server_name="swebench_resources_server",
-    url_path="/verify",
-    json=first_example,
-)
-result = run(task)
-print(json.dumps(run(result.json()), indent=4))
+if __name__ == "__main__":
+    run(main())
