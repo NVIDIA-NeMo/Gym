@@ -23,7 +23,7 @@
 #
 # Judge prompts and reward values are deliberately NOT defined in this config:
 # - Prompts live in configs/verifier_prompt_templates.yaml under explicit
-#   prompt_version keys (see docs/REWARD_DESIGN.md section 10 for the
+#   prompt_version keys (see docs/REWARD-DESIGN.md section 10 for the
 #   rubric revision protocol).
 # - Numeric values live only in util.py (ANSWER_REWARDS /
 #   EXPLANATION_REWARDS); judges return strict-JSON classes, never numbers,

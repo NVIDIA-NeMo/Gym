@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
-
 from util import (
     AnswerJudgment,
     ExpectedValues,
@@ -189,9 +188,7 @@ def test_text_extraction_handles_roles_and_multiple_output_blocks() -> None:
             ]
         ),
     )
-    assert extract_policy_prompt(body) == (
-        "DEVELOPER:\nUse only passage evidence.\n\nUSER:\nWho is supported?"
-    )
+    assert extract_policy_prompt(body) == ("DEVELOPER:\nUse only passage evidence.\n\nUSER:\nWho is supported?")
     assert extract_last_assistant_text(body) == ("The parent.\nThey handed over the book.")
 
 

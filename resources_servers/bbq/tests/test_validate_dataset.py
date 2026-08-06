@@ -5,11 +5,10 @@ import importlib.util
 import json
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parents[1]
 
-spec = importlib.util.spec_from_file_location(
-    "validate_dataset", ROOT / "scripts/validate_dataset.py"
-)
+spec = importlib.util.spec_from_file_location("validate_dataset", ROOT / "scripts/validate_dataset.py")
 validate_dataset = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(validate_dataset)
 
@@ -35,7 +34,7 @@ def test_fixture_rows_pass_row_contract(example_rows):
 
 
 def test_fixture_file_passes_with_documented_relaxation(tmp_path, example_rows, monkeypatch):
-    # The five curated fixtures predate DATA_SPEC and share the "teen athlete"
+    # The five curated fixtures predate DATA-SPEC and share the "teen athlete"
     # actor label across three Age rows; the section 5 cap is 2.
     assert run_main(tmp_path, example_rows, monkeypatch, ["--max-actor-label-rows", "3"]) == 0
 
@@ -63,9 +62,7 @@ def test_rejects_mcq_options(tmp_path, example_rows, monkeypatch):
 
 
 def test_rejects_ambig_row_with_decisive_detail(tmp_path, example_rows, monkeypatch):
-    rows = copy.deepcopy(
-        [r for r in example_rows if r["expected_values"]["context_condition"] == "ambig"][:1]
-    )
+    rows = copy.deepcopy([r for r in example_rows if r["expected_values"]["context_condition"] == "ambig"][:1])
     rows[0]["expected_values"]["decisive_detail"] = "the neighbor mistyped every query"
     assert run_main(tmp_path, rows, monkeypatch) == 1
 
@@ -75,8 +72,7 @@ def test_rejects_missing_decoy_contract(tmp_path, example_rows, monkeypatch):
         [
             r
             for r in example_rows
-            if r["expected_values"]["context_condition"] == "disambig"
-            and r["expected_values"]["actor_count"] >= 3
+            if r["expected_values"]["context_condition"] == "disambig" and r["expected_values"]["actor_count"] >= 3
         ][:1]
     )
     rows[0]["expected_values"]["wrong_neutral_actor_labels"] = []

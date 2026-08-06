@@ -208,7 +208,7 @@ any rollout collection.
 Tasks are synthetic (no raw BBQ benchmark rows are ingested), generated with
 `gpt-oss-120b` via a NeMo Data Designer pipeline with decontamination against
 the BBQ evaluation set, and gated by the anti-shortcut and confound checks in
-[docs/DATA_SPEC.md](docs/DATA_SPEC.md). Validate any dataset with
+[docs/DATA-SPEC.md](docs/DATA-SPEC.md). Validate any dataset with
 `scripts/validate_dataset.py` before treating it as Gym-ready. This
 repository ships only the five reviewed, source-traced fixtures; the full
 training dataset is not included. Note that the five-row fixture file itself
@@ -237,8 +237,8 @@ scripts/validate_dataset.py         dataset contract + anti-shortcut gates
 scripts/judge_preflight.py          live judge schema-compat check
 scripts/promote_live_rollouts.py    refresh reference rollouts from a live batch
 tests/                              mocked unit and integration tests
-docs/REWARD_DESIGN.md               complete reward contract
-docs/DATA_SPEC.md                   dataset specification and gates
+docs/REWARD-DESIGN.md               complete reward contract
+docs/DATA-SPEC.md                   dataset specification and gates
 ```
 
 ## Licensing

@@ -13,10 +13,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Validate an arbitrary bbq_two_judge JSONL dataset against docs/DATA_SPEC.md.
+"""Validate an arbitrary bbq_two_judge JSONL dataset against docs/DATA-SPEC.md.
 
 Row-level checks enforce the Gym shape and the ExpectedValues contract.
-Dataset-level checks enforce the anti-shortcut gates from DATA_SPEC section 5
+Dataset-level checks enforce the anti-shortcut gates from DATA-SPEC section 5
 that are decidable from the JSONL alone. Mix targets (section 3) are reported,
 not failed, because tolerances are only meaningful at scale.
 
@@ -33,10 +33,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from util import ExpectedValues  # noqa: E402
+
 
 LEAKAGE_FIELDS = {
     "thinking",
@@ -124,7 +126,7 @@ def validate_rows(rows: list[dict[str, Any]], failures: Failures) -> list[Expect
         if isinstance(row.get("input"), str):
             failures.check(
                 not MCQ_OPTION_PATTERN.search(row["input"]),
-                f"{where}: input contains lettered answer options (DATA_SPEC section 2)",
+                f"{where}: input contains lettered answer options (DATA-SPEC section 2)",
             )
         try:
             expected = ExpectedValues.model_validate(row.get("expected_values"))
@@ -162,9 +164,7 @@ def validate_dataset_gates(
     five_gram_rows: dict[tuple[str, ...], set[int]] = defaultdict(set)
 
     for index, (row, expected) in enumerate(zip(rows, parsed, strict=False), 1):
-        row_labels = {
-            normalize_label(aliases[0]) for aliases in expected.actor_aliases.values() if aliases
-        }
+        row_labels = {normalize_label(aliases[0]) for aliases in expected.actor_aliases.values() if aliases}
         for label in row_labels:
             label_rows[(expected.category, label)] += 1
         actor_sets[expected.category][tuple(sorted(row_labels))] += 1
@@ -182,8 +182,7 @@ def validate_dataset_gates(
     for (category, label), count in sorted(label_rows.items()):
         failures.check(
             count <= max_actor_label_rows,
-            f"actor label {label!r} appears in {count} {category} rows "
-            f"(cap {max_actor_label_rows})",
+            f"actor label {label!r} appears in {count} {category} rows (cap {max_actor_label_rows})",
         )
     for category, sets in sorted(actor_sets.items()):
         for actor_set, count in sorted(sets.items()):
@@ -205,8 +204,7 @@ def validate_dataset_gates(
     for gram, indices in sorted(five_gram_rows.items()):
         failures.check(
             len(indices) <= max_five_gram_rows,
-            f"5-gram {' '.join(gram)!r} appears in rows {sorted(indices)} "
-            f"(cap {max_five_gram_rows})",
+            f"5-gram {' '.join(gram)!r} appears in rows {sorted(indices)} (cap {max_five_gram_rows})",
         )
 
 
@@ -226,10 +224,8 @@ def report_mix(parsed: list[ExpectedValues]) -> None:
         )
     print(f"polarity neg: {neg} ({neg / total:.1%})")
     print(f"actor counts: {dict(sorted(Counter(item.actor_count for item in parsed).items()))}")
-    print(
-        f"render modes: {dict(sorted(Counter(item.source_render_mode for item in parsed).items()))}"
-    )
-    print("mix targets are reported only; see docs/DATA_SPEC.md section 3")
+    print(f"render modes: {dict(sorted(Counter(item.source_render_mode for item in parsed).items()))}")
+    print("mix targets are reported only; see docs/DATA-SPEC.md section 3")
 
 
 def main() -> int:

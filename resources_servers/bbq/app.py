@@ -24,24 +24,7 @@ from typing import Any, Literal
 
 import yaml
 from fastapi import FastAPI
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-)
-from nemo_gym.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-)
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
-
 from util import (
     AnswerJudgment,
     EmptyPolicyResponseError,
@@ -60,6 +43,24 @@ from util import (
     render_template,
     validate_answer_judgment,
 )
+
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+)
+from nemo_gym.reward_profile import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+)
+from nemo_gym.server_utils import get_response_json, raise_for_status
+
 
 logger = logging.getLogger(__name__)
 
@@ -155,22 +156,16 @@ class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
         try:
             payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         except Exception as exc:
-            raise MetadataValidationError(
-                f"could not load judge prompt templates from {path}: {exc}"
-            ) from exc
+            raise MetadataValidationError(f"could not load judge prompt templates from {path}: {exc}") from exc
         if not isinstance(payload, dict):
             raise MetadataValidationError("judge prompt template file must contain a mapping")
         required = {"answer_check", "explanation_quality_check"}
         if set(payload) != required:
-            raise MetadataValidationError(
-                f"judge prompt template file must contain exactly {sorted(required)}"
-            )
+            raise MetadataValidationError(f"judge prompt template file must contain exactly {sorted(required)}")
         for name in sorted(required):
             item = payload[name]
             if not isinstance(item, dict) or set(item) != {"prompt_version", "prompt_template"}:
-                raise MetadataValidationError(
-                    f"{name} must contain exactly prompt_version and prompt_template"
-                )
+                raise MetadataValidationError(f"{name} must contain exactly prompt_version and prompt_template")
             if not all(isinstance(item[key], str) and item[key].strip() for key in item):
                 raise MetadataValidationError(f"{name} prompt fields must be nonempty strings")
         self._prompt_templates = payload
@@ -188,9 +183,7 @@ class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
 
         policy_prompt = extract_policy_prompt(body)
         if not policy_prompt:
-            raise MetadataValidationError(
-                "responses_create_params contains no policy-facing prompt"
-            )
+            raise MetadataValidationError("responses_create_params contains no policy-facing prompt")
         policy_response = extract_last_assistant_text(body)
         if not policy_response:
             if self.config.empty_response_reward is None:
@@ -494,9 +487,7 @@ class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
         except JudgeCallError:
             raise
         except Exception as exc:
-            raise JudgeCallError(
-                f"{check} judge request failed: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise JudgeCallError(f"{check} judge request failed: {type(exc).__name__}: {exc}") from exc
 
 
 if __name__ == "__main__":

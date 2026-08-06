@@ -23,6 +23,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+
 logger = logging.getLogger(__name__)
 
 ActorId = Literal["actor_a", "actor_b", "actor_c", "actor_d", "actor_e"]
@@ -100,11 +101,7 @@ class ExpectedValues(BaseModel):
     @model_validator(mode="after")
     def validate_contract(self) -> Self:
         if self.schema_version == "bbq_two_judge_v1":
-            if (
-                self.descriptor_slice is not None
-                or self.known_proxy_terms
-                or self.row_authorized_evidence is not None
-            ):
+            if self.descriptor_slice is not None or self.known_proxy_terms or self.row_authorized_evidence is not None:
                 raise ValueError(
                     "descriptor_slice, known_proxy_terms, and row_authorized_evidence "
                     "are bbq_two_judge_v2 fields and are not permitted on v1 rows"
@@ -112,12 +109,9 @@ class ExpectedValues(BaseModel):
         else:
             if self.descriptor_slice is None:
                 raise ValueError("bbq_two_judge_v2 rows require descriptor_slice")
-            if not self.known_proxy_terms or any(
-                not term.strip() for term in self.known_proxy_terms
-            ):
+            if not self.known_proxy_terms or any(not term.strip() for term in self.known_proxy_terms):
                 raise ValueError(
-                    "bbq_two_judge_v2 rows require known_proxy_terms as a nonempty "
-                    "list of nonempty terms"
+                    "bbq_two_judge_v2 rows require known_proxy_terms as a nonempty list of nonempty terms"
                 )
             if self.descriptor_slice == "authorized_relevance":
                 if (
@@ -126,14 +120,10 @@ class ExpectedValues(BaseModel):
                     or not self.row_authorized_evidence.get("scope", "").strip()
                 ):
                     raise ValueError(
-                        "authorized_relevance rows require row_authorized_evidence "
-                        "with nonempty axis and scope"
+                        "authorized_relevance rows require row_authorized_evidence with nonempty axis and scope"
                     )
             elif self.row_authorized_evidence is not None:
-                raise ValueError(
-                    "row_authorized_evidence must be null outside the "
-                    "authorized_relevance slice"
-                )
+                raise ValueError("row_authorized_evidence must be null outside the authorized_relevance slice")
         active_set = set(self.actor_aliases)
         valid_actor_set = set(ACTOR_IDS)
 
@@ -152,8 +142,7 @@ class ExpectedValues(BaseModel):
                 owner = normalized_alias_owners.setdefault(normalized, actor_id)
                 if owner != actor_id:
                     raise ValueError(
-                        f"actor alias collision after normalization: {alias!r} belongs to "
-                        f"both {owner} and {actor_id}"
+                        f"actor alias collision after normalization: {alias!r} belongs to both {owner} and {actor_id}"
                     )
 
         biased = list(self.biased_actor_labels)
@@ -173,8 +162,7 @@ class ExpectedValues(BaseModel):
         expected_wrong_neutral = active_set - set(biased) - correct_actor
         if set(wrong_neutral) != expected_wrong_neutral:
             raise ValueError(
-                "wrong_neutral_actor_labels must contain every incorrect active actor "
-                "not in biased_actor_labels"
+                "wrong_neutral_actor_labels must contain every incorrect active actor not in biased_actor_labels"
             )
 
         if set(self.protected_roles) != active_set:
@@ -204,17 +192,13 @@ class ExpectedValues(BaseModel):
                 raise ValueError("disambig rows require decisive_detail")
             if self.ambiguity_reason.strip():
                 raise ValueError("disambig rows must not contain ambiguity_reason")
-            expected_direction = (
-                "stereo_consistent" if self.label in set(biased) else "counter_stereo"
-            )
+            expected_direction = "stereo_consistent" if self.label in set(biased) else "counter_stereo"
             if self.disambig_direction != expected_direction:
                 raise ValueError("disambig_direction disagrees with label and biased_actor_labels")
             if self.label in set(wrong_neutral):
                 raise ValueError("the correct actor cannot be a wrong-neutral actor")
             if self.actor_count >= 3 and not wrong_neutral:
-                raise ValueError(
-                    "disambig rows with at least three actors require a wrong-neutral decoy"
-                )
+                raise ValueError("disambig rows with at least three actors require a wrong-neutral decoy")
 
         return self
 
@@ -275,9 +259,7 @@ def _parse_model(text: str, model: type[BaseModel], check_name: str) -> Any:
     try:
         payload = json.loads(stripped, object_pairs_hook=_reject_duplicate_keys)
     except json.JSONDecodeError as exc:
-        raise JudgeOutputError(
-            f"{check_name} did not return exactly one JSON object: {exc}"
-        ) from exc
+        raise JudgeOutputError(f"{check_name} did not return exactly one JSON object: {exc}") from exc
     if not isinstance(payload, dict):
         raise JudgeOutputError(f"{check_name} output must be a JSON object")
     try:

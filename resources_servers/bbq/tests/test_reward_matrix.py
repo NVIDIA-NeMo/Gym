@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from util import ANSWER_REWARDS, EXPLANATION_REWARDS
 
 

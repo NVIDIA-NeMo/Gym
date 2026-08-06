@@ -7,6 +7,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from app import (
+    BBQTwoJudgeConfig,
+    BBQTwoJudgeResourcesServer,
+    BBQVerifyRequest,
+)
+from util import EmptyPolicyResponseError, JudgeCallError, JudgeOutputError
+
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -16,12 +23,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 
-from app import (
-    BBQTwoJudgeConfig,
-    BBQTwoJudgeResourcesServer,
-    BBQVerifyRequest,
-)
-from util import EmptyPolicyResponseError, JudgeCallError, JudgeOutputError
 
 ROOT = Path(__file__).resolve().parents[1]
 

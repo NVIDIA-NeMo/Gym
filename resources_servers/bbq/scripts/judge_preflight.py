@@ -34,6 +34,7 @@ from pathlib import Path
 
 import yaml
 
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -43,6 +44,7 @@ from util import (  # noqa: E402
     parse_answer_judgment,
     parse_explanation_judgment,
 )
+
 
 TIMEOUT_SECONDS = 60.0
 
@@ -68,9 +70,7 @@ CHECKS = {
 
 
 def load_prompt_versions() -> dict[str, str]:
-    payload = yaml.safe_load(
-        (ROOT / "configs/verifier_prompt_templates.yaml").read_text(encoding="utf-8")
-    )
+    payload = yaml.safe_load((ROOT / "configs/verifier_prompt_templates.yaml").read_text(encoding="utf-8"))
     return {name: payload[name]["prompt_version"] for name in CHECKS}
 
 
@@ -110,9 +110,7 @@ def run_check(base_url: str, api_key: str, model: str, check: str, prompt_versio
 
 def main() -> int:
     missing = [
-        name
-        for name in ("BBQ_JUDGE_BASE_URL", "BBQ_JUDGE_API_KEY", "BBQ_JUDGE_MODEL")
-        if not os.environ.get(name)
+        name for name in ("BBQ_JUDGE_BASE_URL", "BBQ_JUDGE_API_KEY", "BBQ_JUDGE_MODEL") if not os.environ.get(name)
     ]
     if missing:
         print(f"FAIL: missing environment variables: {', '.join(missing)}")

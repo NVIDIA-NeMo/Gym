@@ -65,7 +65,7 @@ explanation_quality_check:
   # (bbq-rlvr repo: configs/judge_prompts/explanation_quality_calib_v1.1.txt).
   # The selected judge was calibrated against these definitions; editing them
   # requires recalibration against the gold set (revision protocol:
-  # docs/REWARD_DESIGN.md section 10).
+  # docs/REWARD-DESIGN.md section 10).
   prompt_version: bbq_explanation_quality_check_v1_1_strict_r2
   prompt_template: |-
     You are performing the Explanation Quality Check (Reward 2) for a BBQ fairness

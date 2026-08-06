@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -34,6 +35,7 @@ from util import (  # noqa: E402
     answer_reward,
     explanation_reward,
 )
+
 
 LEAKAGE_FIELDS = {
     "thinking",
@@ -113,10 +115,7 @@ def validate_upstream_sources(
         assert source_row["question"] == example["expected_values"]["question"]
 
         raw_gym_line = gym_lines[item["gym_line_1"] - 1]
-        assert (
-            hashlib.sha256(raw_gym_line.encode("utf-8")).hexdigest()
-            == item["raw_jsonl_line_sha256"]
-        )
+        assert hashlib.sha256(raw_gym_line.encode("utf-8")).hexdigest() == item["raw_jsonl_line_sha256"]
         gym_row = json.loads(raw_gym_line)
         assert canonical_hash(gym_row) == item["gym_record_sha256"]
         assert gym_row["input"] == example["input"]
@@ -202,8 +201,11 @@ def main(
     mean_reward = sum(item["reward"] for item in rollouts) / len(rollouts)
     assert metrics["Reference mean reward"] == mean_reward
 
-    checked = "5 fixtures, provenance records, reference rollouts, and metrics" \
-        if provenance is not None else "5 fixtures, reference rollouts, and metrics"
+    checked = (
+        "5 fixtures, provenance records, reference rollouts, and metrics"
+        if provenance is not None
+        else "5 fixtures, reference rollouts, and metrics"
+    )
     print(f"Validated {checked}.")
 
 
