@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -118,7 +118,27 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     # Where per-task transcripts are archived (kept on disk for inspection, like
     # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
+    # The harness derives its OpenClaw agent id as `bench-<slug(model_name)>` and then
+    # resolves the agent's workspace by matching that id in `openclaw agents list`
+    # output. Long ids do not match, and every task then silently runs against a
+    # fallback workspace it never reads back. Refuse the run instead.
+    max_agent_id_length: int = 64
 
+    @model_validator(mode="after")
+    def _reject_unresolvable_agent_id(self) -> "PinchBenchAgentConfig":
+        agent_id_length = len(_AGENT_ID_PREFIX) + len(self.model_name)
+        if agent_id_length > self.max_agent_id_length:
+            raise ValueError(
+                f"model_name yields a {agent_id_length}-character OpenClaw agent id "
+                f"('{_AGENT_ID_PREFIX}{self.model_name}'), over max_agent_id_length="
+                f"{self.max_agent_id_length}. The harness cannot resolve a workspace for an "
+                "id this long, so every task would score 0. Serve the model under a shorter name."
+            )
+        return self
+
+
+# The harness's agent-id prefix (`benchmark.py`: agent_id = f"bench-{model_slug}").
+_AGENT_ID_PREFIX = "bench-"
 
 # Failure-routing sentinels read by the rollout dispatcher (nemo_gym.rollout_collection).
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
