@@ -1498,6 +1498,11 @@ fi
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
+    @staticmethod
+    def _ensure_runtime_dirs(openhands_dir: Path) -> None:
+        for relative_path in (".eval_sessions", "logs", "evaluation/oh"):
+            (openhands_dir / relative_path).mkdir(parents=True, exist_ok=True)
+
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
 
@@ -1553,6 +1558,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             if openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists():
                 print(f"OpenHands already set up at {setup_dir}", flush=True)
                 self._sync_openhands_to_config_commit(openhands_dir)
+                self._ensure_runtime_dirs(openhands_dir)
                 return setup_dir
 
             print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
@@ -1567,6 +1573,7 @@ AGENT_FRAMEWORK_REPO={self.config.agent_framework_repo} \\
 AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
     {script_fpath}"""
             self._run_setup_command(command)
+            self._ensure_runtime_dirs(openhands_dir)
 
             return setup_dir
 
@@ -3135,7 +3142,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         else:
             # OpenHands path (default).
             assert params.openhands_setup_dir is not None, "openhands_setup_dir not set"
-            openhands_dir = f"{params.openhands_setup_dir}/OpenHands"
+            openhands_path = Path(params.openhands_setup_dir) / "OpenHands"
+            if not openhands_path.is_dir():
+                raise FileNotFoundError(
+                    f"OpenHands checkout is missing at {openhands_path}; restart the SWE agent service to rebuild it"
+                )
+            OpenHandsHarnessProcessor._ensure_runtime_dirs(openhands_path)
+            openhands_dir = str(openhands_path)
             mount_args.extend(
                 [
                     # Read-only base mounts (parent first)

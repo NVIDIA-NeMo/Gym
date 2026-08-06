@@ -831,6 +831,63 @@ class TestR2EGymDatasetProcessor:
 
 
 class TestOpenHandsHarnessProcessor:
+    @staticmethod
+    def _git(repo: Path, *args: str) -> str:
+        result = swe_app.subprocess_run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    @classmethod
+    def _init_two_commit_repo(cls, repo: Path) -> tuple[str, str]:
+        repo.mkdir(parents=True)
+        cls._git(repo, "init")
+        cls._git(repo, "config", "user.name", "OpenHands setup test")
+        cls._git(repo, "config", "user.email", "openhands-setup-test@example.com")
+        cls._git(repo, "config", "commit.gpgsign", "false")
+
+        (repo / ".gitignore").write_text(".venv/\n")
+        source_file = repo / "source.txt"
+        source_file.write_text("first\n")
+        cls._git(repo, "add", ".gitignore", "source.txt")
+        cls._git(repo, "commit", "-m", "first")
+        first_commit = cls._git(repo, "rev-parse", "HEAD")
+
+        source_file.write_text("second\n")
+        cls._git(repo, "commit", "-am", "second")
+        second_commit = cls._git(repo, "rev-parse", "HEAD")
+        cls._git(repo, "checkout", "--force", first_commit)
+        return first_commit, second_commit
+
+    def test_setup_syncs_checkout_and_restores_runtime_dirs(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(OpenHandsHarnessProcessor, "parent_dir", property(lambda _self: tmp_path))
+        setup_dir = tmp_path / "swe_openhands_setup"
+        openhands_dir = setup_dir / "OpenHands"
+        _, target_commit = self._init_two_commit_repo(openhands_dir)
+
+        python_bin = openhands_dir / ".venv" / "bin" / "python"
+        python_bin.parent.mkdir(parents=True)
+        python_bin.touch()
+        pre_sync_output = openhands_dir / "evaluation" / "oh" / "old-run" / "output.jsonl"
+        pre_sync_output.parent.mkdir(parents=True)
+        pre_sync_output.write_text("cleaned during commit sync\n")
+
+        config = _minimal_server_config()
+        config.agent_framework_commit = target_commit
+        processor = OpenHandsHarnessProcessor(config=config)
+
+        result = processor.setup()
+
+        assert result == setup_dir
+        assert self._git(openhands_dir, "rev-parse", "HEAD") == target_commit
+        assert python_bin.exists()
+        assert not pre_sync_output.exists()
+        for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+            assert (openhands_dir / subdir).is_dir()
+
     def test_get_run_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
@@ -1852,6 +1909,39 @@ class TestSWEBenchWrapperFindContainer:
 
 
 class TestSWEBenchWrapperBuildApptainerCommand:
+    def test_openhands_mount_recreates_missing_runtime_dirs(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir)
+            openhands_dir = Path(params.openhands_setup_dir) / "OpenHands"
+            openhands_dir.mkdir(parents=True)
+            (Path(params.openhands_setup_dir) / "miniforge3").mkdir(parents=True)
+
+            cmd_args = ExecuteContainerCommandArgs(
+                command="echo hello",
+                expected_file_pattern="/tmp/*.json",
+                mode="agent",
+                timeout=300,
+            )
+            wrapper._build_apptainer_command(params, cmd_args)
+
+            for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+                assert (openhands_dir / subdir).is_dir()
+
+    def test_openhands_mount_fails_early_when_checkout_is_missing(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir)
+            cmd_args = ExecuteContainerCommandArgs(
+                command="echo hello",
+                expected_file_pattern="/tmp/*.json",
+                mode="agent",
+                timeout=300,
+            )
+
+            with pytest.raises(FileNotFoundError, match="restart the SWE agent service"):
+                wrapper._build_apptainer_command(params, cmd_args)
+
     def test_basic_command(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:

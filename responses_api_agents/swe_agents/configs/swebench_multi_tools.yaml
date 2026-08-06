@@ -12,14 +12,14 @@ swe_agents:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
-      agent_framework_commit: 5f0180054732945df08ad2293903e6873f0492b6  # pragma: allowlist secret
+      agent_framework_commit: 7466868e24e12480a1bffbbf5b543b6e4c4eacf8  # pragma: allowlist secret
       
       # Container configuration
       container_formatter: ???
       container_folder_path: null
       swebench_agent_timeout: 1800
       swebench_tests_timeout: 900
-      apptainer_memory_limit_mb: 32768
+      apptainer_memory_limit_mb: 65536
       command_exec_timeout: 300
       
       dataset_path: ???
@@ -27,85 +27,18 @@ swe_agents:
       agent_prompt_overrides:
       # Codex agent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/codex/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/codex/system_prompt.j2
         agent_cls: CodexAgent
         diversify_tool_names: false
 
       # OpenCode agent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/opencode/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/opencode/system_prompt.j2
         agent_cls: OpenCodeAgent
         diversify_tool_names: false
 
-      # Terminus2 agent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/terminus/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/terminus/system_prompt.j2
-        agent_cls: Terminus2Agent
-        diversify_tool_names: false
-      
       # CodeAct agent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
         system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
         agent_cls: CodeActAgent
-        diversify_tool_names: false
-      
-      # Plan and execute agent - CodeActAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/plan_and_execute/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/plan_and_execute/system_prompt.j2
-        agent_cls: CodeActAgent
-        diversify_tool_names: true
-
-      # Explore plan execute agent - OpenCodeAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/explore_plan_execute/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/explore_plan_execute/system_prompt.j2
-        agent_cls: OpenCodeAgent
-        diversify_tool_names: true
-
-      # Test driven agent - CodeActAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/test_driven/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/test_driven/system_prompt.j2
-        agent_cls: CodeActAgent
-        diversify_tool_names: true
-
-      # Hypothesis driven agent - CodexAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/hypothesis_driven/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/hypothesis_driven/system_prompt.j2
-        agent_cls: CodeActAgent
-        diversify_tool_names: true
-
-      # Incremental agent - CodexAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/incremental/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/incremental/system_prompt.j2
-        agent_cls: OpenCodeAgent
-        diversify_tool_names: true
-
-      # Root cause agent - OpenCodeAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/root_cause/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/root_cause/system_prompt.j2
-        agent_cls: OpenCodeAgent
-        diversify_tool_names: true
-
-      # Divide and conquer agent - OpenCodeAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/divide_and_conquer/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/divide_and_conquer/system_prompt.j2
-        agent_cls: OpenCodeAgent
-        diversify_tool_names: true
-
-      # Breadth first agent - CodeActAgent
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/breadth_first/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/breadth_first/system_prompt.j2
-        agent_cls: CodeActAgent
-        diversify_tool_names: true
-
-      # MM prompt
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/minimax/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/minimax/system_prompt.j2
-        agent_cls: CodeActAgent
-        diversify_tool_names: false
-
-      - user_prompt_template: responses_api_agents/swe_agents/prompts/minimax/user_prompt.j2
-        system_prompt_template: responses_api_agents/swe_agents/prompts/minimax/system_prompt.j2
-        agent_cls: OpenCodeAgent
         diversify_tool_names: false
       
       # Optional model server reference
