@@ -24,7 +24,6 @@ from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
     BaseRunRequest,
-    BaseVerifyRequest,
     BaseVerifyResponse,
 )
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
@@ -40,8 +39,6 @@ from nemo_gym.server_utils import (
     BaseServer,
     SimpleServer,
     apply_rollout_prefix,
-    get_response_json,
-    raise_for_status,
     rollout_path_prefix,
 )
 
@@ -57,48 +54,6 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
-
-    def build_skipped_verify_response_payload(
-        self,
-        body: BaseRunRequest,
-        response: NeMoGymResponse | dict[str, Any],
-    ) -> dict[str, Any]:
-        if isinstance(response, NeMoGymResponse):
-            response_payload = response.model_dump()
-        else:
-            response_payload = response
-
-        return body.model_dump() | {
-            "response": response_payload,
-            "reward": float(self.config.skip_verification_reward),
-            "verification_skipped": True,
-        }
-
-    async def call_verify_or_skip(
-        self,
-        *,
-        body: BaseRunRequest,
-        response: NeMoGymResponse | dict[str, Any],
-        resources_server_name: str,
-        verify_request_type: type[BaseVerifyRequest],
-        verify_response_type: type[BaseVerifyResponse],
-        cookies: Any = None,
-    ) -> BaseVerifyResponse:
-        if self.config.skip_verification:
-            return verify_response_type.model_validate(self.build_skipped_verify_response_payload(body, response))
-
-        verify_request = verify_request_type.model_validate(body.model_dump() | {"response": response})
-        verify_kwargs = {
-            "server_name": resources_server_name,
-            "url_path": "/verify",
-            "json": verify_request.model_dump(),
-        }
-        if cookies is not None:
-            verify_kwargs["cookies"] = cookies
-
-        verify_response = await self.server_client.post(**verify_kwargs)
-        await raise_for_status(verify_response)
-        return verify_response_type.model_validate(await get_response_json(verify_response))
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
