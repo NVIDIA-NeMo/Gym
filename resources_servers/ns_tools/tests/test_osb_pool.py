@@ -285,3 +285,87 @@ class TestHealWarmupRace:
 
         asyncio.run(one_heal_pass())
         assert healed == [], "heal loop must not touch slots before warmup completes"
+
+
+class TestPoolRefFallback:
+    """pool_ref acquire semantics — SDK required (create is monkeypatched, no network)."""
+
+    def _pool(self, **overrides):
+        from osb_pool import OpenSandboxPool
+
+        kwargs = dict(
+            provider={"opensandbox": {"connection": {"domain": "http://elb", "api_key": "k"}}},
+            image="img:tag",
+            pool_ref="warm-pool",
+            size=1,
+            service_command="sh -c 'start & echo ok'",
+        )
+        kwargs.update(overrides)
+        return OpenSandboxPool(**kwargs)
+
+    def test_pool_full_falls_back_to_direct_create(self, monkeypatch):
+        opensandbox = pytest.importorskip("opensandbox")
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            if "extensions" in kwargs:
+                raise RuntimeError("pool exhausted")
+            return object()
+
+        monkeypatch.setattr(opensandbox.Sandbox, "create", staticmethod(fake_create))
+        pool = self._pool()
+        pool._connection_config = object()
+        sandbox, from_pool = asyncio.run(pool._acquire_sandbox())
+        assert from_pool is False and sandbox is not None
+        assert calls[0]["extensions"] == {"poolRef": "warm-pool"}
+        # The fallback create carries the full direct spec, not the pool claim shape.
+        assert "extensions" not in calls[1] and calls[1]["image"] == "img:tag"
+
+    def test_pool_failure_raises_when_fallback_disabled(self, monkeypatch):
+        opensandbox = pytest.importorskip("opensandbox")
+
+        async def fake_create(**kwargs):
+            raise RuntimeError("pool exhausted")
+
+        monkeypatch.setattr(opensandbox.Sandbox, "create", staticmethod(fake_create))
+        pool = self._pool(pool_fallback=False)
+        pool._connection_config = object()
+        with pytest.raises(RuntimeError, match="pool exhausted"):
+            asyncio.run(pool._acquire_sandbox())
+
+    def test_pool_claim_skips_prepare_and_fallback_does_not(self, monkeypatch):
+        opensandbox = pytest.importorskip("opensandbox")
+        prepared = []
+
+        async def fake_create(**kwargs):
+            if "extensions" in kwargs and fake_create.pool_ok:
+                return "pool-pod"
+            if "extensions" in kwargs:
+                raise RuntimeError("pool exhausted")
+            return "direct-pod"
+
+        monkeypatch.setattr(opensandbox.Sandbox, "create", staticmethod(fake_create))
+        pool = self._pool()
+        pool._connection_config = object()
+
+        async def fake_prepare(sandbox):
+            prepared.append(sandbox)
+
+        async def fake_endpoint_flow(slot, sandbox):
+            slot.sandbox = sandbox
+            slot.healthy = True
+
+        pool._prepare = fake_prepare
+
+        async def run_inner(pool_ok):
+            fake_create.pool_ok = pool_ok
+            sandbox, from_pool = await pool._acquire_sandbox()
+            if pool._needs_prepare and not from_pool:
+                await pool._prepare(sandbox)
+            return sandbox
+
+        assert asyncio.run(run_inner(True)) == "pool-pod"
+        assert prepared == []
+        assert asyncio.run(run_inner(False)) == "direct-pod"
+        assert prepared == ["direct-pod"]

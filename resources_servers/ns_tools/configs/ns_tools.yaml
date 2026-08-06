@@ -61,6 +61,10 @@ ns_tools:
         # creates claim prewarmed pods via extensions.poolRef — image/resources come
         # from the pool template and warmup drops to allocation time.
         pool_ref: ${oc.env:NS_SANDBOX_POOL_REF,}
+        # With pool_ref set: fall back to a direct create when the pool is full or
+        # unavailable (true, default) or fail the slot instead (false). Fallback pods
+        # go through the prepare step, so keep setup/service settings configured.
+        pool_fallback: ${oc.env:NS_SANDBOX_POOL_FALLBACK,true}
         port: 6000
         size: ${oc.env:NS_SANDBOX_POOL_SIZE,8}
         ttl_s: ${oc.env:NS_SANDBOX_TTL_S,14400}

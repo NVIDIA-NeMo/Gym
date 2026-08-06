@@ -83,6 +83,7 @@ class OpenSandboxPool:
         provider: Dict[str, Any],
         image: str,
         pool_ref: str = "",
+        pool_fallback: bool = True,
         port: int = 6000,
         size: int = 8,
         ttl_s: Optional[float] = None,
@@ -106,6 +107,7 @@ class OpenSandboxPool:
     ) -> None:
         self._connection_kwargs = _parse_connection(provider)
         self._pool_ref = str(pool_ref or "")
+        self._pool_fallback = bool(pool_fallback)
         if not image:
             raise ValueError("opensandbox_pool backend selected but image is empty — set NS_SANDBOX_IMAGE")
         if int(size) < 1:
@@ -248,24 +250,31 @@ class OpenSandboxPool:
         finally:
             slot.creating = False
 
-    async def _acquire_sandbox(self) -> Any:
+    async def _acquire_sandbox(self) -> Tuple[Any, bool]:
+        """Returns (sandbox, from_pool). Pool mode claims a prewarmed pod from the
+        server-side Pool CRD; when the pool is full or unavailable and pool_fallback
+        is on, it degrades to a direct create (which then needs the prepare step, so
+        pool configs should still carry setup/service settings for parity)."""
         from opensandbox import Sandbox
 
         if self._pool_ref:
-            # Pool mode: claim a prewarmed sandbox from the server-side Pool CRD.
-            # Image/entrypoint/resources come from the pool template; the pod is
-            # already running its service, so no prepare step follows.
-            return await Sandbox.create(
-                # The SDK's local validation requires an image even in pool mode; the
-                # pool template still defines what actually runs.
-                image=self._image,
-                extensions={"poolRef": self._pool_ref},
-                metadata=dict(self._metadata),
-                timeout=timedelta(seconds=self._ttl_s or 14400.0),
-                ready_timeout=timedelta(seconds=self._ready_timeout_s),
-                connection_config=self._connection_config,
-            )
-        return await Sandbox.create(
+            try:
+                sandbox = await Sandbox.create(
+                    # The SDK's local validation requires an image even in pool mode;
+                    # the pool template still defines what actually runs.
+                    image=self._image,
+                    extensions={"poolRef": self._pool_ref},
+                    metadata=dict(self._metadata),
+                    timeout=timedelta(seconds=self._ttl_s or 14400.0),
+                    ready_timeout=timedelta(seconds=self._ready_timeout_s),
+                    connection_config=self._connection_config,
+                )
+                return sandbox, True
+            except Exception as exc:
+                if not self._pool_fallback:
+                    raise
+                LOGGER.warning("pool %r allocation failed (%s); falling back to a direct create", self._pool_ref, exc)
+        sandbox = await Sandbox.create(
             image=self._image,
             entrypoint=self._entrypoint,
             env=self._env or None,
@@ -276,11 +285,14 @@ class OpenSandboxPool:
             ready_timeout=timedelta(seconds=self._ready_timeout_s),
             connection_config=self._connection_config,
         )
+        return sandbox, False
 
     async def _create_slot_inner(self, slot: _Slot) -> None:
-        sandbox = await self._acquire_sandbox()
+        sandbox, from_pool = await self._acquire_sandbox()
         try:
-            if self._needs_prepare:
+            # Pool pods are born with their service running; only direct creates
+            # (no pool, or fallback) need bootstrap.
+            if self._needs_prepare and not from_pool:
                 await self._prepare(sandbox)
             resolved = await sandbox.get_endpoint(self._port)
             base_url, headers = self._normalize_endpoint(resolved)
