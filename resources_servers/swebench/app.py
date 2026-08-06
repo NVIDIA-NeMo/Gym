@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
 from pydantic import BaseModel
-from swebench.harness.constants import END_TEST_OUTPUT, START_TEST_OUTPUT
+from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
@@ -195,7 +195,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
-        # await self._apply_sandbox_patches(eval_sandbox)
+        if MAP_REPO_TO_EXT.get(test_spec.repo) == "java":
+            await self._apply_sandbox_patches(eval_sandbox)
 
         return eval_sandbox
 
