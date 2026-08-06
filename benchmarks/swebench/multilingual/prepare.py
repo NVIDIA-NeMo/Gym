@@ -43,14 +43,13 @@ def prepare():
                 },
                 "subset": "multilingual",
                 "split": "test",
+                # SWE Bench Multilingual doesn't have/use this
+                "environment_setup_commit": "",
+                "difficulty": "",
             }
             # Minor tweaks on the formatting to match that of SWE Bench
             row["FAIL_TO_PASS"] = json.dumps(row["FAIL_TO_PASS"])
             row["PASS_TO_PASS"] = json.dumps(row["PASS_TO_PASS"])
-
-            # SWE Bench Multilingual doesn't have/use this
-            row["environment_setup_commit"] = ""
-            row["difficulty"] = ""
 
             fout.write(json.dumps(row) + "\n")
 

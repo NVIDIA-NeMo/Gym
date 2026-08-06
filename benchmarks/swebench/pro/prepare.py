@@ -43,7 +43,17 @@ def prepare():
                 },
                 "subset": "pro",
                 "split": "test",
+                "environment_setup_commit": "",
+                "difficulty": "",
+                "version": "",
+                "hints_text": "",
+                "created_at": "",
             }
+
+            # Normalize to SWE Bench Verified format
+            row["FAIL_TO_PASS"] = json.dumps(eval(row.pop("fail_to_pass")))
+            row["PASS_TO_PASS"] = json.dumps(eval(row.pop("pass_to_pass")))
+
             fout.write(json.dumps(row) + "\n")
 
     print(f"Wrote {len(ds)} problems to {OUTPUT_FPATH}")
