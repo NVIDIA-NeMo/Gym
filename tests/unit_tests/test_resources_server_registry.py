@@ -14,7 +14,8 @@
 # limitations under the License.
 from pathlib import Path
 
-from nemo_gym.resources_server_registry import _discover_resources_servers_in_dir
+from nemo_gym.discovery import read_config_flavor_capabilities
+from nemo_gym.resources_server_registry import RESOURCES_SERVERS_DIR, _discover_resources_servers_in_dir
 
 
 def _make_resources_server(rs_dir: Path, name: str, *, flavors: dict) -> Path:
@@ -77,6 +78,32 @@ class TestDiscoverResourcesServers:
     def test_missing_directory_yields_no_servers(self, tmp_path: Path) -> None:
         assert _discover_resources_servers_in_dir(tmp_path / "nope") == {}
 
+    def test_reads_capabilities_from_the_selected_flavor_only(self, tmp_path: Path) -> None:
+        server_dir = _make_resources_server(
+            tmp_path,
+            "my_server",
+            flavors={"my_server": ("other", "Default"), "stateful": ("other", "Stateful")},
+        )
+        default = server_dir / "configs" / "my_server.yaml"
+        stateful = server_dir / "configs" / "stateful.yaml"
+        default.write_text(
+            default.read_text().replace("      description:", "      provides: [verification]\n      description:")
+        )
+        stateful.write_text(
+            stateful.read_text().replace(
+                "      description:",
+                "      provides: [verification, state:per_session]\n      description:",
+            )
+        )
+
+        servers = _discover_resources_servers_in_dir(tmp_path)
+
+        assert servers["my_server"].capabilities.provides == ("verification",)
+        assert servers["my_server/stateful"].capabilities.provides == (
+            "verification",
+            "state:per_session",
+        )
+
 
 class TestReadResourcesServerValue:
     def test_reads_value_from_config(self, tmp_path: Path) -> None:
@@ -94,3 +121,13 @@ class TestReadResourcesServerValue:
         cfg.write_text("s:\n  resources_servers:\n    my_server:\n      domain: x\n")
 
         assert read_resources_server_value(cfg) is None
+
+
+def test_mcqa_default_flavor_declares_verification() -> None:
+    server = _discover_resources_servers_in_dir(RESOURCES_SERVERS_DIR)["mcqa"]
+
+    assert server.capabilities.provides == ("verification",)
+    assert read_config_flavor_capabilities(server.config_path, "responses_api_agents").requires == (
+        "verification",
+        "text-model",
+    )

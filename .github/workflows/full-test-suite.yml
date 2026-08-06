@@ -41,6 +41,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
+          fetch-depth: 0
 
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -64,6 +65,18 @@ jobs:
       - name: Test
         run: |
           source .venv/bin/activate
+          python scripts/migrate_environment_manifests.py --check
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            python scripts/check_environment_onboarding.py \
+              --base-ref "${{ github.event.before }}" \
+              --head-ref "${{ github.sha }}" \
+              --enforce-changes \
+              --run-verifier-tests
+          else
+            python scripts/check_environment_onboarding.py \
+              --enforce-changes \
+              --run-verifier-tests
+          fi
           PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
           pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
 
@@ -166,6 +179,7 @@ jobs:
           source .venv/bin/activate
           uv pip install $GITHUB_WORKSPACE/dist/*.whl
           python -c "import nemo_gym; print(f'nemo-gym {nemo_gym.__version__}')"
+          python -c "from importlib.resources import files; assert files('nemo_gym').joinpath('resources/environment-composition-locks.json').is_file()"
 
       - name: Start mock inference endpoint
         run: |

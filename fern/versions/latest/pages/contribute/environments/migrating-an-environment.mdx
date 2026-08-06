@@ -1,0 +1,147 @@
+---
+title: "Migrate an existing environment"
+description: "Move one owner-backed legacy recipe to the manifest contract."
+position: 2
+---
+
+The migration inventory records runnable shapes found by the legacy scanners. It is a review aid, not a claim that every record deserves a permanent catalog identity or that generated metadata is correct.
+
+<Info>
+An unchanged legacy recipe remains runnable. A locally generated `TODO_REQUIRED` manifest is intentionally invalid and does not count as manifest coverage. Complete and commit only the draft selected for an owner-reviewed migration.
+</Info>
+
+Do not check in a generated draft as migration inventory. Complete every required field in the selected manifest before adding it to the change.
+
+## Do we migrate everything?
+
+No. Inventory everything, then migrate the actively supported, owner-backed recipes that benefit from discovery, validation, publishing, and a versioned catalog identity.
+
+This distinction matters most under `resources_servers/`. A Resources Server may be a reusable component, or one of its configs may compose a complete runnable recipe with an agent and datasets. Only the latter is a migration candidate, and only after its owner confirms the intended catalog identity. Do not complete every adjacent draft simply because the legacy scanner found a runnable config.
+
+Prioritize owner-backed canonical recipes with stable configs and verifier fixtures. Classify a Resources Server record as a user-facing recipe, one canonical legacy composition, or component-only before editing its draft. Resolve structural exceptions only after the identity and configuration architecture are clear.
+
+There is no value in making raw coverage reach 100% if the result preserves duplicate, abandoned, or component-only identities forever.
+
+## Transition states
+
+| State | Meaning | Policy |
+| --- | --- | --- |
+| Legacy | Runnable config without a valid manifest | Keep runnable; manifest-backed catalog features are unavailable |
+| Local draft | Script-produced file with `TODO_REQUIRED` values | Keep uncommitted until every required field has owner-reviewed evidence |
+| Exception | Discovery found an ambiguous identity or a config it cannot resolve | Keep visible; resolve the underlying decision before authoring |
+| Complete manifest | Authored contract that resolves with its config | Validate and test; do not leave it unpublished in an enforced change |
+| Published version | Reviewed manifest registered under a semantic version | Review score-affecting changes separately and update the version when required |
+
+## When migration is required
+
+- A new runnable environment or benchmark is added.
+- A legacy recipe's own config, dataset, preparation code, scorer, harness, or driver is materially changed.
+- An owner wants the unit published under a versioned identity or authoritative in filtered discovery.
+
+A shared-component change may affect many legacy dependents. Enumerate and validate that fanout, but do not turn one scorer patch into an unaudited mass manifest backfill. Migrate affected recipes only with their owners; keep any temporary exception explicit.
+
+The onboarding gate does not require a manifest solely because a legacy recipe depends on a changed shared component. Reviewers must still enumerate the affected recipes and require owner approval for the selected migration scope.
+
+The following are not migration triggers by themselves:
+
+- a local generated draft exists;
+- a coverage target is behind schedule;
+- a directory name looks like an environment;
+- a shared component has many configs;
+- metadata can be guessed from neighboring files.
+
+## Candidate gate
+
+Before authoring a manifest, answer all five questions:
+
+1. Who owns and can review the semantic claims?
+2. What exact config is the canonical runnable recipe?
+3. Is this a catalog environment or benchmark rather than a component-only server?
+4. What evidence supports licensing, authorship, reward range and direction, determinism, and benchmark protocol?
+5. Does the selected verifier have the required sentinel fixture and repository harness test?
+
+If any answer is missing, defer the migration and record the missing decision. A visible exception is safer than an authoritative-looking guess.
+
+## Migrate one unit
+
+Start from a clean understanding of the inventory and report-only gate:
+
+```bash
+uv run python scripts/migrate_environment_manifests.py --check
+uv run python scripts/check_environment_onboarding.py
+```
+
+Inspect one record in `migration/environment-manifest-inventory.json`, its authoritative config, implementation, datasets, tests, documentation, and ownership history. Author the selected manifest from evidence, replacing every `TODO_REQUIRED` field if you use a locally generated draft. Do not move runtime wiring into the manifest; config remains authoritative and the manifest mirrors its resolved composition.
+
+Validate the pair before depending on named catalog resolution:
+
+```bash
+gym env validate \
+  --config path/to/config.yaml \
+  --manifest path/to/manifest.yaml \
+  --json
+```
+
+Then run the manifest-selected scorer fixture:
+
+```bash
+gym env test NAME --kind environment
+# or: --kind benchmark
+```
+
+The fixture must cover both reward endpoints, malformed input, and repeat seeding when the manifest claims seeded determinism. Review generated expectations; do not accept them merely because the test passes.
+
+Publication is part of completing an enforced migration. Obtain the actual owner and preview the write set first:
+
+```bash
+gym env publish NAME@VERSION \
+  --kind environment \
+  --owner @owner \
+  --dry-run
+```
+
+Publish after review. Confirm that `authors` names explicitly acknowledged contributors or an owning team; do not infer it from Git history. `--owner` separately identifies the GitHub user or team responsible for review.
+
+Gym publication records an immutable `NAME@VERSION` composition hash together with the manifest and config paths it binds. Execution still resolves the live repository files and rejects drift from that lock. Promotion to another registry, certification program, or access-control system is a separate downstream process; this command does not issue a certificate or make a trust claim.
+
+Refresh the checked-in inventory and exercise the scoped gate. Catalog output is generated for deployment and is not added to the migration change:
+
+```bash
+uv run python scripts/migrate_environment_manifests.py --inventory-only
+uv run python scripts/migrate_environment_manifests.py --check
+uv run python scripts/check_environment_onboarding.py \
+  --changed-file path/to/manifest.yaml \
+  --enforce-changes \
+  --run-verifier-tests
+pre-commit run --all-files
+```
+
+## Keep migration and behavior changes separate
+
+A normal migration may add the manifest, capability declarations, verifier fixtures, CODEOWNERS, and the updated inventory. It should not add generated drafts or catalog artifacts, and it should not change scoring, prompts, datasets, orchestration, or runtime defaults.
+
+If validation exposes a behavioral bug, stop and separate the fix. Publish the corrected composition under an owner-reviewed version rather than changing behavior silently as “migration cleanup.”
+
+## Handle exceptions by cause
+
+- **Several configs share one Resources Server identity:** select one canonical recipe, split the user-facing variants, or classify the directory as component-only.
+- **Noncanonical benchmark configs:** decide stable identities and canonical protocols before adding manifests.
+- **Missing interpolation or component reference:** create a deterministic validation composition; never bake credentials into the repo.
+- **No Resources Server or ambiguous composition:** decide whether the record is actually runnable under Gym's object model.
+
+Do not delete an exception to improve a metric. Enable `--fail-on-exceptions` only for a scope whose existing exceptions have been classified. Keep new exceptions visible and revisit unresolved records with their owners.
+
+## Completion criteria
+
+A unit is migrated when:
+
+- its identity is canonical and owner-approved;
+- no generated header or placeholder remains;
+- manifest and config composition agree;
+- static validation and the canonical verifier fixture pass;
+- authored metadata has cited evidence in review;
+- publication completed with explicit review ownership;
+- the inventory record changed to `already-manifest`;
+- runtime behavior did not change, or an intentional change was reviewed separately.
+
+Repository cleanup is complete when every actively supported user-facing recipe is either published or has an explicit owner-reviewed disposition. It is not complete merely because every legacy path has a manifest.

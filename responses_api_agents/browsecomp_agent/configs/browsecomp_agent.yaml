@@ -2,6 +2,7 @@ browsecomp_agent:
   responses_api_agents:
     browsecomp_agent:
       entrypoint: app.py
+      requires: [verification, text-model]
       resources_server:
         type: resources_servers
         name: ???

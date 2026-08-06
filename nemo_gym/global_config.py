@@ -18,25 +18,26 @@ from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
 from difflib import get_close_matches
-from importlib import import_module
+from importlib import import_module, metadata
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, List, Optional, Tuple, Type
+from typing import Any, ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
-import wandb
-import wandb.util
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
-from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from ray import __version__ as ray_version
-from wandb import Run
 
-from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
+from nemo_gym import (
+    CACHE_DIR,
+    RESULTS_DIR,
+    WORKING_DIR,
+    _resolve_under_cwd_or_install,
+    component_search_roots,
+)
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
@@ -55,6 +56,22 @@ from nemo_gym.config_types import (
 
 
 _GLOBAL_CONFIG_DICT = None
+
+
+class _LazyWandb:
+    _module: Any = None
+
+    def __getattr__(self, name: str) -> Any:
+        if self._module is None:
+            self._module = import_module("wandb")
+        return getattr(self._module, name)
+
+
+wandb: Any = _LazyWandb()
+openai_version = metadata.version("openai")
+ray_version = metadata.version("ray")
+
+
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
@@ -90,6 +107,42 @@ QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 COMPONENT_NAME_KEY_NAME = "component_name"
+# Environment-onboarding command inputs. These are CLI metadata, not server
+# instance names, so the config parser must never try to interpret them as
+# deployable blocks.
+ENVIRONMENT_REF_KEY_NAME = "environment_ref"
+MANIFEST_PATH_KEY_NAME = "manifest_path"
+SYNC_MANIFEST_KEY_NAME = "sync_manifest"
+CATALOG_DOMAIN_KEY_NAME = "catalog_domain"
+CATALOG_KIND_KEY_NAME = "catalog_kind"
+CATALOG_MODALITY_KEY_NAME = "catalog_modality"
+CATALOG_LICENSING_KEY_NAME = "catalog_licensing"
+CATALOG_STATUS_KEY_NAME = "catalog_status"
+CATALOG_LIFECYCLE_KEY_NAME = "catalog_lifecycle"
+CATALOG_REQUIRES_KEY_NAME = "catalog_requires"
+CATALOG_FACTS_KEY_NAME = "catalog_facts"
+CATALOG_PROFILE_KEY_NAME = "catalog_profile"
+COMPONENT_PROVIDES_KEY_NAME = "component_provides"
+INIT_NAME_KEY_NAME = "init_name"
+INIT_KIND_KEY_NAME = "init_kind"
+INIT_PROFILE_KEY_NAME = "init_profile"
+INIT_REUSE_VERIFIER_KEY_NAME = "init_reuse_verifier"
+INIT_VERSION_KEY_NAME = "init_version"
+INIT_DOMAIN_KEY_NAME = "init_domain"
+INIT_DESCRIPTION_KEY_NAME = "init_description"
+INIT_MODALITY_KEY_NAME = "init_modality"
+INIT_LICENSING_KEY_NAME = "init_licensing"
+INIT_AUTHORS_KEY_NAME = "init_authors"
+INIT_CANONICAL_SPLIT_KEY_NAME = "init_canonical_split"
+PUBLISH_OWNER_KEY_NAME = "publish_owner"
+PUBLISH_DRY_RUN_KEY_NAME = "publish_dry_run"
+UPDATE_EXPECTED_KEY_NAME = "update_expected"
+REPLAY_ROLLOUTS_PATH_KEY_NAME = "replay_rollouts_path"
+MANIFEST_NAMES_KEY_NAME = "manifest_names"
+MANIFEST_SET_KEY_NAME = "manifest_set"
+ENVIRONMENT_COMPONENT_SWAPS_KEY_NAME = "environment_component_swaps"
+ENVIRONMENT_COMPONENT_PROVENANCE_KEY_NAME = "environment_component_provenance"
+ENVIRONMENT_CLI_OVERRIDE_PATHS_KEY_NAME = "environment_cli_override_paths"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -118,6 +171,39 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     COMPONENT_NAME_KEY_NAME,
+    ENVIRONMENT_REF_KEY_NAME,
+    MANIFEST_PATH_KEY_NAME,
+    SYNC_MANIFEST_KEY_NAME,
+    CATALOG_DOMAIN_KEY_NAME,
+    CATALOG_KIND_KEY_NAME,
+    CATALOG_MODALITY_KEY_NAME,
+    CATALOG_LICENSING_KEY_NAME,
+    CATALOG_STATUS_KEY_NAME,
+    CATALOG_LIFECYCLE_KEY_NAME,
+    CATALOG_REQUIRES_KEY_NAME,
+    CATALOG_FACTS_KEY_NAME,
+    CATALOG_PROFILE_KEY_NAME,
+    COMPONENT_PROVIDES_KEY_NAME,
+    INIT_NAME_KEY_NAME,
+    INIT_KIND_KEY_NAME,
+    INIT_PROFILE_KEY_NAME,
+    INIT_REUSE_VERIFIER_KEY_NAME,
+    INIT_VERSION_KEY_NAME,
+    INIT_DOMAIN_KEY_NAME,
+    INIT_DESCRIPTION_KEY_NAME,
+    INIT_MODALITY_KEY_NAME,
+    INIT_LICENSING_KEY_NAME,
+    INIT_AUTHORS_KEY_NAME,
+    INIT_CANONICAL_SPLIT_KEY_NAME,
+    PUBLISH_OWNER_KEY_NAME,
+    PUBLISH_DRY_RUN_KEY_NAME,
+    UPDATE_EXPECTED_KEY_NAME,
+    REPLAY_ROLLOUTS_PATH_KEY_NAME,
+    MANIFEST_NAMES_KEY_NAME,
+    MANIFEST_SET_KEY_NAME,
+    ENVIRONMENT_COMPONENT_SWAPS_KEY_NAME,
+    ENVIRONMENT_COMPONENT_PROVENANCE_KEY_NAME,
+    ENVIRONMENT_CLI_OVERRIDE_PATHS_KEY_NAME,
 ]
 
 # Data keys
@@ -140,12 +226,10 @@ DEFAULT_HEAD_SERVER_PORT = 11000
 
 
 # W&B
-# Increase row limit since some of our rollouts are pretty hefty
-wandb.util.VALUE_BYTES_LIMIT = 10_000_000
-_WANDB_RUN: Optional[Run] = None
+_WANDB_RUN: Optional[Any] = None
 
 
-def get_wandb_run() -> Optional[Run]:
+def get_wandb_run() -> Optional[Any]:
     return _WANDB_RUN
 
 
@@ -176,7 +260,18 @@ class GlobalConfigDictParserConfig(BaseModel):
             POLICY_BASE_URL_KEY_NAME: "",
             POLICY_API_KEY_KEY_NAME: "",
             POLICY_MODEL_NAME_KEY_NAME: "",
-            POLICY_MODEL_KEY_NAME: {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
+            POLICY_MODEL_KEY_NAME: {
+                "responses_api_models": {
+                    # Static validation needs a concrete capability contract but
+                    # never starts this placeholder model.
+                    "dummy_model": {
+                        "entrypoint": "app.py",
+                        # Static validation checks the recipe's declared model
+                        # interface; no adapter is launched from this placeholder.
+                        "provides": ["text-model", "image-model"],
+                    }
+                }
+            },
         }
     )
 
@@ -198,6 +293,8 @@ def _load_config_yaml(config_path):
 
 
 class GlobalConfigDictParser(BaseModel):
+    enable_runtime_integrations: ClassVar[bool] = True
+
     def parse_global_config_dict_from_cli(self) -> DictConfig:
         # We need to monkeypatch hydra here so that it doesn't use Hydra help so that we can use our own help down the line
         hydra_main_module = import_module("hydra.main")
@@ -518,7 +615,14 @@ For example, on the command line:
                 continue
 
             if is_swap_property or is_copy_property:
-                swapped_value = OmegaConf.merge(swapped_value, v)
+                if isinstance(swapped_value, DictConfig):
+                    # Hydra marks CLI-composed configs as structured. A mapping
+                    # copy is an explicit request to add or replace nested keys,
+                    # so temporarily open the copied source while applying it.
+                    with open_dict(swapped_value):
+                        swapped_value = OmegaConf.merge(swapped_value, v)
+                else:
+                    swapped_value = OmegaConf.merge(swapped_value, v)
 
             dict_config[k] = swapped_value
 
@@ -561,8 +665,6 @@ For example, on the command line:
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
-        # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
         if parse_config.dotenv_path:
             dotenv_path = parse_config.dotenv_path
         else:
@@ -571,7 +673,6 @@ For example, on the command line:
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
             dotenv_extra_config = _load_config_yaml(dotenv_path)
-
         merged_config_for_config_paths = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         ta = TypeAdapter(List[str])
         config_paths = merged_config_for_config_paths.get(CONFIG_PATHS_KEY_NAME) or []
@@ -584,13 +685,41 @@ Pass each config with --config (it builds the list for you), e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml"""
             ) from e
 
-        config_paths, extra_configs = self.load_extra_config_paths(config_paths)
+        from nemo_gym.environment_component_swaps import (
+            apply_component_swaps,
+            partition_component_swap_paths,
+            requested_component_swap_paths,
+            requested_rollout_driver_swap,
+            select_component_from_config,
+        )
+
+        requested_swaps = requested_component_swap_paths(merged_config_for_config_paths)
+        requested_rollout_driver = requested_rollout_driver_swap(merged_config_for_config_paths)
+        recipe_config_paths, requested_swaps = partition_component_swap_paths(config_paths, requested_swaps)
+        config_paths, extra_configs = self.load_extra_config_paths(recipe_config_paths)
+
+        replacements = {}
+        resolved_config_paths = list(config_paths)
+        resolved_path_identities = {_resolve_under_cwd_or_install(path).resolve() for path in resolved_config_paths}
+        for role, selected_path in requested_swaps.items():
+            swap_config_paths, swap_configs = self.load_extra_config_paths([str(selected_path)])
+            swap_config = OmegaConf.merge(*swap_configs)
+            self._recursively_swap_keys(swap_config)
+            replacements[role] = select_component_from_config(role, selected_path, swap_config)
+            for path in swap_config_paths:
+                identity = _resolve_under_cwd_or_install(path).resolve()
+                if identity in resolved_path_identities:
+                    continue
+                resolved_path_identities.add(identity)
+                resolved_config_paths.append(path)
+        config_paths = resolved_config_paths
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
 
         # Merge config dicts
         # global_config_dict is the last config arg here since we want command line args to override everything else.
+        component_overrides = OmegaConf.merge(dotenv_extra_config, global_config_dict)
         global_config_dict = OmegaConf.merge(*extra_configs, global_config_dict)
 
         # Update the config paths after postprocessing
@@ -599,6 +728,12 @@ Pass each config with --config (it builds the list for you), e.g.:
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
         self._recursively_swap_keys(global_config_dict)
+        apply_component_swaps(
+            global_config_dict,
+            replacements,
+            component_overrides,
+            rollout_driver=requested_rollout_driver,
+        )
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —
@@ -619,6 +754,11 @@ Pass each config with --config (it builds the list for you), e.g.:
                     continue
 
                 dummy_value = top_level_value["responses_api_models"].pop("dummy_model")
+                # The placeholder advertises enough capability information for
+                # model-free static validation.  It must not lend those claims
+                # to a real adapter selected by the user.
+                dummy_value.pop("provides", None)
+                dummy_value.pop("requires", None)
                 actual_key = next(iter(top_level_value["responses_api_models"]))
                 top_level_value["responses_api_models"][actual_key] = OmegaConf.merge(
                     dummy_value, top_level_value["responses_api_models"][actual_key]
@@ -707,19 +847,32 @@ Found global config dict yaml:
             # UV related configuration
             # UV caching directory overrides to local folders.
             global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
             # Set the appropriate environment variable here, and matche the config
             environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
-            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
             self._recursively_hide_secrets(global_config_dict)
 
-        # Set up W&B and log config. This must happen at the very last step.
+        self._initialize_runtime_integrations(global_config_dict)
+        return global_config_dict
+
+    def _initialize_runtime_integrations(self, global_config_dict: DictConfig) -> None:
+        """Validate a manifest-backed launch before initializing external integrations."""
+
+        if not self.enable_runtime_integrations:
+            return
+        if global_config_dict.get("manifest_path"):
+            from nemo_gym.environment_execution import preflight_manifest_execution
+
+            preflight_manifest_execution(global_config_dict)
+
         wandb_config = WANDBConfig.model_validate(global_config_dict)
         if wandb_config.is_available:  # pragma: no cover
             environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
+            wandb.util.VALUE_BYTES_LIMIT = 10_000_000
 
             global _WANDB_RUN
             _WANDB_RUN = wandb.init(
@@ -732,8 +885,6 @@ Found global config dict yaml:
             config_dict_to_log = deepcopy(global_config_dict)
             self._recursively_hide_secrets(config_dict_to_log)
             _WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
-
-        return global_config_dict
 
     def parse_no_environment(
         self,
@@ -770,6 +921,52 @@ Found global config dict yaml:
                     almost_servers.append((server_name, error))
 
         return almost_servers
+
+
+class StaticValidationConfigParser(GlobalConfigDictParser):
+    """Resolve configs for inspection without probing or reserving network ports.
+
+    A normal launch asks the OS for open ports. Listing and validation need only
+    deterministic, non-conflicting service boundaries, so this parser assigns
+    placeholders before delegating all other checks to the standard parser.
+    """
+
+    enable_runtime_integrations: ClassVar[bool] = False
+
+    def validate_and_populate_defaults(
+        self,
+        server_instance_configs,
+        default_host: str,
+        port_range_low: int,
+        port_range_high: int,
+        initial_disallowed_ports=None,
+    ) -> List[int]:
+        assigned = set(initial_disallowed_ports or [])
+        candidate = port_range_low
+        for server_instance_config in server_instance_configs:
+            run_server_config = server_instance_config.get_inner_run_server_config_dict()
+            if run_server_config.get("port"):
+                assigned.add(int(run_server_config["port"]))
+                continue
+            while candidate in assigned and candidate <= port_range_high:
+                candidate += 1
+            if candidate > port_range_high:
+                raise ConfigError(
+                    f"Static validation needs more unique ports than the configured range "
+                    f"[{port_range_low}, {port_range_high}] provides."
+                )
+            with open_dict(run_server_config):
+                run_server_config["port"] = candidate
+            assigned.add(candidate)
+            candidate += 1
+
+        return super().validate_and_populate_defaults(
+            server_instance_configs=server_instance_configs,
+            default_host=default_host,
+            port_range_low=port_range_low,
+            port_range_high=port_range_high,
+            initial_disallowed_ports=initial_disallowed_ports,
+        )
 
 
 def get_global_config_dict(

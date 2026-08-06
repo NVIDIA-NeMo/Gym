@@ -37,6 +37,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    StaticValidationConfigParser,
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
@@ -1025,6 +1026,27 @@ class TestGlobalConfig:
             "not": "not",
         }
 
+    def test_mapping_copy_can_add_nested_keys_to_a_structured_hydra_config(self) -> None:
+        config = OmegaConf.create(
+            {
+                "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
+                "derived_model": {
+                    "_copy": "policy_model",
+                    "responses_api_models": {"vllm_model": {"entrypoint": "app.py"}},
+                },
+            }
+        )
+        OmegaConf.set_struct(config, True)
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config["derived_model"], resolve=False) == {
+            "responses_api_models": {
+                "dummy_model": {"entrypoint": "app.py"},
+                "vllm_model": {"entrypoint": "app.py"},
+            }
+        }
+
     def test_recursively_replace_keys(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
@@ -1183,6 +1205,7 @@ class TestGlobalConfig:
                 "responses_api_models": {
                     "dummy_model": {
                         "entrypoint": "app.py",
+                        "provides": ["text-model", "image-model"],
                         "host": "127.0.0.1",
                         "port": 12345,
                     }
@@ -1315,6 +1338,57 @@ class TestGlobalConfig:
 
         # Without the help override, this will SystemExit.
         GlobalConfigDictParser.parse_global_config_dict_from_cli(None)
+
+    def test_manifest_preflight_precedes_runtime_integrations(self, monkeypatch: MonkeyPatch) -> None:
+        import nemo_gym.environment_execution as environment_execution
+
+        events = []
+        run = MagicMock()
+        monkeypatch.setattr(
+            environment_execution,
+            "preflight_manifest_execution",
+            lambda _config: events.append("preflight"),
+        )
+        monkeypatch.setattr(
+            nemo_gym.global_config.wandb,
+            "init",
+            lambda **_kwargs: events.append("wandb") or run,
+        )
+        config = DictConfig(
+            {
+                "manifest_path": "environments/fixture/manifest.yaml",
+                "wandb_project": "project",
+                "wandb_name": "run",
+                "wandb_api_key": "secret",
+            }
+        )
+
+        GlobalConfigDictParser()._initialize_runtime_integrations(config)
+
+        assert events == ["preflight", "wandb"]
+        run.config.update.assert_called_once()
+
+    def test_static_parser_skips_runtime_integrations(self, monkeypatch: MonkeyPatch) -> None:
+        import nemo_gym.environment_execution as environment_execution
+
+        preflight = MagicMock()
+        wandb_init = MagicMock()
+        monkeypatch.setattr(environment_execution, "preflight_manifest_execution", preflight)
+        monkeypatch.setattr(nemo_gym.global_config.wandb, "init", wandb_init)
+
+        StaticValidationConfigParser()._initialize_runtime_integrations(
+            DictConfig(
+                {
+                    "manifest_path": "environments/fixture/manifest.yaml",
+                    "wandb_project": "project",
+                    "wandb_name": "run",
+                    "wandb_api_key": "secret",
+                }
+            )
+        )
+
+        preflight.assert_not_called()
+        wandb_init.assert_not_called()
 
 
 class TestConfigLoadErrors:

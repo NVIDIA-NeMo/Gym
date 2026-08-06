@@ -44,7 +44,7 @@ from typing import Dict, Optional, Tuple
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import discover_components
+from nemo_gym.discovery import ConfigFlavorCapabilities, discover_components, read_config_flavor_capabilities
 
 
 AGENTS_SUBDIR = "responses_api_agents"
@@ -68,6 +68,12 @@ class AgentEntry:
     def variants(self) -> Dict[str, Path]:
         """Map variant name (config filename stem) -> config path."""
         return {path.stem: path for path in self.config_paths}
+
+    @property
+    def capability_flavors(self) -> Dict[str, ConfigFlavorCapabilities]:
+        """Map each config flavor to its own capability declarations."""
+
+        return {path.stem: read_config_flavor_capabilities(path, "responses_api_agents") for path in self.config_paths}
 
 
 def _iter_agent_blocks(config_path: Path):

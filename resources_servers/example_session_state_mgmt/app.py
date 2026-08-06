@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict
+from collections.abc import Mapping
+from typing import Any, Dict
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
@@ -26,6 +27,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.verifier_fixture import build_offline_verifier_app
 
 
 class StatefulCounterResourcesServerConfig(BaseResourcesServerConfig):
@@ -93,6 +95,14 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
             reward = float(body.expected_count == counter)
 
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
+
+
+def create_offline_verifier_app(*, server_config: Mapping[str, Any], instance_name: str) -> FastAPI:
+    return build_offline_verifier_app(
+        StatefulCounterResourcesServer,
+        server_config=server_config,
+        instance_name=instance_name,
+    )
 
 
 if __name__ == "__main__":

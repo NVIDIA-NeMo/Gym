@@ -18,7 +18,7 @@ import json
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
@@ -40,6 +40,8 @@ from nemo_gym.cli.utils import (
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
 from nemo_gym.discovery import read_config_metadata
+from nemo_gym.environment_manifest import parse_python_callable_reference
+from nemo_gym.environment_validation import validate_rollout_driver_contract
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
@@ -55,6 +57,56 @@ from nemo_gym.global_config import (
 # NOTE: `reward_profile`, `rollout_collection`, `rollout_reverification` and `train_data_utils` are imported lazily inside the run/aggregate/
 # profile commands below: they pull in heavy deps (wandb, mlflow, anthropic) that the fast `list`/`search`
 # commands in this module must not pay for on every invocation.
+
+
+def _load_rollout_collection_driver(reference: str | None) -> Callable[..., Any] | None:
+    if reference is None:
+        return None
+    try:
+        module_name, function_name = parse_python_callable_reference(
+            reference,
+            field_name="rollout_collection_driver",
+        )
+        module = importlib.import_module(module_name)
+    except (ImportError, ValueError) as error:
+        raise ConfigError(f"Cannot load rollout_collection_driver {reference!r}: {error}") from error
+
+    try:
+        driver = getattr(module, function_name)
+    except AttributeError as error:
+        raise ConfigError(
+            f"rollout_collection_driver {reference!r} does not name a function in module {module_name!r}."
+        ) from error
+    if not callable(driver):
+        raise ConfigError(f"rollout_collection_driver {reference!r} is not callable.")
+    return driver
+
+
+async def _execute_rollout_collection(
+    config: Any,
+    global_config_dict: DictConfig,
+    driver_fn: Callable[..., Any] | None,
+    *,
+    captured_environment: Any = None,
+) -> None:
+    if driver_fn is None:
+        from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+        await RolloutCollectionHelper().run_from_config(config)
+        return
+
+    resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
+    await driver_fn(config, resolved_config)
+
+    from nemo_gym.trajectory_bundle import write_trajectory_bundle
+
+    bundle_path = write_trajectory_bundle(
+        rollouts_path=config.output_jsonl_fpath,
+        materialized_inputs_path=config.materialized_jsonl_fpath,
+        environment=captured_environment,
+        identity_fields=config.trajectory_identity_fields,
+    )
+    print(f"Trajectory bundle: {bundle_path}")
 
 
 def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
@@ -323,14 +375,22 @@ def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.rollout_collection import (
         E2ERolloutCollectionConfig,
         RolloutCollectionConfig,
-        RolloutCollectionHelper,
     )
     from nemo_gym.train_data_utils import TrainDataProcessor
 
     global_config_dict = get_global_config_dict()
+    if not global_config_dict.get("manifest_path"):
+        validate_rollout_driver_contract(global_config_dict)
 
     # Ensure we have the right config first thing
     e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
+    driver_path = e2e_rollout_collection_config.rollout_collection_driver
+    driver_fn = _load_rollout_collection_driver(driver_path)
+    driver_capture_environment = None
+    if driver_fn is not None:
+        from nemo_gym.trajectory_bundle import captured_environment_from_config
+
+        driver_capture_environment = captured_environment_from_config(global_config_dict)
 
     # Prepare data
     data_processor_config_dict = deepcopy(global_config_dict)
@@ -370,15 +430,11 @@ def e2e_rollout_collection():  # pragma: no cover
     )
 
     rh = RunHelper()
-    rh.start(None)
-
-    rch = RolloutCollectionHelper()
+    rh.start(None, global_config_dict=global_config_dict)
 
     # A benchmark can plug in a custom rollout-collection procedure via the
     # ``rollout_collection_driver`` config field (a ``module.path:function``).
     # The default path runs the built-in single-pass helper.
-    driver_path = e2e_rollout_collection_config.rollout_collection_driver
-
     print(
         f"""Output artifacts:
 1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
@@ -388,15 +444,14 @@ def e2e_rollout_collection():  # pragma: no cover
 """
     )
     try:
-        if driver_path:
-            module_name, _, fn_name = driver_path.partition(":")
-            if not module_name or not fn_name:
-                raise ConfigError(f"rollout_collection_driver must be 'module.path:function' (got {driver_path!r}).")
-            driver_fn = getattr(importlib.import_module(module_name), fn_name)
-            resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
-            asyncio.run(driver_fn(rollout_collection_config, resolved_config))
-        else:
-            asyncio.run(rch.run_from_config(rollout_collection_config))
+        asyncio.run(
+            _execute_rollout_collection(
+                rollout_collection_config,
+                global_config_dict,
+                driver_fn,
+                captured_environment=driver_capture_environment,
+            )
+        )
     except KeyboardInterrupt:
         pass
     finally:
@@ -405,12 +460,27 @@ def e2e_rollout_collection():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollout_collection import RolloutCollectionConfig
 
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
-    rch = RolloutCollectionHelper()
+    global_config_dict = get_global_config_dict()
+    if not global_config_dict.get("manifest_path"):
+        validate_rollout_driver_contract(global_config_dict)
+    config = RolloutCollectionConfig.model_validate(global_config_dict)
+    driver_fn = _load_rollout_collection_driver(config.rollout_collection_driver)
+    driver_capture_environment = None
+    if driver_fn is not None:
+        from nemo_gym.trajectory_bundle import captured_environment_from_config
 
-    asyncio.run(rch.run_from_config(config))
+        driver_capture_environment = captured_environment_from_config(global_config_dict)
+
+    asyncio.run(
+        _execute_rollout_collection(
+            config,
+            global_config_dict,
+            driver_fn,
+            captured_environment=driver_capture_environment,
+        )
+    )
 
 
 @exit_cleanly_on_config_error
@@ -425,12 +495,18 @@ def aggregate_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reverify_rollouts():  # pragma: no cover
-    from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+    from nemo_gym.rollout_reverification import (
+        RolloutReverificationConfig,
+        RolloutReverificationHelper,
+        reverification_fingerprint,
+    )
 
+    global_config = get_global_config_dict()
     rh = RunHelper()
-    rh.start(None)
-
-    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
+    rh.start(None, global_config_dict=global_config)
+    with open_dict(global_config):
+        global_config["verifier_fingerprint"] = reverification_fingerprint(global_config)
+    config = RolloutReverificationConfig.model_validate(global_config)
     rrh = RolloutReverificationHelper()
 
     asyncio.run(rrh.run_from_config(config))

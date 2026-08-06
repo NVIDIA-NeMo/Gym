@@ -61,6 +61,7 @@ class TestListBenchmarks:
         (tmp_path / "flavored" / "configs" / "myflavor.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
         (tmp_path / "notbench").mkdir()
         (tmp_path / "notbench" / "config.yaml").write_text("x:\n  prompt_config: hi.yaml\n")  # no benchmark dataset
+        (tmp_path / "standard" / "manifest.yaml").write_text("datasets:\n- type: benchmark\n")
 
         found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
         assert found == {"standard/config.yaml", "flavored/configs/myflavor.yaml"}

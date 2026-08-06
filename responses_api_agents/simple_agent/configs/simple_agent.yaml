@@ -2,6 +2,7 @@ simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
+      requires: [verification, text-model]
       resources_server:
         type: resources_servers
         name: ???

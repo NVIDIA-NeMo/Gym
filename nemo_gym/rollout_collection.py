@@ -64,6 +64,18 @@ from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.trajectory_bundle import (
+    DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+    TRAJECTORY_ID_KEY,
+    bundle_path_for,
+    captured_environment_from_config,
+    resume_checkpoint_path_for,
+    stamp_trajectory_id,
+    trajectory_identity_key,
+    validate_trajectory_resume,
+    write_trajectory_bundle,
+    write_trajectory_resume_checkpoint,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +160,10 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
             "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
             "When unset, the standard single-pass collection runs."
         ),
+    )
+    trajectory_identity_fields: Tuple[str, ...] = Field(
+        default=DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+        description="Fields that uniquely identify one captured trajectory across custom-driver stages.",
     )
 
 
@@ -419,11 +435,14 @@ class RolloutCollectionHelper(BaseModel):
             result_strs = [[line.strip()] for line in f]
         results = [orjson.loads(p[0]) for p in result_strs]
 
-        get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+        get_key = lambda row: trajectory_identity_key(row, config.trajectory_identity_fields)
 
         # Successes (and any legacy '-failed' rows written by pre-fix Gym
         # builds) live in the main jsonl. They short-circuit dispatch.
-        successes_seen = set(map(get_key, results))
+        success_keys = [get_key(result) for result in results]
+        if len(success_keys) != len(set(success_keys)):
+            raise ConfigError("Cached rollout successes contain duplicate trajectory identities.")
+        successes_seen = set(success_keys)
 
         # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
@@ -439,7 +458,7 @@ class RolloutCollectionHelper(BaseModel):
                     fr = orjson.loads(line)
                     if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                         continue
-                    k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
+                    k = get_key(fr)
                     attempts_by_key[k] += 1
                     if fr.get(NG_TERMINAL_KEY):
                         terminal_keys.add(k)
@@ -458,8 +477,14 @@ class RolloutCollectionHelper(BaseModel):
             if attempt > 0:
                 row[ATTEMPT_INDEX_KEY_NAME] = attempt
 
-        key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
-        rows = [key_to_row[get_key(result)] for result in results]
+        input_keys = [get_key(row) for row in original_input_rows]
+        if len(input_keys) != len(set(input_keys)):
+            raise ConfigError("Materialized inputs contain duplicate trajectory identities.")
+        key_to_row = dict(zip(input_keys, original_input_rows))
+        try:
+            rows = [key_to_row[get_key(result)] for result in results]
+        except KeyError as error:
+            raise ConfigError(f"Cached rollout has no matching materialized input: {error.args[0]}.") from error
 
         print(
             f"""Resumed from cache. Found:
@@ -475,8 +500,20 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        failures_fpath = failures_path_for(output_fpath)
+        bundle_fpath = bundle_path_for(output_fpath)
+        checkpoint_fpath = resume_checkpoint_path_for(output_fpath)
+        global_config = get_global_config_dict()
+        captured_environment = captured_environment_from_config(global_config)
 
-        if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
+        resume_ready = config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists()
+        if resume_ready:
+            validate_trajectory_resume(
+                rollouts_path=output_fpath,
+                materialized_inputs_path=config.materialized_jsonl_fpath,
+                environment=captured_environment,
+                identity_fields=config.trajectory_identity_fields,
+            )
             (
                 input_rows,
                 rows,
@@ -485,6 +522,13 @@ class RolloutCollectionHelper(BaseModel):
             ) = self._load_from_cache(config)
             persisted_rows = list(rows)
             persisted_results = list(results)
+            write_trajectory_resume_checkpoint(
+                rollouts_path=output_fpath,
+                materialized_inputs_path=config.materialized_jsonl_fpath,
+                environment=captured_environment,
+                identity_fields=config.trajectory_identity_fields,
+            )
+            bundle_fpath.unlink(missing_ok=True)
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -506,10 +550,24 @@ class RolloutCollectionHelper(BaseModel):
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
             with config.materialized_jsonl_fpath.open("wb") as f:
+                input_identities: set[str] = set()
                 for row in input_rows:
+                    identity = stamp_trajectory_id(row, config.trajectory_identity_fields)
+                    if identity in input_identities:
+                        raise ConfigError(f"Materialized inputs contain duplicate trajectory id '{identity}'.")
+                    input_identities.add(identity)
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            failures_fpath.unlink(missing_ok=True)
+            bundle_fpath.unlink(missing_ok=True)
+            checkpoint_fpath.unlink(missing_ok=True)
+            write_trajectory_resume_checkpoint(
+                rollouts_path=output_fpath,
+                materialized_inputs_path=config.materialized_jsonl_fpath,
+                environment=captured_environment,
+                identity_fields=config.trajectory_identity_fields,
+            )
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -517,11 +575,10 @@ class RolloutCollectionHelper(BaseModel):
             semaphore = Semaphore(config.num_samples_in_parallel)
 
         output_fpath.parent.mkdir(exist_ok=True, parents=True)
-        failures_fpath = failures_path_for(output_fpath)
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        capture_dirs = model_call_capture_dirs_from_config(global_config)
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
@@ -539,6 +596,10 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            for field in config.trajectory_identity_fields:
+                if field in row:
+                    result[field] = row[field]
+            result[TRAJECTORY_ID_KEY] = stamp_trajectory_id(row, config.trajectory_identity_fields)
             if SKILLS_REF_KEY_NAME in row:
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
             if ATTEMPT_INDEX_KEY_NAME in row:
@@ -597,10 +658,15 @@ class RolloutCollectionHelper(BaseModel):
         del result_strs
 
         print("Sorting results to ensure consistent ordering")
-        rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-        results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-        persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-        persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        sort_key = lambda row: (
+            row[TASK_INDEX_KEY_NAME],
+            row[ROLLOUT_INDEX_KEY_NAME],
+            trajectory_identity_key(row, config.trajectory_identity_fields),
+        )
+        rows.sort(key=sort_key)
+        results.sort(key=sort_key)
+        persisted_rows.sort(key=sort_key)
+        persisted_results.sort(key=sort_key)
 
         # Compute and write aggregate metrics via /aggregate_metrics using only the
         # rows written to the main rollouts jsonl so runtime aggregation matches
@@ -617,9 +683,18 @@ class RolloutCollectionHelper(BaseModel):
                 persisted_results, persisted_rows, output_fpath
             )
 
+        bundle_path = write_trajectory_bundle(
+            rollouts_path=output_fpath,
+            materialized_inputs_path=config.materialized_jsonl_fpath,
+            environment=captured_environment,
+            identity_fields=config.trajectory_identity_fields,
+        )
+        checkpoint_fpath.unlink(missing_ok=True)
+
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
+Trajectory bundle: {bundle_path}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results

@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import shlex
+import subprocess
 from glob import glob
 from os import makedirs
 from os.path import exists
@@ -26,18 +27,18 @@ from signal import SIGINT
 from subprocess import Popen, TimeoutExpired
 from threading import Thread
 from time import sleep, time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple
 
 import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
-from pydantic import Field
+from pydantic import Field, PrivateAttr
 from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.cli.setup_command import run_command, setup_env_command
+from nemo_gym.cli.setup_command import run_command, server_venv_path, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -46,10 +47,20 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.discovery import SERVER_ROLE_BY_GROUP, iter_server_configs
+from nemo_gym.environment_execution import preflight_manifest_execution
+from nemo_gym.environment_manifest import EnvironmentManifest, load_manifest
+from nemo_gym.environment_validation import (
+    resolve_component_provenance,
+    resolve_component_source_directory,
+    validate_manifest_launch_sources,
+)
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
+    CONFIG_PATHS_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    ENVIRONMENT_COMPONENT_PROVENANCE_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -57,6 +68,7 @@ from nemo_gym.global_config import (
     QUERY_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    StaticValidationConfigParser,
     get_global_config_dict,
 )
 from nemo_gym.registry import discover_environments, read_environment_details
@@ -68,6 +80,13 @@ from nemo_gym.server_utils import (
     ServerInstanceDisplayConfig,
     ServerStatus,
     initialize_ray,
+)
+from nemo_gym.verifier_ci_harness import build_verifier_harness_invocation, select_resources_server_runtime
+from nemo_gym.verifier_fixture import (
+    VerifierFixtureError,
+    load_verifier_fixture,
+    validate_verifier_fixture,
+    verifier_fixture_environment,
 )
 
 
@@ -108,7 +127,7 @@ class RunConfig(BaseNeMoGymCLIConfig):
     )
 
 
-class TestConfig(RunConfig):
+class TestConfig(BaseNeMoGymCLIConfig):
     """
     Test a specific server module by running its pytest suite and optionally validating example data.
 
@@ -119,21 +138,41 @@ class TestConfig(RunConfig):
     ```
     """
 
+    entrypoint: str | None = Field(
+        default=None,
+        description="Relative resources-server path. Resolved from manifest_path for `gym env test NAME`.",
+    )
+    manifest_path: Path | None = Field(
+        default=None,
+        description="Environment manifest whose scorer contract is being tested.",
+    )
+    environment_ref: str | None = None
+    update_expected: bool = Field(
+        default=False,
+        description="Regenerate fixture statuses and rewards from the scorer before checking the manifest.",
+    )
     should_validate_data: bool = Field(
         default=False,
         description="Whether or not to validate the example data (examples, metrics, rollouts, etc) for this server.",
     )
 
-    _dir_path: Path  # initialized in model_post_init
+    _dir_path: Path | None = PrivateAttr(default=None)
+    _resolved_dir_override: Path | None = PrivateAttr(default=None)
 
     def model_post_init(self, context):  # pragma: no cover
-        self._dir_path = Path(self.entrypoint)
-        assert not self.dir_path.is_absolute()
+        if self.entrypoint is not None:
+            self._dir_path = Path(self.entrypoint)
+            if self._dir_path.is_absolute():
+                raise ValueError("entrypoint must be relative")
+        elif self.manifest_path is None and self.environment_ref is None:
+            raise ValueError("entrypoint, manifest_path, or environment_ref is required")
 
         return super().model_post_init(context)
 
     @property
     def dir_path(self) -> Path:
+        if self._dir_path is None:
+            raise ConfigError("The resources server has not been resolved from the environment manifest.")
         return self._dir_path
 
     @property
@@ -143,7 +182,13 @@ class TestConfig(RunConfig):
         Use this for filesystem access (reading data, running the suite); use ``dir_path`` (the
         relative entrypoint) for display and example commands shown to the user.
         """
-        return _resolve_server_dir(self._dir_path)
+        if self._resolved_dir_override is not None:
+            return self._resolved_dir_override
+        return _resolve_server_dir(self.dir_path)
+
+    @property
+    def fixture_path(self) -> Path:
+        return self.resolved_dir_path / "tests" / "verifier_cases.jsonl"
 
 
 class RunHelper:  # pragma: no cover
@@ -155,12 +200,27 @@ class RunHelper:  # pragma: no cover
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
 
-    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
-        global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+    def start(
+        self,
+        global_config_dict_parser_config: GlobalConfigDictParserConfig | None,
+        *,
+        global_config_dict: DictConfig | None = None,
+        preflight_mode: Literal["full", "launch-sources-only"] = "full",
+    ) -> None:
+        if global_config_dict is None:
+            global_config_dict = get_global_config_dict(
+                global_config_dict_parser_config=global_config_dict_parser_config
+            )
 
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
+        if preflight_mode == "full":
+            preflight_manifest_execution(global_config_dict)
+        elif preflight_mode == "launch-sources-only":
+            validate_manifest_launch_sources(global_config_dict)
+        else:  # pragma: no cover - Literal protects typed callers
+            raise ValueError(f"Unknown preflight mode: {preflight_mode}")
 
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
@@ -168,6 +228,7 @@ class RunHelper:  # pragma: no cover
 
         # Assume Nemo Gym Run is for a single agent.
         escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
+        component_provenance = {item.instance: item for item in resolve_component_provenance(global_config_dict)}
 
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
@@ -182,12 +243,14 @@ class RunHelper:  # pragma: no cover
         # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
         for top_level_path in top_level_paths:
             server_config_dict = global_config_dict[top_level_path]
-            if not isinstance(server_config_dict, DictConfig):
+            if not isinstance(server_config_dict, DictConfig) or not server_config_dict:
                 continue
 
             first_key = list(server_config_dict)[0]
+            if first_key not in SERVER_ROLE_BY_GROUP:
+                continue
             server_config_dict = server_config_dict[first_key]
-            if not isinstance(server_config_dict, DictConfig):
+            if not isinstance(server_config_dict, DictConfig) or not server_config_dict:
                 continue
             second_key = list(server_config_dict)[0]
             server_config_dict = server_config_dict[second_key]
@@ -197,19 +260,39 @@ class RunHelper:  # pragma: no cover
             if "entrypoint" not in server_config_dict:
                 continue
 
-            # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
             entrypoint_fpath = Path(server_config_dict.entrypoint)
             assert not entrypoint_fpath.is_absolute()
 
-            # Resolve cwd-first (a local server), else the install location for built-ins.
-            dir_path = _resolve_server_dir(Path(first_key, second_key))
+            selected_provenance = component_provenance.get(top_level_path)
+            dir_path = (
+                selected_provenance.source_directory
+                if selected_provenance is not None
+                and selected_provenance.role == SERVER_ROLE_BY_GROUP[first_key]
+                and selected_provenance.implementation == second_key
+                else None
+            )
+            if dir_path is None:
+                # Legacy programmatic configs may not carry enough provenance
+                # to identify an alias, so retain the conventional resolver.
+                dir_path, _selected_config = resolve_component_source_directory(
+                    first_key,
+                    second_key,
+                    global_config_dict.get(CONFIG_PATHS_KEY_NAME) or (),
+                )
+            if dir_path is None:
+                dir_path = _resolve_server_dir(Path(first_key, second_key))
 
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = run_command(command, dir_path, server_name=top_level_path)
+            process = run_command(
+                command,
+                dir_path,
+                server_name=top_level_path,
+                project_root=dir_path.parent.parent,
+            )
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
@@ -452,9 +535,8 @@ def run(
     global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
-
     rh = RunHelper()
-    rh.start(global_config_dict_parser_config)
+    rh.start(global_config_dict_parser_config, global_config_dict=global_config_dict)
     rh.run_forever()
 
 
@@ -538,25 +620,265 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
     print(f"The data for {test_config.dir_path} has been successfully validated!")
 
 
-def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
+def _resources_server_directory(config_path: Path, implementation: str) -> Path | None:
+    """Return the component directory when ``config_path`` defines ``implementation``."""
+
+    try:
+        raw = OmegaConf.load(config_path)
+    except (OSError, ValueError):
+        return None
+    if not any(
+        group == "resources_servers" and str(name) == implementation for group, name, _ in iter_server_configs(raw)
+    ):
+        return None
+
+    for parent in config_path.parents:
+        if parent.parent.name == "resources_servers":
+            return parent.resolve()
+    return None
+
+
+def _resolve_resources_server_component(
+    global_config_dict: Mapping[str, Any] | DictConfig,
+    implementation: str,
+    selection: str,
+) -> Path:
+    """Find the selected resources-server directory from the resolved recipe inputs."""
+
+    provenance_matches = {
+        item.source_directory
+        for item in resolve_component_provenance(global_config_dict)
+        if item.role == "resources_server"
+        and item.implementation == implementation
+        and item.source_directory is not None
+    }
+    if len(provenance_matches) == 1:
+        return next(iter(provenance_matches))
+    if len(provenance_matches) > 1:
+        rendered = ", ".join(map(str, sorted(provenance_matches)))
+        raise ConfigError(
+            f"Resources server implementation '{implementation}' resolves to multiple selected sources: {rendered}."
+        )
+    if global_config_dict.get(ENVIRONMENT_COMPONENT_PROVENANCE_KEY_NAME) is not None:
+        raise ConfigError(
+            f"Manifest-bound environment '{selection}' has no resources-server provenance for '{implementation}'."
+        )
+
+    raw_config_paths = global_config_dict.get(CONFIG_PATHS_KEY_NAME) or []
+    for raw_path in raw_config_paths:
+        config_path = _resolve_under_cwd_or_install(str(raw_path)).resolve()
+        directory = _resources_server_directory(config_path, implementation)
+        if directory is not None:
+            return directory
+
+    # A component config can be supplied indirectly or omitted from config_paths
+    # after programmatic config construction. Fall back to the same component
+    # roots used by discovery, but refuse ambiguity instead of guessing.
+    matches: list[Path] = []
+    for root in component_search_roots():
+        resources_root = root / "resources_servers"
+        if not resources_root.is_dir():
+            continue
+        for config_path in resources_root.glob("*/configs/*.yaml"):
+            directory = _resources_server_directory(config_path, implementation)
+            if directory is not None and directory not in matches:
+                matches.append(directory)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        rendered = ", ".join(str(path) for path in matches)
+        raise ConfigError(
+            f"Resources server implementation '{implementation}' is defined by multiple components: {rendered}. "
+            "Select an unambiguous environment config."
+        )
+    raise ConfigError(
+        f"Environment '{selection}' selects resources_server '{implementation}', but its component directory "
+        "could not be found from config_paths."
+    )
+
+
+def _bind_manifest_resources_server(
+    test_config: TestConfig,
+    global_config_dict: Mapping[str, Any] | DictConfig,
+) -> EnvironmentManifest | None:
+    if test_config.manifest_path is None:
+        manifest = None
+    else:
+        manifest_path = _resolve_under_cwd_or_install(test_config.manifest_path).resolve()
+        manifest = load_manifest(manifest_path)
+    if test_config._dir_path is not None:
+        return manifest
+
+    if manifest is not None:
+        implementation = manifest.resources_server
+        if implementation is None:  # guarded by manifest profile validation; retained for a clear diagnostic
+            raise ConfigError(f"Environment manifest '{manifest.name}' does not declare resources_server.")
+        selection = manifest.name
+    else:
+        implementations = {
+            str(name)
+            for group, name, _server_config in iter_server_configs(global_config_dict)
+            if group == "resources_servers"
+        }
+        if len(implementations) != 1:
+            rendered = ", ".join(sorted(implementations)) or "none"
+            raise ConfigError(
+                f"Environment '{test_config.environment_ref}' must resolve exactly one resources server to test; "
+                f"found {rendered}."
+            )
+        implementation = next(iter(implementations))
+        selection = test_config.environment_ref or "<selected config>"
+
+    resource_dir = _resolve_resources_server_component(global_config_dict, implementation, selection)
+    relative_path = next(
+        (
+            resource_dir.relative_to(root.resolve())
+            for root in component_search_roots()
+            if resource_dir.is_relative_to(root.resolve())
+        ),
+        Path("resources_servers") / resource_dir.name,
+    )
+    test_config.entrypoint = str(relative_path)
+    test_config._dir_path = relative_path
+    test_config._resolved_dir_override = resource_dir
+    return manifest
+
+
+def _validate_scoring_fixture(
+    test_config: TestConfig,
+    manifest: EnvironmentManifest | None,
+    *,
+    require_expected_values: bool,
+) -> bool:
+    fixture_path = test_config.fixture_path
+    if not fixture_path.is_file():
+        if manifest is not None or test_config.update_expected:
+            subject = (
+                f"Environment '{manifest.name}'"
+                if manifest is not None
+                else f"Resources server '{test_config.entrypoint}'"
+            )
+            raise ConfigError(
+                f"{subject} requires the standard verifier fixture at '{fixture_path}'. "
+                "Add full_reward, zero_reward, and malformed cases; add determinism_reseed when seeded."
+            )
+        return False
+    try:
+        validate_verifier_fixture(
+            load_verifier_fixture(fixture_path),
+            reward_range=manifest.reward.range if manifest is not None else None,
+            higher_is_better=manifest.reward.higher_is_better if manifest is not None else True,
+            determinism=manifest.determinism.value if manifest is not None else None,
+            require_expected_values=require_expected_values,
+        )
+    except VerifierFixtureError as error:
+        raise ConfigError(f"Invalid verifier fixture '{fixture_path}': {error}") from error
+    return True
+
+
+def _test_single(
+    test_config: TestConfig,
+    global_config_dict: DictConfig,
+    manifest: EnvironmentManifest | None = None,
+) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
-    prefix = test_config.entrypoint.replace("/", "\\/")
+    prefix = str(test_config.entrypoint).replace("/", "\\/")
     resolved_dir = test_config.resolved_dir_path
-    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest"""
+    fixture_environment = verifier_fixture_environment(
+        reward_range=manifest.reward.range if manifest is not None else None,
+        higher_is_better=manifest.reward.higher_is_better if manifest is not None else True,
+        determinism=manifest.determinism.value if manifest is not None else None,
+        update_expected=test_config.update_expected,
+    )
+    environment_prefix = ""
+    if fixture_environment:
+        assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in fixture_environment.items())
+        environment_prefix = f"env {assignments} "
+    pytest_command = "pytest"
+    command = f"{setup_env_command(resolved_dir, global_config_dict, prefix)} && {environment_prefix}{pytest_command}"
     # Generated server tests import `resources_servers.<name>...`, so the project root (the dir
     # holding the server-type dirs) must be on PYTHONPATH when running from outside a repo checkout.
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
-def test():  # pragma: no cover
-    global_config_dict = get_global_config_dict()
-    test_config = TestConfig.model_validate(global_config_dict)
+def _run_canonical_verifier_harness(
+    test_config: TestConfig,
+    global_config_dict: DictConfig,
+    manifest: EnvironmentManifest,
+) -> int:
+    """Run the same repository-owned verifier contract used by onboarding CI."""
 
-    proc = _test_single(test_config, global_config_dict)
+    implementation = manifest.resources_server
+    if implementation is None:  # guarded by manifest validation
+        raise ConfigError(f"Environment manifest '{manifest.name}' does not declare resources_server.")
+    try:
+        instance_name, server_config = select_resources_server_runtime(global_config_dict, implementation)
+        entrypoint = server_config.get("entrypoint")
+        if not isinstance(entrypoint, str) or not entrypoint:
+            raise VerifierFixtureError(f"Selected verifier {implementation!r} has no Python entrypoint.")
+        resolved_dir = test_config.resolved_dir_path
+        invocation = build_verifier_harness_invocation(
+            python_executable=server_venv_path(resolved_dir, global_config_dict) / "bin" / "python",
+            project_root=resolved_dir.parent.parent,
+            component_dir=resolved_dir,
+            entrypoint=entrypoint,
+            instance_name=instance_name,
+            fixture_path=test_config.fixture_path,
+            server_config=server_config,
+            reward_range=manifest.reward.range,
+            higher_is_better=manifest.reward.higher_is_better,
+            determinism=manifest.determinism.value,
+        )
+        completed = subprocess.run(
+            invocation.command,
+            cwd=resolved_dir,
+            env=invocation.environment,
+            input=invocation.stdin,
+            text=True,
+            check=False,
+        )
+    except (OSError, VerifierFixtureError) as error:
+        raise ConfigError(f"Could not run the canonical verifier fixture: {error}") from error
+    return completed.returncode
+
+
+@exit_cleanly_on_config_error
+def test():  # pragma: no cover
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        ),
+        global_config_dict_parser_cls=StaticValidationConfigParser,
+    )
+    test_config = TestConfig.model_validate(global_config_dict)
+    manifest = _bind_manifest_resources_server(test_config, global_config_dict)
+    from nemo_gym.environment_execution import preflight_manifest_execution
+
+    preflight_manifest_execution(global_config_dict)
+    has_fixture = _validate_scoring_fixture(
+        test_config,
+        manifest,
+        require_expected_values=not test_config.update_expected,
+    )
+
+    proc = _test_single(test_config, global_config_dict, manifest)
     return_code = proc.wait()
     if return_code != 0:
         print(f"You can run detailed tests via `cd {test_config.entrypoint} && source .venv/bin/activate && pytest`.")
         exit(return_code)
+
+    if has_fixture:
+        if manifest is not None:
+            return_code = _run_canonical_verifier_harness(test_config, global_config_dict, manifest)
+            if return_code != 0:
+                print("Gym's canonical verifier fixture harness failed; see the diagnostics above.")
+                exit(return_code)
+        _validate_scoring_fixture(test_config, manifest, require_expected_values=True)
+        action = "updated and passed" if test_config.update_expected else "passed"
+        rich.print(
+            f"[green]✓[/green] Verifier fixture {action}: scoring sentinels, reward endpoints, "
+            "and the declared determinism contract."
+        )
 
     try:
         _validate_data_single(test_config)
@@ -566,6 +888,25 @@ def test():  # pragma: no cover
         print(f"gym env test +entrypoint={test_config.entrypoint} +should_validate_data=true")
         print("```")
         exit(1)
+
+
+@exit_cleanly_on_config_error
+def replay_rollouts():  # pragma: no cover
+    """Re-score captured trajectories with only verifier-side services running."""
+
+    from nemo_gym.environment_replay import replay_environment_rollouts
+
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        ),
+        global_config_dict_parser_cls=StaticValidationConfigParser,
+    )
+    result = replay_environment_rollouts(global_config_dict)
+    rich.print(
+        f"[green]✓[/green] Replayed {result.rows} trajectory row(s) without rerunning the policy. "
+        f"Output: {result.paths.output}"
+    )
 
 
 def _display_list_of_paths(paths: List[Path]) -> str:  # pragma: no cover
@@ -921,6 +1262,7 @@ def validate():
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         ),
+        global_config_dict_parser_cls=StaticValidationConfigParser,
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 

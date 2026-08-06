@@ -12,6 +12,19 @@ description: >
 
 # Add Benchmark to NeMo-Gym
 
+## New catalog onboarding
+
+For a new environment or canonical benchmark, first read `fern/versions/latest/pages/contribute/environments/start-here.mdx` and the relevant `gym env <command> --help` output. Search the catalog and component registry, decide whether the scorer can be reused, and select `stock-loop`, `measured-loop`, `external-loop`, or `custom-driver` by identifying who owns the episode loop.
+
+Use the guided scaffold for a new catalog unit:
+
+```bash
+gym env init --environment my_environment --profile stock-loop --author "Owning Team"
+gym env init --benchmark my_benchmark --profile stock-loop --canonical-split test --author "Owning Team"
+```
+
+Do not begin a new catalog contribution with the legacy `--resources-server` scaffold unless the request is specifically for a standalone Resources Server. For a contribution that creates a Resources Server, the workflow below remains the implementation reference for data, verification, testing, profiling, and review; where command routing differs, the onboarding guide and current CLI help are authoritative.
+
 ## Determine Integration Type
 
 Before starting, determine which type of benchmark you're adding:

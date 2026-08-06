@@ -12,12 +12,47 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import os
+from pathlib import Path
 from unittest.mock import MagicMock
 
-from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
+from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest, create_offline_verifier_app
+from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import (
+    DETERMINISM_ENV_VAR,
+    HIGHER_IS_BETTER_ENV_VAR,
+    REWARD_RANGE_ENV_VAR,
+    UPDATE_EXPECTED_ENV_VAR,
+    exercise_verifier_fixture,
+)
+
+
+CASES_PATH = Path(__file__).with_name("verifier_cases.jsonl")
+
+
+def _fixture_client() -> TestClient:
+    return TestClient(
+        create_offline_verifier_app(
+            server_config={"entrypoint": "app.py"},
+            instance_name="mcqa",
+        )
+    )
+
+
+def test_verifier_fixture() -> None:
+    reward_range = tuple(json.loads(os.getenv(REWARD_RANGE_ENV_VAR, "[0,1]")))
+    exercise_verifier_fixture(
+        _fixture_client,
+        CASES_PATH,
+        reward_range=reward_range,
+        higher_is_better=os.getenv(HIGHER_IS_BETTER_ENV_VAR, "true").casefold() == "true",
+        determinism=os.getenv(DETERMINISM_ENV_VAR, "unknown"),
+        update_expected=os.getenv(UPDATE_EXPECTED_ENV_VAR) == "1",
+    )
 
 
 class TestApp:

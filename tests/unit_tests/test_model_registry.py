@@ -15,7 +15,7 @@
 from pathlib import Path
 
 from nemo_gym.discovery import merge_by_name
-from nemo_gym.model_registry import _discover_models_in_dir
+from nemo_gym.model_registry import MODELS_DIR, _discover_models_in_dir
 
 
 def _make_model(models_dir: Path, name: str, *, app: bool = True, flavors=()) -> Path:
@@ -27,7 +27,9 @@ def _make_model(models_dir: Path, name: str, *, app: bool = True, flavors=()) ->
         configs_dir = model_dir / "configs"
         configs_dir.mkdir()
         for flavor in flavors:
-            (configs_dir / f"{flavor}.yaml").write_text("{}\n")
+            config_path = configs_dir / f"{flavor}.yaml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text("{}\n")
     return model_dir
 
 
@@ -70,3 +72,33 @@ class TestDiscoverModels:
 
     def test_missing_directory_yields_no_models(self, tmp_path: Path) -> None:
         assert _discover_models_in_dir(tmp_path / "nope") == {}
+
+    def test_nested_flavor_keeps_its_passable_selector_path(self, tmp_path: Path) -> None:
+        model_dir = _make_model(tmp_path, "openai_model", flavors=("openai_model", "OpenAI/gpt-5"))
+
+        models = _discover_models_in_dir(tmp_path)
+
+        assert set(models) == {"openai_model", "openai_model/OpenAI/gpt-5"}
+        assert models["openai_model/OpenAI/gpt-5"].config_path == (model_dir / "configs" / "OpenAI" / "gpt-5.yaml")
+
+    def test_capabilities_remain_specific_to_each_model_flavor(self, tmp_path: Path) -> None:
+        model_dir = _make_model(tmp_path, "my_model", flavors=("my_model", "vision"))
+        (model_dir / "configs" / "my_model.yaml").write_text(
+            "policy:\n  responses_api_models:\n    adapter:\n      provides: [text-model]\n"
+        )
+        (model_dir / "configs" / "vision.yaml").write_text(
+            "policy:\n  responses_api_models:\n    adapter:\n      provides: [text-model, image-model]\n"
+        )
+
+        models = _discover_models_in_dir(tmp_path)
+
+        assert models["my_model"].capabilities.provides == ("text-model",)
+        assert models["my_model/vision"].capabilities.provides == ("text-model", "image-model")
+
+    def test_core_model_adapters_declare_text_capability(self) -> None:
+        models = _discover_models_in_dir(MODELS_DIR)
+
+        assert models
+        for entry in models.values():
+            assert "text-model" in entry.capabilities.provides, entry.name
+        assert models["openai_model"].capabilities.provides == ("text-model", "image-model")

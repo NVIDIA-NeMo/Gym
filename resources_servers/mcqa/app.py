@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
+from collections.abc import Mapping
 from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
@@ -26,6 +27,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.verifier_fixture import build_offline_verifier_app
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -424,6 +426,14 @@ def _get_allowed_letters_from_options(
                 if isinstance(k, str) and len(k) == 1 and k.isalpha() and v is not None:
                     letters.add(k.upper())
     return letters
+
+
+def create_offline_verifier_app(*, server_config: Mapping[str, Any], instance_name: str) -> FastAPI:
+    return build_offline_verifier_app(
+        MCQAResourcesServer,
+        server_config=server_config,
+        instance_name=instance_name,
+    )
 
 
 if __name__ == "__main__":

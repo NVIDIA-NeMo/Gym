@@ -492,7 +492,7 @@ class TestResumeSeam:
         stage0_plan = {
             "stage_index": 0,
             "reference_ids": base_summaries[0]["reference_ids"],
-            "task_ids": [f"t{i}" for i in range(3)],
+            "task_ids": list(dict.fromkeys(row["task_id"] for row in stage0_rows)),
         }
         resume = RecordingResume(
             plans={0: stage0_plan},

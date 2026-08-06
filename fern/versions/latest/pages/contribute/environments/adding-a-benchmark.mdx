@@ -5,16 +5,19 @@ position: 3
 ---
 The most important principle when adding benchmarks into NeMo Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
 
+<Tip>
+Begin with [Start here: build an environment](/contribute/environments/start-here) for profile selection, verifier reuse, scaffolding, and the benchmark dataset path. Return here for the fidelity and reward-profiling bar.
+</Tip>
+
 ## Reward profiling
 
-In order to ensure the rough software correctness of your benchmark, baseline against publicly available models including a mixture of open-source and closed-source models. This process is also known as reward profiling.
+Reward profiling is a software and protocol check, not a leaderboard claim. Run a small, representative slice with models that exercise materially different serving and reasoning paths:
 
-1. Typically any open-source model, even smaller ones such as [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), will suffice as long as the resulting performance of running that model on the benchmark is in a meaningful range such as 30% or higher. Otherwise you should run a larger model that attains a meaningful score. If no open model is able to achieve meaningful performance, this may indicate that you have a software bug or indeed your benchmark is quite difficult.  
-2. For closed-source models, as of February 11, 2026, it is typically fine to run just OpenAI models (rather than Anthropic or Gemini models) for a variety of reasons.  
-   1. Typically OpenAI models are the most affordable and have good robustness over various benchmarks, while the same cannot be currently said for Anthropic or Gemini models.  
-   2. These closed-source models should reach at least the same scores as open-source models, if not significantly better. It is rare that open-source models outperform closed-source models. If this is not the case, your benchmark may have a software bug.
+- the policy model or model family the benchmark is intended to evaluate;
+- at least one independently implemented reference model with enough capability to produce non-degenerate outputs;
+- both instruct and reasoning configurations when the benchmark claims to support them.
 
-As of February 11, 2026, an example suite of models to reward profile on your benchmark is: your policy model of interest, GPT 5 Nano, GPT 5, [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), and [Qwen 3 30B A3B Thinking2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507). If the 30B-level Qwen models are not strong enough, consider [Qwen 3 235B A22B Instruct 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) and [Qwen 3 235B A22B Thinking 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507). If those models are also not enough, consider models such as [Kimi K2 Instruct](https://huggingface.co/moonshotai/Kimi-K2-Instruct) or [GLM-4.7](https://huggingface.co/zai-org/GLM-4.7). 
+Record exact model identifiers, sampling settings, prompt configuration, dataset revision, split, repeat count, and Gym commit. Do not use a universal score floor: expected performance depends on the task and verifier. Instead, establish a plausible range from upstream results or owner-reviewed pilot runs, then investigate empty outputs, saturated rewards, large cross-model disagreement, and unexpectedly high or low scores by reading the underlying trajectories.
 
 ## Best practices
 

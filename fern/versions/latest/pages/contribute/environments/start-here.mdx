@@ -1,0 +1,328 @@
+---
+title: "Start here: build an environment"
+description: "Choose an integration profile, scaffold the right files, and take an environment from discovery to publication."
+position: 1
+---
+
+Use this page before creating an environment or benchmark. It gives you one route through the repository, tells you which parts to reuse, and identifies the checks that make each stage ready for the next one.
+
+## Prerequisites
+
+You need the `gym` CLI and a Gym checkout you can contribute to. A GPU, Ray cluster, and policy-model endpoint are **not** needed for scaffolding, validation, or verifier tests.
+
+```bash
+git clone https://github.com/NVIDIA-NeMo/Gym.git
+cd Gym
+uv venv --python 3.12
+source .venv/bin/activate
+uv sync
+gym --version
+```
+
+Make sure your GitHub account has access to the repository, either through a writable clone or a fork. See [Installation](/get-started/installation) and [Development setup](/contribute/development-setup) if the commands above do not complete.
+
+<Info>
+The first authoring question is “does this already exist?”, not “what should I create?”. Reusing an environment, benchmark, verifier, or harness is the shortest and safest path.
+</Info>
+
+## The words used in this guide
+
+| Term | Meaning | Where it lives |
+| --- | --- | --- |
+| **Task** | One unit of work: a prompt plus the grading key or specification used to score it. | One dataset row |
+| **Environment** | The complete task system an agent interacts with and is scored in. In the manifest, `kind: environment` means you own final runnable task rows. | `environments/<name>/` |
+| **Benchmark** | An environment with a fixed evaluation protocol: canonical split and standard prompt configuration. | `benchmarks/<name>/` |
+| **Task dataset** | The task set presented to the agent. It is data, not the environment by itself. | Under the environment or benchmark entry |
+| **Verifier / scorer** | The responsibility that turns a completed response or trajectory into reward. | Usually a Resources Server |
+| **Resources Server** | The deployable server that owns verification and may also own tools, task state, or sandboxes. | `resources_servers/<name>/` |
+| **Environment surface** | The tools and per-task state the agent acts on. It belongs to the environment, even when hosted by a Resources Server. | Resources Server APIs |
+| **Harness** | The strategy that calls a policy and tools to complete an episode. | Usually an Agent Server implementation |
+| **Agent-side component** | Memory, skills, a critic, replay buffer, or another declared capability carried beside the harness. | Composed behind or with an Agent Server |
+| **Agent** | The measured combination of policy, harness, and any agent-side components. | A conceptual composition, not one directory |
+| **Agent Server** | The deployable boundary exposing the harness through the Responses API. | `responses_api_agents/<name>/` |
+| **Policy** | The model being run by the harness. | Selected through a Model Server |
+| **Rollout driver** | Batch orchestration above an agent, used only when the stock collector cannot express the procedure. | The owning environment or benchmark entry |
+| **Environment runtime** | Where the environment and agent processes execute, including local, cluster, and sandbox placement. | Launch configuration and infrastructure |
+| **Environment registry** | The in-repo set of valid manifests read by list, search, validation, CI, and generated catalog pages. | `manifest.yaml` files under registry trees |
+| **Manifest** | The authored contract used for discovery, validation, and publishing. Component and dataset fields mirror resolved config. | `manifest.yaml` |
+| **Config** | The executable composition of resources, agent, model, and datasets. It remains authoritative for runtime wiring. | `config.yaml` |
+
+“Verifier”, “harness”, and “policy” name responsibilities. `resources_server`, `agent_server`, and `model_server` name the deployable boundaries Gym can actually resolve and start. A sandbox belongs to the environment runtime; tools and session state belong to the environment surface.
+
+## 0. Search before creating
+
+Search by the task and scoring idea, not only by the name you intend to use:
+
+```bash
+gym search catalog "multiple choice science"
+gym list catalog
+gym list benchmarks
+gym list resources-servers
+gym list agents
+```
+
+If an existing unit already represents the task, stop and use or improve it. If only the scoring behavior exists, reuse that Resources Server when you scaffold.
+
+## 1. Choose the kind
+
+| Choose | When this is true | Dataset responsibility |
+| --- | --- | --- |
+| `environment` | You are building training tasks, an experiment, or an evaluation without a fixed public protocol. | Commit final rows containing `responses_create_params`; the prompt is inline. |
+| `benchmark` | Scores must be comparable across runs or with a canonical evaluation. | Commit a `prepare.py` path that produces domain JSONL; keep the rollout prompt in `standard_prompt_config`. Declare `canonical_split`. |
+
+This choice is recorded as `kind` in `manifest.yaml`. A benchmark is still an environment in the conceptual sense; `kind: benchmark` adds reproducibility obligations.
+
+## 2. Choose the integration profile
+
+Ask what is part of what you are measuring:
+
+1. **Just the model's answers; Gym should drive the agent.** Choose `stock-loop`.
+2. **The agent's own strategy—how it browses, plans, or uses tools—is under test.** Choose `measured-loop`.
+3. **You drive the episode yourself.** Continue:
+   - You bring a harness or an external framework's loop: choose `external-loop`.
+   - You orchestrate above the agent, for example with adaptive or multi-pass collection: choose `custom-driver`.
+4. **Not sure.** Start with `stock-loop`. You can edit `integration_profile` before publishing and rerun validation.
+
+### Profile reference
+
+| Profile | Use it when | You normally write | Reuse first | What becomes part of the measurement |
+| --- | --- | --- | --- | --- |
+| `stock-loop` | Gym's normal tool-calling loop can complete the task. | Dataset and scorer | `simple_agent` and the stock rollout collector | The selected Agent Server is pinned by the profile. |
+| `measured-loop` | Harness strategy itself affects the result and must stay fixed. | Dataset, scorer, and Agent Server behavior | Stock rollout collector | The scoring point and measured agent behavior are fixed. |
+| `external-loop` | An external framework owns the episode loop. | Dataset, scorer, and adapter Agent Server | Resources Server verification interface | No Gym loop component is assumed swappable. |
+| `custom-driver` | Batch-level orchestration sits above an agent. | Dataset, scorer, and rollout driver | Manifest, discovery, standard output artifacts | The driver owns orchestration; keep its outputs compatible with Gym. |
+
+The profile says **where the episode-driving loop lives**. It does not describe difficulty, task domain, or whether tools are used.
+
+<Info>
+A published manifest selects one Agent Server and one policy-model role. Multi-agent coordination is not a first-class manifest shape yet. Put an existing multi-agent framework behind one `external-loop` adapter only when it exposes a single Gym Agent Server boundary; otherwise treat that integration as unsupported rather than encoding undeclared participants in config.
+</Info>
+
+## 3. Scaffold the runnable shape
+
+Create a novel environment and scorer:
+
+```bash
+gym env init \
+  --environment my_eval \
+  --profile stock-loop \
+  --author "Contributor Name"
+```
+
+Create a benchmark while reusing an existing verifier:
+
+```bash
+gym env init \
+  --benchmark sciqa \
+  --profile stock-loop \
+  --canonical-split test \
+  --reuse-verifier mcqa \
+  --author "Contributor Name"
+```
+
+`--reuse-verifier` is recommended whenever an existing Resources Server already implements the scoring contract. It does not copy or create another Resources Server.
+
+### Rubric-only benchmark: no verifier Python
+
+If correctness is judged from a rubric, reuse a judge Resources Server and keep benchmark-specific instructions and worked examples as data or prompt assets:
+
+```bash
+gym env init \
+  --benchmark rubric_qa \
+  --profile stock-loop \
+  --canonical-split test \
+  --reuse-verifier equivalence_llm_judge \
+  --author "Contributor Name"
+```
+
+Edit the generated domain rows, `prompt.yaml`, and benchmark-local judge prompt or worked-example files, then point the inherited verifier fields at those files from `benchmarks/rubric_qa/config.yaml`. Do not create `resources_servers/rubric_qa/app.py`: the selected judge already owns `verify()`. `benchmarks/secque/` is the concrete in-tree example of this shape. The generated `prepare.py` is a runnable copy step; leave it unchanged when your committed domain JSONL already has the required fields.
+
+The cheaper data-only branch is the same command with a non-judge scorer such as `--reuse-verifier mcqa`: author the dataset and prompt, not a new Resources Server.
+
+The first command produces the profile's relevant parts of this layout:
+
+```text
+environments/my_eval/
+├── manifest.yaml
+├── config.yaml
+├── README.md
+└── data/example.jsonl
+
+resources_servers/my_eval/
+├── app.py
+├── configs/my_eval.yaml
+├── tests/test_app.py
+└── tests/verifier_cases.jsonl
+```
+
+`measured-loop` and `external-loop` additionally create `responses_api_agents/<name>_agent/`. `custom-driver` additionally creates `rollout_driver.py`. A benchmark creates `benchmarks/<name>/prepare.py`, `prompt.yaml`, and domain JSONL instead of final prompt rows.
+
+Scaffolding is non-destructive. Repeating the same command leaves matching files untouched. If generated content would replace a file you changed, `gym env init` reports the conflict before writing anything.
+
+## 4. Author the dataset on the correct path
+
+### Environment path: final Responses API rows
+
+An environment owns final rows, including the prompt:
+
+```json
+{"responses_create_params":{"input":[{"role":"user","content":"What is 6 x 7?"}]},"expected_answer":"42","agent_ref":{"type":"responses_api_agents","name":"my_eval_agent"}}
+```
+
+Keep a small `data/example.jsonl` in git for local checks. Larger train and validation files may be prepared or downloaded through the existing dataset tooling.
+
+### Benchmark path: domain rows plus a standard prompt
+
+A benchmark's authored source stays prompt-independent:
+
+```json
+{"question":"What is 6 x 7?","expected_answer":"42"}
+```
+
+`prepare.py` produces the declared benchmark JSONL. `prompt.yaml`, mirrored as `standard_prompt_config` in the manifest, turns each domain row into Responses API input at rollout time.
+
+```bash
+gym eval prepare --benchmark sciqa
+gym dataset render \
+  --input benchmarks/sciqa/data/example.jsonl \
+  --prompt-config benchmarks/sciqa/prompt.yaml \
+  --output /tmp/sciqa-preview.jsonl
+```
+
+| Checkpoint | Environment | Benchmark |
+| --- | --- | --- |
+| Authored input | Final Responses API JSONL | Source/domain JSONL |
+| Prompt | Inline in each row | Separate standard prompt config |
+| Preparation | Optional | `prepare.py` required |
+| Protocol fields | Optional | `canonical_split` and `standard_prompt_config` required |
+| What validation checks | Every row has usable `responses_create_params.input` | Domain rows match the prompt, then materialize into usable Responses API rows |
+
+## 5. Reuse or implement the scorer
+
+If a Resources Server already accepts your task fields and returns the desired reward, reuse it and configure its grading mode where applicable. Otherwise, implement the generated `verify()` stub.
+
+The generated `tests/verifier_cases.jsonl` establishes three always-required scoring cases plus a conditional re-seed case:
+
+- a full-reward response at the preferred reward endpoint (`higher_is_better` selects which one);
+- a zero-reward response at the opposite endpoint;
+- malformed input with an explicit failure expectation;
+- when `determinism: seeded` is claimed, a repeated re-seed case that must produce the same response.
+
+Stochastic and unknown environments do not have to claim repeatability. Add domain edge cases after the required sentinels. Keep the fixture on the Resources Server so every environment that reuses the scorer exercises the same scoring contract.
+
+A new scorer fixture contains TODO expectations and fails deliberately until you generate and review its expected results in step 7.
+
+## 6. Validate without starting services
+
+```bash
+gym env validate my_eval
+# or
+gym env validate sciqa
+```
+
+Validation resolves configuration and reports the manifest, selected component implementations, datasets, profile constraints, capability compatibility, overrides, and service boundaries. It catches static composition and data errors without Ray, a server process, or a model call.
+
+Components declare their interface with `requires` and `provides`. Runtime facts map to stable capability names: modality `image` requires `image-model`, `session_model: episode` requires `session:episode`, `state: per_session` requires `state:per_session`, and `sandbox: docker` requires `sandbox:docker`. Every selected component, including the model adapter, must declare and provide the capabilities the manifest requires; unresolved or undeclared adapters fail validation before launch.
+
+Gym recognizes the repository-local input fields used by built-in components and binds their contents into the published composition hash. A custom component with another input field must declare it explicitly as `runtime_input_paths`, either as a list or a label-to-path mapping. Do not list output, cache, or scratch directories there. Validation rejects required inputs that escape the selected component root or traverse a symbolic link.
+
+Treat `manifest.yaml` as the place to **read** the unit and `config.yaml` as the place to **author runtime wiring**. If their mirrored fields disagree, fix the config or deliberately synchronize the manifest; do not maintain two independent compositions. To update manifest-authoritative metadata, use [`gym env manifest`](/reference/cli-commands#gym-env-manifest) only with an explicit, reviewed selection and preview the result with `--dry-run`.
+
+### Try a component replacement without editing the recipe
+
+Named component selectors become role-scoped swaps when a manifest-backed recipe is also selected:
+
+```bash
+gym env validate sciqa --resources-server mcqa
+gym env start my_eval --model-type vllm_model
+gym eval run my_eval --model-type openai_model --limit 5
+# For a manifest-backed custom-driver recipe:
+gym env validate batch_eval \
+  --rollout-driver environments.batch_eval.alternate_driver:run_rollout_collection
+```
+
+Swaps are temporary derived compositions. They are reported in validation and trajectory provenance, cannot be written with `--sync`, and do not change the base recipe. Runtime commands accept the live catalog name, not `NAME@VERSION`; validation and publication accept the qualified form to check or record the current manifest version. Composition locks detect drift under that version, but Gym does not retain historical source trees. Profile pins still apply: for example, `stock-loop` refuses an Agent Server swap. A replay may use a different Resources Server only with both an explicit `--resources-server` selection and `--force`; environment identity, session model, and state contract remain fixed.
+
+## 7. Test the scorer locally
+
+For a novel scorer, generate the observed expectations, review the diff, then run the read-only check:
+
+```bash
+gym env test my_eval --update-expected
+gym env test my_eval
+```
+
+For a benchmark that reuses `mcqa`:
+
+```bash
+gym env test sciqa
+```
+
+After an intentional scorer or reward change, repeat the generation, review, and read-only check.
+
+This resolves the manifest to its Resources Server—including a reused one—and runs the verifier fixture without starting Ray or calling a policy model. The legacy component form, `gym env test --resources-server mcqa`, remains available for testing a Resources Server directly. Repeat steps 4–7 while shaping the task and reward.
+
+## 8. Run, review, and publish
+
+A full run is the first step that needs a policy endpoint. Start with a small slice:
+
+```bash
+gym env start my_eval --model-type openai_model
+
+gym eval run my_eval --no-serve \
+  --agent my_eval_agent \
+  --input environments/my_eval/data/example.jsonl \
+  --save-trajectories results/my_eval_rollouts.jsonl \
+  --limit 5 \
+  --num-repeats 1
+```
+
+`--save-trajectories` is a descriptive alias for `--output`. Keep the bundle and every JSONL it references:
+
+- `results/my_eval_rollouts.jsonl`, containing the policy trajectories and their original rewards;
+- `results/my_eval_rollouts_materialized_inputs.jsonl`, containing the matching verifier inputs;
+- `results/my_eval_rollouts.bundle.json`, recording the environment, verifier contract, stable trajectory identity, artifact hashes, and any failure sidecar.
+
+After changing scorer code or configuration, re-score exactly those trajectories through the environment's current verifier without calling the policy again:
+
+```bash
+gym env test \
+  --replay results/my_eval_rollouts.bundle.json \
+  --limit 5 \
+  --concurrency 4
+```
+
+Gym verifies the captured files, selects the environment named by the bundle, checks that its current verifier contract is compatible, and writes `results/my_eval_rollouts_replayed.jsonl`. Passing the rollout JSONL also works when its sibling bundle is present. Successful trajectories take precedence; by default Gym also replays the latest failed attempt that contains a response. Use `--failures exclude` or `--failures judge-failed` to narrow that selection. Replay output is non-overwriting; choose a fresh path with `--output` when that file already exists. Legacy JSONL captures without a bundle require an explicit environment name and `--force` because their provenance cannot be checked.
+
+Replay starts Gym's local Ray/head-server orchestration, the manifest-selected Resources Server, and any service it explicitly references (for example, a judge model). It removes the Agent Server and policy model from the launch config, so it never generates a new trajectory. The ordinary scorer-fixture `gym env test my_eval` workflow remains the fast, in-process check that starts no services.
+
+Inspect successful and failed trajectories, verify the reward distribution, record data and code licensing, and replace scaffold placeholders. For benchmark fidelity and repeatability requirements, continue to [Add a benchmark](/contribute/environments/adding-a-benchmark). For training evidence, continue to [New Environment](/contribute/environments/new-environment).
+
+Before publishing, confirm that `authors` names the people or owning team who explicitly accept credit for the contribution. Do not infer authorship from the local account name or Git history. When the manifest, local checks, and review material are ready:
+
+```bash
+gym env publish my_eval --owner @your-github-handle
+```
+
+`authors` is the credit record; `--owner` separately names the GitHub user or
+`@organization/team` responsible for reviewing the recipe. Preview the publish operation with `--dry-run` when you need to inspect the proposed changes. See [`gym env publish`](/reference/cli-commands#gym-env-publish) for its flags.
+
+### Upstream provenance
+
+For an adopted implementation, set `adopted_from` to its cloneable `source`, Git `ref`, and last `reconciled` date. `gym env validate` checks these fields locally and does not require network access. Publication requires a public HTTPS source and resolves the ref with a bounded Git query; local or credential-dependent provenance remains valid for local use but cannot be published. The query confirms only that the recorded revision is retrievable; reviewers must still assess whether the integration matches the upstream behavior and is current enough for the contribution.
+
+## Authoring workflow
+
+| Step | Action | Exit condition |
+| --- | --- | --- |
+| **0. Discover** | Search environments, benchmarks, scorers, and agents. | No existing unit already solves the same task; otherwise reuse it. |
+| **1. Classify** | Choose `kind` and answer who drives the episode. | One of the four profiles fits. |
+| **2. Scaffold** | Run profile-aware `gym env init`. | The generated example and manifest exist; no user file was overwritten. |
+| **3. Author data** | Follow the environment or benchmark dataset path. | Example rows validate and provenance is recorded. |
+| **4. Score** | Reuse a scorer or implement `verify()`. | Reward behavior is explicit in the scoring sentinels and conditional re-seed case. |
+| **5. Validate** | Run `gym env validate`. | Manifest, composition, capabilities, and datasets resolve locally. |
+| **6. Test** | Run `gym env test`. | Verifier fixtures pass without Ray or a model. |
+| **7. Run** | Exercise a small then representative policy run. | Outputs and reward distribution are sensible; required evidence is saved. |
+| **8. Publish** | Run `gym env publish` and open the contribution. | The manifest is in the catalog and review ownership is clear. |
+
+The fast authoring loop is steps 5 and 6: validate the wiring, test the scoring, then make the next small change.

@@ -62,6 +62,7 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
+from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
@@ -69,6 +70,13 @@ from nemo_gym.rollout_collection import (
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
     _get_max_rollout_attempts,
+)
+from nemo_gym.trajectory_bundle import (
+    DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+    TRAJECTORY_ID_KEY,
+    captured_environment_from_config,
+    stamp_trajectory_id,
+    trajectory_identity_key,
 )
 from resources_servers.gdpval.multistage_elo import (
     PerReferenceTotals,
@@ -108,6 +116,7 @@ class StageResume:
     on_plan: Callable[[int, dict], None]
     on_outcome: Callable[[int, dict], None]
     on_rows: Callable[[int, List[Dict[str, Any]]], None]
+    refresh_gated_keys: Callable[[int], AbstractSet[Tuple[Any, Any]]] | None = None
 
 
 def _is_success_row(row: Mapping[str, Any]) -> bool:
@@ -119,8 +128,10 @@ def compute_fingerprint(
     multistage_config: MultiStageRunConfig,
     reference_elos: Mapping[str, float],
     distribution: Mapping[str, Mapping[str, object]],
+    *,
+    run_provenance: Mapping[str, object] | None = None,
 ) -> str:
-    """Stable hash of everything that affects stage planning.
+    """Stable hash of the stage plan and score-affecting run provenance.
 
     A mismatch between the current run's fingerprint and a journal's marks the
     journal stale: the plans/outcomes it records were produced under a different
@@ -140,6 +151,7 @@ def compute_fingerprint(
             }
             for grp in sorted(distribution)
         },
+        "run_provenance": dict(run_provenance or {}),
     }
     encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(encoded).hexdigest()
@@ -311,6 +323,7 @@ def build_stage_rows(
 def tag_results(
     pairs: Sequence[Tuple[Mapping[str, Any], Mapping[str, Any]]],
     stage_index: int,
+    identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
 ) -> List[Dict[str, Any]]:
     """Attach rollout identity + ``stage_index`` to each stage result row.
 
@@ -326,6 +339,11 @@ def tag_results(
         out[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
         out[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
         out["stage_index"] = stage_index
+        for field_name in identity_fields:
+            if field_name in row:
+                out[field_name] = row[field_name]
+        if TRAJECTORY_ID_KEY in row:
+            out[TRAJECTORY_ID_KEY] = row[TRAJECTORY_ID_KEY]
         if out.get("task_id") is None:
             tid = row_task_id(row)
             if tid is not None:
@@ -349,6 +367,7 @@ async def run_multistage_stages(
     rng: Optional[random.Random] = None,
     on_event: Optional[Callable[[str, dict], None]] = None,
     resume: Optional[StageResume] = None,
+    identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run every stage and return ``(all_result_rows, stage_summaries)``.
 
@@ -402,7 +421,26 @@ async def run_multistage_stages(
     # Later stages reuse these instead of re-running the policy.
     produced: set[Tuple[str, int]] = set()
     for index, stage in enumerate(multistage_config.stages):
+        reference_ids, task_ids, task_reference_ids, replayed = _plan_stage(
+            index, stage, reference_elos, eval_elo, stage_task_sets, multistage_config, resume
+        )
+
+        stage_rows = build_stage_rows(
+            rows_by_task,
+            task_reference_ids,
+            index,
+            produced=produced if multistage_config.reuse_cached_deliverables else None,
+        )
+        expected_keys = {(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in stage_rows}
+
         if resume is not None and index in resume.outcomes:
+            gated = set(resume.gated_keys.get(index, set()))
+            if not expected_keys.issubset(gated):
+                missing = len(expected_keys - gated)
+                raise ValueError(
+                    f"GDPVal resume journal marks stage {index} complete, but {missing} planned "
+                    "trajectory outcome(s) are not persisted. Remove the stale journal or start fresh."
+                )
             eval_elo = _resume_complete_stage(
                 index,
                 total_stages,
@@ -414,17 +452,6 @@ async def run_multistage_stages(
                 _emit,
             )
             continue
-
-        reference_ids, task_ids, task_reference_ids, replayed = _plan_stage(
-            index, stage, reference_elos, eval_elo, stage_task_sets, multistage_config, resume
-        )
-
-        stage_rows = build_stage_rows(
-            rows_by_task,
-            task_reference_ids,
-            index,
-            produced=produced if multistage_config.reuse_cached_deliverables else None,
-        )
 
         cached_rows = resume.rows_by_stage.get(index, []) if resume is not None else []
         # Gated == not re-dispatched: successes on disk plus terminal / max-attempt
@@ -447,7 +474,7 @@ async def run_multistage_stages(
         )
 
         pairs = await run_rollouts(pending_rows)
-        new_tagged = tag_results(pairs, index)
+        new_tagged = tag_results(pairs, index, identity_fields)
         if resume is not None:
             resume.on_rows(index, new_tagged)
         # Only successful rows feed pooling / aggregate.
@@ -455,11 +482,27 @@ async def run_multistage_stages(
         tagged = list(cached_rows) + new_successes
         all_results.extend(tagged)
 
-        # Record this stage's deliverables so later stages can reuse them.
-        for row in stage_rows:
+        # Only successful policy calls produce a deliverable that a later stage
+        # can reuse. Terminal and exhausted failures complete their trajectory
+        # contract but do not create a cached deliverable.
+        for row in new_successes:
             tid = row_task_id(row)
             if tid is not None:
                 produced.add((tid, int(row.get(ROLLOUT_INDEX_KEY_NAME, 0) or 0)))
+        for row in cached_rows:
+            tid = row_task_id(row)
+            if tid is not None:
+                produced.add((tid, int(row.get(ROLLOUT_INDEX_KEY_NAME, 0) or 0)))
+
+        completed_keys = set(gated_keys)
+        completed_keys.update(
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            for row in new_tagged
+            if _is_success_row(row) or bool(row.get(NG_TERMINAL_KEY))
+        )
+        if resume is not None and resume.refresh_gated_keys is not None:
+            completed_keys = set(resume.refresh_gated_keys(index))
+        stage_complete = expected_keys.issubset(completed_keys)
 
         per_reference: PerReferenceTotals = pool_per_reference(tagged)
         stage_elo, normalized, num_references = fit_stage_elo(per_reference, reference_elos)
@@ -467,7 +510,7 @@ async def run_multistage_stages(
             eval_elo = stage_elo
 
         # Completion marker only; eval_elo is re-fit from rows on resume.
-        if resume is not None:
+        if resume is not None and stage_complete:
             resume.on_outcome(index, {"stage_index": index, "status": "complete"})
 
         _emit(
@@ -488,8 +531,14 @@ async def run_multistage_stages(
                 "eval_elo": stage_elo,
                 "normalized_elo": normalized,
                 "num_references": num_references,
+                "complete": stage_complete,
             }
         )
+
+        # Reference selection for the next stage is only valid after every
+        # planned trajectory has a persisted success or terminal outcome.
+        if not stage_complete:
+            break
 
     return all_results, stage_summaries
 
@@ -780,6 +829,10 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
     def on_rows(index: int, rows: List[Dict[str, Any]]) -> None:
         route_stage_rows(output_fpath, rows)
 
+    def refresh_gated_keys(index: int) -> AbstractSet[Tuple[Any, Any]]:
+        persisted = load_persisted_rows(output_fpath)
+        return load_gated_keys(output_fpath, persisted).get(index, set())
+
     return StageResume(
         plans=plans,
         outcomes=outcomes,
@@ -788,6 +841,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
         on_plan=on_plan,
         on_outcome=on_outcome,
         on_rows=on_rows,
+        refresh_gated_keys=refresh_gated_keys,
     )
 
 
@@ -849,8 +903,21 @@ async def run_e2e_multistage(
     )
 
     semaphore_size = getattr(rollout_collection_config, "num_samples_in_parallel", None)
+    identity_fields = tuple(
+        getattr(rollout_collection_config, "trajectory_identity_fields", DEFAULT_TRAJECTORY_IDENTITY_FIELDS)
+    )
+    materialized_fpath = Path(rollout_collection_config.materialized_jsonl_fpath)
+    materialized_fpath.parent.mkdir(parents=True, exist_ok=True)
+    materialized_identities: set[str] = set()
 
     async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        with materialized_fpath.open("ab") as materialized_handle:
+            for row in rows:
+                stamp_trajectory_id(row, identity_fields, overwrite=True)
+                identity = trajectory_identity_key(row, identity_fields)
+                if identity not in materialized_identities:
+                    materialized_handle.write(orjson.dumps(row) + b"\n")
+                    materialized_identities.add(identity)
         semaphore = None
         if semaphore_size:
             from asyncio import Semaphore
@@ -864,8 +931,46 @@ async def run_e2e_multistage(
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
     journal_fpath = journal_path_for(output_fpath)
-    fingerprint = compute_fingerprint(multistage_config, reference_elos, distribution)
+    from nemo_gym.credential_keys import canonical_redacted_config_json
+
+    captured = captured_environment_from_config(global_config_dict)
+    run_provenance = {
+        "environment": captured.model_dump(mode="json") if captured is not None else None,
+        "resolved_config_sha256": hashlib.sha256(
+            canonical_redacted_config_json(global_config_dict).encode()
+        ).hexdigest(),
+        "source_rows_sha256": hashlib.sha256(orjson.dumps(materialized_rows, option=orjson.OPT_SORT_KEYS)).hexdigest(),
+        "trajectory_identity_fields": list(identity_fields),
+    }
+    fingerprint = compute_fingerprint(
+        multistage_config,
+        reference_elos,
+        distribution,
+        run_provenance=run_provenance,
+    )
     resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
+    if output_fpath.exists() and not materialized_fpath.is_file():
+        raise ValueError(
+            f"Cannot resume GDPVal trajectory capture without materialized stage inputs at '{materialized_fpath}'."
+        )
+    if not output_fpath.exists():
+        materialized_fpath.unlink(missing_ok=True)
+        materialized_identities.clear()
+    elif materialized_fpath.is_file():
+        with materialized_fpath.open("rb") as materialized_handle:
+            for line_number, line in enumerate(materialized_handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = orjson.loads(line)
+                    identity = trajectory_identity_key(row, identity_fields)
+                except (orjson.JSONDecodeError, ConfigError, ValueError) as error:
+                    raise ValueError(
+                        f"Invalid GDPVal materialized input '{materialized_fpath}' at line {line_number}: {error}."
+                    ) from error
+                if identity in materialized_identities:
+                    raise ValueError(f"GDPVal materialized inputs contain duplicate trajectory identity '{identity}'.")
+                materialized_identities.add(identity)
 
     all_results, stage_summaries = await run_multistage_stages(
         multistage_config,
@@ -875,6 +980,7 @@ async def run_e2e_multistage(
         run_rollouts,
         on_event=_log_event,
         resume=resume,
+        identity_fields=identity_fields,
     )
 
     write_rollouts(all_results, output_fpath)

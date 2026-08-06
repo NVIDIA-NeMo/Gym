@@ -22,10 +22,12 @@ ng ...                        # 'ng' is an alias for 'gym'
 # Discover
 gym list benchmarks [<name>] [--json]         # list benchmarks (or inspect one), by their --benchmark value
 gym list environments [<name>] [--json]       # list environments (or inspect one)
+gym list catalog [<name>] [--json]            # list the manifest/legacy runnable-unit union
 gym list agents [<name>] [--json]             # list agent harnesses and how each composes
 gym list models [<name>] [--json]             # list --model-type values (or inspect a model)
 gym list resources-servers [<name>] [--json]  # list --resources-server values (or inspect one)
-gym search [<type>] <query> [--json]          # filter a component type (default: benchmarks) by query
+gym list components [--provides CAPABILITY]   # find reusable deployables by capability
+gym search [<type>] <query> [--json]          # search benchmarks by default, or one selected type
 
 # Datasets
 gym dataset upload            # upload a prepared dataset to HF (default) or GitLab
@@ -36,12 +38,14 @@ gym dataset render            # generate a dataset preview (materialize prompts)
 gym dataset collate           # validate and collate a dataset
 
 # Environments
-gym env init                  # scaffold a new resources server
+gym env init                  # scaffold an environment/benchmark by integration profile
 gym env resolve               # resolve and print the final merged config
 gym env validate              # validate a config (no Ray, no servers) — fast pre-flight check
+gym env manifest              # edit manifest metadata for an explicit reviewed selection
 gym env packages              # list packages in a server's virtual environment
-gym env test                  # test resources server(s); all of them if none is given
+gym env test                  # test a manifest scorer/replay, or legacy resources server suites
 gym env start                 # start the servers
+gym env publish               # validate and register a catalog version
 gym env status                # show running servers
 
 # Evaluation
@@ -64,6 +68,7 @@ These options are shared across many commands.
 | `--config PATH` | Load a Gym config YAML. Repeatable. Maps to `+config_paths=[...]`. |
 | `--benchmark NAME` | Select a registered benchmark by name instead of a config path. |
 | `--resources-server NAME` | Select a registered resources server by name. |
+| `--agent-server NAME` | Select a registered agent-server config by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
 | `--search-dir DIR` | Extra root directory to search for components and configs. Repeatable. Applies everywhere Gym resolves paths — discovery, the `--<component>` selectors, `config_paths`, prompt configs, and data files — and is inherited by spawned servers. Equivalent to the `NEMO_GYM_EXTRA_ROOTS` environment variable; see [Configuration](/reference/configuration). |
 | `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). |
@@ -159,18 +164,37 @@ gym list benchmarks --json | jq '.[].name'
 
 ### `gym list environments`
 
-List the environments available under `environments/`, by short name (with their domain and description).
-The names map to environments' configs and can be passed to `--environment` on commands like `gym env start` / `gym eval run`.
+List or inspect the existing environment registry. This command keeps its pre-onboarding output and JSON schema for compatibility.
 
 | Option | Description |
 | --- | --- |
-| `[<name>]` | Inspect a single environment (config path, resources servers, agent, datasets). |
+| `[<name>]` | Inspect a single environment. |
 | `--json` | Output the environment list as JSON. |
 
 ```bash
 gym list environments
 gym list environments calendar        # inspect one environment
 gym list environments --json | jq '.[].name'
+```
+
+### `gym list catalog`
+
+List the unified runnable environment and benchmark catalog, including grandfathered legacy units during migration. Manifest-backed names can be passed directly to `gym env start` and `gym eval run`; legacy names remain available through existing selectors. `NAME@VERSION` is accepted by validation and publication, but historical versions are not materialized or executable.
+
+| Option | Description |
+| --- | --- |
+| `[<name>]` | Inspect a single environment or benchmark. |
+| `--kind` | Filter to `environment` or `benchmark`. |
+| `--domain` / `--modality` / `--licensing` | Filter authored catalog metadata. |
+| `--status` / `--lifecycle` | Filter catalog state (`experimental` or `no-manifest`) or authored retirement state. |
+| `--requires CAPABILITY` | Require a declared capability; repeatable. |
+| `--facts` | Include the underlying manifest facts. |
+| `--json` | Output the normalized catalog payload as JSON. |
+
+```bash
+gym list catalog
+gym list catalog calendar --facts
+gym list catalog --json | jq '.entries[].name'
 ```
 
 ### `gym list agents`
@@ -220,19 +244,32 @@ gym list resources-servers mcqa       # inspect one resources server
 gym list resources-servers --json | jq '.[].name'
 ```
 
-### `gym search`
+### `gym list components`
 
-Filter a component type's listing to fuzzy matches on a query (against each component's name/value, description, domain, and type-specific fields).
-The type is optional and defaults to `benchmarks`.
+List reusable Resources, Agent, and Model Server implementations with their declared `requires` and `provides` capabilities.
 
 | Option | Description |
 | --- | --- |
-| `[<type>]` | Component type to search: `benchmarks` (default), `environments`, `agents`, `models`, or `resources-servers`. |
+| `--provides CAPABILITY` | Show only components that provide the capability. |
+| `--json` | Output the list as JSON. |
+
+```bash
+gym list components --provides verification
+```
+
+### `gym search`
+
+Search benchmarks by default, preserving the existing CLI behavior, or filter one selected component type's listing to fuzzy matches on a query. Select `catalog` for the unified environment/benchmark catalog.
+
+| Option | Description |
+| --- | --- |
+| `[<type>]` | Optional type: `benchmarks`, `environments`, `catalog`, `agents`, `models`, or `resources-servers`. Omit it to search benchmarks. |
 | `QUERY` | Text matched (substring or fuzzy) against a component's name, description, and key metadata (positional, required). |
 | `--json` | Output matches as JSON. |
 
 ```bash
-gym search math                       # benchmarks matching "math" (default type)
+gym search math                       # benchmarks matching "math"
+gym search catalog math               # environments and benchmarks matching "math"
 gym search environments calendar      # environments matching "calendar"
 gym search models vllm --json
 ```
@@ -387,14 +424,22 @@ Commands for developing, running, and inspecting environments (a dataset + agent
 
 ### `gym env init`
 
-Scaffold a new resources server with template files (config, app, tests, README, data directory).
+Scaffold the structure for an environment or benchmark using one of the four integration profiles. The generated manifest, config, data, fixture, and component stubs are an authoring starting point; a novel scorer's fixture intentionally fails until its expected results are generated and reviewed. Reruns are non-destructive. The legacy Resources Server-only scaffold remains available.
 
 | Option | Description |
 | --- | --- |
-| `--resources-server NAME` | Name of the resources server to create. |
+| `--environment NAME` / `--benchmark NAME` | Select the catalog kind and name to scaffold. |
+| `--profile` | `stock-loop`, `measured-loop`, `external-loop`, or `custom-driver` (default: `stock-loop`). |
+| `--reuse-verifier NAME` | Compose an existing Resources Server instead of generating a scorer. |
+| `--version` | Initial semantic version (default: `0.1.0`). |
+| `--domain` / `--description` / `--modality` / `--licensing` | Initial catalog metadata. |
+| `--author NAME` | Add an explicitly confirmed contributor or owning team; repeatable. Supply this for catalog entries rather than relying on the local account name. |
+| `--canonical-split NAME` | Required for benchmarks; names the split used for canonical evaluation. |
+| `--resources-server NAME` | Use the legacy Resources Server-only scaffold. |
 
 ```bash
-gym env init --resources-server my_server
+gym env init --environment my_eval --profile stock-loop --author "Contributor Name"
+gym env init --benchmark sciqa --canonical-split test --reuse-verifier mcqa --domain knowledge --author "Owning Team"
 ```
 
 ### `gym env resolve`
@@ -416,16 +461,27 @@ gym env resolve \
 
 ### `gym env validate`
 
-Validate a config without starting Ray or any server subprocess — a fast pre-flight check that catches config mistakes (missing/malformed `config_paths`, unknown server cross-references, unset mandatory `???` values, schema errors) in well under a second instead of after a Ray bootstrap. Exits `0` when valid, or `1` with a clean message (no traceback) when not. A model config is **not** required — model interpolations resolve against a dummy model; pass one (or `--model-type`) if you want it validated too.
+Validate a config without starting Ray, a server subprocess, or a network request. The pre-flight catches malformed configuration, incompatible components, manifest drift, dataset errors, and source errors before service startup. `adopted_from` syntax is checked locally; publication separately requires a public HTTPS source and confirms its Git ref with a bounded query. Validation exits `0` when valid, or `1` with a clean message. A model config is **not** required — model interpolations resolve against a dummy model; pass one (or `--model-type`) if you want it validated too.
 
 | Option | Description |
 | --- | --- |
+| `NAME` | Catalog name, optionally qualified as `NAME@VERSION` to check the current manifest version. |
+| `--kind` | Disambiguate a catalog name as `environment` or `benchmark`. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
 | `--resources-server NAME` | Validate a named resources server config. |
+| `--agent-server NAME` | Also load a named agent-server config. With a manifest-backed target, this requests an agent swap and profile pinning still applies. |
 | `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
+| `--rollout-driver MODULE:FUNCTION` | Temporarily replace the driver declared by a manifest-backed `custom-driver` recipe. |
+| `--manifest PATH` | Bind an explicit `manifest.yaml` when validating config paths directly. |
+| `--sync` | Update mirrored manifest composition fields from the resolved config. Temporary component swaps cannot be synchronized. |
+| `--json` | Output the complete validation report as JSON. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
+
+An exact `NAME@VERSION` selection rejects component selectors such as `--resources-server`, `--agent-server`, and `--model-type`. Runtime model settings through `--model`, `--model-url`, and `--model-api-key` remain available.
+
+A rollout-driver replacement is temporary: validation checks it against the manifest declaration, the resolved driver is included in composition provenance and trajectory capture, and the canonical manifest and version lock are unchanged. `--sync` refuses the temporary selection.
 
 ```bash
 gym env validate --environment workplace_assistant
@@ -433,6 +489,25 @@ gym env validate --benchmark gsm8k
 
 # or explicit config path(s)
 gym env validate --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
+```
+
+### `gym env manifest`
+
+Apply one validated edit to an explicit, reviewed selection of manifest-authoritative fields. Use `--environment` for a named selection whenever possible. If you use metadata filters, run `--dry-run`, inspect every selected path, and obtain owner approval before writing. Every selected manifest is checked before any file is written; composition mirrors remain authored in Hydra config.
+
+| Option | Description |
+| --- | --- |
+| `--environment NAME` | Select an exact manifest name; repeatable. |
+| `--domain` / `--kind` / `--profile` | Select manifests by catalog metadata. |
+| `--set FIELD=VALUE` | Assign a YAML value to an editable field; repeatable. |
+| `--dry-run` | Validate and show the selection without writing. |
+| `--json` | Output the result as JSON. |
+
+```bash
+gym env manifest \
+    --environment my_eval \
+    --set description="A revised searchable description" \
+    --dry-run
 ```
 
 ### `gym env packages`
@@ -457,14 +532,29 @@ gym env packages \
 
 ### `gym env test`
 
-Test resource server(s) by running their pytest suite. If no resources server is given, all of them are tested.
+Test an environment's manifest-selected scorer fixture, replay captured trajectories through its verifier, or run legacy Resources Server pytest suites. Fixture mode runs in process without Ray; replay mode starts verifier-side services but never an agent or policy rollout.
 
 | Option | Description |
 | --- | --- |
+| `NAME` | Live environment or benchmark catalog name. Optional for replay when the bundle records the environment. |
+| `--kind` | Disambiguate a catalog name as `environment` or `benchmark`. |
 | `--resources-server NAME` | Resources server to test. Omit to test all servers. |
+| `--update-expected` | Generate observed fixture statuses and rewards. Inspect the diff, then rerun without this flag; generation is not acceptance. |
+| `--replay PATH` | Re-score a `.bundle.json`, or a rollout JSONL with a sibling bundle. A bundle supplies `NAME` and verifies its referenced artifacts. Legacy JSONL requires explicit `NAME` and `--force`. |
+| `--force` | Permit an explicitly selected replacement verifier or a verifier whose `reverify_mode` is `unsupported` or `unknown`; the result is prefixed with `unsafe_`. Environment identity, session model, and state contract must still match the capture. |
+| `--failures MODE` | Failure trajectories to replay: `latest-replayable` (default), `judge-failed`, or `exclude`. Successful trajectories take precedence. |
+| `--limit N` | Replay at most N captured trajectories. |
+| `--concurrency N` | Maximum concurrent verifier requests during replay. |
+| `--output PATH`, `-o` | Fresh replay output path. Defaults to `<stem>_replayed.jsonl`; existing output is never overwritten. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
+# Run one environment's scorer fixture without services
+gym env test my_eval
+
+# Re-score saved trajectories without calling the policy again
+gym env test --replay results/my_eval_rollouts.bundle.json
+
 # Test a single server
 gym env test --resources-server example_single_tool_call
 
@@ -472,22 +562,49 @@ gym env test --resources-server example_single_tool_call
 gym env test
 ```
 
-### `gym env start`
+### `gym env publish`
 
-Start the NeMo Gym servers (agents, models, resources) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment.
+Validate a manifest-backed catalog entry, register its `NAME@VERSION`, and add CODEOWNERS rules for the recipe and scaffold-owned components. Confirm the manifest's `authors` directly with the contributors or owning team before running this command; `--owner` identifies review responsibility and is not an authorship substitute.
 
 | Option | Description |
 | --- | --- |
+| `NAME` | Catalog name, optionally qualified as the manifest's current `NAME@VERSION`. |
+| `--kind` | Disambiguate an environment/benchmark name collision. |
+| `--owner HANDLE` | GitHub user or team to add to CODEOWNERS; repeatable. |
+| `--dry-run` | Perform validation and show changes without writing. |
+| `--json` | Output the result as JSON. |
+| `--search-dir DIR` | Extra catalog root; repeatable. |
+
+```bash
+gym env publish my_eval@1.0.0 --owner @your-github-handle --dry-run
+```
+
+Publishing reports Gym's environment-version key as `environment:NAME@VERSION` or `benchmark:NAME@VERSION` and locks the canonical checked-in composition. Temporary model, component, and Hydra composition overrides are rejected; persist the intended recipe first. Use `--dry-run` to review the proposed files and ownership rules before writing.
+
+### `gym env start`
+
+Start the NeMo Gym servers (agents, models, resources) for a catalog declaration or explicit configs. A manifest-backed selection is statically preflighted before Ray or any service starts.
+
+| Option | Description |
+| --- | --- |
+| `NAME` | Live catalog name. Historical `NAME@VERSION` execution is not supported. |
+| `--kind` | Disambiguate a catalog name as `environment` or `benchmark`. |
 | `--config PATH` | Config file to load. Repeatable. |
+| `--environment NAME` | Legacy named-config selector. Prefer positional `NAME` for manifest-backed entries. |
 | `--benchmark NAME` | Load the named benchmark config (start its servers). |
 | `--resources-server NAME` | Load the named resources server config. |
-| `--model-type NAME` | Load the named model server type config. |
+| `--agent-server NAME` | Load the named agent-server config. With a manifest-backed target, this requests a role-scoped swap. |
+| `--model-type NAME` | Load the named model server type config. With a manifest-backed target, this requests a role-scoped swap. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--model`, `-m` | Served model identifier. See [Selecting the model server](#selecting-the-model-server). |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
+| `--rollout-driver MODULE:FUNCTION` | Temporarily replace the driver declared by a manifest-backed `custom-driver` recipe. |
 
 ```bash
+# Live selection with a model implementation override
+gym env start my_eval --model-type openai_model
+
 gym env start \
     --resources-server example_single_tool_call \
     --model-type openai_model
@@ -548,20 +665,24 @@ gym eval prepare --benchmark aime24
 
 ### `gym eval run`
 
-Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
+Collate data, start the servers, and collect rollouts. This is the main evaluation command. A positional catalog selection carries the manifest through a static preflight before data preparation or service startup. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
 | Option | Description |
 | --- | --- |
+| `NAME` | Live catalog name. Historical `NAME@VERSION` execution is not supported. |
+| `--kind` | Disambiguate a catalog name as `environment` or `benchmark`. |
 | `--config PATH` | Config file to load. Repeatable. |
+| `--environment NAME` | Legacy named-config selector. Prefer positional `NAME` for manifest-backed entries. |
 | `--benchmark NAME` | Load the named benchmark config. |
 | `--resources-server NAME` | Load the named resources server config. |
-| `--model-type NAME` | Load the named model server type config. |
+| `--agent-server NAME` | Load the named agent-server config. With a manifest-backed target, this requests a role-scoped swap. |
+| `--model-type NAME` | Load the named model server type config. With a manifest-backed target, this requests a role-scoped swap. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
 | `--agent`, `-a` | Agent to collect rollouts with. |
 | `--input`, `-i` | Input tasks JSONL file. |
-| `--output`, `-o` | Output rollouts JSONL file. |
+| `--output`, `-o`, `--save-trajectories` | Output rollouts JSONL file. `--save-trajectories` is a descriptive alias; all three spellings produce rollouts, materialized inputs, and a hash-verified trajectory bundle. |
 | `--limit` | Maximum number of tasks to run. |
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
@@ -570,15 +691,20 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--model`, `-m` | Served model identifier. |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
+| `--rollout-driver MODULE:FUNCTION` | Temporarily replace the driver declared by a manifest-backed `custom-driver` recipe. |
 | `--temperature` | Sampling temperature. |
 | `--top-p` | Nucleus sampling top-p. |
 | `--max-output-tokens` | Maximum output tokens. |
 
 ```bash
+# Catalog-name run; legacy entries remain supported during migration
+gym eval run aime24 \
+    --save-trajectories results/aime24.jsonl
+
 # End-to-end: spin up servers, then collect rollouts for a benchmark
 gym eval run --benchmark aime24 \
     --model-type openai_model \
-    --output results/aime24.jsonl \
+    --save-trajectories results/aime24.jsonl \
     --split validation \
     --concurrency 10
 

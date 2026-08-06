@@ -12,8 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared component-discovery helpers: which roots to scan for a component, how to resolve name
-collisions across them, and how to read a component's ``(domain, description)``.
+"""Shared component-discovery helpers: search roots, collision handling, metadata, and capability contracts.
 
 Lives below the per-component registries (``registry.py``, ``benchmarks.py``, ``agent_registry.py``) so
 they can share it without depending on each other. Reads configs only; never starts servers.
@@ -21,21 +20,145 @@ they can share it without depending on each other. Reads configs only; never sta
 
 import re
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Optional, Tuple, TypeVar
+from typing import Callable, Dict, Iterable, Literal, Optional, Tuple, TypeVar
 
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationKeyError
 
 from nemo_gym import component_search_roots
-from nemo_gym.global_config import (
-    POLICY_MODEL_KEY_NAME,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-)
 
 
 _T = TypeVar("_T")
+
+ServerGroupKey = Literal["resources_servers", "responses_api_agents", "responses_api_models"]
+ComponentRole = Literal["resources_server", "agent_server", "model_server"]
+SERVER_GROUP_KEYS: tuple[ServerGroupKey, ...] = (
+    "resources_servers",
+    "responses_api_agents",
+    "responses_api_models",
+)
+SERVER_ROLE_BY_GROUP: dict[ServerGroupKey, ComponentRole] = {
+    "resources_servers": "resources_server",
+    "responses_api_agents": "agent_server",
+    "responses_api_models": "model_server",
+}
+BASELINE_PROVIDES_BY_GROUP: dict[ServerGroupKey, Tuple[str, ...]] = {
+    # Every Responses API model implements the text request/response contract.
+    # Flavors declare only additional capabilities such as image input.
+    "responses_api_models": ("text-model",),
+}
+
+
+@dataclass(frozen=True)
+class CapabilityDeclaration:
+    """Capabilities declared by one server implementation in one config flavor."""
+
+    instance: str
+    implementation: str
+    requires: Tuple[str, ...] = ()
+    provides: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConfigFlavorCapabilities:
+    """Typed capability declarations read from exactly one config file and role."""
+
+    config_path: Path
+    group: ServerGroupKey
+    declarations: Tuple[CapabilityDeclaration, ...] = ()
+
+    @property
+    def requires(self) -> Tuple[str, ...]:
+        """Ordered capabilities required by implementations in this flavor only."""
+
+        return _ordered_unique(capability for declaration in self.declarations for capability in declaration.requires)
+
+    @property
+    def provides(self) -> Tuple[str, ...]:
+        """Ordered capabilities provided by implementations in this flavor only."""
+
+        return _ordered_unique(capability for declaration in self.declarations for capability in declaration.provides)
+
+
+def _ordered_unique(values: Iterable[str]) -> Tuple[str, ...]:
+    return tuple(dict.fromkeys(values))
+
+
+def _capability_values(value: object) -> Tuple[str, ...]:
+    """Best-effort capability normalization for non-executing discovery."""
+
+    if isinstance(value, str):
+        values: Iterable[object] = (value,)
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return ()
+    return _ordered_unique(item.strip() for item in values if isinstance(item, str) and item.strip())
+
+
+def component_capability_declaration(
+    *,
+    instance: str,
+    implementation: str,
+    group: ServerGroupKey,
+    server_config: object,
+) -> CapabilityDeclaration:
+    """Return the interface baseline plus one flavor's explicit declarations."""
+
+    config = server_config if isinstance(server_config, (dict, DictConfig)) else {}
+    return CapabilityDeclaration(
+        instance=instance,
+        implementation=implementation,
+        requires=_capability_values(config.get("requires")),
+        provides=_ordered_unique(
+            (*BASELINE_PROVIDES_BY_GROUP.get(group, ()), *_capability_values(config.get("provides")))
+        ),
+    )
+
+
+def read_config_flavor_capabilities(
+    config_path: Path,
+    group: ServerGroupKey,
+) -> ConfigFlavorCapabilities:
+    """Read capability declarations for one role from one config flavor.
+
+    The function intentionally does not merge sibling files: two selectable
+    flavors may expose different contracts even when they share an implementation
+    directory. Discovery is best effort and never resolves runtime-only values.
+    """
+
+    try:
+        raw = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False, throw_on_missing=False)
+    except Exception:
+        raw = None
+
+    declarations: list[CapabilityDeclaration] = []
+    if isinstance(raw, dict):
+        for instance, top_level_value in raw.items():
+            if not isinstance(top_level_value, dict):
+                continue
+            servers = top_level_value.get(group)
+            if not isinstance(servers, dict):
+                continue
+            for implementation, server_config in servers.items():
+                if not isinstance(server_config, dict):
+                    continue
+                declarations.append(
+                    component_capability_declaration(
+                        instance=str(instance),
+                        implementation=str(implementation),
+                        group=group,
+                        server_config=server_config,
+                    )
+                )
+
+    return ConfigFlavorCapabilities(
+        config_path=config_path,
+        group=group,
+        declarations=tuple(declarations),
+    )
 
 
 def merge_by_name(per_root: Iterable[Dict[str, _T]]) -> Dict[str, _T]:
@@ -66,18 +189,16 @@ def discover_components(
 # endpoints) not needed to identify a component, so a placeholder lets the config still resolve.
 _UNSET_VALUE_PLACEHOLDER = "__unset_for_listing__"
 
-# Server groups a component's `domain`/`description` may be declared on. `domain` can sit on a
-# resources server (e.g. `aime24`), an agent (e.g. `tau2`), or in principle a model server.
-_SERVER_GROUP_KEYS = ("resources_servers", "responses_api_agents", "responses_api_models")
-
 
 def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfig) -> DictConfig:
     """`parse_no_environment` for listing: fill unset `???` and undefined `${...}` values (runtime-only
     things like API keys/endpoints) with a placeholder so the config still resolves enough to identify the
     component. Never mutates the input; errors other than those two propagate.
     """
+    from nemo_gym.global_config import StaticValidationConfigParser
+
     working = deepcopy(initial_config_dict)  # never mutate the caller's config
-    parser = GlobalConfigDictParser()
+    parser = StaticValidationConfigParser()
 
     # Fill all `???` leaves in one pass. The loop below only adds placeholder keys, so no new `???` appear.
     for path in parser.collect_missing_value_paths(working):
@@ -100,6 +221,18 @@ def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfi
             working = OmegaConf.merge(DictConfig({key: _UNSET_VALUE_PLACEHOLDER}), working)
 
 
+def resolve_config_paths_static(config_paths: Iterable[str | Path]) -> DictConfig:
+    """Resolve config paths for discovery/CI without runtime integrations or a real model."""
+
+    from nemo_gym.global_config import GlobalConfigDictParserConfig
+
+    initial = OmegaConf.merge(
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        OmegaConf.create({"config_paths": [str(path) for path in config_paths]}),
+    )
+    return _parse_no_environment_tolerating_unset_values(initial)
+
+
 def iter_server_configs(container):
     """Yield ``(group_key, server_name, server_config)`` for every server across all instances in a config.
 
@@ -112,7 +245,7 @@ def iter_server_configs(container):
     for instance in container.values():
         if not isinstance(instance, (dict, DictConfig)):
             continue
-        for group_key in _SERVER_GROUP_KEYS:
+        for group_key in SERVER_GROUP_KEYS:
             servers = instance.get(group_key)
             if not isinstance(servers, (dict, DictConfig)):
                 continue
@@ -155,6 +288,8 @@ def read_config_metadata(config_path: Path) -> Tuple[Optional[str], Optional[str
         return domain, description
 
     try:
+        from nemo_gym.global_config import POLICY_MODEL_KEY_NAME, GlobalConfigDictParserConfig
+
         initial_config_dict = OmegaConf.load(config_path)
         if POLICY_MODEL_KEY_NAME not in initial_config_dict:
             initial_config_dict = OmegaConf.merge(

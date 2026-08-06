@@ -2,6 +2,7 @@ legal_agent_bench:
   resources_servers:
     legal_agent_bench:
       entrypoint: app.py
+      provides: [verification, tools]
       domain: agent
       verified: false
       description: Harbor-native integration of <a href='https://github.com/harveyai/harvey-labs/tree/f46ef86e4788545622db25dcffa3aebb7a139929'>Legal Agent Benchmark (LAB)</a>
@@ -31,6 +32,7 @@ legal_agent_bench_harbor_agent:
   responses_api_agents:
     harbor_agent:
       entrypoint: ../../resources_servers/legal_agent_bench/harbor_bridge.py
+      requires: [text-model]
       concurrency: 1
 
       harbor_datasets:

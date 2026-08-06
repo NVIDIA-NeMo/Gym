@@ -1,0 +1,4 @@
+interface:
+  display_name: "Migrate Gym Environment"
+  short_description: "Complete one legacy environment manifest safely"
+  default_prompt: "Use $migrate-gym-environment to migrate one selected legacy Gym unit without changing its runtime behavior."

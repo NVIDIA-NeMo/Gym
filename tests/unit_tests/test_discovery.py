@@ -28,6 +28,7 @@ from nemo_gym.discovery import (
     _UNSET_VALUE_PLACEHOLDER,
     _parse_no_environment_tolerating_unset_values,
     merge_by_name,
+    read_config_flavor_capabilities,
     read_config_metadata,
 )
 
@@ -142,6 +143,43 @@ class TestMergeByName:
 
     def test_empty_input(self) -> None:
         assert merge_by_name([]) == {}
+
+
+class TestConfigFlavorCapabilities:
+    def test_reads_one_role_without_merging_sibling_flavors(self, tmp_path: Path) -> None:
+        text_config = tmp_path / "text.yaml"
+        image_config = tmp_path / "image.yaml"
+        text_config.write_text(
+            "policy:\n"
+            "  responses_api_models:\n"
+            "    adapter:\n"
+            "      requires: transport:http\n"
+            "      provides: [text-model, text-model]\n"
+            "agent:\n"
+            "  responses_api_agents:\n"
+            "    harness:\n"
+            "      requires: [text-model]\n"
+        )
+        image_config.write_text("policy:\n  responses_api_models:\n    adapter:\n      provides: [image-model]\n")
+
+        text = read_config_flavor_capabilities(text_config, "responses_api_models")
+        image = read_config_flavor_capabilities(image_config, "responses_api_models")
+
+        assert text.requires == ("transport:http",)
+        assert text.provides == ("text-model",)
+        assert len(text.declarations) == 1
+        assert text.declarations[0].instance == "policy"
+        assert text.declarations[0].implementation == "adapter"
+        assert image.provides == ("text-model", "image-model")
+
+    def test_malformed_config_is_an_empty_flavor(self, tmp_path: Path) -> None:
+        config = tmp_path / "broken.yaml"
+        config.write_text("responses_api_models: [unclosed\n")
+
+        capabilities = read_config_flavor_capabilities(config, "responses_api_models")
+
+        assert capabilities.config_path == config
+        assert capabilities.declarations == ()
 
 
 class TestTolerantInterpolationParse:

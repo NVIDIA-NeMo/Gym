@@ -14,9 +14,8 @@
 # limitations under the License.
 """Registry of model servers under ``responses_api_models/<name>/``.
 
-Maps each model dir to the config flavors it ships (``configs/<flavor>.yaml``), so they can be
-enumerated by the token passed to ``--model-type`` (see :attr:`ModelEntry.model_types`). Reads the
-directory tree only; never loads a config.
+Maps each model dir to the config flavors it ships, so they can be enumerated by the token passed to
+``--model-type``. Reads the directory tree only; never starts a model server.
 """
 
 from dataclasses import dataclass
@@ -24,7 +23,7 @@ from pathlib import Path
 from typing import Dict
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import discover_components
+from nemo_gym.discovery import ConfigFlavorCapabilities, discover_components, read_config_flavor_capabilities
 
 
 MODELS_SUBDIR = "responses_api_models"
@@ -40,12 +39,19 @@ class ModelEntry:
     model_group: str
     config_path: Path
 
+    @property
+    def capabilities(self) -> ConfigFlavorCapabilities:
+        """Capabilities declared by this selectable model config flavor."""
+
+        return read_config_flavor_capabilities(self.config_path, "responses_api_models")
+
 
 def _discover_models_in_dir(models_dir: Path) -> Dict[str, ModelEntry]:
     """Map model name -> :class:`ModelEntry` for every config flavor under one ``responses_api_models/`` dir.
 
-    One entry per ``configs/<flavor>.yaml``: ``<dir>`` for the flavor named after the model, ``<dir>/<flavor>``
-    for the rest. A config-less dir contributes nothing. Returns an empty dict if the directory is missing.
+    One entry per YAML below ``configs/``: ``<dir>`` for the top-level flavor named after the model,
+    ``<dir>/<relative-flavor>`` for the rest. A config-less dir contributes nothing. Returns an empty dict if
+    the directory is missing.
     """
     models: Dict[str, ModelEntry] = {}
     if not models_dir.is_dir():
@@ -55,9 +61,10 @@ def _discover_models_in_dir(models_dir: Path) -> Dict[str, ModelEntry]:
         if not child.is_dir():
             continue
         configs_dir = child / MODEL_CONFIGS_SUBDIR
-        config_files = sorted(configs_dir.glob("*.yaml")) if configs_dir.is_dir() else []
+        config_files = sorted(configs_dir.rglob("*.yaml")) if configs_dir.is_dir() else []
         for config in config_files:
-            name = child.name if config.stem == child.name else f"{child.name}/{config.stem}"
+            flavor = config.relative_to(configs_dir).with_suffix("").as_posix()
+            name = child.name if flavor == child.name else f"{child.name}/{flavor}"
             models[name] = ModelEntry(name=name, model_group=child.name, config_path=config)
 
     return models

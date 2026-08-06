@@ -13,17 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import hashlib
 import json
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import orjson
 from omegaconf import DictConfig
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 from wandb import Table
 
@@ -38,6 +39,7 @@ from nemo_gym.global_config import (
     get_wandb_run,
 )
 from nemo_gym.path_utils import failures_path_for
+from nemo_gym.repository_io import atomic_write_bytes
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
@@ -50,6 +52,15 @@ from nemo_gym.server_utils import (
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     setup_server_client,
+)
+from nemo_gym.trajectory_bundle import (
+    DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+    TRAJECTORY_ID_KEY,
+    FailureReplaySelection,
+    bundle_path_for,
+    load_trajectory_bundle,
+    stamp_trajectory_id,
+    trajectory_identity_key,
 )
 
 
@@ -66,6 +77,199 @@ _RECOVERY_TWO_SOURCES_WARNING = (
 )
 
 
+class _ReverificationSource(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str
+    sha256: str
+    rows: int = Field(ge=0)
+    bytes: int = Field(ge=0)
+
+
+class _ReverificationCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = 1
+    materialized_inputs: _ReverificationSource
+    source_rollouts: _ReverificationSource
+    source_failures: _ReverificationSource | None = None
+    verifier_fingerprint: str
+    trajectory_identity_fields: Tuple[str, ...]
+    failure_trajectories: FailureReplaySelection
+    judge_failed_only: bool
+    limit: int | None
+    resources_server_name: str | None
+
+    @field_validator("verifier_fingerprint")
+    @classmethod
+    def _validate_fingerprint(cls, value: str) -> str:
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("verifier_fingerprint must be a lowercase SHA-256 digest")
+        return value
+
+
+def reverification_fingerprint(
+    global_config: Mapping[str, Any] | DictConfig,
+    *,
+    resources_server_name: str | None = None,
+) -> str:
+    """Hash the resolved verifier configuration without credentials or runtime-only paths."""
+
+    from nemo_gym.credential_keys import canonical_redacted_config_json
+
+    digest = hashlib.sha256(b"nemo-gym-reverification-v1\0")
+    digest.update(canonical_redacted_config_json(global_config).encode())
+    digest.update(b"\0resources-server\0")
+    digest.update((resources_server_name or "").encode())
+    return digest.hexdigest()
+
+
+def _reverification_checkpoint_path(output_path: Path) -> Path:
+    return output_path.with_suffix(".reverify.json")
+
+
+def _source_stamp(path: Path) -> _ReverificationSource:
+    resolved = path.expanduser().resolve()
+    digest = hashlib.sha256()
+    rows = 0
+    byte_count = 0
+    try:
+        with resolved.open("rb") as handle:
+            for line in handle:
+                digest.update(line)
+                byte_count += len(line)
+                if line.strip():
+                    rows += 1
+    except OSError as error:
+        raise ConfigError(f"Could not fingerprint reverification source '{resolved}': {error}.") from error
+    return _ReverificationSource(path=str(resolved), sha256=digest.hexdigest(), rows=rows, bytes=byte_count)
+
+
+def _source_matches_append_boundary(
+    recorded: _ReverificationSource,
+    current: _ReverificationSource,
+    mutable_path: Path,
+) -> bool:
+    if recorded == current:
+        return True
+    if Path(recorded.path) != Path(current.path) or Path(recorded.path) != mutable_path.resolve():
+        return False
+    try:
+        with Path(current.path).open("rb") as handle:
+            prefix = handle.read(recorded.bytes)
+    except OSError:
+        return False
+    return len(prefix) == recorded.bytes and hashlib.sha256(prefix).hexdigest() == recorded.sha256
+
+
+def _append_checkpoint_matches(
+    recorded: _ReverificationCheckpoint,
+    expected: _ReverificationCheckpoint,
+    output_paths: "OutputPaths",
+) -> bool:
+    fixed_fields = (
+        "schema_version",
+        "materialized_inputs",
+        "verifier_fingerprint",
+        "trajectory_identity_fields",
+        "failure_trajectories",
+        "judge_failed_only",
+        "limit",
+        "resources_server_name",
+    )
+    if any(getattr(recorded, field) != getattr(expected, field) for field in fixed_fields):
+        return False
+    if not _source_matches_append_boundary(recorded.source_rollouts, expected.source_rollouts, output_paths.output):
+        return False
+    if recorded.source_failures is None or expected.source_failures is None:
+        return recorded.source_failures == expected.source_failures
+    return _source_matches_append_boundary(
+        recorded.source_failures,
+        expected.source_failures,
+        output_paths.failures,
+    )
+
+
+def _expected_reverification_checkpoint(
+    config: "RolloutReverificationConfig",
+    *,
+    materialized_inputs: Path,
+    source_rollouts: Path,
+    source_failures: Path | None,
+    resources_server_name: str | None,
+) -> _ReverificationCheckpoint:
+    fingerprint = config.verifier_fingerprint
+    if fingerprint is None:
+        fallback = {"resources_server_name": resources_server_name or ""}
+        fingerprint = hashlib.sha256(orjson.dumps(fallback, option=orjson.OPT_SORT_KEYS)).hexdigest()
+    return _ReverificationCheckpoint(
+        materialized_inputs=_source_stamp(materialized_inputs),
+        source_rollouts=_source_stamp(source_rollouts),
+        source_failures=_source_stamp(source_failures) if source_failures is not None else None,
+        verifier_fingerprint=fingerprint,
+        trajectory_identity_fields=config.trajectory_identity_fields,
+        failure_trajectories=config.failure_trajectories,
+        judge_failed_only=config.judge_failed_only,
+        limit=config.limit,
+        resources_server_name=resources_server_name,
+    )
+
+
+def _bind_reverification_resume(
+    config: "RolloutReverificationConfig",
+    output_paths: "OutputPaths",
+    expected: _ReverificationCheckpoint,
+) -> Path:
+    checkpoint_path = _reverification_checkpoint_path(output_paths.output)
+    cached_state_exists = any(
+        path.exists() or path.is_symlink() for path in (output_paths.output, output_paths.failures, checkpoint_path)
+    )
+    validate_existing_checkpoint = config.resume_from_cache or config.append
+    if validate_existing_checkpoint and (checkpoint_path.exists() or checkpoint_path.is_symlink()):
+        if checkpoint_path.is_symlink() or not checkpoint_path.is_file():
+            raise ConfigError(f"Invalid reverification checkpoint path '{checkpoint_path}'.")
+        try:
+            recorded = _ReverificationCheckpoint.model_validate_json(checkpoint_path.read_bytes())
+        except (OSError, ValueError) as error:
+            raise ConfigError(f"Invalid reverification checkpoint '{checkpoint_path}': {error}.") from error
+        if recorded != expected and not (
+            config.append and _append_checkpoint_matches(recorded, expected, output_paths)
+        ):
+            raise ConfigError(
+                "Cannot resume reverification because its source artifacts, verifier configuration, selection, "
+                "or trajectory identity changed. Start fresh with a new output path."
+            )
+        return checkpoint_path
+
+    if config.resume_from_cache and cached_state_exists:
+        if checkpoint_path.is_symlink() or not checkpoint_path.is_file():
+            raise ConfigError(
+                f"Cannot resume reverification output '{output_paths.output}' without provenance checkpoint "
+                f"'{checkpoint_path}'. Start fresh or restore the checkpoint."
+            )
+
+    checkpoint_path.unlink(missing_ok=True)
+    _write_reverification_checkpoint(checkpoint_path, expected)
+    return checkpoint_path
+
+
+def _write_reverification_checkpoint(
+    checkpoint_path: Path,
+    checkpoint: _ReverificationCheckpoint,
+) -> None:
+    content = (
+        orjson.dumps(
+            checkpoint.model_dump(mode="json"),
+            option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS,
+        )
+        + b"\n"
+    )
+    try:
+        atomic_write_bytes(checkpoint_path, content)
+    except OSError as error:
+        raise ConfigError(f"Could not write reverification checkpoint '{checkpoint_path}': {error}.") from error
+
+
 class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
@@ -73,7 +277,23 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
     rollouts_jsonl_fpath: str = Field(
         description="The file path of the rollouts to re-verify, as output by `gym eval run`."
     )
+    failure_rollouts_jsonl_fpath: Optional[str] = Field(
+        default=None,
+        description="Explicit failure-sidecar path supplied by a trajectory bundle.",
+    )
     output_jsonl_fpath: str = Field(description="The output data jsonl file path with recomputed rewards.")
+    failure_trajectories: FailureReplaySelection = Field(
+        default=FailureReplaySelection.EXCLUDE,
+        description="Captured failure trajectories to include alongside successful rollouts.",
+    )
+    trajectory_identity_fields: Tuple[str, ...] = Field(
+        default=DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+        description="Fields used to pair captured inputs and rollouts.",
+    )
+    verifier_fingerprint: str | None = Field(
+        default=None,
+        description="Internal fingerprint of the resolved verifier configuration used to protect resume caches.",
+    )
     force: bool = Field(
         default=False,
         description=(
@@ -129,10 +349,10 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         default=False,
         description=(
             "Recovery-only: append the re-verified judge-failure results to an EXISTING output file instead of "
-            "seeding the successful rollouts into a fresh output. Use to add the recovered rows directly onto a "
-            "file that already holds the successes (e.g. point --output at the run's rollouts file). The output "
-            "is opened in append mode (never cleared) and already-present keys are skipped, so re-running is "
-            "idempotent. Only valid together with judge_failed_only=true, and mutually exclusive with overwrite."
+            "seeding the successful rollouts into a fresh output. Captured bundle artifacts are immutable, so use "
+            "a separate merged output. The output is never cleared and already-present keys are skipped, making "
+            "re-runs idempotent. Only valid together with judge_failed_only=true, and mutually exclusive with "
+            "overwrite."
         ),
     )
 
@@ -142,6 +362,8 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
             raise ValueError("`append` is only valid together with `judge_failed_only` (pass --judge-failed-only).")
         if self.append and self.overwrite:
             raise ValueError("`append` and `overwrite` are mutually exclusive: one appends, the other clears.")
+        if self.append and self.resume_from_cache:
+            raise ValueError("`append` and `resume_from_cache` cannot be combined safely.")
         return self
 
 
@@ -159,9 +381,9 @@ class OutputPaths:
 
 @dataclass
 class CacheKeysByStatus:
-    successful_keys: set[tuple[int, int]]
-    terminal_keys: set[tuple[int, int]]
-    maxed_out_keys: set[tuple[int, int]]
+    successful_keys: set[str]
+    terminal_keys: set[str]
+    maxed_out_keys: set[str]
 
 
 # ---------------------------------------------------------------------------
@@ -208,11 +430,31 @@ def _agent_to_rs_mapping_from_resources_only_config(
 
 def _build_agent_to_resources_server_mapping(
     global_config_dict: Union[Dict[str, Any], "DictConfig"],
+    resources_server_name: Optional[str] = None,
 ) -> Dict[str, str]:
+    if resources_server_name is not None:
+        block = global_config_dict.get(resources_server_name)
+        if not isinstance(block, (dict, DictConfig)) or "resources_servers" not in block:
+            raise ConfigError(
+                f"reverify: selected resources server instance '{resources_server_name}' is not in the config."
+            )
+        return defaultdict(lambda: resources_server_name)
     mapping = _agent_to_rs_mapping_from_agent_blocks(global_config_dict)
     if mapping:
         return mapping
     return _agent_to_rs_mapping_from_resources_only_config(global_config_dict)
+
+
+def _build_reverification_mapping(
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
+    resources_server_name: Optional[str],
+) -> Dict[str, str]:
+    if resources_server_name is None:
+        return _build_agent_to_resources_server_mapping(global_config_dict)
+    return _build_agent_to_resources_server_mapping(
+        global_config_dict,
+        resources_server_name=resources_server_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -242,16 +484,20 @@ def _parse_output_line(line: bytes) -> Dict[str, Any]:
     return orjson.loads(result_str)
 
 
-def _parse_output_line_key(line: bytes) -> tuple[int, int] | None:
+def _parse_output_line_key(
+    line: bytes,
+    trajectory_identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+) -> str | None:
     result = _parse_output_line(line)
-    task_idx = result.get(TASK_INDEX_KEY_NAME)
-    rollout_idx = result.get(ROLLOUT_INDEX_KEY_NAME)
-    if task_idx is None or rollout_idx is None:
+    if TASK_INDEX_KEY_NAME not in result or ROLLOUT_INDEX_KEY_NAME not in result:
         return None
-    return task_idx, rollout_idx
+    return trajectory_identity_key(result, trajectory_identity_fields)
 
 
-def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
+def _load_cache_keys_by_status(
+    output_fpaths: OutputPaths,
+    trajectory_identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+) -> CacheKeysByStatus:
     if not (output_fpaths.output.exists() or output_fpaths.failures.exists()):
         print("Skipping resume_from_cache because cache paths don't exist!")
         return CacheKeysByStatus(
@@ -261,10 +507,16 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
         )
     # Successes (and any legacy '-failed' rows written by pre-fix Gym
     # builds) live in the main jsonl. They short-circuit dispatch.
-    successful_keys: set[tuple[int, int]] = set()
+    successful_keys: set[str] = set()
     if output_fpaths.output.exists():
         with output_fpaths.output.open("rb") as f:
-            successful_keys = {key for line in f if (key := _parse_output_line_key(line)) is not None}
+            for line in f:
+                key = _parse_output_line_key(line, trajectory_identity_fields)
+                if key is None:
+                    continue
+                if key in successful_keys:
+                    raise ConfigError(f"Reverification cache contains duplicate trajectory id '{key}'.")
+                successful_keys.add(key)
 
     # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
     # per key + flag terminal rows so chain-hop 2 retries the right ones.
@@ -278,7 +530,7 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
                     continue
                 if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                     continue
-                k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
+                k = trajectory_identity_key(fr, trajectory_identity_fields)
                 attempts_by_key[k] += 1
                 if fr.get(NG_TERMINAL_KEY):
                     terminal_keys.add(k)
@@ -292,9 +544,13 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
     )
 
 
-def _drop_cache_from_payloads(payloads: List[Dict], cache: CacheKeysByStatus) -> Iterator[Dict]:
+def _drop_cache_from_payloads(
+    payloads: List[Dict],
+    cache: CacheKeysByStatus,
+    trajectory_identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+) -> Iterator[Dict]:
     for payload in payloads:
-        key = (payload[TASK_INDEX_KEY_NAME], payload[ROLLOUT_INDEX_KEY_NAME])
+        key = trajectory_identity_key(payload, trajectory_identity_fields)
         if key in cache.successful_keys:
             continue
         if key in cache.terminal_keys:
@@ -329,7 +585,8 @@ def _is_judge_failure(row: Dict[str, Any]) -> bool:
 
 
 def _recovery_rollout_predicate(
-    skip_keys: Optional[set[tuple[Any, Any]]] = None,
+    skip_keys: Optional[set[str]] = None,
+    trajectory_identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
 ) -> Callable[[Dict[str, Any]], bool]:
     """Build the row filter for `--judge-failed-only` recovery.
 
@@ -340,12 +597,12 @@ def _recovery_rollout_predicate(
     attempts for one key re-verifies it exactly once.
     """
     skip_keys = skip_keys or set()
-    seen: set[tuple[Any, Any]] = set()
+    seen: set[str] = set()
 
     def predicate(row: Dict[str, Any]) -> bool:
         if not _is_judge_failure(row):
             return False
-        key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
+        key = trajectory_identity_key(row, trajectory_identity_fields)
         if key in skip_keys or key in seen:
             return False
         seen.add(key)
@@ -354,20 +611,26 @@ def _recovery_rollout_predicate(
     return predicate
 
 
-def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> set[tuple[int, int]]:
+def _seed_output_with_successes(
+    successes_fpath: Path,
+    output_fpath: Path,
+    trajectory_identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+) -> set[str]:
     """Copy the already-successful rollout rows into the output file so the final aggregate covers
     successes + recovered rows, and return the set of (task, rollout) keys ALREADY PRESENT in the output
     afterward"""
-    present: set[tuple[int, int]] = set()
+    present: set[str] = set()
     if output_fpath.exists():
         with output_fpath.open("rb") as f:
-            present = {key for line in f if (key := _parse_output_line_key(line)) is not None}
+            present = {
+                key for line in f if (key := _parse_output_line_key(line, trajectory_identity_fields)) is not None
+            }
     seeded = 0
     with successes_fpath.open("rb") as src, output_fpath.open("ab") as dst:
         for line in src:
             if not line.strip():
                 continue
-            key = _parse_output_line_key(line)
+            key = _parse_output_line_key(line, trajectory_identity_fields)
             if key is not None:
                 if key in present:
                     continue
@@ -391,26 +654,74 @@ def _yield_inputs_and_rollouts_paired(
     rollouts_jsonl_fpath: Path,
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    *,
+    failure_rollouts_jsonl_fpath: Optional[Path] = None,
+    failure_trajectories: FailureReplaySelection = FailureReplaySelection.EXCLUDE,
+    trajectory_identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+    primary_failure_attempts: bool = False,
 ) -> "Iterator[InputRolloutPair]":
-    inputs_by_key = {}
+    inputs_by_key: Dict[str, Dict[str, Any]] = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
         for line in m_f:
             r = orjson.loads(line)
-            inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
+            key = trajectory_identity_key(r, trajectory_identity_fields)
+            if key in inputs_by_key:
+                raise ConfigError(f"Materialized inputs contain duplicate trajectory id '{key}'.")
+            inputs_by_key[key] = r
+
+    def selected_rollouts() -> Iterator[Dict[str, Any]]:
+        successful_keys: set[str] = set()
+        latest_primary_failures: Dict[str, Dict[str, Any]] = {}
+        with open(rollouts_jsonl_fpath) as r_f:
+            for line in tqdm(r_f, desc="Reading rollouts"):
+                rollout_row = orjson.loads(line)
+                key = trajectory_identity_key(rollout_row, trajectory_identity_fields)
+                if primary_failure_attempts:
+                    latest_primary_failures[key] = rollout_row
+                    continue
+                if key in successful_keys:
+                    raise ConfigError(f"Captured successes contain duplicate trajectory id '{key}'.")
+                successful_keys.add(key)
+                yield rollout_row
+        if primary_failure_attempts:
+            yield from latest_primary_failures.values()
+
+        if failure_trajectories == FailureReplaySelection.EXCLUDE or failure_rollouts_jsonl_fpath is None:
+            return
+        latest_failures: Dict[str, Dict[str, Any]] = {}
+        skipped_without_response = 0
+        with open(failure_rollouts_jsonl_fpath) as failures_file:
+            for line in failures_file:
+                if not line.strip():
+                    continue
+                failure = orjson.loads(line)
+                if failure_trajectories == FailureReplaySelection.JUDGE_FAILED and not _is_judge_failure(failure):
+                    continue
+                if "response" not in failure:
+                    skipped_without_response += 1
+                    continue
+                key = trajectory_identity_key(failure, trajectory_identity_fields)
+                if key not in successful_keys:
+                    latest_failures[key] = failure
+        print(
+            f"Replay failure selection={failure_trajectories.value}: included {len(latest_failures)} latest "
+            f"failure trajectory(s), skipped {skipped_without_response} without a response."
+        )
+        yield from latest_failures.values()
+
     # `limit` bounds the number of pairs actually YIELDED (post-predicate)
     n_yielded = 0
-    with open(rollouts_jsonl_fpath) as r_f:
-        for line in tqdm(r_f, desc="Reading rollouts"):  # never holds the whole file
-            if limit is not None and n_yielded >= limit:
-                break
-            rollout_row = orjson.loads(line)
-            if rollout_predicate is not None and not rollout_predicate(rollout_row):
-                continue
-            input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
-            if input_row is None:
-                raise ConfigError(f"No matching materialized input row found for rollout row {rollout_row}")
-            yield InputRolloutPair(input=input_row, rollout=rollout_row)
-            n_yielded += 1
+    for rollout_row in selected_rollouts():
+        if limit is not None and n_yielded >= limit:
+            break
+        if rollout_predicate is not None and not rollout_predicate(rollout_row):
+            continue
+        key = trajectory_identity_key(rollout_row, trajectory_identity_fields)
+        input_row = inputs_by_key.get(key)
+        if input_row is None:
+            raise ConfigError(f"No matching materialized input row found for trajectory id '{key}'.")
+        yield InputRolloutPair(input=input_row, rollout=rollout_row)
+        n_yielded += 1
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
@@ -424,16 +735,45 @@ def _prepare_payloads(
     resume_from_cache: bool,
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    *,
+    failure_rollouts_jsonl_fpath: Optional[Path] = None,
+    failure_trajectories: FailureReplaySelection = FailureReplaySelection.EXCLUDE,
+    trajectory_identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+    primary_failure_attempts: bool = False,
 ) -> List[Dict]:
+    pairing_kwargs: Dict[str, Any] = {
+        "limit": limit,
+        "rollout_predicate": rollout_predicate,
+    }
+    if failure_rollouts_jsonl_fpath is not None:
+        pairing_kwargs["failure_rollouts_jsonl_fpath"] = failure_rollouts_jsonl_fpath
+    if failure_trajectories != FailureReplaySelection.EXCLUDE:
+        pairing_kwargs["failure_trajectories"] = failure_trajectories
+    if tuple(trajectory_identity_fields) != DEFAULT_TRAJECTORY_IDENTITY_FIELDS:
+        pairing_kwargs["trajectory_identity_fields"] = trajectory_identity_fields
+    if primary_failure_attempts:
+        pairing_kwargs["primary_failure_attempts"] = True
     all_payloads = [
         _build_verify_payload(pair)
         for pair in _yield_inputs_and_rollouts_paired(
-            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit, rollout_predicate=rollout_predicate
+            materialized_inputs_jsonl_fpath,
+            rollouts_jsonl_fpath,
+            **pairing_kwargs,
         )
     ]
     if resume_from_cache:
-        cache = _load_cache_keys_by_status(output_fpaths)
-        payloads = list(_drop_cache_from_payloads(all_payloads, cache))
+        cache = _load_cache_keys_by_status(output_fpaths, trajectory_identity_fields)
+        if not primary_failure_attempts:
+            source_keys = {trajectory_identity_key(payload, trajectory_identity_fields) for payload in all_payloads}
+            cached_keys = cache.successful_keys | cache.terminal_keys | cache.maxed_out_keys
+            unknown_keys = cached_keys - source_keys
+            if unknown_keys:
+                raise ConfigError(
+                    "Reverification cache contains trajectory identities outside the selected source capture: "
+                    + ", ".join(sorted(unknown_keys)[:5])
+                    + ("." if len(unknown_keys) <= 5 else f", and {len(unknown_keys) - 5} more.")
+                )
+        payloads = list(_drop_cache_from_payloads(all_payloads, cache, trajectory_identity_fields))
         summarize_cache_usage(cache, all_payloads, payloads)
         prepared_payloads = payloads
     else:
@@ -446,10 +786,11 @@ def _prepare_payloads(
 def _run_verification_payloads(
     payloads: List[Dict],
     semaphore: Semaphore | nullcontext[None] | None = None,
+    resources_server_name: Optional[str] = None,
 ) -> Iterator[Future]:  # pragma: no cover
     semaphore = semaphore or nullcontext[None]()
     server_client = setup_server_client()
-    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    agent_to_rs = _build_reverification_mapping(server_client.global_config_dict, resources_server_name)
 
     async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
         async with semaphore:
@@ -510,7 +851,10 @@ async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[
     return sorted(unsupported)
 
 
-async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[str]:
+async def _guard_reverify_mode(
+    config: RolloutReverificationConfig,
+    resources_server_name: Optional[str] = None,
+) -> Optional[str]:
     """Check reverify_mode for every RS in the config before reverification starts.
 
     Returns a warning string when the user runs full re-verification (not judge-failed-only) and force=True and at least one RS is UNSUPPORTED or UNKNOWN (caller must
@@ -521,7 +865,7 @@ async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[
     if config.judge_failed_only:
         return None
     server_client = setup_server_client()
-    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    agent_to_rs = _build_reverification_mapping(server_client.global_config_dict, resources_server_name)
     non_stateless_rs = await _check_reverify_mode(server_client, agent_to_rs)
     if not non_stateless_rs:
         return None
@@ -547,6 +891,7 @@ async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
     output_fpath: Path,
+    resources_server_name: Optional[str] = None,
 ) -> Optional[Path]:
     """Call /aggregate_metrics on each resource server after rollouts complete.
 
@@ -557,7 +902,7 @@ async def _call_aggregate_metrics(
         return None
 
     server_client = setup_server_client()
-    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    agent_to_rs = _build_reverification_mapping(server_client.global_config_dict, resources_server_name)
     # Group results by agent name
     agent_results: Dict[str, List[Dict]] = {}
     for row, result in zip(rows, results):
@@ -661,7 +1006,10 @@ def _prepare_output_fpaths(
     return OutputPaths(output=output_fpath, failures=failures_fpath)
 
 
-def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]]:
+def _load_reverified_results(
+    output_fpath: Path,
+    trajectory_identity_fields: Sequence[str] = DEFAULT_TRAJECTORY_IDENTITY_FIELDS,
+) -> Tuple[List[Dict], List[Dict]]:
     """Load the full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
 
     Returns ``(results, rows)``: ``results`` are the parsed rows — the source of truth used for both
@@ -671,14 +1019,41 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     """
     with output_fpath.open("rb") as f:
         results = [orjson.loads(line) for line in f if line.strip()]
-    results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+    results.sort(
+        key=lambda row: (
+            row[TASK_INDEX_KEY_NAME],
+            row[ROLLOUT_INDEX_KEY_NAME],
+            trajectory_identity_key(row, trajectory_identity_fields),
+        )
+    )
     rows = [{AGENT_REF_KEY_NAME: r.get(AGENT_REF_KEY_NAME)} for r in results]
     return results, rows
 
 
 class RolloutReverificationHelper(BaseModel):
-    async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
-        force_warning = await _guard_reverify_mode(config)
+    async def run_from_config(
+        self,
+        config: RolloutReverificationConfig,
+        *,
+        resources_server_name: Optional[str] = None,
+    ) -> List[Dict]:
+        if config.verifier_fingerprint is None and (config.resume_from_cache or config.append):
+            from nemo_gym import global_config as active_global_config
+
+            if active_global_config._GLOBAL_CONFIG_DICT is None:
+                raise ConfigError(
+                    "Cached reverification requires verifier_fingerprint or an active resolved Gym config."
+                )
+            config = config.model_copy(
+                update={
+                    "verifier_fingerprint": reverification_fingerprint(
+                        active_global_config._GLOBAL_CONFIG_DICT,
+                        resources_server_name=resources_server_name,
+                    )
+                }
+            )
+        guard_kwargs = {"resources_server_name": resources_server_name} if resources_server_name is not None else {}
+        force_warning = await _guard_reverify_mode(config, **guard_kwargs)
         if force_warning:
             print(force_warning)
             output_name_prefix = "unsafe_"
@@ -692,16 +1067,62 @@ class RolloutReverificationHelper(BaseModel):
         rollouts_jsonl_fpath = _resolve_under_cwd_or_install(
             config.rollouts_jsonl_fpath
         )  # rollouts are inputs for the verification
+        failure_rollouts_jsonl_fpath = (
+            _resolve_under_cwd_or_install(config.failure_rollouts_jsonl_fpath)
+            if config.failure_rollouts_jsonl_fpath is not None
+            else failures_path_for(rollouts_jsonl_fpath)
+        )
+        if config.append:
+            candidate_bundle = bundle_path_for(rollouts_jsonl_fpath)
+            if candidate_bundle.is_file():
+                _bundle, captured_artifacts = load_trajectory_bundle(candidate_bundle)
+                protected = {path.resolve() for path in captured_artifacts.values() if path is not None}
+                collided = [
+                    path
+                    for path in (output_fpaths.output.resolve(), output_fpaths.failures.resolve())
+                    if path in protected
+                ]
+                if collided:
+                    rendered = ", ".join(f"'{path}'" for path in collided)
+                    raise ConfigError(
+                        "Append output cannot mutate immutable trajectory-bundle artifacts: "
+                        f"{rendered}. Choose a separate merged output path."
+                    )
+        if (
+            config.failure_trajectories != FailureReplaySelection.EXCLUDE
+            and not failure_rollouts_jsonl_fpath.is_file()
+        ):
+            failure_rollouts_jsonl_fpath = None
+        if config.judge_failed_only and not failure_rollouts_jsonl_fpath.is_file():
+            raise ConfigError(f"Judge-failed recovery requires the failure sidecar '{failure_rollouts_jsonl_fpath}'.")
+
+        checkpoint_source_failures = (
+            failure_rollouts_jsonl_fpath
+            if config.judge_failed_only or config.failure_trajectories != FailureReplaySelection.EXCLUDE
+            else None
+        )
+        expected_checkpoint = _expected_reverification_checkpoint(
+            config,
+            materialized_inputs=materialized_inputs_jsonl_fpath,
+            source_rollouts=rollouts_jsonl_fpath,
+            source_failures=checkpoint_source_failures,
+            resources_server_name=resources_server_name,
+        )
+        _bind_reverification_resume(config, output_fpaths, expected_checkpoint)
 
         reverify_source_fpath = rollouts_jsonl_fpath
         rollout_predicate = None
 
         if config.judge_failed_only:
             print(_RECOVERY_TWO_SOURCES_WARNING)
-            reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
+            reverify_source_fpath = failure_rollouts_jsonl_fpath or failures_path_for(rollouts_jsonl_fpath)
             # Seed the successes and dedup so the re-verification doesn't judge successes again.
-            skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
-            rollout_predicate = _recovery_rollout_predicate(skip_keys)
+            skip_keys = _seed_output_with_successes(
+                rollouts_jsonl_fpath,
+                output_fpaths.output,
+                config.trajectory_identity_fields,
+            )
+            rollout_predicate = _recovery_rollout_predicate(skip_keys, config.trajectory_identity_fields)
 
         payloads_to_reverify = _prepare_payloads(
             materialized_inputs_jsonl_fpath,
@@ -710,6 +1131,12 @@ class RolloutReverificationHelper(BaseModel):
             config.resume_from_cache,
             config.limit,
             rollout_predicate=rollout_predicate,
+            failure_rollouts_jsonl_fpath=(failure_rollouts_jsonl_fpath if not config.judge_failed_only else None),
+            failure_trajectories=(
+                config.failure_trajectories if not config.judge_failed_only else FailureReplaySelection.EXCLUDE
+            ),
+            trajectory_identity_fields=config.trajectory_identity_fields,
+            primary_failure_attempts=config.judge_failed_only,
         )
 
         semaphore = nullcontext()
@@ -723,12 +1150,19 @@ class RolloutReverificationHelper(BaseModel):
         failures_file = output_fpaths.failures.open("ab")
         completed = 0  # number of rows re-verified this run (for progress reporting)
         try:
-            for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
+            verification_kwargs = (
+                {"resources_server_name": resources_server_name} if resources_server_name is not None else {}
+            )
+            for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore, **verification_kwargs):
                 row, result = await future
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
                 result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                for field in config.trajectory_identity_fields:
+                    if field in row:
+                        result[field] = row[field]
+                result[TRAJECTORY_ID_KEY] = stamp_trajectory_id(result, config.trajectory_identity_fields)
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
 
@@ -772,7 +1206,10 @@ class RolloutReverificationHelper(BaseModel):
 
         # Read the full main jsonl (cached + newly re-verified successes) ONCE — the source of truth,
         # reused for both the W&B rollouts export and aggregate metrics so the file is never re-read.
-        results, agg_rows = _load_reverified_results(output_fpaths.output)
+        results, agg_rows = _load_reverified_results(
+            output_fpaths.output,
+            config.trajectory_identity_fields,
+        )
 
         if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
@@ -787,7 +1224,12 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
+            aggregate_kwargs = (
+                {"resources_server_name": resources_server_name} if resources_server_name is not None else {}
+            )
+            aggregate_metrics_fpath = await _call_aggregate_metrics(
+                results, agg_rows, output_fpaths.output, **aggregate_kwargs
+            )
 
         print(f"""Finished rollout collection! View results at:
         Re-verified rollouts: {output_fpaths.output}

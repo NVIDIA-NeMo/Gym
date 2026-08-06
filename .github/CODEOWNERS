@@ -2,3 +2,4 @@
 docker/ @nvidia-nemo/automation
 pyproject.toml @nvidia-nemo/automation
 uv.lock @nvidia-nemo/automation
+/nemo_gym/resources/environment-composition-locks.json @nvidia-nemo/automation

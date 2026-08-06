@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -100,14 +101,18 @@ def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
         return ""
 
 
-def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
-    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
+def server_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
+    """Return the component venv path used by :func:`setup_env_command`."""
 
     root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
     if Path(root_venv_path).resolve() != PARENT_DIR.resolve():
-        venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
-    else:
-        venv_path = (dir_path / ".venv").absolute()
+        return Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
+    return (dir_path / ".venv").absolute()
+
+
+def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
+    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
+    venv_path = server_venv_path(dir_path, global_config_dict)
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv_path}"
 
@@ -124,7 +129,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
-    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
+    gym_source_root = PARENT_DIR.resolve()
+    is_editable_install = (gym_source_root / "pyproject.toml").is_file()
+    editable_gym_requirement = shlex.quote(f"nemo-gym[dev] @ {gym_source_root.as_uri()}")
 
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
@@ -138,7 +145,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         elif has_pyproject_toml:
             if is_editable_install:
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                    f"uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' "
+                    f"-e {editable_gym_requirement} {' '.join(head_server_deps)}"
                 )
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
@@ -153,7 +161,11 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             has_overrides_txt = (dir_path / "overrides.txt").exists()
             override_flag = "--override overrides.txt " if has_overrides_txt else ""
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+                install_cmd = (
+                    f"grep -v -F '../..' requirements.txt | "
+                    f"uv pip install {verbose_flag}{uv_pip_python_flag}{override_flag}-r /dev/stdin "
+                    f"-e {editable_gym_requirement} {' '.join(head_server_deps)}"
+                )
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 # with support for pre-releases, custom indexes, and version pinning

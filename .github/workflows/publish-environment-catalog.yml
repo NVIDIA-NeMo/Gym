@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Publish Environment Catalog
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: environment-catalog-pages
+  cancel-in-progress: false
+
+env:
+  # Keep this aligned with the repository test workflows.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.11.19/install.sh"
+
+jobs:
+  build:
+    name: Build catalog
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up catalog generator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          curl -LsSf "$UV_INSTALL_URL" | sh
+          uv venv --python 3.12
+          source .venv/bin/activate
+          uv sync --frozen
+
+      - name: Generate and validate catalog
+        run: |
+          source .venv/bin/activate
+          python scripts/generate_environment_catalog.py \
+            --json-output "$RUNNER_TEMP/environment-catalog/catalog.json" \
+            --html-output "$RUNNER_TEMP/environment-catalog/index.html" \
+            --fail-on-issues
+          python -m json.tool "$RUNNER_TEMP/environment-catalog/catalog.json" >/dev/null
+          test -s "$RUNNER_TEMP/environment-catalog/index.html"
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/environment-catalog
+
+  deploy:
+    name: Deploy catalog
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

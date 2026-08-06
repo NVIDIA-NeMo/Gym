@@ -12,16 +12,40 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 from httpx import Cookies
 
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,
+    create_offline_verifier_app,
 )
+
+
+CASES_PATH = Path(__file__).with_name("verifier_cases.jsonl")
+
+
+def _fixture_client() -> TestClient:
+    return TestClient(
+        create_offline_verifier_app(
+            server_config={"entrypoint": "app.py"},
+            instance_name="example_session_state_mgmt",
+        )
+    )
+
+
+def test_stateful_verifier_fixture() -> None:
+    exercise_verifier_fixture(
+        _fixture_client,
+        CASES_PATH,
+        reward_range=(0, 1),
+        determinism="seeded",
+    )
 
 
 class TestApp:

@@ -3,6 +3,7 @@ labbench2_vlm:
     labbench2_vlm:
       entrypoint: app.py
       domain: knowledge
+      provides: [verification]
       verified: false
       description: "labbench2 VLM benchmarks: scientific figure/table QA (figqa2, tableqa2), protocol troubleshooting (protocolqa2), LLM-as-judge"
       value: Measure scientific reasoning on figures, tables, and lab protocols
@@ -22,6 +23,7 @@ labbench2_vlm_simple_agent:
   responses_api_agents:
     labbench2_vlm_agent:
       entrypoint: app.py
+      requires: [verification, image-model]
       resources_server:
         type: resources_servers
         name: labbench2_vlm

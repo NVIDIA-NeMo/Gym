@@ -100,6 +100,21 @@ class TestDiscoverAgents:
             "rewoo_agent",
         }
 
+    def test_capabilities_remain_specific_to_each_agent_flavor(self, tmp_path: Path) -> None:
+        _make_agent(
+            tmp_path,
+            "variant_agent",
+            configs={
+                "text": _pattern_a("variant_agent") + "      requires: [text-model]\n",
+                "vision": _pattern_a("variant_agent") + "      requires: [image-model]\n",
+            },
+        )
+
+        flavors = _discover_agents_in_dir(tmp_path)["variant_agent"].capability_flavors
+
+        assert flavors["text"].requires == ("text-model",)
+        assert flavors["vision"].requires == ("image-model",)
+
     def test_non_agent_yaml_is_filtered_out(self, tmp_path: Path) -> None:
         # A configs/ file that is not a gym agent config (no responses_api_agents) is ignored;
         # the dir still counts as an agent because of app.py.
@@ -130,6 +145,19 @@ class TestRealAgents:
         # The repo ships a `simple_agent`; it pairs with a separate resources server.
         if "simple_agent" in agents:
             assert agents["simple_agent"].self_contained is False
+            assert agents["simple_agent"].capability_flavors["simple_agent"].requires == (
+                "verification",
+                "text-model",
+            )
+
+    def test_real_browsecomp_agent_declares_its_dependencies(self) -> None:
+        agents = discover_agents()
+
+        if "browsecomp_agent" in agents:
+            assert agents["browsecomp_agent"].capability_flavors["browsecomp_agent"].requires == (
+                "verification",
+                "text-model",
+            )
 
     def test_agent_entry_is_hashable(self) -> None:
         entry = AgentEntry(name="a", path=Path("a"), config_paths=(Path("a/configs/a.yaml"),), self_contained=True)

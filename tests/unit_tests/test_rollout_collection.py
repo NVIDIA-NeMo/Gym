@@ -42,6 +42,12 @@ from nemo_gym.rollout_collection import (
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
+from nemo_gym.trajectory_bundle import (
+    CapturedEnvironment,
+    bundle_path_for,
+    load_trajectory_bundle,
+    stamp_trajectory_id,
+)
 
 
 @pytest.fixture
@@ -543,6 +549,19 @@ class TestRolloutCollection:
     async def test_run_from_config_sanity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
+        captured_environment = CapturedEnvironment(
+            name="fixture",
+            kind="environment",
+            version="1.0.0",
+            composition_hash="a" * 64,
+            integration_profile="stock-loop",
+            resources_server="fixture",
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "captured_environment_from_config",
+            MagicMock(return_value=captured_environment),
+        )
         clear_captures = MagicMock()
         merge_capture = MagicMock()
         monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
@@ -633,6 +652,8 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my agent name"},
             },
         ]
+        for result in expected_results:
+            stamp_trajectory_id(result)
 
         assert expected_results == actual_returned_results
 
@@ -644,6 +665,10 @@ class TestRolloutCollection:
         with output_jsonl_fpath.open() as f:
             actual_written_results = [json.loads(line) for line in f]
         assert expected_results == actual_written_results
+        bundle, artifacts = load_trajectory_bundle(bundle_path_for(output_jsonl_fpath))
+        assert bundle.environment == captured_environment
+        assert artifacts["inputs"] == config.materialized_jsonl_fpath
+        assert artifacts["successes"] == output_jsonl_fpath
 
         aggregate_metrics_fpath = tmp_path / "output_aggregate_metrics.json"
         actual_aggregate_metrics = json.loads(aggregate_metrics_fpath.read_text())
@@ -712,6 +737,66 @@ class TestRolloutCollection:
 
         assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["fresh"]
         assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["fresh"]
+
+    async def test_fresh_collection_clears_stale_failure_and_bundle_artifacts(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_path = tmp_path / "input.jsonl"
+        output_path = tmp_path / "output.jsonl"
+        input_path.write_text(
+            json.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + "\n"
+        )
+        failures_path = _failures_path_for(output_path)
+        failures_path.write_text('{"case":"stale"}\n')
+        bundle_path_for(output_path).write_text('{"stale":true}\n')
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_path),
+            output_jsonl_fpath=str(output_path),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result((example, {"response": {"usage": {}}}))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        bundle, artifacts = load_trajectory_bundle(bundle_path_for(output_path))
+        assert bundle.environment is None
+        assert failures_path.read_bytes() == b""
+        assert artifacts["failures"] == failures_path.resolve()
+
+    async def test_manifest_bound_resume_requires_existing_bundle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        output_path = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "unused.jsonl"),
+            output_jsonl_fpath=str(output_path),
+            resume_from_cache=True,
+            disable_aggregation=True,
+        )
+        output_path.write_text("{}\n")
+        config.materialized_jsonl_fpath.write_text("{}\n")
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "captured_environment_from_config",
+            lambda _config: CapturedEnvironment(
+                name="fixture",
+                kind="environment",
+                version="1.0.0",
+                composition_hash="a" * 64,
+                integration_profile="stock-loop",
+                resources_server="fixture",
+            ),
+        )
+
+        with pytest.raises(ConfigError, match="without trajectory bundle"):
+            await RolloutCollectionHelper().run_from_config(config)
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -791,6 +876,8 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my agent name"},
             },
         ]
+        for result in expected_results:
+            stamp_trajectory_id(result)
 
         assert expected_results == actual_returned_results
 

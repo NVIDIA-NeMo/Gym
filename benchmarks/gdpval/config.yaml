@@ -39,6 +39,7 @@ gdpval_judge_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
+      provides: [image-model]
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
@@ -48,6 +49,7 @@ gdpval_resources_server:
   resources_servers:
     gdpval:
       entrypoint: app.py
+      provides: [verification]
       domain: other
       verified: false
       reward_mode: rubric
@@ -97,6 +99,7 @@ gdpval_stirrup_agent:
   responses_api_agents:
     stirrup_agent:
       entrypoint: app.py
+      requires: [verification, text-model]
       task: gdpval
       agent_max_turns: 250
       concurrency: 32

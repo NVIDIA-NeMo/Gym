@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, SKILLS_REF_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     JUDGE_FAILED_FAILURE_CLASS,
@@ -38,11 +39,13 @@ from nemo_gym.rollout_reverification import (
     RolloutReverificationHelper,
     _agent_to_rs_mapping_from_agent_blocks,
     _agent_to_rs_mapping_from_resources_only_config,
+    _bind_reverification_resume,
     _build_agent_to_resources_server_mapping,
     _build_verify_payload,
     _call_aggregate_metrics,
     _check_reverify_mode,
     _drop_cache_from_payloads,
+    _expected_reverification_checkpoint,
     _get_rs_names,
     _guard_reverify_mode,
     _is_judge_failure,
@@ -58,6 +61,55 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.trajectory_bundle import (
+    TRAJECTORY_ID_KEY,
+    CapturedEnvironment,
+    FailureReplaySelection,
+    trajectory_identity_key,
+    write_trajectory_bundle,
+)
+
+
+def _identity(task: int, rollout: int = 0, stage: int = 0) -> str:
+    return trajectory_identity_key(
+        {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "stage_index": stage,
+        }
+    )
+
+
+def _ensure_reverification_sources(config: RolloutReverificationConfig) -> None:
+    Path(config.materialized_inputs_jsonl_fpath).touch(exist_ok=True)
+    Path(config.rollouts_jsonl_fpath).touch(exist_ok=True)
+
+
+def _seed_reverification_checkpoint(config: RolloutReverificationConfig) -> None:
+    materialized_inputs = Path(config.materialized_inputs_jsonl_fpath)
+    source_rollouts = Path(config.rollouts_jsonl_fpath)
+    source_failures = None
+    if config.judge_failed_only or config.failure_trajectories != FailureReplaySelection.EXCLUDE:
+        candidate = (
+            Path(config.failure_rollouts_jsonl_fpath)
+            if config.failure_rollouts_jsonl_fpath is not None
+            else failures_path_for(source_rollouts)
+        )
+        if candidate.is_file():
+            source_failures = candidate
+    expected = _expected_reverification_checkpoint(
+        config,
+        materialized_inputs=materialized_inputs,
+        source_rollouts=source_rollouts,
+        source_failures=source_failures,
+        resources_server_name=None,
+    )
+    output = Path(config.output_jsonl_fpath)
+    _bind_reverification_resume(
+        config.model_copy(update={"resume_from_cache": False, "append": False}),
+        OutputPaths(output=output, failures=failures_path_for(output)),
+        expected,
+    )
 
 
 class TestRolloutReverificationConfig:
@@ -212,6 +264,18 @@ class TestBuildAgentToResourcesServerMapping:
         }
         result = _build_agent_to_resources_server_mapping(config)
         assert result["any_agent_name"] == "verifier_block"
+
+    def test_explicit_resource_routes_all_agents_when_verifier_has_resource_dependencies(self) -> None:
+        config = {
+            "selected_verifier": {"resources_servers": {"primary": {}}},
+            "verifier_dependency": {"resources_servers": {"secondary": {}}},
+        }
+
+        result = _build_agent_to_resources_server_mapping(config, resources_server_name="selected_verifier")
+
+        assert result["original_agent_name"] == "selected_verifier"
+        with pytest.raises(ConfigError, match="missing_verifier"):
+            _build_agent_to_resources_server_mapping(config, resources_server_name="missing_verifier")
 
 
 class TestGetRsNames:
@@ -468,8 +532,14 @@ class TestIsJudgeFailure:
 
 
 class TestRecoveryRolloutPredicate:
-    def _row(self, task: int, rollout: int = 0, failure_class: str | None = JUDGE_FAILED_FAILURE_CLASS) -> dict:
-        row = {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout}
+    def _row(
+        self,
+        task: int,
+        rollout: int = 0,
+        failure_class: str | None = JUDGE_FAILED_FAILURE_CLASS,
+        stage: int = 0,
+    ) -> dict:
+        row = {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout, "stage_index": stage}
         if failure_class is not None:
             row[NG_FAILURE_CLASS_KEY] = failure_class
         return row
@@ -478,6 +548,11 @@ class TestRecoveryRolloutPredicate:
         predicate = _recovery_rollout_predicate()
         assert predicate(self._row(0)) is True
         assert predicate(self._row(0)) is False  # same (task, rollout) seen again
+
+    def test_keeps_distinct_multistage_trajectories(self) -> None:
+        predicate = _recovery_rollout_predicate()
+        assert predicate(self._row(0, stage=0)) is True
+        assert predicate(self._row(0, stage=1)) is True
 
     def test_drops_non_judge_rows(self) -> None:
         predicate = _recovery_rollout_predicate()
@@ -495,7 +570,7 @@ class TestRecoveryRolloutPredicate:
     def test_skips_judge_failures_whose_key_is_already_in_the_output(self) -> None:
         """A judge-failure key already present in the output (a seeded success or an already-recovered
         row) is skipped — no re-verify/duplicate — without any resume/cache machinery."""
-        predicate = _recovery_rollout_predicate(skip_keys={(0, 0), (2, 0)})
+        predicate = _recovery_rollout_predicate(skip_keys={_identity(0), _identity(2)})
         assert predicate(self._row(0)) is False  # already present in output
         assert predicate(self._row(1)) is True  # genuinely still to recover
         assert predicate(self._row(2)) is False  # already present in output
@@ -510,7 +585,7 @@ class TestSeedOutputWithSuccesses:
 
         keys = _seed_output_with_successes(src, out)
 
-        assert keys == {(0, 0), (1, 0), (2, 0)}
+        assert keys == {_identity(0), _identity(1), _identity(2)}
         seeded = [orjson.loads(line) for line in out.read_bytes().splitlines() if line.strip()]
         assert seeded == rows
 
@@ -548,9 +623,20 @@ class TestSeedOutputWithSuccesses:
 
         keys = _seed_output_with_successes(src, out)
 
-        assert keys == {(0, 0), (1, 0), (2, 0)}  # union of pre-existing (0) + seeded successes (1, 2)
+        assert keys == {_identity(0), _identity(1), _identity(2)}
         seeded = [orjson.loads(line) for line in out.read_bytes().splitlines() if line.strip()]
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in seeded) == [0, 1, 2]  # no duplicate of task 0
+
+    def test_multistage_rows_do_not_deduplicate_each_other(self, tmp_path: Path) -> None:
+        src = tmp_path / "successes.jsonl"
+        rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "stage_index": stage} for stage in (0, 1)]
+        src.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        out = tmp_path / "output.jsonl"
+
+        keys = _seed_output_with_successes(src, out)
+
+        assert keys == {_identity(0, stage=0), _identity(0, stage=1)}
+        assert len(out.read_bytes().splitlines()) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -561,11 +647,11 @@ class TestSeedOutputWithSuccesses:
 class TestParseOutputLineKey:
     def test_extracts_task_and_rollout_index(self) -> None:
         line = orjson.dumps({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 7, "reward": 1.0})
-        assert _parse_output_line_key(line) == (3, 7)
+        assert _parse_output_line_key(line) == _identity(3, 7)
 
     def test_tolerates_trailing_newline(self) -> None:
         line = orjson.dumps({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 2}) + b"\n"
-        assert _parse_output_line_key(line) == (1, 2)
+        assert _parse_output_line_key(line) == _identity(1, 2)
 
     def test_missing_indices_return_none(self) -> None:
         line = orjson.dumps({"reward": 1.0})
@@ -596,7 +682,19 @@ class TestLoadCacheKeysByStatus:
             ],
         )
         cache = _load_cache_keys_by_status(paths)
-        assert cache.successful_keys == {(0, 0), (1, 2)}
+        assert cache.successful_keys == {_identity(0, 0), _identity(1, 2)}
+
+    def test_successful_cache_keys_include_stage(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.output,
+            [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "stage_index": 1}],
+        )
+
+        cache = _load_cache_keys_by_status(paths)
+
+        assert cache.successful_keys == {_identity(0, stage=1)}
+        assert _identity(0, stage=0) not in cache.successful_keys
 
     def test_terminal_keys_flagged_from_failures_sidecar(self, tmp_path: Path) -> None:
         paths = self._paths(tmp_path)
@@ -608,7 +706,7 @@ class TestLoadCacheKeysByStatus:
             ],
         )
         cache = _load_cache_keys_by_status(paths)
-        assert cache.terminal_keys == {(5, 0)}
+        assert cache.terminal_keys == {_identity(5)}
 
     def test_maxed_out_keys_when_attempts_reach_configured_max(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -624,8 +722,8 @@ class TestLoadCacheKeysByStatus:
             ],
         )
         cache = _load_cache_keys_by_status(paths)
-        assert cache.maxed_out_keys == {(7, 0)}
-        assert (8, 0) not in cache.maxed_out_keys
+        assert cache.maxed_out_keys == {_identity(7)}
+        assert _identity(8) not in cache.maxed_out_keys
 
     def test_failure_rows_without_indices_or_blank_lines_are_skipped(self, tmp_path: Path) -> None:
         paths = self._paths(tmp_path)
@@ -637,7 +735,7 @@ class TestLoadCacheKeysByStatus:
             + b"\n"  # blank line -> skipped
         )
         cache = _load_cache_keys_by_status(paths)
-        assert cache.terminal_keys == {(1, 0)}
+        assert cache.terminal_keys == {_identity(1)}
 
     def test_only_failures_file_present_still_loads_sidecar(self, tmp_path: Path) -> None:
         """Output file absent but failures present: successes empty, terminal keys still read."""
@@ -645,7 +743,7 @@ class TestLoadCacheKeysByStatus:
         self._write(paths.failures, [{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3, NG_TERMINAL_KEY: True}])
         cache = _load_cache_keys_by_status(paths)
         assert cache.successful_keys == set()
-        assert cache.terminal_keys == {(2, 3)}
+        assert cache.terminal_keys == {_identity(2, 3)}
 
 
 class TestDropCacheFromPayloads:
@@ -655,9 +753,9 @@ class TestDropCacheFromPayloads:
     def test_drops_successful_terminal_and_maxed_out_keeps_the_rest(self) -> None:
         payloads = [self._payload(t) for t in range(5)]  # keys (0,0)..(4,0)
         cache = CacheKeysByStatus(
-            successful_keys={(0, 0)},
-            terminal_keys={(1, 0)},
-            maxed_out_keys={(2, 0)},
+            successful_keys={_identity(0)},
+            terminal_keys={_identity(1)},
+            maxed_out_keys={_identity(2)},
         )
         remaining = list(_drop_cache_from_payloads(payloads, cache))
         assert [p[TASK_INDEX_KEY_NAME] for p in remaining] == [3, 4]
@@ -670,17 +768,29 @@ class TestDropCacheFromPayloads:
     def test_drops_at_rollout_index_granularity_within_a_single_task(self) -> None:
         """The cache key is the full (task, rollout) tuple: caching (0,0) must NOT drop (0,1)."""
         payloads = [self._payload(0, 0), self._payload(0, 1), self._payload(0, 2)]
-        cache = CacheKeysByStatus(successful_keys={(0, 0)}, terminal_keys=set(), maxed_out_keys=set())
+        cache = CacheKeysByStatus(successful_keys={_identity(0)}, terminal_keys=set(), maxed_out_keys=set())
         remaining = list(_drop_cache_from_payloads(payloads, cache))
         assert [p[ROLLOUT_INDEX_KEY_NAME] for p in remaining] == [1, 2]
+
+    def test_drops_only_the_cached_stage(self) -> None:
+        payloads = [{**self._payload(0), "stage_index": stage} for stage in (0, 1)]
+        cache = CacheKeysByStatus(
+            successful_keys={_identity(0, stage=0)},
+            terminal_keys=set(),
+            maxed_out_keys=set(),
+        )
+
+        remaining = list(_drop_cache_from_payloads(payloads, cache))
+
+        assert [payload["stage_index"] for payload in remaining] == [1]
 
 
 class TestSummarizeCacheUsage:
     def test_prints_the_expected_counts(self, capsys: pytest.CaptureFixture) -> None:
         cache = CacheKeysByStatus(
-            successful_keys={(0, 0)},
-            terminal_keys={(1, 0)},
-            maxed_out_keys={(2, 0)},
+            successful_keys={_identity(0)},
+            terminal_keys={_identity(1)},
+            maxed_out_keys={_identity(2)},
         )
         summarize_cache_usage(cache, all_payloads=[{}] * 10, filtered_payloads=[{}] * 7)
         out = capsys.readouterr().out
@@ -1498,13 +1608,15 @@ class TestRolloutReverificationRunFromConfig:
         disable_aggregation: bool = False,
         num_samples_in_parallel: int | None = None,
     ) -> RolloutReverificationConfig:
-        return RolloutReverificationConfig(
+        config = RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
             rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             disable_aggregation=disable_aggregation,
             num_samples_in_parallel=num_samples_in_parallel,
         )
+        _ensure_reverification_sources(config)
+        return config
 
     def _make_row(self, agent: str, task: int, rollout: int = 0, *, skills: bool = False) -> dict:
         row = {
@@ -1591,6 +1703,7 @@ class TestRolloutReverificationRunFromConfig:
             ROLLOUT_INDEX_KEY_NAME,
             AGENT_REF_KEY_NAME,
             SKILLS_REF_KEY_NAME,
+            TRAJECTORY_ID_KEY,
         }
 
         # failure row: exact field set = verify response fields + 3 stamped metadata fields (no SKILLS_REF)
@@ -1604,6 +1717,7 @@ class TestRolloutReverificationRunFromConfig:
             TASK_INDEX_KEY_NAME,
             ROLLOUT_INDEX_KEY_NAME,
             AGENT_REF_KEY_NAME,
+            TRAJECTORY_ID_KEY,
         }
 
         # run_from_config returns the persisted main-jsonl rows only: exactly the 1 success —
@@ -1768,7 +1882,13 @@ class TestRolloutReverificationRunFromConfig:
         # output file: all 4 results, exact field set matches verify response + stamped metadata
         output_rows = self._read_jsonl(tmp_path / "output.jsonl")
         assert len(output_rows) == 4
-        expected_keys = {"reward", TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, AGENT_REF_KEY_NAME}
+        expected_keys = {
+            "reward",
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            AGENT_REF_KEY_NAME,
+            TRAJECTORY_ID_KEY,
+        }
         for row in output_rows:
             assert set(row.keys()) == expected_keys
 
@@ -1787,13 +1907,15 @@ class TestRunFromConfigForceFlag:
     """Tests for the --force / unsafe_ prefix integration inside run_from_config."""
 
     def _make_config(self, tmp_path: Path, *, force: bool = False) -> RolloutReverificationConfig:
-        return RolloutReverificationConfig(
+        config = RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
             rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             disable_aggregation=True,
             force=force,
         )
+        _ensure_reverification_sources(config)
+        return config
 
     def _patch_common(
         self,
@@ -1864,14 +1986,19 @@ class TestRunFromConfigResumeFromCache:
     def _make_config(
         self, tmp_path: Path, *, resume_from_cache: bool, disable_aggregation: bool = True, overwrite: bool = False
     ) -> RolloutReverificationConfig:
-        return RolloutReverificationConfig(
+        config = RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
             rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             disable_aggregation=disable_aggregation,
             resume_from_cache=resume_from_cache,
             overwrite=overwrite,
+            verifier_fingerprint="a" * 64,
         )
+        _ensure_reverification_sources(config)
+        if resume_from_cache and Path(config.output_jsonl_fpath).exists():
+            _seed_reverification_checkpoint(config)
+        return config
 
     def _row(self, agent: str, task: int, rollout: int = 0) -> dict:
         return {AGENT_REF_KEY_NAME: {"name": agent}, TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: rollout}
@@ -2066,7 +2193,7 @@ class TestRunFromConfigJudgeFailedOnly:
         append: bool = False,
         output_name: str = "recovered.jsonl",
     ) -> RolloutReverificationConfig:
-        return RolloutReverificationConfig(
+        config = RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
             rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
             output_jsonl_fpath=str(tmp_path / output_name),
@@ -2075,7 +2202,13 @@ class TestRunFromConfigJudgeFailedOnly:
             resume_from_cache=resume_from_cache,
             overwrite=overwrite,
             append=append,
+            verifier_fingerprint="a" * 64,
         )
+        if resume_from_cache and Path(config.output_jsonl_fpath).exists():
+            checkpoint = Path(config.output_jsonl_fpath).with_suffix(".reverify.json")
+            if not checkpoint.exists():
+                _seed_reverification_checkpoint(config)
+        return config
 
     def _mat(self, task: int, rollout: int = 0, agent: str = "agent_a") -> dict:
         return {
@@ -2402,13 +2535,63 @@ class TestRunFromConfigJudgeFailedOnly:
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1]
         assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(1) == 1  # not duplicated
 
+    async def test_append_directly_to_source_is_idempotent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0), self._mat(1)],
+            successes=[self._success(0)],
+            failures=[self._failure(1)],
+        )
+        config = self._make_config(tmp_path, append=True, output_name="rollouts.jsonl")
+
+        self._patch(monkeypatch, [])
+        await RolloutReverificationHelper().run_from_config(config)
+
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+        await RolloutReverificationHelper().run_from_config(config)
+
+        assert dispatched == []
+        rows = self._read_jsonl(tmp_path / "rollouts.jsonl")
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row in rows) == [0, 1]
+
+    async def test_append_refuses_to_mutate_bundle_artifacts(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0), self._mat(1)],
+            successes=[self._success(0)],
+            failures=[self._failure(1)],
+        )
+        write_trajectory_bundle(
+            rollouts_path=tmp_path / "rollouts.jsonl",
+            materialized_inputs_path=tmp_path / "inputs.jsonl",
+            environment=CapturedEnvironment(
+                name="fixture",
+                kind="environment",
+                version="1.0.0",
+                composition_hash="b" * 64,
+                integration_profile="stock-loop",
+                resources_server="fixture_verifier",
+            ),
+        )
+        self._patch(monkeypatch, [])
+
+        with pytest.raises(ConfigError, match="immutable trajectory-bundle artifacts"):
+            await RolloutReverificationHelper().run_from_config(
+                self._make_config(tmp_path, append=True, output_name="rollouts.jsonl")
+            )
+
     async def test_missing_failures_sidecar_raises(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         # inputs + successes exist, but no rollouts_failures.jsonl sidecar → recovery has nothing to read
         self._write(tmp_path / "inputs.jsonl", [self._mat(0)])
         self._write(tmp_path / "rollouts.jsonl", [self._success(0)])
         self._patch(monkeypatch, [])
 
-        with pytest.raises(FileNotFoundError, match="rollouts_failures.jsonl"):
+        with pytest.raises(ConfigError, match="rollouts_failures.jsonl"):
             await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
     async def test_resume_incrementally_recovers_judge_failures_across_invocations(

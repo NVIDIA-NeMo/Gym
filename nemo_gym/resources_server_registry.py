@@ -27,7 +27,13 @@ from typing import Dict, Optional
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import discover_components, iter_server_configs, read_config_metadata
+from nemo_gym.discovery import (
+    ConfigFlavorCapabilities,
+    discover_components,
+    iter_server_configs,
+    read_config_flavor_capabilities,
+    read_config_metadata,
+)
 
 
 RESOURCES_SERVERS_SUBDIR = "resources_servers"
@@ -45,18 +51,16 @@ class ResourcesServerEntry:
     description: Optional[str] = None
     domain: Optional[str] = None
 
+    @property
+    def capabilities(self) -> ConfigFlavorCapabilities:
+        """Capabilities declared by this selectable resources-server flavor."""
+
+        return read_config_flavor_capabilities(self.config_path, "resources_servers")
+
 
 def _config_defines_resources_server(config_path: Path) -> bool:
     """True if a config declares a ``resources_servers`` block (vs a helper like a judge model). Never raises."""
-    try:
-        raw = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False, throw_on_missing=False)
-    except Exception:
-        return False
-    if not isinstance(raw, dict):
-        return False
-    return any(
-        isinstance(instance, dict) and isinstance(instance.get("resources_servers"), dict) for instance in raw.values()
-    )
+    return bool(read_config_flavor_capabilities(config_path, "resources_servers").declarations)
 
 
 def _discover_resources_servers_in_dir(resources_servers_dir: Path) -> Dict[str, ResourcesServerEntry]:
