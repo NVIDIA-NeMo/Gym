@@ -3,7 +3,7 @@ title: "Configuration Errors"
 description: ""
 position: 1
 ---
-These errors appear when running `gym env start` or `gym eval run --no-serve`. NeMo Gym validates configuration at startup before launching servers.
+These errors appear when running `gym env start` or `gym eval run --no-serve`. NeMo Gym validates configuration at startup before launching servers, and checks the model endpoints the config names once its own servers are up.
 
 <Note>
 See the [Configuration reference](/reference/configuration) for complete configuration syntax and options.
@@ -171,3 +171,40 @@ gym env start \
 Bypassing validation means invalid servers won't start. Use this only for debugging, not production.
 
 </Warning>
+
+---
+
+## Connection Errors
+
+Errors where the config is valid but an endpoint it names cannot be reached.
+
+### Model Endpoint Unreachable
+
+```
+2 model endpoint(s) never answered within 600s:
+  - http://localhost:8000/v1 (from `openai_base_url`)
+  - http://judge-host:9000/v1 (from `judge_base_url`)
+
+Nothing accepted a connection there. The server was never started, is still starting up, or the URL
+in your config does not match where it is listening.
+```
+
+**When**: `gym env start` finished starting Gym's own servers, but a model endpoint named in the config is not answering. Gym's model server is a proxy that answers as soon as it starts, whether or not an inference server is behind it, so this check is separate from the server readiness check above it.
+
+**Fix**: Check the config key named beside each URL, and confirm something answers there. The check probes `/models` under a base URL ending in `/v1`, and the URL itself otherwise, so mirror whichever applies:
+
+```bash
+curl -i https://example.com/v1/models
+curl -i https://example.com
+```
+
+Any response, including `401` or `404`, means something is listening. Then correct that config key, or start the server it names. The [Quickstart](/get-started/quickstart) uses a hosted endpoint (`https://api.openai.com/v1`); a `localhost` URL means you serve the model yourself (see [Configure Model](/model-server)).
+
+<Note>
+The check waits up to `model_endpoint_readiness_timeout_seconds` (default 600) so an inference server still loading weights is not treated as a failure. Raise it to wait longer, or set it to `0` to skip the check entirely.
+
+An endpoint whose hostname does not resolve is reported once and not waited on, since waiting cannot create a DNS record. This is what happens to a config that leaves a judge or user model at its placeholder default: you get one line about it rather than a stalled startup.
+
+Any HTTP answer counts as listening, including 401 and 404. A completed TLS handshake counts too, even against a certificate this machine does not trust, because it proves something is there.
+
+</Note>
