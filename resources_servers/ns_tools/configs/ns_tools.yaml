@@ -53,6 +53,9 @@ ns_tools:
               domain: ${oc.env:OPENSANDBOX_BASE_URL,}
               api_key: ${oc.env:OPENSANDBOX_API_KEY,}
               use_server_proxy: true
+              # First-ever create on a new image tag blocks on nydus conversion (40-55s);
+              # the SDK default request_timeout (30s) fails the whole cold warmup wave.
+              request_timeout: 180
             create:
               timeout_s: 90
               retries: 3

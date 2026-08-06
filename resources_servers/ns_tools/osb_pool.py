@@ -101,7 +101,8 @@ class OpenSandboxPool:
         health_path: str = "/health",
         ready_timeout_s: float = 30.0,
         health_budget_s: float = 300.0,
-        warmup_fill_concurrency: int = 32,
+        warmup_fill_concurrency: int = 0,  # 0 = full fan-out (all slots at once)
+        use_sdk_pool: bool = False,
         health_interval_s: float = 15.0,
         health_timeout_s: float = 10.0,
         heal_creates_per_s: float = 4.0,
@@ -133,7 +134,9 @@ class OpenSandboxPool:
         # (30s) fails creates that would have succeeded.
         self._ready_timeout_s = float(ready_timeout_s)
         self._health_budget_s = float(health_budget_s)
-        self._warmup_fill_concurrency = warmup_fill_concurrency
+        self._warmup_fill_concurrency = int(warmup_fill_concurrency) or self._size
+        self._use_sdk_pool = bool(use_sdk_pool)
+        self._connection_config: Any = None
         self._health_interval_s = health_interval_s
         self._health_timeout_s = health_timeout_s
         self._heal_min_interval_s = 1.0 / heal_creates_per_s if heal_creates_per_s > 0 else 0.0
@@ -179,44 +182,34 @@ class OpenSandboxPool:
         from opensandbox.pool_async import SandboxPoolAsync
         from opensandbox.pool_types import PoolCreationSpec
 
-        connection_kwargs = dict(self._connection_kwargs)
-        try:
-            # The SDK's control plane rides httpx; back it with aiohttp (Gym main's
-            # connection.transport_backend=aiohttp pattern) for stability at concurrency.
-            from httpx_aiohttp import AiohttpTransport
+        # NOTE: a shared httpx_aiohttp.AiohttpTransport here corrupted concurrent creates at
+        # 128-burst (pods materialized with missing image layers); single-pod creates through
+        # it were fine. The SDK default transport survives the same burst 128/128 — keep it.
+        self._connection_config = ConnectionConfig(**self._connection_kwargs)
 
-            connection_kwargs["transport"] = AiohttpTransport(
-                limits=httpx.Limits(max_connections=512, max_keepalive_connections=512)
+        if self._use_sdk_pool:
+            self._sdk_pool = SandboxPoolAsync(
+                pool_name=self._run_label,
+                max_idle=self._warm_spares,
+                state_store=InMemoryAsyncPoolStateStore(),
+                connection_config=self._connection_config,
+                creation_spec=PoolCreationSpec(
+                    image=self._image,
+                    entrypoint=self._entrypoint,
+                    env=self._env or None,
+                    resource=self._resources or None,
+                    metadata=dict(self._metadata),
+                ),
+                warmup_sandbox_preparer=self._prepare if self._needs_prepare else None,
+                # Warm creates and renewals use idle_timeout as the sandbox TTL; the SDK
+                # default (24h) exceeds the server's configured maximum (8h on cell-2).
+                idle_timeout=timedelta(seconds=self._ttl_s or 14400.0),
+                sandbox_creator=self._create_sandbox_with_requests if self._resource_requests else None,
+                acquire_ready_timeout=timedelta(seconds=self._ready_timeout_s),
+                warmup_ready_timeout=timedelta(seconds=self._ready_timeout_s),
+                acquire_skip_health_check=True,
             )
-        except ImportError:
-            LOGGER.warning("httpx-aiohttp not installed; SDK control plane stays on the httpx transport")
-
-        self._sdk_pool = SandboxPoolAsync(
-            pool_name=self._run_label,
-            max_idle=self._warm_spares,
-            state_store=InMemoryAsyncPoolStateStore(),
-            connection_config=ConnectionConfig(**connection_kwargs),
-            creation_spec=PoolCreationSpec(
-                image=self._image,
-                entrypoint=self._entrypoint,
-                env=self._env or None,
-                resource=self._resources or None,
-                metadata=dict(self._metadata),
-            ),
-            warmup_sandbox_preparer=self._prepare if self._needs_prepare else None,
-            # Warm creates and renewals use idle_timeout as the sandbox TTL; the SDK default
-            # (24h) exceeds the server's configured maximum (8h on cell-2).
-            idle_timeout=timedelta(seconds=self._ttl_s or 14400.0),
-            # PoolCreationSpec cannot express the requests/limits split; a custom creator
-            # calls Sandbox.create with resource_requests for both warmup and direct-create.
-            sandbox_creator=self._create_sandbox_with_requests if self._resource_requests else None,
-            acquire_ready_timeout=timedelta(seconds=self._ready_timeout_s),
-            warmup_ready_timeout=timedelta(seconds=self._ready_timeout_s),
-            # The SDK's acquire-time health check EXECS in the pod, which would reap the
-            # warmup-started service; slots are gated on proxied HTTP health instead.
-            acquire_skip_health_check=True,
-        )
-        await self._sdk_pool.start()
+            await self._sdk_pool.start()
         self._tasks.append(asyncio.create_task(self._warmup(), name="osb-pool-warmup"))
         self._tasks.append(asyncio.create_task(self._heal_loop(), name="osb-pool-heal"))
         self._tasks.append(asyncio.create_task(self._sweep_loop(), name="osb-pool-sweep"))
@@ -329,9 +322,30 @@ class OpenSandboxPool:
         finally:
             slot.creating = False
 
+    async def _acquire_sandbox(self) -> Any:
+        if self._use_sdk_pool:
+            sandbox_timeout = timedelta(seconds=self._ttl_s) if self._ttl_s else None
+            return await self._sdk_pool.acquire(sandbox_timeout=sandbox_timeout)
+        # Direct async create: the fastest, and the only create path that has never
+        # produced content-broken pods on cell-2.
+        from datetime import timedelta as _td
+
+        from opensandbox import Sandbox
+
+        return await Sandbox.create(
+            image=self._image,
+            entrypoint=self._entrypoint,
+            env=self._env or None,
+            metadata=dict(self._metadata),
+            resource=self._resources or None,
+            resource_requests=self._resource_requests or None,
+            timeout=_td(seconds=self._ttl_s or 14400.0),
+            ready_timeout=_td(seconds=self._ready_timeout_s),
+            connection_config=self._connection_config,
+        )
+
     async def _create_slot_inner(self, slot: _Slot) -> None:
-        sandbox_timeout = timedelta(seconds=self._ttl_s) if self._ttl_s else None
-        sandbox = await self._sdk_pool.acquire(sandbox_timeout=sandbox_timeout)
+        sandbox = await self._acquire_sandbox()
         try:
             await self._ensure_prepared(sandbox)
             resolved = await sandbox.get_endpoint(self._port)
@@ -374,10 +388,7 @@ class OpenSandboxPool:
                 except Exception as exc:
                     LOGGER.warning("pool warmup: slot %d failed (heal loop will retry): %s", slot.index, exc)
 
-        # Prime the cell's image-conversion cache with ONE sequential create before the
-        # concurrent wave: first-conversion races cache broken artifacts (observed).
-        await one(self._slots[0])
-        await asyncio.gather(*(one(slot) for slot in self._slots[1:]))
+        await asyncio.gather(*(one(slot) for slot in self._slots))
         ready = sum(1 for slot in self._slots if slot.healthy)
         self._warmup_done = True
         LOGGER.info("pool ready %d/%d", ready, self._size)
