@@ -253,7 +253,12 @@ class TestRubricImagesAndText:
         blocks = convert_deliverables_to_content_blocks(
             str(tmp_path), media_mode="images_and_text", audio_capable=False
         )
-        assert blocks == []
+        # Gating is correct, so no audio is forwarded. The file is still announced:
+        # silence would let the judge grade a deliverable it believes was never produced.
+        assert not any(b.get("type") in {"input_audio", "image_url", "video_url"} for b in blocks)
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        assert "clip.mp3" in text
+        assert "cannot decode audio" in text
 
     def test_convert_deliverables_audio_passthrough_when_av_capable(self, tmp_path) -> None:
         # images_and_text == self-hosted vLLM judge -> input_audio (not image_url).

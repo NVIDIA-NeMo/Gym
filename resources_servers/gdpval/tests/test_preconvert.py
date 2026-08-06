@@ -37,7 +37,9 @@ class TestFindConvertibleFiles:
         (tmp_path / "c.pdf").write_text("p")
         files = pcv.find_convertible_files(str(tmp_path))
         # Sorted by full path: top-level b.docx < sub/a.xlsx; c.pptx skipped (sibling .pdf exists).
-        assert [p.name for p in files] == ["b.docx", "a.xlsx"]
+        # Entries are (source, explicit_destination); destination is None unless the stem is ambiguous.
+        assert [src.name for src, _dest in files] == ["b.docx", "a.xlsx"]
+        assert all(dest is None for _src, dest in files)
 
 
 class TestConvertToPdfErrors:
@@ -99,7 +101,7 @@ class TestPreconvertDirSurfacesFailures:
         (tmp_path / "a.docx").write_text("x")
         (tmp_path / "b.xlsx").write_text("x")
 
-        def _convert(path: Path) -> tuple[Path, bool, str]:
+        def _convert(path: Path, output_pdf: Path | None = None) -> tuple[Path, bool, str]:
             return path, False, f"forced fail on {path.name}"
 
         monkeypatch.setattr(pcv, "convert_to_pdf", _convert)
@@ -116,8 +118,8 @@ class TestPreconvertDirSurfacesFailures:
     def test_success_path_returns_no_errors(self, tmp_path: Path, monkeypatch) -> None:
         (tmp_path / "a.docx").write_text("x")
 
-        def _convert(path: Path) -> tuple[Path, bool, str]:
-            (path.with_suffix(".pdf")).write_text("p")
+        def _convert(path: Path, output_pdf: Path | None = None) -> tuple[Path, bool, str]:
+            (output_pdf or path.with_suffix(".pdf")).write_text("p")
             return path, True, "ok"
 
         monkeypatch.setattr(pcv, "convert_to_pdf", _convert)
@@ -130,7 +132,7 @@ class TestPreconvertDirSurfacesFailures:
 async def test_preconvert_dir_async_propagates_results(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "a.docx").write_text("x")
 
-    monkeypatch.setattr(pcv, "convert_to_pdf", lambda p: (p, False, "boom"))
+    monkeypatch.setattr(pcv, "convert_to_pdf", lambda p, output_pdf=None: (p, False, "boom"))
     ok, fail, errors = await pcv.preconvert_dir_async(str(tmp_path))
     assert (ok, fail) == (0, 1)
     assert errors == ["boom"]
