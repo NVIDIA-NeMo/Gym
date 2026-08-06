@@ -60,11 +60,11 @@ sandbox:
       retry_max_delay_s: 45.0
       # A retried command the server already started runs twice; agent commands
       # are usually mutating. Raise only for idempotent workloads.
-      command_retries: 1000
+      command_retries: 0
       close_timeout_s: 30
       # Short status/log polls instead of one long-lived SSE stream, for load
       # balancers that cap stream duration. Costs extra round trips.
-      background_exec: false
+      background_exec: true
       # Poll interval backs off from initial to interval.
       background_poll_initial_s: 0.25
       background_poll_interval_s: 2.0
