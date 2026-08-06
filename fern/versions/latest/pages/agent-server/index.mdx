@@ -55,7 +55,7 @@ class Agent:
         return conversation
 ```
 
-In an Agent server built on an external harness, the harness supplies the interaction loop with the policy model. The episode orchestration is unchanged: NeMo Gym seeds the session, verifies the finished trajectory, and reports the reward.
+In an Agent server built on an external harness, the harness supplies the interaction loop with the policy model. The three phases around it are the same: initialize the episode, produce a trajectory, score it.
 
 ## Choosing an Agent Server to Implement Your Agent
 
