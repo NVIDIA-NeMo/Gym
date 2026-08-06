@@ -51,7 +51,7 @@ class BrowserSessionProvider(Protocol):
 | Provider | What it does |
 | --- | --- |
 | `static_cdp` (built in) | Uses an endpoint that already exists (`cdp_url`, or `$BROWSER_CDP_URL`). Release is a no-op. |
-| `lexmount` (example) | Creates one isolated cloud browser session per rollout and deletes it afterwards. See [`providers/lexmount/`](providers/lexmount/README.md) and the `interactive_browser/lexmount` config flavor. |
+| `lexmount` (example) | Creates one isolated cloud browser session per rollout and deletes it afterwards. Code, config and docs live together in [`providers/lexmount/`](providers/lexmount/README.md). |
 
 Providers are selected by name (`{provider_name: {kwargs}}`) and imported only
 when selected, so an unused provider never pulls in its SDK. Publish one from
@@ -144,15 +144,23 @@ gym eval run --no-serve --agent interactive_browser_simple_agent \
 ```
 Then plug into NeMo-RL GRPO via `examples/nemo_gym/run_grpo_nemo_gym.py`.
 
+A provider's config ships with the provider, so a remote run loads it by path:
+
+```bash
+gym env start --config resources_servers/interactive_browser/providers/lexmount/configs/lexmount.yaml \
+  --model-type openai_model --model <served-model-name> \
+  --model-url https://your-endpoint/v1 --model-api-key <key> &
+```
+
 Remote browsers cannot open this repo's offline `site/` pages (local `file://`
-URIs), so remote runs use live-web tasks — `data/example_remote.jsonl`, which the
-`interactive_browser/lexmount` flavor points at.
+URIs), so remote runs use live-web tasks — `data/example_remote.jsonl`, which
+that config points at.
 
 ## Files (Gym `new-environment` spec)
 - [x] `app.py` — resources server (seed_session + tools + verify)
 - [x] `browser/` — `BrowserBackend` contract, `LocalPlaywrightBackend`, `RemoteCDPBackend` + `StaticCDPProvider`, registry
-- [x] `providers/lexmount/` — example session provider (hosted browser service, optional SDK)
-- [x] `configs/interactive_browser.yaml`, `configs/lexmount.yaml` (remote flavor)
+- [x] `providers/lexmount/` — example session provider: code, its own `configs/`, README (hosted browser service, optional SDK)
+- [x] `configs/interactive_browser.yaml`
 - [x] `site/` — bundled offline test site (deterministic tasks/CI)
 - [x] `generate_data.py` + `data/example.jsonl` (offline) + `data/example_remote.jsonl` (live web)
 - [x] `tests/` — backend contract (both backends) + selection/session bookkeeping
