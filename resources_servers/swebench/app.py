@@ -83,6 +83,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
 
+    instance_id: str
     model_patch: Optional[str]
 
     log_dir: str
@@ -305,6 +306,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,
             log_dir=str(Path(__file__).parent / "logs/run_evaluation" / run_id),
+            instance_id=test_spec.instance_id,
         )
 
 
