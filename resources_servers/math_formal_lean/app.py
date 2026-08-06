@@ -416,6 +416,26 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
             strip_theorem_from_proof=self.config.strip_theorem_from_proof,
         )
 
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        start_pool = getattr(self._sandbox_client, "start_pool", None)
+        if start_pool is None:
+            return app
+        from contextlib import asynccontextmanager
+
+        main_app_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan_wrapper(app):
+            # Warm lean pool pods from startup: a cold pod's first compile is ~15 min
+            # of nydus olean pulls, far beyond any verify's admission window.
+            start_pool()
+            async with main_app_lifespan(app) as maybe_state:
+                yield maybe_state
+
+        app.router.lifespan_context = lifespan_wrapper
+        return app
+
     async def verify(self, body: MathFormalLeanVerifyRequest) -> MathFormalLeanVerifyResponse:
         """Verify a proof attempt with multi-turn self-correction support.
 

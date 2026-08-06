@@ -243,6 +243,16 @@ class OpenSandboxLean4Client:
             pass  # prefetch is an optimization; the first compile warms the rest
         return sandbox
 
+    def start_pool(self) -> None:
+        """Kick the pool fill early (call from server lifespan startup) so the first
+        verify does not pay pool warmup inside its admission window."""
+        if self._pool_size > 0:
+            self._pool_queue()
+
+    @property
+    def pool_ready_count(self) -> int:
+        return self._pool.qsize() if self._pool is not None else 0
+
     def _pool_queue(self):
         import asyncio
 
