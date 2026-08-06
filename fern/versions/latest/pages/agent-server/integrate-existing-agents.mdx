@@ -21,7 +21,7 @@ These are NeMo Gym code, with no external dependency. They call the Model server
 
 ## Agent Servers That Run a Third-Party Harness
 
-In these, the external harness owns the agent loop and keeps its own prompts and tools. NeMo Gym seeds the session, translates the resulting trajectory into Responses API format, and verifies it against the Resources server.
+In these, the external harness owns the agent loop and keeps its own prompts and tools. NeMo Gym usually seeds the session, translates the resulting trajectory into Responses API format, and verifies it against the Resources server; a few whose benchmark harness owns scoring compute the reward themselves.
 
 Because verification stays on the NeMo Gym side, an agent harness that brings its own tools can often run in an existing environment by adding a `<benchmark>_<agent>` config, leaving the dataset and verifier unchanged — only the Resources server's task data and `/verify` are used. This is how `hermes_agent` is used with the math, coding, reasoning_gym, MCQA, and instruction-following benchmarks. It does not hold for every harness: agent servers such as `swe_agents`, `osworld_agent`, and `tau2` are tied to specific benchmarks.
 
@@ -167,10 +167,12 @@ gym eval run --no-serve --agent my_agent --input data/tasks.jsonl --output resul
 
 Wrappers differ in size, but share four responsibilities. The `swe_agents` opencode integration states the rule as "swap the transport, keep the loop": leave the harness's prompts, tools, and control flow unchanged, and change only where it gets tokens from and where its trajectory goes.
 
-1. Run the harness from the Agent server's `responses()` — a subprocess for a CLI, an in-process import for a Python framework, a container for a sandboxed benchmark. `run()` remains the episode orchestrator: it seeds the session, calls `responses()`, and verifies.
+1. Run the harness — a subprocess for a CLI, an in-process import for a Python framework, a container for a sandboxed benchmark.
 2. Point the harness at a NeMo Gym Model server by setting whatever base URL it uses. Model servers accept `POST /v1/responses` (including the streaming form Codex uses), `POST /v1/chat/completions`, and `POST /v1/messages`, so most harnesses need no change here. This is what lets one harness run against vLLM, OpenAI, or an inference provider, and it is required for training.
 3. Translate the harness's output into Responses API items. The source varies — a JSON event stream, a SQLite session, per-turn files on disk — so this is the per-harness part of the code and usually the bulk of the wrapper.
-4. From `run()`, send the finished trajectory to the Resources server's `/verify` and return the reward. Harnesses that bring their own tools use only the Resources server's task data and verifier; harnesses that accept externally supplied tools can also route tool calls to it.
+4. Return a reward. Harnesses that bring their own tools use only the Resources server's task data and verifier; harnesses that accept externally supplied tools can also route tool calls to it.
+
+Which method holds steps 1 and 4 differs by agent server. Most run the harness in `responses()` and use `run()` to orchestrate the episode: seed the session, call `responses()`, send the trajectory to the Resources server's `/verify`. `mini_swe_agent`, `mini_swe_agent_2`, `harbor_agent`, and `tau2` do everything in `run()` and raise `NotImplementedError` from `responses()`; these also compute the reward from their harness's own evaluation output instead of calling `/verify`.
 
 ## Evaluation-Only vs Training-Grade
 
