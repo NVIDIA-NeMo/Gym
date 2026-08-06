@@ -35,7 +35,6 @@ from typing import Any, Dict, Optional
 import aiohttp
 import httpx
 from nemo_skills.code_execution import sandbox as ns_sandbox
-
 from osb_pool import OpenSandboxPool
 
 
@@ -103,6 +102,12 @@ class OpenSandboxPoolSandbox(ns_sandbox.LocalSandbox):
 
     async def delete_session(self, session_id: str) -> None:
         """Delete the session on the pod it is pinned to, then release the pin."""
+        if str(session_id) not in self._pool._session_to_slot:
+            # Never pinned (or already swept): no pod holds this session's state, and
+            # route() would mint a fresh pin just to receive a guaranteed 404.
+            self._pool.release(str(session_id))
+            self.session_histories.pop(str(session_id), None)
+            return
         try:
             base_url, pool_headers = await self._pool.route(str(session_id))
         except httpx.TimeoutException:

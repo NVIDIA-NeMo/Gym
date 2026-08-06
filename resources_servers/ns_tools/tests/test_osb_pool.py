@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Unit tests for the opensandbox_pool sandbox backend. No network, no cell access:
-routing/eviction logic is driven directly, the transport via httpx.MockTransport."""
+routing/eviction logic is driven directly, the transport via a fake aiohttp session."""
 
 import asyncio
 import sys
@@ -21,6 +21,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

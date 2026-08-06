@@ -29,7 +29,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
+from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient, OpenSandboxLean4Client
 
 
 LOG = logging.getLogger(__name__)
@@ -394,8 +394,6 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         if self.config.sandbox_backend == "opensandbox":
-            from resources_servers.math_formal_lean.sandbox_client import OpenSandboxLean4Client
-
             self._sandbox_client = OpenSandboxLean4Client(
                 max_output_characters=self.config.max_output_characters,
                 **self.config.opensandbox,

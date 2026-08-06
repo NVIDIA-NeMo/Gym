@@ -56,9 +56,6 @@ ns_tools:
               # First-ever create on a new image tag blocks on nydus conversion (40-55s);
               # the SDK default request_timeout (30s) fails the whole cold warmup wave.
               request_timeout: 180
-            create:
-              timeout_s: 90
-              retries: 3
         image: ${oc.env:NS_SANDBOX_IMAGE,}
         port: 6000
         size: ${oc.env:NS_SANDBOX_POOL_SIZE,8}

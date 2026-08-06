@@ -35,14 +35,12 @@ import aiohttp
 import httpx  # exception types only: the nemo_skills client contract catches httpx errors
 
 from nemo_gym.sandbox.attribution import RUN_KEY, resolve_attribution, resolve_run_id
+from nemo_gym.sandbox.providers.opensandbox.provider import (
+    DEFAULT_ATTRIBUTION_KEY_PREFIX as _ATTRIBUTION_KEY_PREFIX,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-
-# Same prefixed-key namespace the Gym opensandbox provider injects (k8s labels on the pod).
-_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
-
-_PREPARED_MARKER = "/opt/ns/.pool_prepared"
 
 
 def _parse_connection(provider: Dict[str, Any]) -> Dict[str, Any]:
@@ -145,7 +143,6 @@ class OpenSandboxPool:
         self._slots = [_Slot(index=i) for i in range(self._size)]
         self._session_to_slot: Dict[str, int] = {}
         self._session_last_used: Dict[str, float] = {}
-        self._prepared_ids: set = set()
         self._lock = asyncio.Lock()
         self._started = False
         self._warmup_done = False
@@ -165,7 +162,7 @@ class OpenSandboxPool:
         return self._http
 
     async def start(self) -> None:
-        """Start the SDK pool and kick warmup + maintenance loops; returns immediately."""
+        """Kick warmup and the maintenance loops; returns immediately."""
         if self._started or self._closed:
             return
         self._started = True
@@ -186,14 +183,16 @@ class OpenSandboxPool:
             except (asyncio.CancelledError, Exception):
                 pass
         self._tasks.clear()
-        for slot in self._slots:
-            if slot.sandbox is not None:
-                try:
-                    await asyncio.wait_for(slot.sandbox.kill(), timeout=30.0)
-                except Exception as exc:
-                    LOGGER.warning("pool slot %d teardown failed (TTL will reap): %s", slot.index, exc)
-                slot.sandbox = None
-                slot.healthy = False
+
+        async def _kill(slot: _Slot) -> None:
+            try:
+                await asyncio.wait_for(slot.sandbox.kill(), timeout=30.0)
+            except Exception as exc:
+                LOGGER.warning("pool slot %d teardown failed (TTL will reap): %s", slot.index, exc)
+            slot.sandbox = None
+            slot.healthy = False
+
+        await asyncio.gather(*(_kill(slot) for slot in self._slots if slot.sandbox is not None))
         if self._http is not None and not self._http.closed:
             await self._http.close()
 
@@ -207,7 +206,7 @@ class OpenSandboxPool:
         """Bootstrap a pod. INVARIANT: the service start is the LAST execd command this pod
         ever sees — execd reaps a completed command's backgrounded children when any later
         command runs (probed empirically: service->touch->10s = dead listener; service->
-        nothing = alive). Preparedness is tracked in-process, never probed via exec."""
+        nothing = alive)."""
         for target_path, local_path in self._setup_files.items():
             with open(local_path, "rb") as fh:
                 await sandbox.files.write_file(target_path, fh.read())
@@ -215,7 +214,6 @@ class OpenSandboxPool:
             execution = await sandbox.commands.run(command)
             if (execution.exit_code or 0) != 0:
                 raise RuntimeError(f"setup command failed rc={execution.exit_code}: {command!r}")
-        await sandbox.commands.run(f"touch {_PREPARED_MARKER}")
         if self._service_command:
             # Plain shell backgrounding (cmd &): setsid and execd background:true both
             # freeze the child during module import (probed); a plain & child reparents
@@ -223,16 +221,6 @@ class OpenSandboxPool:
             execution = await sandbox.commands.run(self._service_command)
             if (execution.exit_code or 0) != 0:
                 raise RuntimeError(f"service command failed rc={execution.exit_code}")
-        self._prepared_ids.add(str(sandbox.id))
-
-    async def _ensure_prepared(self, sandbox: Any) -> None:
-        """Prepare a freshly created pod exactly once. Membership is checked in memory —
-        an exec-based probe would kill a prepared pod's running service."""
-        if not self._needs_prepare:
-            return
-        if str(sandbox.id) in self._prepared_ids:
-            return
-        await self._prepare(sandbox)
 
     def _normalize_endpoint(self, resolved: Any) -> Tuple[str, Dict[str, str]]:
         url = str(getattr(resolved, "endpoint", "") or "")
@@ -276,7 +264,8 @@ class OpenSandboxPool:
     async def _create_slot_inner(self, slot: _Slot) -> None:
         sandbox = await self._acquire_sandbox()
         try:
-            await self._ensure_prepared(sandbox)
+            if self._needs_prepare:
+                await self._prepare(sandbox)
             resolved = await sandbox.get_endpoint(self._port)
             base_url, headers = self._normalize_endpoint(resolved)
             await self._wait_healthy(base_url, headers, budget_s=self._health_budget_s)

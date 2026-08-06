@@ -3,7 +3,7 @@ math_formal_lean:
     math_formal_lean:
       entrypoint: app.py
       sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
-            sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
       # Sandbox backend: 'ns_http' (default — today's path, byte-identical with zero env
       # vars set), 'opensandbox' (per-verify OpenSandbox pods via provider exec), or
       # 'ns_http_proxy' (NS protocol through a full base_url — parity oracle).

@@ -191,9 +191,6 @@ class OpenSandboxLean4Client:
         self._semaphore_size = max_concurrent
         self._semaphore: Any = None  # bound lazily to the serving event loop
 
-    async def close(self) -> None:
-        return None
-
     def _get_semaphore(self):
         import asyncio
 
@@ -257,7 +254,3 @@ class OpenSandboxLean4Client:
                 await sandbox.stop()
             except Exception as exc:
                 LOG.warning("lean sandbox teardown failed (TTL will reap): %s", exc)
-
-    async def health_check(self, timeout: float = 5.0) -> bool:
-        """The exec path has no standing service; report configured-and-ready."""
-        return True

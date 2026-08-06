@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from resources_servers.math_formal_lean.sandbox_client import (  # noqa: E402
