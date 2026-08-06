@@ -59,11 +59,10 @@ For C1, C2, and C4, `V` evaluates the correlated Gym Model Server path; direct-p
 | `mini_swe_agent` | X | X | X | X | X | X | X |
 | `mini_swe_agent_2` | V | V | X | V | X | X | X |
 | `non_executing_simple_agent` | V | V | X | V | X | X | X |
-| `openclaw_agent` | V | V | X | V | V | V | V |
+| `openclaw_agent` | V | V | X | O | V | V | V |
 | `opencode_agent` | X | X | X | X | X | X | X |
 | `osworld_agent` | O | O | X | O | X | X | X |
 | `pi_agent` | X | X | X | X | X | X | X |
-| `pinchbench` | V | V | X | V | V | V | V |
 | `proof_refinement_agent` | V | V | X | V | X | X | X |
 | `remote_agent` | X | O | X | X | X | X | X |
 | `scicode_agent` | X | X | X | X | X | X | X |
@@ -80,4 +79,5 @@ Simple and LabBench C3 support is partial because verifier responses may omit re
 CVDP Simple path, Finance and Remote aggregate usage, LabBench image redaction, OSWorld M3 and Pointer direct-provider routes,
 omitted raised failures in Simple-derived agents, and Stirrup calls outside its policy path. The matrix reports producer output,
 not schema capacity.
+OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox benchmark path.
 C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.

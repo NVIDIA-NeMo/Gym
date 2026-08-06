@@ -17,11 +17,9 @@
 import asyncio
 import tempfile
 import threading
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -31,7 +29,6 @@ from nemo_gym.sandbox.providers import (
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
-    SandboxResourceUsage,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
@@ -55,13 +52,8 @@ class AsyncSandbox:
         self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self._spec = spec
         self._handle: SandboxHandle | None = None
-        self._started_at: float | None = None
         self._stopped = True
         self._closed = False
-
-    @property
-    def sandbox_id(self) -> str | None:
-        return self._handle.sandbox_id if self._handle is not None else None
 
     def _require_handle(self) -> SandboxHandle:
         if self._handle is None or self._stopped:
@@ -80,12 +72,7 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        self._started_at = time.perf_counter()
-        try:
-            handle = await self._provider.create(requested_spec)
-        except Exception:
-            self._started_at = None
-            raise
+        handle = await self._provider.create(requested_spec)
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -97,7 +84,6 @@ class AsyncSandbox:
         except Exception:
             await self._provider.close(handle)
             await self._provider.aclose()
-            self._started_at = None
             self._closed = True
             raise
 
@@ -154,22 +140,6 @@ class AsyncSandbox:
         if not isinstance(resolved, SandboxEndpoint):
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
-
-    async def resource_usage(self) -> SandboxResourceUsage:
-        """Return a best-effort pre-stop snapshot for this managed sandbox.
-
-        Wall time is always measured by this wrapper. Providers may optionally
-        expose ``resource_usage(handle)`` for cumulative CPU and peak memory.
-        Calling this method is explicit so normal sandbox use pays no telemetry
-        overhead.
-        """
-
-        handle = self._require_handle()
-        collect = getattr(self._provider, "resource_usage", None)
-        usage = SandboxResourceUsage() if collect is None else await collect(handle)
-        started_at = self._started_at
-        wall_time_s = None if started_at is None else max(0.0, time.perf_counter() - started_at)
-        return replace(usage, wall_time_s=wall_time_s)
 
     async def stop(self) -> None:
         if self._closed:
@@ -324,10 +294,6 @@ class Sandbox:
             raise
         self._closed = False
 
-    @property
-    def sandbox_id(self) -> str | None:
-        return self._async_sandbox.sandbox_id
-
     def start(
         self,
         spec: SandboxSpec | None = None,
@@ -371,9 +337,6 @@ class Sandbox:
 
     def endpoint(self, port: int) -> SandboxEndpoint:
         return self._runner.run("endpoint", lambda: self._async_sandbox.endpoint(port))
-
-    def resource_usage(self) -> SandboxResourceUsage:
-        return self._runner.run("resource_usage", self._async_sandbox.resource_usage)
 
     def stop(self) -> None:
         if self._closed:

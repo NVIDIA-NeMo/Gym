@@ -24,14 +24,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     ContextCompactionObservation,
-    SandboxObservation,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult, SandboxResourceUsage
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pinchbench.app import (
     NG_FAILURE_CLASS_KEY,
@@ -42,7 +40,6 @@ from responses_api_agents.pinchbench.app import (
     PinchBenchRunRequest,
     SandboxKilledError,
     _classify_task_failure,
-    _sandbox_observation_from_exec,
 )
 
 
@@ -139,34 +136,6 @@ def test_build_spec_from_config():
     # the per-task env (incl the in-sandbox gateway token) is injected into the spec
     assert spec.env["TASK_ID"] == "task_x"
     assert spec.env["OPENCLAW_GATEWAY_TOKEN"]
-
-
-@pytest.mark.parametrize(
-    ("result", "outcome", "exit_code"),
-    [
-        (SandboxExecResult(stdout="", stderr="", return_code=0), "completed", 0),
-        (SandboxExecResult(stdout="", stderr="failed", return_code=2), "failed", 2),
-        (
-            SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
-            "timeout",
-            None,
-        ),
-        (
-            SandboxExecResult(stdout=None, stderr="runtime error", return_code=125, error_type="sandbox"),
-            "sandbox_error",
-            None,
-        ),
-    ],
-)
-def test_sandbox_observation_uses_provider_exec_result(result, outcome, exit_code):
-    observation = _sandbox_observation_from_exec("opensandbox", result)
-
-    assert observation.role == "agent"
-    assert observation.provider == "opensandbox"
-    assert observation.outcome == outcome
-    assert observation.exit_code == exit_code
-    assert observation.cpu_time_s is None
-    assert observation.peak_memory_mib is None
 
 
 def _write_result(out_dir, task_id, mean, gtype, breakdown, notes):
@@ -295,6 +264,21 @@ def test_response_from_transcript_common_output_items_and_usage(tmp_path):
     assert resp.usage.total_tokens == 26
 
 
+def test_transcript_parsing_ignores_non_object_message_and_usage():
+    events = [
+        {"type": "message", "message": "invalid"},
+        {
+            "type": "message",
+            "message": {"role": "assistant", "content": "Done.", "usage": "invalid"},
+        },
+    ]
+
+    resp = make_agent()._response_from_transcript_events("task_x", events)
+
+    assert resp.output[0].content[0].text == "Done."
+    assert resp.usage.total_tokens == 0
+
+
 def test_collect_transcript_archives(tmp_path):
     out = tmp_path / "out"
     (out / "0001_transcripts").mkdir(parents=True)
@@ -313,7 +297,7 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     otherwise ng_collect_rollouts (fail-fast) aborts the whole collection."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir, rollout_id=None, observation_collector=None):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -359,7 +343,7 @@ async def test_generic_failure_routes_to_sidecar_not_main(tmp_path, monkeypatch)
     """A failed task must carry a failure class so it never lands in the main jsonl."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir, rollout_id=None, observation_collector=None):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -375,7 +359,7 @@ async def test_signal_killed_sandbox_is_kill_shaped_and_unpersisted(tmp_path, mo
     """Walltime SIGTERM shape: no row anywhere; resume's set-difference re-dispatches."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def killed(task_id, out_dir, rollout_id=None, observation_collector=None):
+    async def killed(task_id, out_dir, rollout_id=None):
         raise SandboxKilledError("direct apptainer exec killed (rc=-15) for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", killed)
@@ -390,7 +374,7 @@ async def test_task_timeout_is_terminal_sidecar(tmp_path, monkeypatch):
     """Per-task timeout consumed its budget: one sidecar row, never retried."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def slow(task_id, out_dir, rollout_id=None, observation_collector=None):
+    async def slow(task_id, out_dir, rollout_id=None):
         raise TimeoutError("direct apptainer exec timed out for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", slow)
@@ -406,7 +390,7 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
     """Scored rollouts must keep landing in the main jsonl (no sentinel keys)."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def ok(task_id, out_dir, rollout_id=None, observation_collector=None):
+    async def ok(task_id, out_dir, rollout_id=None):
         return None
 
     monkeypatch.setattr(agent, "_run_in_sandbox", ok)
@@ -421,7 +405,6 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
             "status": "success",
         },
     )
-    monkeypatch.setattr(agent, "_response_from_transcript", lambda task_id, out_dir: agent._empty_response(task_id))
     monkeypatch.setattr(agent, "_collect_transcript", lambda task_id, out_dir, run_id: ([], ""))
     resp = await agent.run(body=_run_body())
     dumped = resp.model_dump()
@@ -436,7 +419,7 @@ async def test_run_returns_openclaw_observations_when_enabled(tmp_path, monkeypa
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "archive"))
     agent.server_client.global_config_dict = {"observability_enabled": True}
 
-    async def run_in_sandbox(task_id, out_dir, rollout_id=None, observation_collector=None):
+    async def run_in_sandbox(task_id, out_dir, rollout_id=None):
         transcript_dir = out_dir / "0001_transcripts"
         transcript_dir.mkdir(parents=True)
         root_transcript = transcript_dir / f"{task_id}.jsonl"
@@ -525,9 +508,6 @@ async def test_run_returns_openclaw_observations_when_enabled(tmp_path, monkeypa
                 }
             )
         )
-        return SandboxObservation(
-            role="agent", provider="opensandbox", sandbox_id="sandbox-1", outcome="completed", exit_code=0
-        )
 
     monkeypatch.setattr(agent, "_run_in_sandbox", run_in_sandbox)
     monkeypatch.setattr(
@@ -554,11 +534,11 @@ async def test_run_returns_openclaw_observations_when_enabled(tmp_path, monkeypa
 
     observations = result.ng_agent_observations
     assert observations is not None
-    assert observations.source == "pinchbench"
+    assert observations.source == "openclaw"
+    assert result.model_dump()["ng_agent_observations"]["source"] == "openclaw"
     invocations = _records(observations, AgentInvocation)
     tool_calls = _records(observations, ToolCallObservation)
     compactions = _records(observations, ContextCompactionObservation)
-    sandboxes = _records(observations, SandboxObservation)
     assert invocations[0].invocation_id == "agent:main:main"
     assert [item.type for item in invocations[0].conversation] == [
         "message",
@@ -571,69 +551,7 @@ async def test_run_returns_openclaw_observations_when_enabled(tmp_path, monkeypa
     assert invocations[1].parent_invocation_id == "agent:main:main"
     assert "research this" in str(invocations[1].conversation)
     assert tool_calls[0].duration_ms == 500
-    assert {tool.sandbox_id for tool in tool_calls} == {"sandbox-1"}
     assert compactions[0].summary == "condensed context"
-    assert len(sandboxes) == 1
-    assert sandboxes[0].model_dump(exclude={"wall_time_s"}) == SandboxObservation(
-        role="agent", provider="opensandbox", sandbox_id="sandbox-1", outcome="completed", exit_code=0
-    ).model_dump(exclude={"wall_time_s"})
-    assert sandboxes[0].wall_time_s is not None
-
-
-@pytest.mark.asyncio
-async def test_download_failure_preserves_managed_sandbox_exec_observation(tmp_path, monkeypatch):
-    agent = make_agent(
-        work_root=str(tmp_path / "work"),
-        transcripts_dir=str(tmp_path / "archive"),
-        sandbox_provider={"opensandbox": {}},
-    )
-    agent.server_client.global_config_dict = {"observability_enabled": True}
-
-    class FailingDownloadSandbox:
-        sandbox_id = "sandbox-1"
-
-        async def start(self, spec):
-            return None
-
-        async def exec(self, command, timeout_s):
-            return SandboxExecResult(stdout="", stderr="failed", return_code=7)
-
-        async def download(self, source, target):
-            raise OSError("archive download failed")
-
-        async def resource_usage(self):
-            return SandboxResourceUsage(
-                wall_time_s=4.0,
-                cpu_time_s=1.5,
-                peak_memory_mib=256,
-                source="test_cgroup",
-            )
-
-        async def stop(self):
-            return None
-
-    monkeypatch.setattr(
-        "responses_api_agents.pinchbench.app.AsyncSandbox",
-        lambda config: FailingDownloadSandbox(),
-    )
-
-    result = await agent.run(body=_observed_run_body())
-
-    assert result.status == "error"
-    [sandbox] = _records(result.ng_agent_observations, SandboxObservation)
-    assert sandbox.sandbox_id == "sandbox-1"
-    assert sandbox.outcome == "failed"
-    assert sandbox.exit_code == 7
-    assert sandbox.wall_time_s == 4.0
-    assert sandbox.cpu_time_s == 1.5
-    assert sandbox.peak_memory_mib == 256
-    assert sandbox.resource_usage_source == "test_cgroup"
-    gap_codes = {gap.code for gap in result.ng_agent_observations.gaps}
-    assert "sandbox_cpu_time_unavailable" not in gap_codes
-    assert "sandbox_memory_usage_unavailable" not in gap_codes
-    [invocation] = _records(result.ng_agent_observations, AgentInvocation)
-    assert invocation.conversation == [NeMoGymEasyInputMessage(role="user", content="solve")]
-    assert "agent_transcript_unavailable" in gap_codes
 
 
 @pytest.mark.asyncio
@@ -658,9 +576,6 @@ async def test_managed_sandbox_timeout_is_terminal(tmp_path, monkeypatch):
         async def download(self, source, target):
             self.download_called = True
 
-        async def resource_usage(self):
-            return SandboxResourceUsage(wall_time_s=4.0, source="test")
-
         async def stop(self):
             return None
 
@@ -672,80 +587,39 @@ async def test_managed_sandbox_timeout_is_terminal(tmp_path, monkeypatch):
     dumped = result.model_dump()
     assert dumped[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
     assert dumped[NG_TERMINAL_KEY] is True
-    [observation] = _records(result.ng_agent_observations, SandboxObservation)
-    assert observation.outcome == "timeout"
-    assert observation.error_type == "timeout"
+    assert result.ng_agent_observations.source == "openclaw"
     assert sandbox.download_called is False
 
 
 @pytest.mark.asyncio
-async def test_missing_direct_archive_preserves_process_observation(tmp_path, monkeypatch):
-    agent = make_agent(
-        work_root=str(tmp_path / "work"),
-        transcripts_dir=str(tmp_path / "archive"),
-        sandbox_provider={"apptainer": {"direct_exec": True}},
-        sandbox_spec={"image": "pinchbench.sif"},
-    )
-    agent.server_client.global_config_dict = {"observability_enabled": True}
-
-    class FailedProcess:
-        returncode = 23
-
-        async def wait(self):
-            return self.returncode
-
-        def kill(self):
-            return None
-
-    async def create_process(*args, **kwargs):
-        return FailedProcess()
-
-    monkeypatch.setattr(
-        "responses_api_agents.pinchbench.app.asyncio.create_subprocess_exec",
-        create_process,
-    )
-
-    result = await agent.run(body=_observed_run_body())
-
-    assert result.status == "error"
-    [sandbox] = _records(result.ng_agent_observations, SandboxObservation)
-    assert sandbox.sandbox_id is not None
-    assert sandbox.sandbox_id.startswith("pinchbench:")
-    assert sandbox.outcome == "failed"
-    assert sandbox.exit_code == 23
-    assert sandbox.wall_time_s is not None
-    assert "sandbox_identity_unavailable" not in {gap.code for gap in result.ng_agent_observations.gaps}
-
-
-@pytest.mark.asyncio
-async def test_managed_sandbox_create_failure_does_not_fabricate_identity(tmp_path, monkeypatch):
+async def test_managed_sandbox_error_skips_download(tmp_path, monkeypatch):
     agent = make_agent(
         work_root=str(tmp_path / "work"),
         transcripts_dir=str(tmp_path / "archive"),
         sandbox_provider={"opensandbox": {}},
     )
-    agent.server_client.global_config_dict = {"observability_enabled": True}
 
-    class FailingSandbox:
+    class FailedSandbox:
+        download_called = False
+
         async def start(self, spec):
-            raise SandboxCreateError("create failed")
+            return None
+
+        async def exec(self, command, timeout_s):
+            return SandboxExecResult(stdout=None, stderr="provider failed", return_code=125, error_type="sandbox")
+
+        async def download(self, source, target):
+            self.download_called = True
 
         async def stop(self):
             return None
 
-    monkeypatch.setattr(
-        "responses_api_agents.pinchbench.app.AsyncSandbox",
-        lambda config: FailingSandbox(),
-    )
+    sandbox = FailedSandbox()
+    monkeypatch.setattr("responses_api_agents.pinchbench.app.AsyncSandbox", lambda config: sandbox)
 
-    result = await agent.run(body=_observed_run_body())
-
-    assert result.status == "error"
-    [sandbox] = _records(result.ng_agent_observations, SandboxObservation)
-    assert sandbox.sandbox_id is None
-    assert sandbox.outcome == "sandbox_error"
-    assert all(tool.sandbox_id is None for tool in _records(result.ng_agent_observations, ToolCallObservation))
-    assert "sandbox_identity_unavailable" in {gap.code for gap in result.ng_agent_observations.gaps}
+    with pytest.raises(RuntimeError, match=r"sandbox.*provider failed"):
+        await agent._run_in_sandbox("task_x", tmp_path)
+    assert sandbox.download_called is False
 
 
 @pytest.mark.asyncio
@@ -753,10 +627,8 @@ async def test_observation_failure_does_not_change_result(tmp_path, monkeypatch)
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "archive"))
     agent.server_client.global_config_dict = {"observability_enabled": True}
 
-    async def run_in_sandbox(task_id, out_dir, rollout_id=None, observation_collector=None):
-        return SandboxObservation(
-            role="agent", provider="opensandbox", sandbox_id="sandbox-1", outcome="completed", exit_code=0
-        )
+    async def run_in_sandbox(task_id, out_dir, rollout_id=None):
+        return None
 
     monkeypatch.setattr(agent, "_run_in_sandbox", run_in_sandbox)
     monkeypatch.setattr(
@@ -790,46 +662,8 @@ async def test_observation_failure_does_not_change_result(tmp_path, monkeypatch)
     assert result.response.output[0].content[0].text == ""
     observations = result.ng_agent_observations
     assert observations is not None
-    assert observations.source == "pinchbench"
-    assert [gap.code for gap in observations.gaps] == [
-        "observation_capture_failed",
-        "sandbox_cpu_time_unavailable",
-        "sandbox_memory_usage_unavailable",
-        "policy_model_capture_unavailable",
-        "judge_model_capture_unavailable",
-    ]
-
-
-def test_build_observations_handles_parser_failure(tmp_path, monkeypatch):
-    agent = make_agent()
-    monkeypatch.setattr(
-        "responses_api_agents.pinchbench.app.build_openclaw_observations",
-        MagicMock(side_effect=RuntimeError("observer failed")),
-    )
-    sandbox = SandboxObservation(
-        role="agent",
-        provider="opensandbox",
-        sandbox_id="sandbox-1",
-        outcome="completed",
-        exit_code=0,
-    )
-
-    observations = agent._build_observations(
-        _observed_run_body(),
-        agent._empty_response("task_x"),
-        [],
-        tmp_path,
-        "run-1",
-        sandbox,
-    )
-
-    assert [gap.code for gap in observations.gaps] == [
-        "observation_capture_failed",
-        "sandbox_cpu_time_unavailable",
-        "sandbox_memory_usage_unavailable",
-        "policy_model_capture_unavailable",
-        "judge_model_capture_unavailable",
-    ]
+    assert observations.source == "openclaw"
+    assert [gap.code for gap in observations.gaps] == ["observation_capture_failed"]
 
 
 def test_classify_task_failure_mapping():

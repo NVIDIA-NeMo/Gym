@@ -22,6 +22,7 @@ from nemo_gym.rollout_observability import (
 
 
 OpenClawSessionTree = list[tuple[str, str | None, list[dict[str, Any]]]]
+OPENCLAW_OBSERVATION_SOURCE = "openclaw"
 _MILLISECOND_EPOCH_THRESHOLD = 100_000_000_000
 
 
@@ -170,11 +171,10 @@ def build_openclaw_observation_tree(
         ]
     ],
     *,
-    source: str = "openclaw",
     model_ref: ModelServerRef | None = None,
 ) -> AgentObservationBundle:
     """Combine per-session observations after exact store-based lineage discovery."""
-    combined = AgentObservationBundle(source=source)
+    combined = AgentObservationBundle(source=OPENCLAW_OBSERVATION_SOURCE)
     for invocation_id, parent_id, conversation, events in sessions:
         events = list(events)
         bundle = build_openclaw_observations(
@@ -182,7 +182,6 @@ def build_openclaw_observation_tree(
             conversation,
             events,
             transcript_available=any(event.get("type") == "message" for event in events),
-            source=source,
             prefer_native_session_id=False,
             model_ref=model_ref,
         )
@@ -253,7 +252,6 @@ def build_openclaw_observations(
     events: Iterable[dict[str, Any]],
     *,
     transcript_available: bool,
-    source: str = "openclaw",
     prefer_native_session_id: bool = True,
     model_ref: ModelServerRef | None = None,
 ) -> AgentObservationBundle:
@@ -274,7 +272,7 @@ def build_openclaw_observations(
     conversation = list(conversation)
     invocation = AgentInvocation(invocation_id=invocation_id, conversation=conversation)
     bundle = AgentObservationBundle(
-        source=source,
+        source=OPENCLAW_OBSERVATION_SOURCE,
         records=[invocation],
         gaps=[
             ObservationGap(code="subagent_hierarchy_unavailable"),

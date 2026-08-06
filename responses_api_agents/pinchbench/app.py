@@ -42,10 +42,9 @@ import logging
 import shutil
 import tarfile
 import textwrap
-import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, model_validator
@@ -71,15 +70,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
-    AgentObservationBundle,
-    ObservationGap,
-    SandboxObservation,
-    ToolCallObservation,
-)
-from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxExecResult, SandboxResources, SandboxSpec
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
 from responses_api_agents.openclaw_agent.observability import (
+    OPENCLAW_OBSERVATION_SOURCE,
     build_openclaw_observation_tree,
     build_openclaw_observations,
     discover_openclaw_session_tree,
@@ -180,26 +175,6 @@ def _classify_task_failure(exc: BaseException) -> str:
     return "legitimate"
 
 
-def _sandbox_observation_from_exec(provider: str, result: SandboxExecResult) -> SandboxObservation:
-    if result.error_type == "timeout":
-        outcome = "timeout"
-    elif result.error_type is not None:
-        outcome = "sandbox_error"
-    elif result.return_code == 0:
-        outcome = "completed"
-    else:
-        outcome = "failed"
-
-    return SandboxObservation(
-        role="agent",
-        provider=provider,
-        outcome=outcome,
-        # A provider error may use a non-process sentinel return code.
-        exit_code=None if result.error_type is not None else result.return_code,
-        error_type=result.error_type,
-    )
-
-
 class PinchBenchRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
@@ -294,57 +269,36 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         task_id: str,
         out_dir: Path,
         rollout_id: Optional[str] = None,
-        observation_collector: Optional[Callable[[SandboxObservation], None]] = None,
-    ) -> Optional[SandboxObservation]:
+    ) -> None:
         """Run one PinchBench task and pull its /out archive back."""
         provider = self.config.sandbox_provider or {}
         apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
         if isinstance(apptainer_cfg, dict) and apptainer_cfg.get("direct_exec"):
-            return await self._run_in_apptainer_direct(
+            await self._run_in_apptainer_direct(
                 task_id,
                 out_dir,
                 apptainer_cfg,
                 rollout_id=rollout_id,
-                observation_collector=observation_collector,
             )
+            return
 
         if not self.config.sandbox_provider:
             raise ValueError("pinchbench requires sandbox_provider (see configs/pinchbench.yaml)")
-        provider_name = next(iter(self.config.sandbox_provider))
         archive = f"{self.config.sandbox_work_base.rstrip('/')}/out/out.tgz"
         sb = AsyncSandbox(self.config.sandbox_provider)
-        observation: Optional[SandboxObservation] = None
         try:
             await sb.start(self._build_spec(task_id, rollout_id))
-            sandbox_id = sb.sandbox_id
-            observation = SandboxObservation(role="agent", provider=provider_name, sandbox_id=sandbox_id)
-            if observation_collector is not None:
-                observation_collector(observation)
             exec_result = await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
-            observation = _sandbox_observation_from_exec(provider_name, exec_result)
-            observation.sandbox_id = sandbox_id
-            if observation_collector is not None:
-                observation_collector(observation)
             if exec_result.error_type == "timeout":
                 raise TimeoutError("PinchBench sandbox execution timed out")
+            if exec_result.error_type:
+                detail = exec_result.stderr or exec_result.stdout or "unknown sandbox error"
+                raise RuntimeError(f"PinchBench sandbox execution failed ({exec_result.error_type}): {detail}")
             await sb.download(archive, out_dir / "out.tgz")
         finally:
-            try:
-                if observation is not None and rollout_id is not None:
-                    try:
-                        usage = await sb.resource_usage()
-                    except Exception:
-                        LOG.warning("sandbox resource usage is unavailable", exc_info=True)
-                    else:
-                        observation.wall_time_s = usage.wall_time_s
-                        observation.cpu_time_s = usage.cpu_time_s
-                        observation.peak_memory_mib = usage.peak_memory_mib
-                        observation.resource_usage_source = usage.source
-            finally:
-                await sb.stop()
+            await sb.stop()
         with tarfile.open(out_dir / "out.tgz") as tf:
             tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
-        return observation
 
     def _write_direct_exec_wrapper(self, staging_dir: Path) -> Path:
         wrapper_path = staging_dir / "run_task_efb.sh"
@@ -461,8 +415,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         out_dir: Path,
         apptainer_cfg: dict[str, Any],
         rollout_id: Optional[str] = None,
-        observation_collector: Optional[Callable[[SandboxObservation], None]] = None,
-    ) -> SandboxObservation:
+    ) -> None:
         image = self.config.sandbox_spec.get("image")
         if not image:
             raise ValueError("pinchbench sandbox_spec.image is required for direct Apptainer exec")
@@ -492,8 +445,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         stdout_path = staging_dir / "apptainer.stdout.log"
         stderr_path = staging_dir / "apptainer.stderr.log"
         with stdout_path.open("wb") as stdout_f, stderr_path.open("wb") as stderr_f:
-            process_started_at = time.perf_counter()
-            sandbox_id = f"pinchbench:{out_dir.name}"
             proc = await asyncio.create_subprocess_exec(
                 *argv, stdout=stdout_f, stderr=stderr_f, start_new_session=True
             )
@@ -505,30 +456,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 except ProcessLookupError:
                     pass
                 await proc.wait()
-                observation = SandboxObservation(
-                    role="agent",
-                    provider="apptainer",
-                    sandbox_id=sandbox_id,
-                    outcome="timeout",
-                    exit_code=proc.returncode,
-                    wall_time_s=time.perf_counter() - process_started_at,
-                    error_type="timeout",
-                )
-                if observation_collector is not None:
-                    observation_collector(observation)
                 raise TimeoutError(f"direct apptainer exec timed out for task {task_id}") from exc
 
-        return_code = proc.returncode or 0
-        observation = SandboxObservation(
-            role="agent",
-            provider="apptainer",
-            sandbox_id=sandbox_id,
-            outcome="completed" if return_code == 0 else "failed",
-            exit_code=return_code,
-            wall_time_s=time.perf_counter() - process_started_at,
-        )
-        if observation_collector is not None:
-            observation_collector(observation)
         stdout = stdout_path.read_text(errors="replace")[-4000:] if stdout_path.exists() else ""
         stderr = stderr_path.read_text(errors="replace")[-4000:] if stderr_path.exists() else ""
         if proc.returncode != 0 and not archive.exists():
@@ -547,7 +476,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         shutil.copy2(archive, out_dir / "out.tgz")
         with tarfile.open(out_dir / "out.tgz") as tf:
             tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
-        return observation
 
     # --- result parsing -----------------------------------------------------
     def _parse_result(self, task_id: str, out_dir: Path) -> dict:
@@ -637,17 +565,25 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 return 0
 
         for event in events:
-            message = event.get("message") or {}
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
             if message.get("role") != "assistant":
                 continue
-            usage = message.get("usage") or {}
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
             input_tokens += as_int(usage.get("input") or usage.get("input_tokens") or usage.get("prompt_tokens"))
             output_tokens += as_int(
                 usage.get("output") or usage.get("output_tokens") or usage.get("completion_tokens")
             )
             cached_tokens += as_int(usage.get("cacheRead"))
-            input_details = usage.get("input_tokens_details") or {}
-            output_details = usage.get("output_tokens_details") or {}
+            input_details = usage.get("input_tokens_details")
+            if not isinstance(input_details, dict):
+                input_details = {}
+            output_details = usage.get("output_tokens_details")
+            if not isinstance(output_details, dict):
+                output_details = {}
             cached_tokens += as_int(input_details.get("cached_tokens"))
             reasoning_tokens += as_int(usage.get("reasoning") or output_details.get("reasoning_tokens"))
 
@@ -686,7 +622,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             if event.get("type") != "message":
                 continue
 
-            message = event.get("message") or {}
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
             role = message.get("role")
             if role == "assistant":
                 reasoning = self._reasoning_text(message)
@@ -820,7 +758,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         transcript_events: list[dict[str, Any]],
         out_dir: Path,
         run_id: str,
-        sandbox_observation: Optional[SandboxObservation],
     ) -> AgentObservationBundle:
         try:
             transcript_available = any(event.get("type") == "message" for event in transcript_events)
@@ -862,7 +799,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                     tree_inputs.append((invocation_id, parent_id, invocation_conversation, events))
                 observations = build_openclaw_observation_tree(
                     tree_inputs,
-                    source="pinchbench",
                     model_ref=self.config.model_server,
                 )
             else:
@@ -876,35 +812,15 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                     transcript_conversation,
                     transcript_events,
                     transcript_available=transcript_available,
-                    source="pinchbench",
                     model_ref=self.config.model_server,
                 )
             observations.gaps.extend(tree_gaps)
         except Exception:
-            LOG.exception("failed to build PinchBench observations")
+            LOG.exception("failed to build OpenClaw observations")
             observations = AgentObservationBundle(
-                source="pinchbench",
+                source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed")],
             )
-
-        if sandbox_observation is not None:
-            if sandbox_observation.sandbox_id is not None:
-                for record in observations.records:
-                    if isinstance(record, ToolCallObservation) and record.sandbox_id is None:
-                        record.sandbox_id = sandbox_observation.sandbox_id
-            else:
-                observations.gaps.append(ObservationGap(code="sandbox_identity_unavailable"))
-            observations.records.append(sandbox_observation)
-            if sandbox_observation.cpu_time_s is None:
-                observations.gaps.append(ObservationGap(code="sandbox_cpu_time_unavailable"))
-            if sandbox_observation.peak_memory_mib is None:
-                observations.gaps.append(ObservationGap(code="sandbox_memory_usage_unavailable"))
-        else:
-            observations.gaps.append(ObservationGap(code="sandbox_observation_unavailable"))
-        if self.config.model_server is None:
-            observations.gaps.append(ObservationGap(code="policy_model_capture_unavailable"))
-        if self.config.judge_model_server is None:
-            observations.gaps.append(ObservationGap(code="judge_model_capture_unavailable"))
         return observations
 
     async def run(self, body: PinchBenchRunRequest = Body(), request: Request = None) -> PinchBenchVerifyResponse:
@@ -923,56 +839,21 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         transcript_events: list = []
         archive_path = ""
         observations: Optional[AgentObservationBundle] = None
-        sandbox_observation: Optional[SandboxObservation] = None
         rollout_id = self.rollout_id_from_run(body)
         observe = rollout_id is not None
-        sandbox_started: Optional[float] = None
-
-        def collect_sandbox_observation(value: SandboxObservation) -> None:
-            nonlocal sandbox_observation
-            sandbox_observation = value
 
         try:
             async with self._sem:
-                sandbox_started = time.perf_counter()
-                sandbox_observation = await self._run_in_sandbox(
+                await self._run_in_sandbox(
                     task_id,
                     out_dir,
                     rollout_id=rollout_id,
-                    observation_collector=collect_sandbox_observation,
                 )  # one sandbox per task
-                if sandbox_observation is not None and sandbox_observation.wall_time_s is None:
-                    sandbox_observation.wall_time_s = time.perf_counter() - sandbox_started
             result = self._parse_result(task_id, out_dir)
-            response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
+            response = self._response_from_transcript_events(task_id, transcript_events)
         except Exception as exc:  # noqa: BLE001 -- never 500; one task must not abort the whole collection (ng_collect is fail-fast)
             failure_class = _classify_task_failure(exc)
-            provider = self.config.sandbox_provider or {}
-            provider_name = next(iter(provider)) if len(provider) == 1 else None
-            if sandbox_observation is not None and sandbox_started is not None:
-                if sandbox_observation.wall_time_s is None:
-                    sandbox_observation.wall_time_s = time.perf_counter() - sandbox_started
-                if sandbox_observation.outcome == "unknown":
-                    if isinstance(exc, TimeoutError):
-                        sandbox_observation.outcome = "timeout"
-                    elif isinstance(exc, SandboxCreateError):
-                        sandbox_observation.outcome = "sandbox_error"
-                if sandbox_observation.error_type is None:
-                    sandbox_observation.error_type = type(exc).__name__
-            elif provider_name is not None and sandbox_started is not None:
-                outcome = "unknown"
-                if isinstance(exc, TimeoutError):
-                    outcome = "timeout"
-                elif isinstance(exc, SandboxCreateError):
-                    outcome = "sandbox_error"
-                sandbox_observation = SandboxObservation(
-                    role="agent",
-                    provider=provider_name,
-                    outcome=outcome,
-                    wall_time_s=time.perf_counter() - sandbox_started,
-                    error_type=type(exc).__name__,
-                )
             LOG.warning("[pinchbench-%s] %s: %s: %s", failure_class, task_id, type(exc).__name__, exc)
             result = {
                 "reward": 0.0,
@@ -994,7 +875,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                     transcript_events,
                     out_dir,
                     run_id,
-                    sandbox_observation,
                 )
             shutil.rmtree(out_dir, ignore_errors=True)
 
