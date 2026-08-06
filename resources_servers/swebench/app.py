@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
 from pydantic import BaseModel
+from swebench.harness.constants import END_TEST_OUTPUT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
@@ -91,6 +92,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
 # See resources_servers/swebench/swebench_patches.py
 class DockerContainer(BaseModel):
     id: str
+    instance_id: str
 
     _inner_container: AsyncSandbox
 
@@ -123,7 +125,17 @@ class DockerContainer(BaseModel):
                 timeout_s=timeout,
             )
             timed_out = False
-            test_output = (res.stdout or "") + (res.stderr or "")
+
+            stdout = res.stdout or ""
+            stderr = res.stderr or ""
+
+            # For RuboCop tests specifically, we interleave the stderr inside the start and end tags in the stdout for parsing reasons. See `get_logs_eval`
+            if "rubocop" in self.instance_id and START_TEST_OUTPUT in stderr:
+                start, middle_end = stderr.split(START_TEST_OUTPUT)
+                middle, end = middle_end.split(END_TEST_OUTPUT)
+                test_output = start + START_TEST_OUTPUT + stdout + middle + END_TEST_OUTPUT + end
+            else:
+                test_output = stdout + stderr
         except TimeoutError:
             # Gym Sandbox API will throw a timeout error on actual timeout.
             timed_out = True
@@ -244,7 +256,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             model_patch = model_patch_result.stdout
 
         run_id = request.session[SESSION_ID_KEY]
-        mock_container = DockerContainer(id=run_id)
+        mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
         mock_container._inner_container = eval_sandbox
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
