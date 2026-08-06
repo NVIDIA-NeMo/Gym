@@ -148,6 +148,27 @@ class _FetchParams(BaseModel):
     url: Annotated[str, Field(description="Full HTTP or HTTPS URL of the web page to fetch.")]
 
 
+# A markdown extraction this much smaller than the page it came from is usually a fragment,
+# not a short page. Observed on a real run: 313 characters returned for a 141 KB page (0.2%),
+# which the model consumed as if it were the whole page.
+_SUSPICIOUS_EXTRACTION_RATIO = 0.01
+_MIN_HTML_FOR_RATIO_CHECK = 20_000
+
+
+def _extract_page_text(html: str) -> str:
+    """Extract readable text from *html* as markdown, falling back to a bare pass.
+
+    The fallback matters because ``extract`` returning ``None`` is otherwise indistinguishable
+    from a genuinely empty page.
+    """
+    import trafilatura
+
+    extracted = trafilatura.extract(html, output_format="markdown")
+    if extracted and extracted.strip():
+        return extracted.strip()
+    return (trafilatura.extract(html, include_comments=True) or "").strip()
+
+
 async def _fetch_executor(
     params: _FetchParams,
     *,
@@ -163,9 +184,30 @@ async def _fetch_executor(
         )
         resp.raise_for_status()
 
-        import trafilatura
-
-        body_md = trafilatura.extract(resp.text, output_format="markdown") or ""
+        body_md = _extract_page_text(resp.text)
+        if not body_md:
+            # An empty <body> with no error reads to the model as "this page is blank",
+            # and it will happily reason on from nothing. Say what happened instead.
+            return ToolResult(
+                content=(
+                    f"<web_fetch><url>{params.url}</url>"
+                    f"<error>fetched {len(resp.text)} bytes but no readable text could be extracted; "
+                    f"the page is likely script-rendered. Try fetching a different URL, or retrieve it "
+                    f"inside code_exec if you need the raw markup.</error></web_fetch>"
+                ),
+                success=False,
+                metadata=ToolUseCountMetadata(),
+            )
+        if len(resp.text) >= _MIN_HTML_FOR_RATIO_CHECK and (
+            len(body_md) < _SUSPICIOUS_EXTRACTION_RATIO * len(resp.text)
+        ):
+            # Extraction succeeded but returned a sliver. Without saying so, the model treats
+            # the sliver as the whole page; with it, it can re-fetch the raw markup itself.
+            body_md = (
+                f"[extracted only {len(body_md)} characters of readable text from a "
+                f"{len(resp.text)}-byte page; this is likely a fragment, so re-fetch the raw "
+                f"markup inside code_exec if you need the rest]\n\n{body_md}"
+            )
         return ToolResult(
             content=f"<web_fetch><url>{params.url}</url><body>{truncate_msg(body_md, MAX_LENGTH)}</body></web_fetch>",
             metadata=ToolUseCountMetadata(),
