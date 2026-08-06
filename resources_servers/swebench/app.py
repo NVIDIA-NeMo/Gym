@@ -24,7 +24,7 @@ from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
 from docker.models.containers import ExecResult
-from nemo_gym import ROOT_DIR
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -201,7 +201,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         return eval_sandbox
 
     async def _apply_sandbox_patches(self, sandbox: AsyncSandbox) -> None:
-        base_path = ROOT_DIR / "responses_api_agents/swe_agents/maven_mirror"
+        base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
         settings_xml_path = base_path / "settings.xml"
         init_gradle_path = base_path / "init.gradle"
 
