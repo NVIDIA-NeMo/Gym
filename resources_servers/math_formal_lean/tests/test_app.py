@@ -209,6 +209,87 @@ theorem test : True := by
         assert verify_response.proof_status == "empty_generation"
 
     @pytest.mark.asyncio
+    async def test_gym_sandbox_backend_executes_via_async_sandbox(self):
+        """gym_sandbox path uses AsyncSandbox instead of Lean4SandboxClient."""
+        from uuid import uuid4
+
+        from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus, register_provider
+
+        provider_name = f"fake-lean-{uuid4().hex}"
+
+        class FakeLeanProvider:
+            last_exec_command = None
+
+            def __init__(self, **kwargs):
+                del kwargs
+
+            async def create(self, spec: SandboxSpec) -> SandboxHandle:
+                assert any(path.endswith("proof.lean") for path in (spec.files or {}))
+                return SandboxHandle(sandbox_id="lean-1", provider_name=provider_name, raw={})
+
+            async def exec(self, handle, command, **kwargs):
+                FakeLeanProvider.last_exec_command = command
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+            async def upload_file(self, handle, source_path, target_path):
+                return None
+
+            async def download_file(self, handle, source_path, target_path):
+                return None
+
+            async def status(self, handle):
+                return SandboxStatus.RUNNING
+
+            async def close(self, handle):
+                return None
+
+            async def aclose(self):
+                return None
+
+        register_provider(provider_name, FakeLeanProvider)
+
+        config = MathFormalLeanResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="math_formal_lean",
+            sandbox_backend="gym_sandbox",
+            sandbox_provider={provider_name: {}},
+            lean_proof_path="/sandbox/proof.lean",
+            lean_compile_command="lean {proof_path}",
+        )
+        server = MathFormalLeanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert server._sandbox_client is None
+
+        generation = "```lean4\ntheorem test : True := by\n  trivial\n```"
+        response = self._create_response(text=generation)
+        verify_request = MathFormalLeanVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "Prove True"}]
+            ),
+            response=response,
+            header="import Mathlib\n\n",
+            formal_statement="theorem test : True := by\n",
+        )
+        verify_response = await server.verify(verify_request)
+        assert verify_response.reward == 1.0
+        assert FakeLeanProvider.last_exec_command == "lean /sandbox/proof.lean"
+
+    def test_gym_sandbox_requires_provider(self):
+        with pytest.raises(ValueError, match="requires sandbox_provider"):
+            MathFormalLeanResourcesServer(
+                config=MathFormalLeanResourcesServerConfig(
+                    host="0.0.0.0",
+                    port=8080,
+                    entrypoint="",
+                    name="math_formal_lean",
+                    sandbox_backend="gym_sandbox",
+                    sandbox_provider=None,
+                ),
+                server_client=MagicMock(spec=ServerClient),
+            )
+
+    @pytest.mark.asyncio
     async def test_verify_builds_correct_proof(self, server):
         """Test that the proof is built correctly with header and formal statement."""
         captured_code = None
