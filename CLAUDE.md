@@ -144,3 +144,20 @@ git checkout -- resources_servers/other_server/
 
 - **Ray socket path length**: On systems with long working directory paths (e.g. Lustre mounts), Ray's AF_UNIX socket paths can exceed the 107-byte Linux limit. Fix: `RAY_TMPDIR=/tmp` before running tests or `ray.init()`.
 - **`ng_test` venv isolation**: `ng_test` creates isolated venvs per resources server. `os.environ` changes in Python don't propagate — set env vars externally (e.g. `RAY_TMPDIR=/tmp ng_test ...`).
+
+## This fork & sibling repos
+
+This is a personal fork of NVIDIA NeMo Gym (`NVIDIA-NeMo/Gym`). The fork's own
+contribution is the **`sc_bench` (SupChain-Bench) resources server**
+(`resources_servers/sc_bench/`, `benchmarks/sc_bench/`) plus baseline rollouts,
+and gdpval support (`resources_servers/gdpval/`, `benchmarks/gdpval/`,
+`responses_api_agents/stirrup_agent/`).
+
+- `../SC-bench` (sibling repo in the transpira workspace) is the upstream data
+  source: its `scripts/convert_to_nemo_gym.py` produces the JSONL that
+  `benchmarks/sc_bench/prepare.py` consumes.
+- `../gdpval-bench` is the HUD-environment counterpart of the gdpval benchmark
+  here.
+- Model calls and MLflow tracking route through the HUD platform
+  (`inference.hud.ai`, `mlflow.hud.ai`) via `env.yaml` (gitignored — keep
+  secrets out of commits).
