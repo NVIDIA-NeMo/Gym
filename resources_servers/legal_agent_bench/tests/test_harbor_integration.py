@@ -714,6 +714,21 @@ def test_deliverable_matching_ignores_thread_export() -> None:
     ) == {"contract": "final-contract.docx"}
 
 
+def test_full_output_ignores_raw_ooxml_working_files(monkeypatch, tmp_path) -> None:
+    output_dir = tmp_path / "output"
+    (output_dir / "workdir" / "word" / "_rels").mkdir(parents=True)
+    (output_dir / "response.docx").write_bytes(b"placeholder")
+    (output_dir / "workdir" / "word" / "document.xml").write_text("raw document xml")
+    (output_dir / "workdir" / "word" / "_rels" / "document.xml.rels").write_text("raw relationships")
+    monkeypatch.setattr(lab_scoring, "_read_file_as_text", lambda path: f"content:{path.name}")
+
+    content = lab_scoring._load_all_output(output_dir)
+
+    assert "content:response.docx" in content
+    assert "document.xml" not in content
+    assert "document.xml.rels" not in content
+
+
 def test_parallel_judging_uses_isolated_judges_and_preserves_order(tmp_path) -> None:
     output_dir = tmp_path / "run" / "output"
     output_dir.mkdir(parents=True)
