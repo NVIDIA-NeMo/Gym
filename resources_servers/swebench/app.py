@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Optional, Tuple
@@ -250,9 +251,15 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
+            # Stop both sandboxes even when patch extraction fails, else a dead
+            # backend leaks them until their multi-hour TTL.
             original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
-            original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
-            model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
+            try:
+                original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
+                model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
+            except BaseException:
+                await asyncio.gather(original_sandbox.stop(), eval_sandbox.stop(), return_exceptions=True)
+                raise
             await original_sandbox.stop()
             model_patch = model_patch_result.stdout
 

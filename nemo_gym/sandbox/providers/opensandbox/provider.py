@@ -52,6 +52,15 @@ class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
 
 
+class SandboxBackendUnreachableError(RuntimeError):
+    """Raised when the server proxy cannot open a TCP connection to a sandbox's exec daemon.
+
+    The proxy's 502 is a connect failure, so the submitted command never
+    started. Persistent 502s mean the backend is gone (e.g. the container was
+    OOM-killed and sandbox pods never restart); retrying cannot revive it.
+    """
+
+
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRYABLE_ERROR_MARKERS = (
     "all connection attempts failed",
@@ -261,13 +270,17 @@ def _log_create_retry(retry_state: Any) -> None:
     )
 
 
-def _log_operation_retry(retry_state: Any) -> None:
+def _log_operation_retry(retry_state: Any, *, operation: str = "?", sandbox_id: str = "?") -> None:
+    # operation + sandbox_id make an absorbed create-probe retry distinguishable
+    # from a failing agent exec; without them every 502 retry looks identical.
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
     LOGGER.warning(
-        "Retrying OpenSandbox SDK operation after attempt %s; next_sleep_s=%s; error=%r",
+        "Retrying OpenSandbox SDK operation after attempt %s; next_sleep_s=%s; operation=%s; sandbox_id=%s; error=%r",
         retry_state.attempt_number,
         sleep_s,
+        operation,
+        sandbox_id,
         exception,
     )
 
@@ -730,7 +743,7 @@ class OpenSandboxProvider:
         max_attempts = retry_count + 1
 
         def _before_sleep(retry_state: Any) -> None:
-            _log_operation_retry(retry_state)
+            _log_operation_retry(retry_state, operation=operation, sandbox_id=sandbox_id)
 
         retry_policy = AsyncRetrying(
             retry=retry_if_exception(_is_retryable_sdk_operation_error),
@@ -752,6 +765,59 @@ class OpenSandboxProvider:
                 )
 
         raise RuntimeError("OpenSandbox SDK operation retry loop did not run")
+
+    async def _submit_command(
+        self,
+        operation_factory: Callable[[], Awaitable[Any]],
+        *,
+        operation: str,
+        sandbox_id: str,
+        timeout_s: float | None,
+        retries: int,
+    ) -> Any:
+        """Submit a command, absorbing backend-connect 502s the command retries skip.
+
+        The proxy's 502 is a TCP-connect failure — the command never reached
+        execd — so retrying cannot run it twice even when ``command_retries``
+        is 0. This covers the ~2s execd bind window after a pod first reports
+        Running. A backend that stays unreachable through the budget is dead
+        (sandbox containers never restart), so fail fast and typed rather
+        than retrying for hours.
+        """
+        attempts = self._operations.retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._await_sdk_operation(
+                    operation_factory,
+                    operation=operation,
+                    sandbox_id=sandbox_id,
+                    timeout_s=timeout_s,
+                    retries=retries,
+                )
+            except Exception as e:
+                if _exception_status_code(e) != 502:
+                    raise
+                if attempt == attempts:
+                    raise SandboxBackendUnreachableError(
+                        f"Sandbox backend unreachable through {attempts} submissions of "
+                        f"{operation!r} (proxy 502: no TCP connection to execd); the sandbox "
+                        f"is likely dead; sandbox_id={sandbox_id!r}"
+                    ) from e
+                sleep_s = min(
+                    self._operations.retry_delay_s * (2 ** (attempt - 1)),
+                    self._operations.retry_max_delay_s,
+                )
+                LOGGER.warning(
+                    "Backend-connect 502 on %s; retrying submission %s/%s in %.1fs; sandbox_id=%s",
+                    operation,
+                    attempt,
+                    attempts,
+                    sleep_s,
+                    sandbox_id,
+                )
+                await asyncio.sleep(sleep_s)
+
+        raise RuntimeError("OpenSandbox command submission retry loop did not run")
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
         if self._probe.command is None:
@@ -1061,7 +1127,7 @@ class OpenSandboxProvider:
                     retries=effective_retries,
                 )
 
-            execution = await self._await_sdk_operation(
+            execution = await self._submit_command(
                 lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
                 operation="command run",
                 sandbox_id=handle.sandbox_id,
@@ -1118,7 +1184,7 @@ class OpenSandboxProvider:
         background_opts = dict(opts_kwargs)
         background_opts["background"] = True
 
-        execution = await self._await_sdk_operation(
+        execution = await self._submit_command(
             lambda: handle.raw.commands.run(command, opts=RunCommandOpts(**background_opts)),
             operation="command run (background submit)",
             sandbox_id=handle.sandbox_id,

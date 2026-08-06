@@ -1008,7 +1008,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)
-                except Exception:
+                except Exception as e:
                     if is_global_aiohttp_client_request_debug_enabled():
                         print(
                             "[rollout_collection] /run failed "
@@ -1016,7 +1016,14 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                             flush=True,
                         )
-                    raise
+                    # One failed rollout must not abort the whole collection.
+                    # Record it as a failure-class result: it lands in the
+                    # failures sidecar and is retried on resume like any other
+                    # failed rollout, instead of crashing a multi-hour run.
+                    return row, {
+                        NG_FAILURE_CLASS_KEY: "run_request_failed",
+                        "error": f"{type(e).__name__}: {e}",
+                    }
                 return row, await get_response_json(res)
 
         return tqdm.as_completed(
