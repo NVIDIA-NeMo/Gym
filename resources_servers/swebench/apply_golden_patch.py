@@ -45,7 +45,7 @@ async def main(examples: list) -> None:
         resolved_pct = 100 * num_resolved / num_total
         pbar.set_description_str(desc=f"Resolved: {num_resolved} / {num_total} ({resolved_pct:.2f}%)")
         pbar.update(1)
-        f.write(json.dumps(data) + "\n")
+        write_file.write(json.dumps(data) + "\n")
     write_file.close()
 
 
