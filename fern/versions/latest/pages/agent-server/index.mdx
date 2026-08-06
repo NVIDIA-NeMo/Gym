@@ -6,7 +6,7 @@ position: 1
 
 An environment integrates four independent components: a dataset, an agent harness, a verifier, and per-task state. The Agent server is where the harness lives.
 
-A harness decides how a model interacts with the world: how many turns it gets, what its system prompt says, which tools it can reach, how tool results are fed back, when it stops, and what scaffolding (planning, compaction, sub-agents) sits between the model and the task. The Agent server does not run an LLM itself. It is orchestration code that delegates text generation to the Model server and tool execution, state, and scoring to the Resources server.
+A harness controls how the model interacts with the environment: the number of turns, the system prompt, which tools are available, how tool results are fed back, the stopping condition, and any scaffolding such as planning, compaction, or sub-agents. The Agent server does not run an LLM itself. It is orchestration code that delegates text generation to the Model server and tool execution, state, and scoring to the Resources server.
 
 ## Why the Harness Is Its Own Server
 
@@ -55,13 +55,13 @@ class Agent:
         return conversation
 ```
 
-An Agent server built on an external harness replaces the inner interaction loop with the policy model, which the harness supplies. The episode orchestration is unchanged: NeMo Gym seeds the session, verifies the finished trajectory, and reports the reward.
+In an Agent server built on an external harness, the harness supplies the interaction loop with the policy model. The episode orchestration is unchanged: NeMo Gym seeds the session, verifies the finished trajectory, and reports the reward.
 
 ## Choosing an Agent Server to Implement Your Agent
 
-There are three options, and what separates the first two is who implements the agent, not where the code lives — both ship in the NeMo Gym repo.
+There are three options. The first two differ by who implements the agent, not by where the code lives — both ship in the NeMo Gym repo.
 
-Use an agent server with a Gym-native implementation: `simple_agent` handles multi-step tool calling in any environment. Use an agent server that runs a third-party harness — a coding CLI, an agent framework, or a benchmark's own scaffold — where the harness owns the loop and the agent server adapts its output to NeMo Gym. Either way you write configuration, not code. The third option is `remote_agent`: keep the agent in your own repo, expose an endpoint that follows the OpenAI Responses contract, and let NeMo Gym drive the loop against that endpoint.
+Use an agent server with a Gym-native implementation, such as `simple_agent` for multi-step tool calling. Use an agent server that runs a third-party harness — a coding CLI, an agent framework, or a benchmark's own scaffold — where the harness owns the loop and the agent server translates its output. Both take configuration, not code. Third, use `remote_agent`: keep the agent in your own repo, expose an endpoint that follows the OpenAI Responses contract, and NeMo Gym drives the loop against that endpoint.
 
 <Cards>
 
