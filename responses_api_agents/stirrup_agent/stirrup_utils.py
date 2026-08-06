@@ -92,6 +92,20 @@ def convert_stirrup_history_to_output_items(
     input_items: list = []
     output_items: list = []
 
+    # Some serving layers mint tool_call_id per turn (e.g. "code_exec:0"), so the same id
+    # recurs every turn and a trajectory ends up with many function_call / function_call_output
+    # pairs sharing one call_id. Anything that later pairs them by id -- replay, training,
+    # trajectory analysis -- then silently attributes the wrong output to a call. Disambiguate
+    # by occurrence: the nth call and the nth output for a given raw id get the same suffix, so
+    # pairing is preserved while ids become unique within the response. The first occurrence
+    # keeps the raw id, so a trajectory that never repeats one is unchanged.
+    call_seq: dict[str, int] = {}
+    output_seq: dict[str, int] = {}
+
+    def _disambiguate(raw: str, seen: dict[str, int]) -> str:
+        seen[raw] = seen.get(raw, 0) + 1
+        return raw if seen[raw] == 1 else f"{raw}#{seen[raw]}"
+
     for turn in history:
         for msg in turn:
             if isinstance(msg, SystemMessage):
@@ -106,7 +120,7 @@ def convert_stirrup_history_to_output_items(
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 output_items.append(
                     NeMoGymFunctionCallOutput(
-                        call_id=msg.tool_call_id,
+                        call_id=_disambiguate(msg.tool_call_id, output_seq),
                         output=content,
                         type="function_call_output",
                     )
@@ -153,7 +167,7 @@ def convert_stirrup_history_to_output_items(
                             NeMoGymResponseFunctionToolCall(
                                 id=f"fc-{uuid.uuid4().hex[:8]}",
                                 arguments=tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments),
-                                call_id=call_id,
+                                call_id=_disambiguate(call_id, call_seq),
                                 name=tc.name,
                                 type="function_call",
                                 status="completed",
@@ -165,7 +179,7 @@ def convert_stirrup_history_to_output_items(
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 output_items.append(
                     NeMoGymFunctionCallOutput(
-                        call_id=call_id,
+                        call_id=_disambiguate(call_id, output_seq),
                         output=content,
                         type="function_call_output",
                     )
