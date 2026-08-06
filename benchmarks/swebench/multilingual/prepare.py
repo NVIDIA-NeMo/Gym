@@ -41,7 +41,7 @@ def prepare():
                         }
                     ],
                 },
-                "subset": "verified",
+                "subset": "multilingual",
                 "split": "test",
             }
             # Minor tweaks on the formatting to match that of SWE Bench

@@ -41,7 +41,7 @@ def prepare():
                         }
                     ],
                 },
-                "subset": "verified",
+                "subset": "pro",
                 "split": "test",
             }
             fout.write(json.dumps(row) + "\n")
