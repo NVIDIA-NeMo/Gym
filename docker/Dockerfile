@@ -24,7 +24,6 @@ FROM ${BASE_IMAGE} AS base
 ENV NEMO_GYM_CONTAINER=1
 USER root
 
-ARG ENROOT_VERSION=3.5.0
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TZ=America/Los_Angeles
@@ -40,13 +39,12 @@ apt-get install -y --no-install-recommends \
     less \
     vim
 
-# Install enroot for the EnrootProvider sandbox backend.
-# The .deb pulls in required runtime deps (parallel, squashfs-tools, etc.) automatically.
-arch=$(dpkg --print-architecture)
-curl -fSsL -o /tmp/enroot.deb \
-    "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot_${ENROOT_VERSION}-1_${arch}.deb"
-apt-get install -y /tmp/enroot.deb
-rm /tmp/enroot.deb
+# Install enroot for the EnrootProvider sandbox backend via NVIDIA CUDA apt repo.
+apt-get install -y --no-install-recommends gnupg
+echo "deb http://developer.download.nvidia.com/compute/cuda/repos/ubuntu$(source /etc/lsb-release; echo "$DISTRIB_RELEASE" | tr -d .)/$(dpkg --print-architecture) /" | tee /etc/apt/sources.list.d/nvidia-cuda.list
+apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/$(uname -m | sed 's/aarch64/sbsa/')/7fa2af80.pub
+apt-get update
+apt-get install -y enroot
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
