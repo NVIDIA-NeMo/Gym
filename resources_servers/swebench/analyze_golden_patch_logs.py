@@ -37,16 +37,17 @@ for path in glob("resources_servers/swebench/logs/run_evaluation/**/report.json"
         }
     )
 
-    relative_report_path = path.relative_to("resources_servers/swebench/logs/run_evaluation")
-    session_id = relative_report_path.parts[0]
-    copytree(
-        src=Path("resources_servers/swebench/logs/run_evaluation") / session_id,
-        dst=failed_sample_dirpath / session_id,
-        dirs_exist_ok=True,
-    )
-    row = instance_id_to_row[instance_id]
-    sample_path = (failed_sample_dirpath / relative_report_path).parent / "sample.json"
-    sample_path.write_text(json.dumps(row, indent=4))
+    if not report[instance_id]["resolved"]:
+        relative_report_path = path.relative_to("resources_servers/swebench/logs/run_evaluation")
+        session_id = relative_report_path.parts[0]
+        copytree(
+            src=Path("resources_servers/swebench/logs/run_evaluation") / session_id,
+            dst=failed_sample_dirpath / session_id,
+            dirs_exist_ok=True,
+        )
+        row = instance_id_to_row[instance_id]
+        sample_path = (failed_sample_dirpath / relative_report_path).parent / "sample.json"
+        sample_path.write_text(json.dumps(row, indent=4))
 
     seen_instance_ids.append(instance_id)
     if not report[instance_id]["resolved"]:
