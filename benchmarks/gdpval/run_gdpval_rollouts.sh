@@ -93,7 +93,9 @@ CONTEXT_WINDOW="${GDPVAL_CONTEXT_WINDOW:-262144}"
 TEMPERATURE="${GDPVAL_TEMPERATURE:-1.0}"
 TOP_P="${GDPVAL_TOP_P:-0.95}"
 ENABLE_THINKING="${GDPVAL_ENABLE_THINKING:-true}"
-# Must match what slurm/bootstrap_gdpval_runtime.sh writes.
+# A prebuilt component-venv tree with a READY marker, laid down out of band. Point
+# GDPVAL_COMPONENT_VENV_ROOT and GDPVAL_RUNTIME_READY_MARKER at yours; the runner only
+# reads them, it never creates them.
 BOOT_ROOT="${GDPVAL_BOOT_ROOT:-${STAGING_ROOT}/bootstrap}"
 COMPONENT_VENV_ROOT="${GDPVAL_COMPONENT_VENV_ROOT:-${BOOT_ROOT}/venvs}"
 UV_CACHE_DIR="${GDPVAL_UV_CACHE_DIR:-${BOOT_ROOT}/uv-cache}"
@@ -128,7 +130,7 @@ Actions:
   validate     Validate any existing smoke/full artifacts without launching models.
 
 Set GDPVAL_ENV_FILE to a private (chmod 600) environment file based on
-benchmarks/gdpval/gdpval_rollout.env.example. No judge credentials are used:
+benchmarks/gdpval/datasets/example.env. No judge credentials are used:
 the server is always started with EXECUTE_ONLY=true.
 EOF
 }
