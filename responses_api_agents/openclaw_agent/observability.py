@@ -18,11 +18,11 @@ from nemo_gym.rollout_observability import (
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
-    model_visible_tool_calls,
 )
 
 
 OpenClawSessionTree = list[tuple[str, str | None, list[dict[str, Any]]]]
+_MILLISECOND_EPOCH_THRESHOLD = 100_000_000_000
 
 
 def _read_events(path: Path) -> list[dict[str, Any]]:
@@ -186,10 +186,18 @@ def build_openclaw_observation_tree(
             prefer_native_session_id=False,
             model_ref=model_ref,
         )
-        invocation = next(record for record in bundle.records if isinstance(record, AgentInvocation))
+        combined.gaps.extend(gap for gap in bundle.gaps if gap.code != "subagent_hierarchy_unavailable")
+        invocation = next((record for record in bundle.records if isinstance(record, AgentInvocation)), None)
+        if invocation is None:
+            combined.gaps.append(
+                ObservationGap(
+                    code="agent_invocation_unavailable",
+                    invocation_id=invocation_id,
+                )
+            )
+            continue
         invocation.parent_invocation_id = parent_id
         combined.records.extend(bundle.records)
-        combined.gaps.extend(gap for gap in bundle.gaps if gap.code != "subagent_hierarchy_unavailable")
         if parent_id is not None:
             combined.gaps.append(
                 ObservationGap(
@@ -204,7 +212,8 @@ def _timestamp(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)) and isfinite(value) and value >= 0:
-        return float(value) / 1000 if value >= 100_000_000_000 else float(value)
+        # Current Unix timestamps are ~1e9 seconds or ~1e12 milliseconds.
+        return float(value) / 1000 if value >= _MILLISECOND_EPOCH_THRESHOLD else float(value)
     if isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -212,6 +221,21 @@ def _timestamp(value: Any) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _model_visible_tool_calls(
+    conversation: Iterable[NeMoGymResponseInputItem],
+) -> list[tuple[str, str | None]]:
+    """Return model-visible call IDs and tool names."""
+
+    def field(item: Any, name: str) -> Any:
+        return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+    return [
+        (call_id, field(item, "name"))
+        for item in conversation
+        if field(item, "type") == "function_call" and isinstance((call_id := field(item, "call_id")), str) and call_id
+    ]
 
 
 def _has_conversation_branches(events: Iterable[dict[str, Any]]) -> bool:
@@ -288,11 +312,9 @@ def build_openclaw_observations(
         )
 
     bundle.gaps = [gap for gap in bundle.gaps if gap.code != "context_compaction_unavailable"]
-    visible_tools = model_visible_tool_calls(conversation)
-    tool_counts = Counter(call_id for call_id, _, _ in visible_tools)
-    tool_metadata = {
-        call_id: (tool_name, status) for call_id, tool_name, status in visible_tools if tool_counts[call_id] == 1
-    }
+    visible_tools = _model_visible_tool_calls(conversation)
+    tool_counts = Counter(call_id for call_id, _ in visible_tools)
+    tool_metadata = {call_id: tool_name for call_id, tool_name in visible_tools if tool_counts[call_id] == 1}
     for call_id, count in tool_counts.items():
         if count > 1:
             bundle.gaps.append(
@@ -322,7 +344,7 @@ def build_openclaw_observations(
                 )
                 continue
 
-            tool_name, _ = tool_metadata[call_id]
+            tool_name = tool_metadata[call_id]
             tool = ToolCallObservation(
                 invocation_id=invocation_id,
                 tool_call_id=call_id,

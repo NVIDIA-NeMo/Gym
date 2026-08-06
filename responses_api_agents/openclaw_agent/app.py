@@ -21,6 +21,7 @@ import os
 import shlex
 import shutil
 from asyncio import Semaphore
+from collections.abc import Mapping
 from pathlib import Path
 from time import time
 from typing import Any, Callable, ClassVar, Optional
@@ -54,8 +55,6 @@ from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentObservationBundle,
     ObservationGap,
-    pop_response_observations,
-    response_with_observations,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.openclaw_agent.observability import (
@@ -68,6 +67,7 @@ from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 
 LOG = logging.getLogger(__name__)
+_INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 def _decode_last_json_dict_suffix(raw: str) -> Optional[dict[str, Any]]:
@@ -107,7 +107,7 @@ def _text_from_openclaw_payloads(envelope: dict[str, Any]) -> str:
 def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
     envelope = _decode_last_json_dict_suffix(stdout)
     if not envelope:
-        return [], {"input_tokens": 0, "output_tokens": 0}
+        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
 
     text = _text_from_openclaw_payloads(envelope)
     output_items: list[Any] = []
@@ -128,7 +128,11 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
     cache_read = int(usage.get("cacheRead") or 0)
     input_tokens = int(usage.get("input") or 0) + cache_read
     output_tokens = int(usage.get("output") or 0)
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cache_read,
+    }
 
 
 def parse_openclaw_session_items(events: list[dict[str, Any]], *, include_input: bool = False) -> list[Any]:
@@ -614,6 +618,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
+        cached_tokens = usage.get("cached_tokens", 0)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -626,7 +631,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
@@ -638,19 +643,21 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        rollout_id = request.path_params.get("rollout_id") if request is not None else None
-        if rollout_id is None:
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        if not isinstance(rollout_id, str):
             return await self._create_response(body)
-        return response_with_observations(await self.responses_with_observations(request, body, rollout_id=rollout_id))
+        episode = await self._create_episode(body, rollout_id=rollout_id)
+        return episode.response.model_copy(
+            update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
+        )
 
-    async def responses_with_observations(
+    async def _create_episode(
         self,
-        request: Optional[Request],
         body: NeMoGymResponseCreateParamsNonStreaming,
-        rollout_id: Optional[str] = None,
+        *,
+        rollout_id: str,
     ) -> AgentEpisode:
-        if rollout_id is None and request is not None:
-            rollout_id = request.path_params.get("rollout_id")
         session_id: Optional[str] = None
         session_events: list[dict[str, Any]] = []
         session_tree: OpenClawSessionTree = []
@@ -743,7 +750,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
-            observations = pop_response_observations(agent_resp_json)
+            raw_observations = (
+                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
+            )
+            observations = (
+                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
+            )
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,

@@ -637,6 +637,48 @@ async def test_download_failure_preserves_managed_sandbox_exec_observation(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_managed_sandbox_timeout_is_terminal(tmp_path, monkeypatch):
+    agent = make_agent(
+        work_root=str(tmp_path / "work"),
+        transcripts_dir=str(tmp_path / "archive"),
+        sandbox_provider={"opensandbox": {}},
+    )
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+
+    class TimedOutSandbox:
+        sandbox_id = "sandbox-1"
+        download_called = False
+
+        async def start(self, spec):
+            return None
+
+        async def exec(self, command, timeout_s):
+            return SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout")
+
+        async def download(self, source, target):
+            self.download_called = True
+
+        async def resource_usage(self):
+            return SandboxResourceUsage(wall_time_s=4.0, source="test")
+
+        async def stop(self):
+            return None
+
+    sandbox = TimedOutSandbox()
+    monkeypatch.setattr("responses_api_agents.pinchbench.app.AsyncSandbox", lambda config: sandbox)
+
+    result = await agent.run(body=_observed_run_body())
+
+    dumped = result.model_dump()
+    assert dumped[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+    assert dumped[NG_TERMINAL_KEY] is True
+    [observation] = _records(result.ng_agent_observations, SandboxObservation)
+    assert observation.outcome == "timeout"
+    assert observation.error_type == "timeout"
+    assert sandbox.download_called is False
+
+
+@pytest.mark.asyncio
 async def test_missing_direct_archive_preserves_process_observation(tmp_path, monkeypatch):
     agent = make_agent(
         work_root=str(tmp_path / "work"),
@@ -749,6 +791,38 @@ async def test_observation_failure_does_not_change_result(tmp_path, monkeypatch)
     observations = result.ng_agent_observations
     assert observations is not None
     assert observations.source == "pinchbench"
+    assert [gap.code for gap in observations.gaps] == [
+        "observation_capture_failed",
+        "sandbox_cpu_time_unavailable",
+        "sandbox_memory_usage_unavailable",
+        "policy_model_capture_unavailable",
+        "judge_model_capture_unavailable",
+    ]
+
+
+def test_build_observations_handles_parser_failure(tmp_path, monkeypatch):
+    agent = make_agent()
+    monkeypatch.setattr(
+        "responses_api_agents.pinchbench.app.build_openclaw_observations",
+        MagicMock(side_effect=RuntimeError("observer failed")),
+    )
+    sandbox = SandboxObservation(
+        role="agent",
+        provider="opensandbox",
+        sandbox_id="sandbox-1",
+        outcome="completed",
+        exit_code=0,
+    )
+
+    observations = agent._build_observations(
+        _observed_run_body(),
+        agent._empty_response("task_x"),
+        [],
+        tmp_path,
+        "run-1",
+        sandbox,
+    )
+
     assert [gap.code for gap in observations.gaps] == [
         "observation_capture_failed",
         "sandbox_cpu_time_unavailable",
