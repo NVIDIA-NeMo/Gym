@@ -22,15 +22,19 @@
 # dataset and prepare script resolve relative to your working directory. Results
 # land in ./results/browsecomp.
 #
-#   ./browsecomp.sh                          # full benchmark
+#   ./browsecomp.sh                          # full benchmark (1266 tasks x 1)
 #   LIMIT=3 ./browsecomp.sh                  # quick smoke
 #   OUT=<dir> PARALLEL=<n> ./browsecomp.sh   # output dir, concurrency
+
+# Runs all 1266 problems. Unset for prepare.py's default 400-problem subset.
+export BROWSECOMP_RUN_FULL=1
 
 # Used judge: GLM-5.1
 BROWSECOMP_JUDGE_MODEL="${BROWSECOMP_JUDGE_MODEL:?}"
 TAVILY_API_KEY="${TAVILY_API_KEY:?export TAVILY_API_KEY (one key, or [k1,k2] for several)}"
 
-# The domain list search skips.
+# The domain list search skips. Which domains are on it changes search coverage,
+# so results shift if you swap in a different list.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXCLUDE_JSON="${EXCLUDE_JSON:-$HERE/exclude_domains.json}"
 [ -r "$EXCLUDE_JSON" ] || { echo "exclude list not readable at $EXCLUDE_JSON" >&2; exit 1; }
