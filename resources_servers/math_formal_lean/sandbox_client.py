@@ -148,7 +148,7 @@ class Lean4SandboxClient:
             return False
 
 
-class OpenSandboxLean4Client:
+class GymSandboxLean4Client:
     """Lean4 compilation on per-verify OpenSandbox pods via provider exec.
 
     Reimplements the NS server's lean4 invocation exactly (reference frozen at
@@ -184,11 +184,11 @@ class OpenSandboxLean4Client:
         prefetch_paths: str = "/root/.elan /lean4",
     ):
         if not image:
-            raise ValueError("sandbox_backend=opensandbox requires a non-empty image")
+            raise ValueError("sandbox_backend=gym_sandbox requires a non-empty image")
         connection = (next(iter(provider.values()), {}) or {}).get("connection", {}) if provider else {}
         if not connection.get("domain") or not connection.get("api_key"):
             raise ValueError(
-                "sandbox_backend=opensandbox requires provider connection domain/api_key — "
+                "sandbox_backend=gym_sandbox requires provider connection domain/api_key — "
                 "set OPENSANDBOX_BASE_URL / OPENSANDBOX_API_KEY"
             )
         self._provider = provider

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for the opensandbox_pool sandbox backend. No network, no cell access:
+"""Unit tests for the sandbox_pool sandbox backend. No network, no cell access:
 routing/eviction logic is driven directly, the transport via a fake aiohttp session."""
 
 import asyncio
@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from osb_pool import OpenSandboxPool  # noqa: E402
+from sandbox_pool import SandboxPool  # noqa: E402
 
 
 PROVIDER = {
@@ -36,13 +36,13 @@ PROVIDER = {
 }
 
 
-def _pool(**overrides) -> OpenSandboxPool:
+def _pool(**overrides) -> SandboxPool:
     kwargs = dict(provider=PROVIDER, image="img", size=2)
     kwargs.update(overrides)
-    return OpenSandboxPool(**kwargs)
+    return SandboxPool(**kwargs)
 
 
-def _admit(pool: OpenSandboxPool, index: int) -> None:
+def _admit(pool: SandboxPool, index: int) -> None:
     slot = pool._slots[index]
     slot.base_url = f"http://elb.example/v1/sandboxes/sbx-{index}/proxy/6000"
     slot.headers = {"OPEN-SANDBOX-API-KEY": "k"}
@@ -54,16 +54,16 @@ class TestPoolConfigValidation:
     def test_empty_domain_is_a_hard_error(self):
         bad = {"opensandbox": {"connection": {"domain": "", "api_key": "k"}}}
         with pytest.raises(ValueError, match="OPENSANDBOX_BASE_URL"):
-            OpenSandboxPool(provider=bad, image="img")
+            SandboxPool(provider=bad, image="img")
 
     def test_empty_api_key_is_a_hard_error(self):
         bad = {"opensandbox": {"connection": {"domain": "http://elb", "api_key": ""}}}
         with pytest.raises(ValueError, match="OPENSANDBOX_API_KEY"):
-            OpenSandboxPool(provider=bad, image="img")
+            SandboxPool(provider=bad, image="img")
 
     def test_empty_image_is_a_hard_error(self):
         with pytest.raises(ValueError, match="NS_SANDBOX_IMAGE"):
-            OpenSandboxPool(provider=PROVIDER, image="")
+            SandboxPool(provider=PROVIDER, image="")
 
     def test_ctor_is_pure_no_event_loop_required(self):
         # Constructing outside any running loop must work (pure ctor rule).
@@ -177,9 +177,9 @@ class TestSandboxBackend:
     @pytest.fixture()
     def backend(self):
         pytest.importorskip("nemo_skills")
-        import osb_sandbox
+        import gym_sandbox
 
-        sandbox = osb_sandbox.OpenSandboxPoolSandbox(
+        sandbox = gym_sandbox.GymSandbox(
             pool=dict(provider=PROVIDER, image="img", size=1),
             host="127.0.0.1",
             port="6000",
@@ -190,10 +190,10 @@ class TestSandboxBackend:
 
     def test_backend_registers_with_the_nemo_skills_registry(self):
         pytest.importorskip("nemo_skills")
-        import osb_sandbox
+        import gym_sandbox
         from nemo_skills.code_execution.sandbox import sandboxes
 
-        assert sandboxes["opensandbox_pool"] is osb_sandbox.OpenSandboxPoolSandbox
+        assert sandboxes["sandbox_pool"] is gym_sandbox.GymSandbox
 
     def test_send_request_routes_with_pool_headers_and_session(self, backend):
         ok = '{"process_status": "completed", "stdout": "", "stderr": ""}'
@@ -289,9 +289,9 @@ class TestHealWarmupRace:
 
 class TestEnvStringify:
     def test_env_values_are_stringified(self):
-        from osb_pool import OpenSandboxPool
+        from sandbox_pool import SandboxPool
 
-        pool = OpenSandboxPool(
+        pool = SandboxPool(
             provider={"opensandbox": {"connection": {"domain": "http://elb", "api_key": "k"}}},
             image="img:tag",
             env={"NUM_WORKERS": 4, "FLAG": True},
@@ -304,7 +304,7 @@ class TestPoolRefFallback:
     """pool_ref acquire semantics — SDK required (create is monkeypatched, no network)."""
 
     def _pool(self, **overrides):
-        from osb_pool import OpenSandboxPool
+        from sandbox_pool import SandboxPool
 
         kwargs = dict(
             provider={"opensandbox": {"connection": {"domain": "http://elb", "api_key": "k"}}},
@@ -314,7 +314,7 @@ class TestPoolRefFallback:
             service_command="sh -c 'start & echo ok'",
         )
         kwargs.update(overrides)
-        return OpenSandboxPool(**kwargs)
+        return SandboxPool(**kwargs)
 
     def test_pool_full_falls_back_to_direct_create(self, monkeypatch):
         opensandbox = pytest.importorskip("opensandbox")

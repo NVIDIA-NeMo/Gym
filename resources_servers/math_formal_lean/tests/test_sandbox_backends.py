@@ -28,8 +28,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from resources_servers.math_formal_lean.sandbox_client import (  # noqa: E402
+    GymSandboxLean4Client,
     Lean4SandboxClient,
-    OpenSandboxLean4Client,
 )
 
 
@@ -109,21 +109,21 @@ def fake_sandbox(monkeypatch):
     return _FakeSandbox
 
 
-def _client(**overrides) -> OpenSandboxLean4Client:
+def _client(**overrides) -> GymSandboxLean4Client:
     kwargs = dict(provider=PROVIDER, image="lean-img")
     kwargs.update(overrides)
-    return OpenSandboxLean4Client(**kwargs)
+    return GymSandboxLean4Client(**kwargs)
 
 
-class TestOpenSandboxLean4Client:
+class TestGymSandboxLean4Client:
     def test_empty_image_is_a_hard_error(self):
         with pytest.raises(ValueError, match="image"):
-            OpenSandboxLean4Client(provider=PROVIDER, image="")
+            GymSandboxLean4Client(provider=PROVIDER, image="")
 
     def test_empty_creds_is_a_hard_error(self):
         bad = {"opensandbox": {"connection": {"domain": "", "api_key": ""}}}
         with pytest.raises(ValueError, match="OPENSANDBOX"):
-            OpenSandboxLean4Client(provider=bad, image="img")
+            GymSandboxLean4Client(provider=bad, image="img")
 
     def test_completed_maps_rc_zero(self, fake_sandbox):
         out = asyncio.run(_client().execute_lean4("theorem t : True := trivial", timeout=30.0))
@@ -169,6 +169,7 @@ class TestOpenSandboxLean4Client:
         out = asyncio.run(main())
         assert out == {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
         assert not fake_sandbox.instances, "no pod may be created past a failed admission"
+
 
 class TestPooledMode:
     def test_pool_reuses_pods_across_verifies(self, fake_sandbox):

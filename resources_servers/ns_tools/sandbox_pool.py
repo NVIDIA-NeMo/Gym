@@ -20,7 +20,7 @@ Sharing is what makes large batches feasible: 16k concurrent sessions ride K pod
 and heal with direct async ``Sandbox.create`` calls — a full fan-out warm wave is
 ~5s per pod measured in production, so no warm-spare inventory layer is needed.
 
-This module is imported only when ns_tools selects the ``opensandbox_pool`` backend;
+This module is imported only when ns_tools selects the ``sandbox_pool`` backend;
 the default ``local`` backend never touches it.
 """
 
@@ -46,12 +46,12 @@ LOGGER = logging.getLogger(__name__)
 def _parse_connection(provider: Dict[str, Any]) -> Dict[str, Any]:
     """Pull the connection kwargs out of a single-key provider config dict."""
     if not isinstance(provider, dict) or len(provider) != 1:
-        raise ValueError("opensandbox_pool.provider must be a single-key provider config dict")
+        raise ValueError("sandbox_pool.provider must be a single-key provider config dict")
     kwargs = next(iter(provider.values())) or {}
     connection = dict(kwargs.get("connection") or {})
     if not connection.get("domain") or not connection.get("api_key"):
         raise ValueError(
-            "opensandbox_pool backend selected but the provider connection has an empty "
+            "sandbox_pool backend selected but the provider connection has an empty "
             "domain or api_key — set OPENSANDBOX_BASE_URL / OPENSANDBOX_API_KEY"
         )
     return connection
@@ -70,7 +70,7 @@ class _Slot:
     sessions: set = field(default_factory=set)
 
 
-class OpenSandboxPool:
+class SandboxPool:
     """K shared NS-sandbox pods with sticky session routing.
 
     The constructor is pure (validation only); ``start()`` kicks a non-blocking
@@ -110,9 +110,9 @@ class OpenSandboxPool:
         self._pool_ref = str(pool_ref or "")
         self._pool_fallback = bool(pool_fallback)
         if not image:
-            raise ValueError("opensandbox_pool backend selected but image is empty — set NS_SANDBOX_IMAGE")
+            raise ValueError("sandbox_pool backend selected but image is empty — set NS_SANDBOX_IMAGE")
         if int(size) < 1:
-            raise ValueError(f"opensandbox_pool.size must be >= 1, got {size}")
+            raise ValueError(f"sandbox_pool.size must be >= 1, got {size}")
         self._image = image
         self._port = int(port)
         self._size = int(size)

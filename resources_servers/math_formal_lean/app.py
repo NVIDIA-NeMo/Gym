@@ -29,7 +29,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient, OpenSandboxLean4Client
+from resources_servers.math_formal_lean.sandbox_client import GymSandboxLean4Client, Lean4SandboxClient
 
 
 LOG = logging.getLogger(__name__)
@@ -347,8 +347,8 @@ class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_backend: str = "ns_http"
     sandbox_base_url: str = ""
     sandbox_extra_headers: Dict[str, str] = Field(default_factory=dict)
-    # OpenSandboxLean4Client kwargs (provider/image/max_concurrent/...) — read only when
-    # sandbox_backend == "opensandbox".
+    # GymSandboxLean4Client kwargs (provider/image/max_concurrent/...) — read only when
+    # sandbox_backend == "gym_sandbox".
     opensandbox: Dict[str, Any] = Field(default_factory=dict)
     compilation_timeout: float = 30.0
     max_output_characters: int = 1000
@@ -393,8 +393,8 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        if self.config.sandbox_backend == "opensandbox":
-            self._sandbox_client = OpenSandboxLean4Client(
+        if self.config.sandbox_backend == "gym_sandbox":
+            self._sandbox_client = GymSandboxLean4Client(
                 max_output_characters=self.config.max_output_characters,
                 **self.config.opensandbox,
             )

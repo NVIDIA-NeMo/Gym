@@ -42,11 +42,11 @@ ns_tools:
       disable_session_restore: true
 
       # Sandbox backend switch: 'local' (default — today's colocated server, byte-identical
-      # with zero env vars set) or 'opensandbox_pool' (disaggregated pods on OpenSandbox).
+      # with zero env vars set) or 'sandbox_pool' (disaggregated pods on OpenSandbox).
       sandbox_type: ${oc.env:NS_TOOLS_SANDBOX_TYPE,local}
-      # Pool settings; read only when sandbox_type == opensandbox_pool. Selecting that
+      # Pool settings; read only when sandbox_type == sandbox_pool. Selecting that
       # backend with an empty domain/api_key/image is a hard startup error, never a no-op.
-      opensandbox_pool:
+      sandbox_pool:
         provider:
           opensandbox:
             connection:

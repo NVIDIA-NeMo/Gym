@@ -14,7 +14,7 @@
 # limitations under the License.
 """NeMo-Skills sandbox backend that routes through an OpenSandbox pod pool.
 
-Registers ``sandbox_type: opensandbox_pool`` with the nemo_skills sandbox registry. The
+Registers ``sandbox_type: sandbox_pool`` with the nemo_skills sandbox registry. The
 class IS a ``LocalSandbox`` — same request preparation, same session bookkeeping — with the
 transport re-pointed: each request resolves (base_url, headers) from the pool by session
 uuid, and rides a shared AIOHTTP session (httpx/httpcore's O(n^2) connection pooling
@@ -35,24 +35,24 @@ from typing import Any, Dict, Optional
 import aiohttp
 import httpx
 from nemo_skills.code_execution import sandbox as ns_sandbox
-from osb_pool import OpenSandboxPool
+from sandbox_pool import SandboxPool
 
 
 LOGGER = logging.getLogger(__name__)
 
 # The pool the owning server can warm up at lifespan startup (set by the first construction).
-CURRENT_POOL: Optional[OpenSandboxPool] = None
+CURRENT_POOL: Optional[SandboxPool] = None
 
 
-class OpenSandboxPoolSandbox(ns_sandbox.LocalSandbox):
+class GymSandbox(ns_sandbox.LocalSandbox):
     """LocalSandbox with the transport routed through an OpenSandbox pod pool over aiohttp."""
 
     def __init__(self, pool: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         if not pool:
-            raise ValueError("sandbox_type=opensandbox_pool requires a 'pool' config dict")
+            raise ValueError("sandbox_type=sandbox_pool requires a 'pool' config dict")
         global CURRENT_POOL
-        self._pool = OpenSandboxPool(**pool)
+        self._pool = SandboxPool(**pool)
         self._aiohttp: Optional[aiohttp.ClientSession] = None
         CURRENT_POOL = self._pool
 
@@ -137,4 +137,4 @@ class OpenSandboxPoolSandbox(ns_sandbox.LocalSandbox):
             await super().close()
 
 
-ns_sandbox.sandboxes["opensandbox_pool"] = OpenSandboxPoolSandbox
+ns_sandbox.sandboxes["sandbox_pool"] = GymSandbox
