@@ -38,7 +38,8 @@ reaches a trainer depends on the training framework's NeMo Gym integration.
 import json
 from typing import Any, Dict, List
 
-from pydantic import Field
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
@@ -50,6 +51,15 @@ from nemo_gym.base_resources_server import (
 
 class ToolCallMultiRewardResourcesServerConfig(BaseResourcesServerConfig):
     pass
+
+
+class GetWeatherRequest(BaseModel):
+    city: str
+
+
+class GetWeatherResponse(BaseModel):
+    city: str
+    weather_description: str
 
 
 class ToolCallMultiRewardVerifyRequest(BaseVerifyRequest):
@@ -69,6 +79,14 @@ class ToolCallMultiRewardVerifyResponse(BaseMultiRewardVerifyResponse):
 
 class ToolCallMultiRewardResourcesServer(SimpleResourcesServer):
     config: ToolCallMultiRewardResourcesServerConfig
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/get_weather")(self.get_weather)
+        return app
+
+    async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
+        return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is sunny.")
 
     @staticmethod
     def _parse_arguments(arguments: Any) -> tuple[Dict[str, Any], bool]:

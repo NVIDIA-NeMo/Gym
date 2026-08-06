@@ -73,6 +73,29 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertEqual([], broken_links)
         self.assertEqual(8, canonical_links)
 
+    def test_main_training_tutorial_links_include_the_tutorials_section(self):
+        """`training-tutorials` sits under the same `section: Tutorials` as `evaluation-tutorials`.
+
+        Both therefore publish under `/tutorials/`. `/training-tutorials/...` still resolves
+        via a 308 from Fern, but the redirect is not something to rely on, and having the two
+        sibling folders linked differently is what makes the prefix look optional.
+
+        No exact link count here: there are enough of these that pinning a total would just
+        mean editing this test every time a tutorial gains a cross-reference.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        redirected_links = []
+        canonical_links = 0
+
+        for page in pages.rglob("*.mdx"):
+            for line_number, line in enumerate(page.read_text().splitlines(), start=1):
+                if re.search(r'(?:\]\(|href=")/training-tutorials(?:[/#")])', line):
+                    redirected_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
+                canonical_links += line.count("/tutorials/training-tutorials")
+
+        self.assertEqual([], redirected_links)
+        self.assertGreater(canonical_links, 0)
+
     def test_v040_evaluation_tutorial_links_stay_in_the_frozen_version(self):
         pages = REPO_ROOT / "fern/versions/v0.4.0/pages"
         versionless_links = []
@@ -107,6 +130,25 @@ class TestFernDocsLinks(unittest.TestCase):
 
                 self.assertEqual([], broken_links)
                 self.assertEqual(2, canonical_links)
+
+    def test_internal_pages_are_linked_by_path_not_by_absolute_url(self):
+        """An absolute docs.nvidia.com link pins the reader to the default version.
+
+        Relative paths keep the reader inside the version they are already reading.
+        Prose that names the domain without linking to it is fine.
+
+        Scoped to `latest`. The frozen versions carry the same pattern but are left as
+        they shipped.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        absolute_links = []
+
+        for page in pages.rglob("*.mdx"):
+            for line_number, line in enumerate(page.read_text().splitlines(), start=1):
+                if re.search(r'(?:\]\(|href=")https?://docs\.nvidia\.com/nemo/gym', line):
+                    absolute_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
+
+        self.assertEqual([], absolute_links)
 
     def test_private_cli_compat_api_link_redirects_to_the_public_cli_page(self):
         redirects = read("fern/docs.yml")
