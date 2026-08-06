@@ -32,8 +32,10 @@ from resources_servers.legal_agent_bench.prepare import (
     _marker,
     flatten_task_id,
 )
+from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import judge as lab_judge
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import scoring as lab_scoring
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor.judge import (
+    OpenAICompatibleJudge,
     _extract_judge_message_text,
 )
 from resources_servers.legal_agent_bench.verifier import (
@@ -548,6 +550,48 @@ def test_judge_response_text_sources(message, expected) -> None:
 def test_empty_judge_message_fails_clearly() -> None:
     with pytest.raises(ValueError, match="contained no text"):
         _extract_judge_message_text({"content": "", "reasoning_content": None})
+
+
+def test_judge_sends_configured_reasoning_effort(monkeypatch) -> None:
+    observed = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"verdict":"pass","reasoning":"ok"}'}}]}).encode()
+
+    def urlopen(request, *, timeout):
+        observed["payload"] = json.loads(request.data)
+        observed["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(lab_judge.urllib.request, "urlopen", urlopen)
+    judge = OpenAICompatibleJudge(
+        model="openai-compatible/provider/judge",
+        base_url="https://judge.example/v1",
+        api_key="test-key",  # pragma: allowlist secret
+        temperature=None,
+        timeout_seconds=30,
+        reasoning_effort="medium",
+    )
+
+    result = judge.evaluate(
+        {
+            "task_description": "task",
+            "agent_output": "output",
+            "criterion_title": "criterion",
+            "match_criteria": "match",
+        }
+    )
+
+    assert result == {"verdict": "pass", "reasoning": "ok"}
+    assert observed["payload"]["reasoning_effort"] == "medium"
+    assert observed["timeout"] == 30
 
 
 def test_reward_mode_validation() -> None:
