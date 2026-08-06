@@ -226,6 +226,92 @@ Harbor retains its established response format and additionally reports
 `failure_reason` for agent-phase failures. It preserves any partial trajectory,
 but skips judging and forces reward to zero when one of those failures occurs.
 
+## Choose output, context, and timeout limits
+
+LAB does not prescribe one model-independent output-token limit. Its
+[upstream adapters](https://github.com/harveyai/harvey-labs/tree/main/harness/adapters)
+choose provider- and model-specific per-call limits, generally using the
+model's large output capacity. For a locally hosted model, `64,000` is a
+sensible starting point when the endpoint and hardware support it:
+
+```bash
+++responses_create_params.max_output_tokens=64000
+```
+
+Append that override to the native or configurable-harness command. Set the
+limit as high as the model, server, total context window, and available KV
+cache can sustain. A larger output reservation can reduce the input space
+available within a fixed context window, so it is not always safe to use the
+largest numerical value accepted by the API. If a higher limit exceeds local
+memory capacity, reduce rollout and agent-server concurrency together before
+lowering the limit.
+
+An unreasonably low output limit can stop a long tool call or reasoning turn
+before the agent finishes its deliverables. A context window that is too small
+can have the same effect later in a multi-turn task. LAB scores those incomplete
+outcomes, so either constraint can skew model-quality results downward. Record
+both limits with published results and compare models using settings that do
+not prematurely truncate otherwise supported work.
+
+### Timeouts and turn limits
+
+LAB does not define one canonical wall-clock timeout for a task. Its current
+upstream [runner CLI](https://github.com/harveyai/harvey-labs/blob/main/harness/run.py)
+exposes a turn budget and a per-command shell timeout, but the
+[agent loop](https://github.com/harveyai/harvey-labs/blob/main/harness/agent_loop.py)
+has no overall deadline. Upstream
+[model adapters](https://github.com/harveyai/harvey-labs/tree/main/harness/adapters)
+also do not share a model-request timeout, and the
+[evaluator CLI](https://github.com/harveyai/harvey-labs/blob/main/evaluation/run_eval.py)
+does not expose a uniform judge timeout. Provider SDK defaults therefore
+differ.
+
+Gym adds layered operational deadlines so a stalled endpoint or sandbox cannot
+hold a rollout worker indefinitely. The checked-in defaults are the recommended
+starting values for full evaluations:
+
+| Layer | Default | Guidance |
+| --- | ---: | --- |
+| Complete agent phase | 10,800 seconds (3 hours) | Use for all harnesses. Claude Code and Codex also receive this as their inner harness timeout. |
+| One policy-model request | 1,800 seconds (30 minutes) | Used by the native and Harbor loops. This is intentionally generous for slow local reasoning models. |
+| Shell command | 60 seconds | Used by the native and Harbor loops. Hermes uses a 180-second terminal timeout. A shell timeout is returned to the agent as a tool error. |
+| Complete verifier phase | 3,600 seconds (1 hour) | Covers output staging, all criterion calls, and artifact collection. |
+| One judge request | 90 seconds, with one retry | Increase only when the judge endpoint is healthy but consistently needs longer than 90 seconds. |
+
+Start with these values. For a slow locally hosted policy model, reduce both
+rollout and agent-server concurrency before changing timeouts. If successful
+model generations genuinely take longer than 30 minutes, raise the policy-call
+timeout and the enclosing agent-phase timeout together. Keep the outer agent
+deadline comfortably above a single model call, and keep the verifier deadline
+above the judge request timeout plus retries. Raising a timeout does not reserve
+GPU memory; increasing output or context limits can.
+
+The default native and Harbor configurations use a 60-turn budget, while
+Hermes uses 90 turns and the CLI harnesses use their own configured stopping
+behavior. A turn limit is a model-behavior constraint, not a timeout. Current
+upstream LAB `main` uses 200 turns, but this Gym integration is pinned to an
+earlier LAB revision and does not silently adopt later harness changes. Record
+the turn budget as well as output, context, and timeout settings with published
+results.
+
+The common defaults are configured in
+`responses_api_agents/legal_agent_bench_agent/configs/` and
+`resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml`. For the
+default native benchmark, the relevant override paths are:
+
+```text
++legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.agent_timeout_seconds=<seconds>
++legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.verifier_timeout_seconds=<seconds>
++legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.agent_kwargs.model_timeout_seconds=<seconds>
++legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.agent_kwargs.shell_timeout=<seconds>
++legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench.judge_request_timeout_seconds=<seconds>
+```
+
+Substitute the selected variant's agent and resource-server prefixes when
+running Harbor, Hermes, Claude Code, or Codex. A whole-agent, policy-connection,
+sandbox, or verifier timeout is an operational failure and is routed through
+Gym's failure handling; it is not a completed zero-reward model outcome.
+
 ## Run a larger evaluation
 
 Remove `--limit 1` from the desired smoke command. Choose a new output filename
