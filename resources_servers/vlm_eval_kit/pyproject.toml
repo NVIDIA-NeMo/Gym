@@ -102,5 +102,13 @@ requires = ["setuptools>=61", "setuptools-scm"]
 where = [".."]
 include = ["local_vllm_model"]
 
+[tool.uv]
+# opencv-python and decord2 bundle H.264/H.265/AAC codec libs; excluded from
+# the shipped container. Install before testing via docker/install_codec_deps.sh.
+override-dependencies = [
+    "opencv-python; sys_platform == 'never'",
+    "decord2; sys_platform == 'never'",
+]
+
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }

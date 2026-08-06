@@ -335,12 +335,18 @@ override-dependencies = [
     "spacy>=3.8.13",
 
     # Codec-bearing packages — excluded from the shipped container.
-    # Their binary wheels bundle static FFmpeg executables (H.264, H.265, AAC)
-    # that may incur MPEG-LA royalties. Install before testing via
-    # docker/install_codec_deps.sh (--no-config bypasses this override).
+    # Their binary wheels bundle static FFmpeg executables or libavcodec libs
+    # (H.264, H.265, AAC, MP3) that may incur MPEG-LA royalties.
+    # Install before testing via docker/install_codec_deps.sh
+    # (--no-config bypasses this override).
     "opencv-python-headless; sys_platform == 'never'",
+    "opencv-python; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
+    "av; sys_platform == 'never'",
+    "decord2; sys_platform == 'never'",
+    "ffmpeg-python; sys_platform == 'never'",
+    "pydub; sys_platform == 'never'",
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Don't add a package any

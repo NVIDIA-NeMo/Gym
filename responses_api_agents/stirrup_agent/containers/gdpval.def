@@ -58,7 +58,6 @@ From: python:3.13-bookworm
         pandoc \
         poppler-utils \
         ghostscript \
-        ffmpeg \
         graphviz \
         imagemagick \
         chromium \
@@ -99,7 +98,6 @@ From: python:3.13-bookworm
     command -v pandoc
     command -v pdftotext
     command -v gs
-    command -v ffmpeg
     command -v dot
     command -v convert
     command -v pdflatex
@@ -129,7 +127,13 @@ From: python:3.13-bookworm
     # advertised runtime).  Versions left unpinned so the resolver picks
     # Python 3.13-compatible wheels.  This block MUST fully succeed: a missing
     # wheel aborts the build rather than silently shipping a degraded sif.
+    # av and opencv-python binary wheels bundle static FFmpeg libs (H.264, H.265,
+    # AAC) that may incur MPEG-LA royalties. Install from source (sdist) so no
+    # bundled codec executables are included. ffmpeg-python/pydub/moviepy are
+    # wrappers that invoke a system ffmpeg binary at runtime; they ship no codecs.
     pip install --no-cache-dir \
+        --no-binary av \
+        --no-binary opencv-python \
         jupyterlab notebook jupyter-server \
         aiohttp hypercorn fastapi websockets pydantic gradio \
         numpy numpy-financial scipy pandas polars duckdb pyarrow xarray \

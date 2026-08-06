@@ -13,7 +13,12 @@ resolution-markers = [
 [manifest]
 constraints = [{ name = "grpcio", specifier = ">=1.81.0rc1" }]
 overrides = [
+    { name = "av", marker = "sys_platform == 'never'" },
+    { name = "decord2", marker = "sys_platform == 'never'" },
+    { name = "ffmpeg-python", marker = "sys_platform == 'never'" },
+    { name = "opencv-python", marker = "sys_platform == 'never'" },
     { name = "opencv-python-headless", marker = "sys_platform == 'never'" },
+    { name = "pydub", marker = "sys_platform == 'never'" },
     { name = "spacy", specifier = ">=3.8.13" },
     { name = "torchaudio", marker = "sys_platform == 'never'" },
     { name = "torchvision", marker = "sys_platform == 'never'" },
