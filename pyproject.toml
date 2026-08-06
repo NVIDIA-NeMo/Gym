@@ -245,9 +245,9 @@ sandbox = [
     "tenacity>=9.1.4",
 
     # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
-    # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
+    # Updated: Thu Aug 6, 2026 with opensandbox>=0.1.15 (resource_requests in Sandbox.create)
     # License: Apache 2.0
-    "opensandbox>=0.1.9",
+    "opensandbox>=0.1.15",
 
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
