@@ -76,6 +76,7 @@ RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
+MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
@@ -110,6 +111,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
@@ -706,6 +708,10 @@ Found global config dict yaml:
             global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # How long `gym env start` waits for the model endpoints named in the config to accept
+            # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
+            global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
 
             # UV related configuration
             # UV caching directory overrides to local folders.
