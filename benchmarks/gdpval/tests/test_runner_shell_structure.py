@@ -29,3 +29,22 @@ def test_every_function_is_defined_at_top_level() -> None:
         "function(s) defined inside another function body; they only exist once "
         f"the enclosing function has run: {nested}"
     )
+
+
+def test_head_server_wait_is_exported_before_waiting() -> None:
+    """`wait_for_servers.sh` caps its head-server phase at HEAD_MAX_WAIT, default 180s.
+
+    GDPVAL_SERVER_WAIT_SECONDS covers only the child-server phase, so without this
+    export a slow Ray bring-up discards the whole allocation after a two-line log.
+    """
+    text = RUNNER.read_text(encoding="utf-8")
+
+    export_at = text.find("export HEAD_MAX_WAIT=")
+    assert export_at != -1, "runner must export HEAD_MAX_WAIT; wait_for_servers.sh defaults it to 180s"
+
+    # Match the invocation, not the prose above it that also names the script.
+    invocation = re.search(r"^[ \t]*\"\$\{REPO_ROOT\}/scripts/wait_for_servers\.sh\"", text, re.M)
+    assert invocation, "runner no longer invokes wait_for_servers.sh; this guard needs updating"
+    assert export_at < invocation.start(), (
+        "HEAD_MAX_WAIT is exported after wait_for_servers.sh runs, so it has no effect"
+    )

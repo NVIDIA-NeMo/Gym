@@ -72,6 +72,14 @@ HEAD_PORT="${GDPVAL_HEAD_PORT:-22135}"
 PORT_RANGE_LOW="${GDPVAL_PORT_RANGE_LOW:-22136}"
 PORT_RANGE_HIGH="${GDPVAL_PORT_RANGE_HIGH:-22999}"
 SERVER_WAIT_SECONDS="${GDPVAL_SERVER_WAIT_SECONDS:-900}"
+# scripts/wait_for_servers.sh waits in two phases and only the second one takes
+# SERVER_WAIT_SECONDS. The first - head server up, which is gated on Ray's API
+# server - is capped by HEAD_MAX_WAIT, whose own default is 180s, so raising
+# GDPVAL_SERVER_WAIT_SECONDS did nothing for the phase that actually times out.
+# On a node already serving a large policy model Ray can exceed 180s, and the
+# whole allocation is then discarded after a two-line log. Give both phases the
+# same budget by default, and keep a separate knob for tuning this one alone.
+HEAD_WAIT_SECONDS="${GDPVAL_HEAD_WAIT_SECONDS:-${SERVER_WAIT_SECONDS}}"
 MODEL_TYPE="${GDPVAL_MODEL_TYPE:-vllm_model}"
 MODEL_PATH="${GDPVAL_MODEL_PATH-}"
 # 250 matches the GDPVal config default (benchmarks/gdpval/config.yaml); the
@@ -490,6 +498,9 @@ start_servers() {
   export PATH="$(dirname "${APPTAINER_BIN}"):${PATH}"
   export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS="${NEMO_GYM_MAX_ROLLOUT_ATTEMPTS:-3}"
   export UV_CACHE_DIR
+  # Read by scripts/wait_for_servers.sh for its head-server phase; see the
+  # HEAD_WAIT_SECONDS definition above for why the 180s default is not enough.
+  export HEAD_MAX_WAIT="${HEAD_WAIT_SECONDS}"
   if [[ "${GYM_BIN}" == */* ]]; then
     export PATH="$(dirname "${GYM_BIN}"):${PATH}"
   fi
