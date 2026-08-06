@@ -1,5 +1,8 @@
-# Flavor config: the same environment, driving remote browsers from a hosted
-# service (`gym env start --resources-server interactive_browser/lexmount`).
+# The same environment, driving remote browsers from a hosted service. It lives
+# with the provider it configures rather than in the environment's own configs/,
+# so everything vendor-specific is one directory. Load it by path:
+#
+#   gym env start --config resources_servers/interactive_browser/providers/lexmount/configs/lexmount.yaml ...
 #
 # Worked example of `backend: remote_cdp` + a session provider. Credentials come
 # from the environment, never from this file:
