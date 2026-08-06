@@ -104,7 +104,6 @@ class SandboxPool:
         heal_creates_per_s: float = 4.0,
         heal_concurrency: int = 16,
         session_idle_sweep_s: float = 7200.0,
-        run_label: Optional[str] = None,
     ) -> None:
         self._connection_kwargs = _parse_connection(provider)
         self._pool_ref = str(pool_ref or "")
@@ -141,9 +140,11 @@ class SandboxPool:
         self._heal_concurrency = int(heal_concurrency)
         self._heal_rate_lock = asyncio.Lock()
         self._session_idle_sweep_s = session_idle_sweep_s
-        self._run_label = run_label or "ns-tools-pool"
         attribution = resolve_attribution()
-        attribution[RUN_KEY] = resolve_run_id(self._run_label)
+        # No explicit label: NEMO_GYM_RUN_ID (set per job by the launch script) wins,
+        # else a per-process id — either way unique per run, so an epilogue reaper can
+        # delete exactly this run's sandboxes by the run attribution label.
+        attribution[RUN_KEY] = resolve_run_id()
         self._metadata = {f"{_ATTRIBUTION_KEY_PREFIX}{k}": v for k, v in attribution.items()}
         self._metadata["purpose"] = "ns-tools-sandbox-pool"
 
