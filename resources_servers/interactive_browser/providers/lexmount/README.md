@@ -21,13 +21,14 @@ unless the config selects `session_provider: {lexmount: ...}`.
    export LEXMOUNT_PROJECT_ID=<your-project-id>
    export LEXMOUNT_BASE_URL=https://api.lexmount.com   # API base shown in your dashboard
    ```
-3. Start the remote flavor of the environment:
+3. Start the environment with this provider's config (it lives here, next to the
+   provider, so load it by path):
    ```bash
-   gym env start --resources-server interactive_browser/lexmount \
+   gym env start --config resources_servers/interactive_browser/providers/lexmount/configs/lexmount.yaml \
      --model-type openai_model --model <served-model-name> \
      --model-url https://your-endpoint/v1 --model-api-key <key>
    ```
-   That flavor is just `configs/lexmount.yaml`: the same environment with
+   `configs/lexmount.yaml` is the stock environment with one block changed:
    ```yaml
    backend:
      remote_cdp:
@@ -36,7 +37,7 @@ unless the config selects `session_provider: {lexmount: ...}`.
    ```
 
 Remote browsers cannot open the bundled offline `site/` tasks (local `file://`
-URIs), so the flavor ships live-web tasks (`data/example_remote.jsonl`).
+URIs), so this config points at live-web tasks (`data/example_remote.jsonl`).
 
 ## Limits to know before training concurrency
 
