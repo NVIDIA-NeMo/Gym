@@ -104,7 +104,8 @@ class OpenSandboxPool:
         warmup_fill_concurrency: int = 8,
         health_interval_s: float = 15.0,
         health_timeout_s: float = 10.0,
-        heal_creates_per_s: float = 0.5,
+        heal_creates_per_s: float = 4.0,
+        heal_concurrency: int = 16,
         session_idle_sweep_s: float = 7200.0,
         run_label: Optional[str] = None,
     ) -> None:
@@ -136,6 +137,8 @@ class OpenSandboxPool:
         self._health_interval_s = health_interval_s
         self._health_timeout_s = health_timeout_s
         self._heal_min_interval_s = 1.0 / heal_creates_per_s if heal_creates_per_s > 0 else 0.0
+        self._heal_concurrency = int(heal_concurrency)
+        self._heal_rate_lock = asyncio.Lock()
         self._session_idle_sweep_s = session_idle_sweep_s
         self._run_label = run_label or "ns-tools-pool"
         attribution = resolve_attribution()
@@ -388,12 +391,13 @@ class OpenSandboxPool:
                 # Warmup owns every slot until it finishes; healing in parallel would
                 # race duplicate acquisitions into the same slot.
                 continue
-            for slot in self._slots:
+
+            async def check(slot: _Slot) -> bool:
+                """Returns True when the slot needs a heal. Health probes run concurrently."""
                 if slot.creating:
-                    continue
+                    return False
                 if slot.sandbox is None or not slot.healthy:
-                    await self._heal_slot(slot)
-                    continue
+                    return True
                 try:
                     async with self._http_session().get(
                         f"{slot.base_url}{self._health_path}", headers=slot.headers
@@ -403,7 +407,7 @@ class OpenSandboxPool:
                     ok = False
                 if ok:
                     slot.strikes = 0
-                    continue
+                    return False
                 slot.strikes += 1
                 if slot.strikes >= 3:
                     LOGGER.warning("pool slot %d failed 3 health checks — evicting and healing in slot", slot.index)
@@ -415,16 +419,32 @@ class OpenSandboxPool:
                         except Exception:
                             pass
                         slot.sandbox = None
+                    return True
+                return False
+
+            needs_heal = await asyncio.gather(*(check(slot) for slot in self._slots))
+            to_heal = [slot for slot, needed in zip(self._slots, needs_heal) if needed]
+            if not to_heal:
+                continue
+            semaphore = asyncio.Semaphore(self._heal_concurrency)
+
+            async def heal(slot: _Slot) -> None:
+                async with semaphore:
                     await self._heal_slot(slot)
 
+            await asyncio.gather(*(heal(slot) for slot in to_heal))
+
     async def _heal_slot(self, slot: _Slot) -> None:
-        """Replace a dead pod in the SAME slot, rate-limited; the SDK's warm spares make
-        the replacement itself near-instant."""
-        now = time.monotonic()
-        wait = self._last_heal_create + self._heal_min_interval_s - now
+        """Replace a dead pod in the SAME slot. Heals run concurrently (bounded by
+        heal_concurrency); the rate lock spaces create STARTS so a mass heal cannot
+        storm the cell's create path."""
+        async with self._heal_rate_lock:
+            now = time.monotonic()
+            start_at = max(now, self._last_heal_create + self._heal_min_interval_s)
+            self._last_heal_create = start_at
+        wait = start_at - time.monotonic()
         if wait > 0:
             await asyncio.sleep(wait)
-        self._last_heal_create = time.monotonic()
         try:
             await self._create_slot(slot)
             LOGGER.info("pool slot %d healed", slot.index)
