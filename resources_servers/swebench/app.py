@@ -129,7 +129,8 @@ class DockerContainer(BaseModel):
             stdout = res.stdout or ""
             stderr = res.stderr or ""
 
-            # For RuboCop tests specifically, we interleave the stderr inside the start and end tags in the stdout for parsing reasons. See `get_logs_eval`
+            # For RuboCop tests in SWE Multilingual specifically, there is an issue with the logs parsing if the stdout and stderr returned is not interleaved.
+            # We interleave the stderr inside the start and end tags in the stdout here instead. See `get_logs_eval`
             if "rubocop" in self.instance_id and START_TEST_OUTPUT in stderr:
                 start, middle_end = stderr.split(START_TEST_OUTPUT)
                 middle, end = middle_end.split(END_TEST_OUTPUT)
