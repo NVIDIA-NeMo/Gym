@@ -7,6 +7,9 @@ import hashlib
 import io
 import json
 import tarfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -259,6 +262,66 @@ def test_runtime_hydration_can_reuse_a_validated_cache(monkeypatch, tmp_path) ->
     )
 
     assert (runtime / "area__task-one" / "task.toml").is_file()
+
+
+def test_directory_replacement_is_serialized_across_concurrent_publishers(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "runtime"
+    target.mkdir()
+    (target / "value").write_text("old")
+    sources = []
+    for value in ("first", "second"):
+        source = tmp_path / value
+        source.mkdir()
+        (source / "value").write_text(value)
+        sources.append(source)
+
+    original_rename = Path.rename
+    active_renames = 0
+    maximum_active_renames = 0
+    counter_lock = threading.Lock()
+
+    def slow_rename(path: Path, destination: Path) -> Path:
+        nonlocal active_renames, maximum_active_renames
+        with counter_lock:
+            active_renames += 1
+            maximum_active_renames = max(maximum_active_renames, active_renames)
+        try:
+            time.sleep(0.02)
+            return original_rename(path, destination)
+        finally:
+            with counter_lock:
+                active_renames -= 1
+
+    monkeypatch.setattr(Path, "rename", slow_rename)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda source: prepare._replace_directory(source, target), sources))
+
+    assert maximum_active_renames == 1
+    assert (target / "value").read_text() in {"first", "second"}
+    assert not target.with_name(".runtime.backup").exists()
+
+
+def test_directory_replacement_restores_stale_backup_before_failed_publish(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "runtime"
+    backup = tmp_path / ".runtime.backup"
+    source = tmp_path / "new"
+    backup.mkdir()
+    source.mkdir()
+    (backup / "value").write_text("preserved")
+
+    original_rename = Path.rename
+
+    def fail_new_publish(path: Path, destination: Path) -> Path:
+        if path == source:
+            raise OSError("publish failed")
+        return original_rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", fail_new_publish)
+    with pytest.raises(OSError, match="publish failed"):
+        prepare._replace_directory(source, target)
+
+    assert (target / "value").read_text() == "preserved"
+    assert not backup.exists()
 
 
 def test_missing_public_skill_fails_clearly(monkeypatch, tmp_path) -> None:
