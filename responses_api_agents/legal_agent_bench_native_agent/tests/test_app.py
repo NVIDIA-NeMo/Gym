@@ -190,7 +190,7 @@ async def test_tool_executor_validates_calls_and_truncates_output(monkeypatch) -
     assert await executor.execute("read", []) == "Error: arguments for read must be a JSON object"
     assert await executor.execute("bash", {}) == "Error: command is required"
     assert await executor.execute("bash", {"command": "pwd"}) == "compl\n[output truncated]"
-    run.assert_awaited_once_with(["/bin/bash", "-lc", "pwd"])
+    run.assert_awaited_once_with(["/bin/bash", "-l", "-s"], stdin=b"pwd")
 
     run.reset_mock(return_value=True)
     run.return_value = "short"
@@ -214,6 +214,33 @@ async def test_explicit_full_read_is_not_truncated(monkeypatch) -> None:
     assert result == "complete document"
 
 
+async def test_tool_executor_passes_large_non_bash_payload_over_stdin(monkeypatch) -> None:
+    executor = app.LabToolExecutor(timeout_seconds=1, max_output_chars=2_000_000)
+    run = AsyncMock(return_value="written")
+    monkeypatch.setattr(executor, "_run", run)
+    content = "x" * 1_000_000
+
+    result = await executor.execute("write", {"file_path": "memo.txt", "content": content})
+
+    assert result == "written"
+    command = run.await_args.args[0]
+    assert command == ["/usr/local/bin/python", str(app.CONTAINER_TOOL_RUNNER), "write"]
+    assert json.loads(run.await_args.kwargs["stdin"]) == {"file_path": "memo.txt", "content": content}
+
+
+async def test_tool_executor_passes_large_bash_command_over_stdin(monkeypatch) -> None:
+    executor = app.LabToolExecutor(timeout_seconds=1, max_output_chars=2_000_000)
+    run = AsyncMock(return_value="written")
+    monkeypatch.setattr(executor, "_run", run)
+    command = "printf %s " + "x" * 1_000_000
+
+    result = await executor.execute("bash", {"command": command})
+
+    assert result == "written"
+    assert run.await_args.args[0] == ["/bin/bash", "-l", "-s"]
+    assert run.await_args.kwargs["stdin"] == command.encode()
+
+
 async def test_process_runner_parses_container_result_and_stderr(monkeypatch) -> None:
     executor = app.LabToolExecutor(timeout_seconds=1, max_output_chars=100)
     process = _process(stdout=b'log line\n{"result":"document text"}\n', stderr=b"tool warning")
@@ -221,12 +248,15 @@ async def test_process_runner_parses_container_result_and_stderr(monkeypatch) ->
     monkeypatch.setattr(app.asyncio, "create_subprocess_exec", create)
 
     result = await executor._run(
-        ["/usr/local/bin/python", str(app.CONTAINER_TOOL_RUNNER), "read", '{"file_path":"memo.docx"}']
+        ["/usr/local/bin/python", str(app.CONTAINER_TOOL_RUNNER), "read"],
+        stdin=b'{"file_path":"memo.docx"}',
     )
 
     assert result == "document text\nSTDERR:\ntool warning"
     assert create.await_args.kwargs["cwd"] == "/workspace/output"
     assert create.await_args.kwargs["start_new_session"] is True
+    assert create.await_args.kwargs["stdin"] is app.asyncio.subprocess.PIPE
+    process.communicate.assert_awaited_once_with(input=b'{"file_path":"memo.docx"}')
 
 
 @pytest.mark.parametrize(
@@ -250,7 +280,10 @@ async def test_process_runner_handles_unstructured_and_failed_output(
         AsyncMock(return_value=_process(stdout=stdout, returncode=returncode)),
     )
 
-    result = await executor._run(["/usr/local/bin/python", str(app.CONTAINER_TOOL_RUNNER), "preflight", "{}"])
+    result = await executor._run(
+        ["/usr/local/bin/python", str(app.CONTAINER_TOOL_RUNNER), "preflight"],
+        stdin=b"{}",
+    )
 
     assert result == expected
 
@@ -275,6 +308,7 @@ async def test_process_runner_kills_timed_out_process_group(monkeypatch) -> None
     killpg.assert_called_once_with(123, app.signal.SIGKILL)
     assert process.communicate.call_count == 2
     assert process.communicate.await_count == 1
+    process.communicate.assert_any_call(input=None)
 
 
 def test_merge_usage_ignores_missing_current_usage() -> None:

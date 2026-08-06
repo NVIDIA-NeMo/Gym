@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import threading
 import time
@@ -32,6 +33,7 @@ from resources_servers.legal_agent_bench.prepare import (
     _marker,
     flatten_task_id,
 )
+from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import container_tool_runner
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import judge as lab_judge
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import scoring as lab_scoring
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor.judge import (
@@ -48,6 +50,24 @@ from responses_api_agents.harbor_agent.app import HarborAgentConfig
 
 
 BENCH_DIR = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("use_stdin", [False, True])
+def test_container_tool_runner_accepts_legacy_argv_and_stdin(monkeypatch, capsys, use_stdin: bool) -> None:
+    arguments = {"file_path": "memo.txt"}
+    raw_arguments = json.dumps(arguments)
+    argv = ["container_tool_runner.py", "preflight"]
+    if not use_stdin:
+        argv.append(raw_arguments)
+    monkeypatch.setattr(container_tool_runner.sys, "argv", argv)
+    monkeypatch.setattr(container_tool_runner.sys, "stdin", io.StringIO(raw_arguments if use_stdin else ""))
+    preflight = MagicMock(return_value="ready")
+    monkeypatch.setattr(container_tool_runner, "_preflight", preflight)
+
+    container_tool_runner.main()
+
+    assert json.loads(capsys.readouterr().out) == {"result": "ready", "metrics": {}}
+    preflight.assert_called_once_with()
 
 
 def _write_skills(skills_dir: Path) -> None:
