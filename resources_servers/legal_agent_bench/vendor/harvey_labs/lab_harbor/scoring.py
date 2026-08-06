@@ -10,7 +10,8 @@ Intentional differences from upstream:
 - uses the configured OpenAI-compatible judge instead of provider SDKs;
 - creates isolated judges for parallel criteria;
 - records per-criterion transcripts and judge errors;
-- fails missing or unreadable deliverables without calling the judge; and
+- fails missing or unreadable deliverables without calling the judge;
+- excludes raw OOXML working files from aggregate judge input; and
 - uses deterministic filename matching without Anthropic-specific LLM fallback.
 """
 
@@ -27,7 +28,7 @@ from .judge import PROMPT_TEMPLATE, VERDICT_SCHEMA, OpenAICompatibleJudge, write
 
 
 SKIP_DIRS = {"node_modules", ".npm", "__pycache__", ".git", "venv", ".venv"}
-SKIP_EXTENSIONS = {".lock", ".map"}
+SKIP_EXTENSIONS = {".lock", ".map", ".rels", ".xml"}
 SKIP_FILES = {"package-lock.json"}
 
 
