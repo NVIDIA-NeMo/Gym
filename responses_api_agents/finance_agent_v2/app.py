@@ -539,6 +539,17 @@ class FinanceAgentV2(SimpleResponsesAPIAgent):
 
         last_model_response.output = new_outputs
         last_model_response.usage = usage
+        # Carry why the loop ended into the rollout. Without this the stop reason
+        # exists only in the agent's log, so a results file cannot distinguish an
+        # answer the model chose to submit from one cut short by the time budget or
+        # a tool abort — and under dealbreaker-gated scoring a truncated trajectory
+        # scores exactly like a confidently wrong one. ``metadata`` is the Responses
+        # API's own string-keyed side channel, so it survives verify() untouched.
+        last_model_response.metadata = {
+            **(last_model_response.metadata or {}),
+            "stop_reason": stop_reason.value,
+            "steps": str(step),
+        }
         return last_model_response
 
     async def run(self, request: Request, body: FinanceAgentV2RunRequest) -> FinanceAgentV2VerifyResponse:
@@ -555,6 +566,7 @@ class FinanceAgentV2(SimpleResponsesAPIAgent):
                 tools=[],
                 parallel_tool_calls=False,
                 tool_choice="auto",
+                metadata={"stop_reason": StopReason.ERROR.value},
             )
             return FinanceAgentV2VerifyResponse(
                 responses_create_params=body.responses_create_params,

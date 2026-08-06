@@ -518,6 +518,44 @@ class TestResponses:
         model_calls = [c for c in agent.server_client.post.call_args_list if c.kwargs["server_name"] == _MODEL_SERVER]
         assert len(model_calls) == 1, "budget should have expired before the second turn"
 
+    def test_stop_reason_recorded_for_a_clean_submission(self) -> None:
+        agent, client = _make_agent_and_client()
+
+        model_mock = _dotjson_mock(_tool_call_response("submit_final_result", json.dumps({"final_result": "$100B"})))
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, _dotjson_mock({"status": "ok"})))
+
+        res = client.post("/v1/responses", json=_INPUT)
+        assert res.status_code == 200
+        assert res.json()["metadata"]["stop_reason"] == "done_tool"
+        assert res.json()["metadata"]["steps"] == "1"
+
+    @pytest.mark.parametrize(
+        "config, expected",
+        [
+            (dict(max_steps=2), "max_turns"),
+            (dict(max_steps=5, max_time_seconds=0.05), "max_time"),
+        ],
+    )
+    def test_stop_reason_distinguishes_truncated_rollouts(self, config, expected) -> None:
+        """A trajectory cut short scores like a confident miss under dealbreaker
+        gating, so the results file has to say which one it was."""
+        agent, client = _make_agent_and_client(_make_config(**config))
+        tool_call = _tool_call_response("edgar_search", json.dumps({"search_query": "AAPL"}))
+        rs_mock = _dotjson_mock({"results": "data"})
+
+        async def route_post(**kwargs):
+            if kwargs["server_name"] == _MODEL_SERVER:
+                if config.get("max_time_seconds"):
+                    await asyncio.sleep(0.06)
+                return _dotjson_mock(tool_call)
+            return rs_mock
+
+        agent.server_client.post = AsyncMock(side_effect=route_post)
+
+        res = client.post("/v1/responses", json=_INPUT)
+        assert res.status_code == 200
+        assert res.json()["metadata"]["stop_reason"] == expected
+
     def test_abort_error_terminates_rollout(self) -> None:
         """Upstream's on_tool_result hook re-raises RetryExhaustedError, ending
         the run rather than letting the model continue without the data."""

@@ -1,13 +1,8 @@
 # Finance Agent v2 (FABv2) benchmark: the public 27-question eval overlay on top
-# of the finance_agent_v2 resources server. `gym eval prepare --benchmark
-# finance_agent_v2` runs benchmarks/finance_agent_v2/prepare.py to (re)build the
-# dataset; `gym eval run --benchmark finance_agent_v2` evaluates against it.
-#
-# NOTE: prepare.py imports the upstream `finance_agent` package (tools-only reuse),
-# and `gym eval prepare` imports the prepare module in-process, so run it from the
-# resource server's venv (which has both `gym` and `finance_agent`):
-#   source resources_servers/finance_agent_v2/.venv/bin/activate
-#   gym eval prepare --benchmark finance_agent_v2
+# of the finance_agent_v2 resources server. Both commands run from the repo root
+# venv; prepare.py is standard-library only:
+#   gym eval prepare --benchmark finance_agent_v2   # (re)builds the dataset
+#   gym eval run --benchmark finance_agent_v2       # evaluates against it
 
 # Chain to the existing finance_agent_v2 resources server + finance_agent config.
 config_paths:
@@ -34,9 +29,9 @@ finance_agent_v2_benchmark_agent:
       - name: finance_agent_v2
         type: benchmark
         jsonl_fpath: benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl
-        # The v2 system/question prompts are baked into each sample's
-        # responses_create_params by prepare.py (imported from the upstream
-        # finance_agent package), so there is no separate prompt config to apply.
+        # prepare.py bakes the upstream v2 system/question prompts into each
+        # sample's responses_create_params (from benchmarks/finance_agent_v2/
+        # upstream_spec.json), so there is no separate prompt config to apply.
         prompt_config: null
         prepare_script: benchmarks/finance_agent_v2/prepare.py
         num_repeats: 1

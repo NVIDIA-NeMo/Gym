@@ -22,12 +22,13 @@ same resources server run on externally generated SDG data, so there is no
 | Path | Purpose |
 |------|---------|
 | `config.yaml` | Thin benchmark overlay: `config_paths`-chains to the resources server + `finance_agent` agent config and overrides the dataset to the frozen FABv2 set. Resolved by `gym eval prepare/run --benchmark finance_agent_v2`. |
-| `prepare.py` | `gym eval prepare` entry point **and** CSV→JSONL converter (`--input/--output`): builds benchmark JSONL from a raw Vals public export (downloading it if absent), copying the raw `rubric` through (the scoring input) and concatenating its criteria into a human-readable `expected_answer` reference. |
+| `prepare.py` | `gym eval prepare` entry point **and** CSV→JSONL converter (`--input/--output`): builds benchmark JSONL from a raw Vals public export (downloading it if absent), copying the raw `rubric` through verbatim — criteria text *and* the `modifiers` carrying severity/`must_pass`, all of which are scoring inputs — and concatenating the criteria into a human-readable `expected_answer` reference. Depends only on the standard library, so it runs in the repo-root venv like every other benchmark's prepare script. |
+| `upstream_spec.json` | Committed snapshot of the upstream system/question prompts and the tool JSON schemas that `prepare.py` bakes into each sample. Generated from the installed `finance_agent` package by `resources_servers/finance_agent_v2/scripts/export_upstream_spec.py`; **do not hand-edit**. It exists because `gym eval prepare` imports `prepare.py` into the root `gym` process, where `finance_agent` (a server dependency) is not installed. The server's `tests/test_upstream_spec.py` re-derives it from the package and fails if it has drifted, and `prepare.py` refuses to run if its `_UPSTREAM_SHA` and the snapshot disagree. |
 | `data/vals_v2_public_27q.jsonl` | The public 27-question eval set. **Not committed** — `prepare.py` regenerates it from the upstream Vals public export, so the whole `data/` dir is gitignored. The `gym env test` fixtures (`example.jsonl`, `example_rollouts.jsonl`, `example_metrics.json`) live with the server in `resources_servers/finance_agent_v2/data/`. |
 
-Operational scripts (cache prefetch, run comparison) live with the server, not
-here, because they are shared by eval, training, and SDG:
-`resources_servers/finance_agent_v2/scripts/`.
+Operational scripts (cache prefetch, run comparison, offline rescoring, run
+reports) live with the server, not here, because they are shared by eval, training,
+and SDG: `resources_servers/finance_agent_v2/scripts/`.
 
 ## Setup
 
@@ -71,12 +72,12 @@ search_judge_model_name: gpt-5-mini
 
 ## Run (gym CLI, NeMo Gym >= 0.5.0)
 
-`prepare.py` imports the upstream `finance_agent` package, and `gym eval prepare`
-imports the prepare module in-process, so run from the resource server's venv
-(which has both `gym` and `finance_agent`), at the repo root:
+Run from the repo root in the root venv. `gym eval prepare` imports `prepare.py`
+into the `gym` process, and prepare reads the upstream prompts and tool schemas from
+the committed `upstream_spec.json`, so no server venv is needed to build the dataset:
 
 ```bash
-source resources_servers/finance_agent_v2/.venv/bin/activate
+source .venv/bin/activate
 
 # 1. Build (or rebuild) the public 27Q set. Downloads the Vals public CSV if no
 #    local source is present under data/.
@@ -86,6 +87,18 @@ gym eval prepare --benchmark finance_agent_v2
 gym eval run --benchmark finance_agent_v2 \
   -c responses_api_models/openai_model/configs/openai_model.yaml \
   --output results/finance_agent_v2_27q.jsonl --limit 27 --concurrency 4
+```
+
+For a model comparison, name the model on the command line and take repeats — 27
+questions is small enough that a single pass cannot separate two models (see
+[report_run.py](../../resources_servers/finance_agent_v2/README.md#analyzing-a-finished-run)
+for the confidence intervals):
+
+```bash
+gym eval run --benchmark finance_agent_v2 --split benchmark \
+  --model-type openai_model -m gpt-5.5 \
+  --output results/fabv2_27q_gpt55_repeat3.jsonl \
+  --num-repeats 3 --concurrency 4
 ```
 
 To reuse one set of servers across several runs, start them in one terminal and
@@ -103,11 +116,19 @@ gym eval run --no-serve --agent finance_agent_v2_benchmark_agent \
   --output results/finance_agent_v2_27q.jsonl --limit 27 --concurrency 4
 ```
 
-Rewards land in the output JSONL: `reward` 1.0 only when every rubric criterion
-passed, with `rubric_fraction` carrying the partial credit and `judge_error`
-marking rows the judge could not score (filter those out rather than reading them
-as zeros). Swap in `responses_api_models/vllm_model/configs/vllm_model.yaml` and point
-`policy_*` at your endpoint to run on a self-hosted model.
+Rewards land in the output JSONL. `reward` is **Partial Credit**: the
+severity-weighted share of rubric criteria passed, forced to 0.0 if any criterion
+marked `must_pass` failed. `rubric_all_pass` is the stricter every-criterion-passed
+flag, and `judge_error` marks rows the judge could not score (filter those out
+rather than reading them as zeros). Swap in
+`responses_api_models/vllm_model/configs/vllm_model.yaml` and point `policy_*` at
+your endpoint to run on a self-hosted model.
+
+> **Reward semantics changed in Aug 2026.** It used to be all-or-nothing and is now
+> graded, so `mean/reward` from an older run is not comparable. Rescore old rollouts
+> with `resources_servers/finance_agent_v2/scripts/rescore_rubrics.py` (no
+> re-judging needed — only the aggregation changed), and use
+> `scripts/report_run.py` for confidence intervals before calling a difference real.
 
 ## Caching
 
@@ -130,7 +151,8 @@ their published numbers. Licensing detail:
 [resources-server README](../../resources_servers/finance_agent_v2/README.md#licensing).
 
 Before comparing anything here to the Vals leaderboard, read
-[reading these metrics against the Vals leaderboard](../../resources_servers/finance_agent_v2/README.md#reading-these-metrics-against-the-vals-leaderboard):
-their headline Accuracy is dealbreaker-gated Partial Credit on a private split,
-`mean/rubric_all_pass` is the only metric of ours that matches a Vals definition,
-and `rubric_fraction` has no counterpart there.
+[reading these metrics against the Vals leaderboard](../../resources_servers/finance_agent_v2/README.md#reading-these-metrics-against-the-vals-leaderboard).
+`mean/rubric_partial_credit` and `mean/rubric_all_pass` now match their Accuracy and
+All-Pass *definitions*, but not their numbers: we measure on the 27 public questions
+rather than their private 450-question split, with our own judge instead of their
+three-model jury. `rubric_fraction` has no counterpart there at all.

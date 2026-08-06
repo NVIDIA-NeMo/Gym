@@ -18,22 +18,15 @@ Populates the same per-(endpoint, ticker) master files that ``CachedPriceHistory
 reads at runtime, so a later eval run (with ``use_cache: true``) serves every
 already-prefetched price query from disk instead of calling Tiingo.
 
-Design notes:
-  - Fetches the widest useful window once per ticker: ``--start`` .. ``MAX_END_DATE``
-    (the pinned upstream ``finance_agent.tools.MAX_END_DATE``). Because history is
-    immutable within that window, one fetch per ticker suffices.
-  - Sequential + throttled (``--sleep``) to respect limited API keys.
-  - Idempotent/resumable: a ticker whose master already covers the window is
-    skipped unless ``--force`` is given.
+One fetch per ticker covers ``--start`` .. upstream's ``MAX_END_DATE``, since history
+is immutable within that window. Sequential and throttled (``--sleep``) for limited
+API keys, and resumable: a ticker whose master already covers the window is skipped
+unless ``--force``.
 
 Usage (from the repository root):
-    python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
-        --cache-dir /shared/cache/finance_agent_v2 \
-        --tickers AAPL MSFT NVDA \
-        --asset-class equity
-    # or from a file (one "TICKER[,asset_class]" per line):
-    python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
-        --cache-dir ... --tickers-file tickers.txt
+    python .../prefetch_prices.py --cache-dir /shared/cache/finance_agent_v2 \
+        --tickers AAPL MSFT NVDA --asset-class equity
+    # or --tickers-file with one "TICKER[,asset_class]" per line
 """
 
 from __future__ import annotations

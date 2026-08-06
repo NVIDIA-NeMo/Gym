@@ -14,26 +14,21 @@
 # limitations under the License.
 """Cache-friendly wrappers around the upstream Vals finance-agent-v2 tools.
 
-Fidelity principle: we never reimplement a tool's logic. Each ``Cached*`` class
-subclasses the upstream tool and overrides *only its network method*, caching
-the **raw upstream response** and letting the untouched upstream serializer
-render it. A cache hit is therefore byte-identical to a live call, and the cache
-survives an upstream formatting/SHA bump without a refetch (we re-serialize the
-stored raw records with the new code).
+No tool logic is reimplemented. Each ``Cached*`` class subclasses the upstream tool
+and overrides only its network method, storing the raw upstream response and letting
+the untouched upstream serializer render it. A hit is therefore byte-identical to a
+live call, and the cache survives an upstream formatting bump without a refetch.
 
 Overridden seams (see upstream ``finance_agent/tools.py``):
-  - ``PriceHistory._fetch``       -> per-(endpoint, ticker) master of raw Tiingo
-                                     records; slice-on-read via the untouched
-                                     ``_records_to_csv``.
-  - ``EDGARSearch._execute_search`` -> cache the raw sec-api ``filings`` list,
-                                     keyed by the normalized request payload.
-  - ``ParseHtmlPage._parse_html_page`` -> cache parsed text for sec.gov filing
-                                     URLs only; all other URLs pass through.
+  - ``PriceHistory._fetch`` -> per-(endpoint, ticker) master of raw Tiingo records,
+    sliced on read by the untouched ``_records_to_csv``.
+  - ``EDGARSearch._execute_search`` -> raw sec-api ``filings`` list, keyed by the
+    normalized request payload.
+  - ``ParseHtmlPage._parse_html_page`` -> parsed text for sec.gov filing URLs only.
 
-``SecFilingSearch`` is a *new* tool (not from Vals): a ticker->CIK submissions
-lookup over ``data.sec.gov`` that returns sec.gov Archives filing URLs. It is
-intended for training/SDG (cheaper, no sec-api key), and is NOT byte-parity with
-Vals's ``edgar_search`` full-text search. Expose it only via ``enabled_sec_tools``.
+``SecFilingSearch`` is a new tool, not from Vals: a ticker->CIK lookup over
+data.sec.gov for training/SDG use (cheaper, no sec-api key). It is not byte-parity
+with Vals's ``edgar_search``, so expose it only via ``enabled_sec_tools``.
 """
 
 from __future__ import annotations

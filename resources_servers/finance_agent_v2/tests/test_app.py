@@ -41,6 +41,8 @@ from resources_servers.finance_agent_v2.app import (
     FinanceAgentV2ResourcesServer,
     FinanceAgentV2ResourcesServerConfig,
     FinanceAgentV2VerifyRequest,
+    RubricJudgement,
+    aggregate_rubric_scores,
 )
 from resources_servers.finance_agent_v2.cached_tools import (
     CachedParseHtmlPage,
@@ -50,6 +52,7 @@ from resources_servers.finance_agent_v2.cached_tools import (
 
 
 _PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompt_templates"
+_BENCHMARK_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "finance_agent_v2"
 _TEST_SESSION_ID = "test-session"
 
 
@@ -345,6 +348,15 @@ class TestToolSurface:
         server = _make_server(enabled_sec_tools=["edgar_search", "sec_filing_search"])
         assert isinstance(server._tools.get("sec_filing_search"), SecFilingSearch)
 
+    def test_server_registers_every_tool_the_benchmark_advertises(self) -> None:
+        """The dataset's tool list and this registry come from the same package by
+        different paths (committed snapshot vs. live instantiation). A tool advertised
+        but not registered means an "unknown tool" error for the whole run."""
+        spec = json.loads((_BENCHMARK_DIR / "upstream_spec.json").read_text(encoding="utf-8"))
+        advertised = set(spec["valid_tools"]) | {spec["submit_tool"]}
+
+        assert advertised <= set(_make_server()._tools)
+
     def test_cache_disabled_by_default_uses_plain_tools(self) -> None:
         server = _make_server()
         assert server._cache.enabled is False
@@ -478,10 +490,122 @@ class TestRubricParsing:
                 {"criteria": "Sentiment was positive"},
             ]
         )
+        # No modifiers: the pre-Aug-2026 schema, which must degenerate to unweighted
+        # and ungating so old datasets still reverify to the numbers they were scored at.
         assert FinanceAgentV2ResourcesServer._parse_rubric(rubric) == [
-            {"criteria": "Revenue was $391.0 billion", "operator": "finance_agent_v2_operator"},
-            {"criteria": "Sentiment was positive", "operator": None},
+            {
+                "criteria": "Revenue was $391.0 billion",
+                "operator": "finance_agent_v2_operator",
+                "severity": 1.0,
+                "must_pass": False,
+            },
+            {"criteria": "Sentiment was positive", "operator": None, "severity": 1.0, "must_pass": False},
         ]
+
+    def test_parses_severity_and_must_pass(self) -> None:
+        rubric = json.dumps(
+            [
+                {"criteria": _C1, "modifiers": {"severity": 3.0, "category": "must_pass"}},
+                {"criteria": _C2, "modifiers": {"severity": 2.0}},
+                {"criteria": _C3, "modifiers": {"category": "nice_to_have"}},
+            ]
+        )
+        parsed = FinanceAgentV2ResourcesServer._parse_rubric(rubric)
+        assert [(c["severity"], c["must_pass"]) for c in parsed] == [(3.0, True), (2.0, False), (1.0, False)]
+
+    @pytest.mark.parametrize(
+        "modifiers",
+        [
+            {},
+            {"severity": None},
+            {"severity": "high"},  # not a number
+            {"severity": 0},  # a zero-weight criterion that still gates reads as a bug
+            {"severity": -2.0},
+            {"severity": float("nan")},
+            {"severity": float("inf")},
+            "not a dict",
+        ],
+    )
+    def test_unusable_severity_falls_back_to_one(self, modifiers) -> None:
+        """A malformed weight on one criterion must not throw away a finished rollout."""
+        rubric = json.dumps([{"criteria": _C1, "modifiers": modifiers}])
+        assert FinanceAgentV2ResourcesServer._parse_rubric(rubric)[0]["severity"] == 1.0
+
+    def test_must_pass_survives_an_unusable_severity(self) -> None:
+        rubric = json.dumps([{"criteria": _C1, "modifiers": {"severity": "high", "category": "must_pass"}}])
+        parsed = FinanceAgentV2ResourcesServer._parse_rubric(rubric)[0]
+        assert (parsed["severity"], parsed["must_pass"]) == (1.0, True)
+
+
+def _judgement(score, severity=1.0, must_pass=False, criteria=None) -> RubricJudgement:
+    return RubricJudgement(
+        criteria=criteria or f"criterion s={severity} mp={must_pass} score={score}",
+        score=score,
+        severity=severity,
+        must_pass=must_pass,
+    )
+
+
+class TestPartialCredit:
+    """The aggregation Vals's leaderboard number is defined by.
+
+    Exercised directly rather than only through verify() so the arithmetic is
+    pinned without a judge in the loop.
+    """
+
+    def test_unweighted_ungated_matches_a_plain_mean(self) -> None:
+        """The pre-Aug-2026 behaviour, which old datasets must still degenerate to."""
+        scores = aggregate_rubric_scores([_judgement(1), _judgement(1), _judgement(0), _judgement(0)])
+        assert scores["rubric_partial_credit"] == 0.5
+        assert scores["rubric_fraction"] == 0.5
+        assert scores["rubric_all_pass"] is False
+
+    def test_severity_weights_the_fraction(self) -> None:
+        """Failing the 3.0 criterion costs far more than failing a 1.0 one."""
+        judgements = [_judgement(1, severity=1.0), _judgement(1, severity=1.0), _judgement(0, severity=3.0)]
+        scores = aggregate_rubric_scores(judgements)
+        assert scores["rubric_weight_total"] == 5.0
+        assert scores["rubric_weight_passed"] == 2.0
+        assert scores["rubric_partial_credit"] == pytest.approx(0.4)
+        # The unweighted view still says 2 of 3, which is the point of keeping both.
+        assert scores["rubric_fraction"] == pytest.approx(2 / 3)
+
+    def test_failed_dealbreaker_forfeits_everything(self) -> None:
+        judgements = [_judgement(1, severity=3.0), _judgement(1, severity=3.0), _judgement(0, must_pass=True)]
+        scores = aggregate_rubric_scores(judgements)
+        assert scores["rubric_partial_credit"] == 0.0
+        # The ungated fraction is what the gate cost — 86% of the weight passed.
+        assert scores["rubric_weighted_fraction"] == pytest.approx(6 / 7)
+        assert scores["rubric_dealbreakers_failed"] == 1
+
+    def test_passed_dealbreaker_does_not_gate(self) -> None:
+        scores = aggregate_rubric_scores([_judgement(1, must_pass=True), _judgement(0)])
+        assert scores["rubric_partial_credit"] == 0.5
+        assert (scores["rubric_dealbreakers_total"], scores["rubric_dealbreakers_failed"]) == (1, 0)
+
+    def test_unresolved_dealbreaker_gates_like_a_failure(self) -> None:
+        """An absent verdict is not a pass, so it cannot be treated as one. verify()
+        pairs this with judge_error so the row stays filterable."""
+        scores = aggregate_rubric_scores([_judgement(None, must_pass=True), _judgement(1)])
+        assert scores["rubric_partial_credit"] == 0.0
+        assert scores["rubric_dealbreakers_failed"] == 1
+        assert scores["rubric_unresolved"] == 1
+
+    def test_unresolved_criterion_weighs_as_a_miss(self) -> None:
+        scores = aggregate_rubric_scores([_judgement(None, severity=2.0), _judgement(1, severity=2.0)])
+        assert scores["rubric_partial_credit"] == 0.5
+        assert scores["rubric_all_pass"] is False
+
+    def test_all_pass_scores_one(self) -> None:
+        scores = aggregate_rubric_scores([_judgement(1, severity=3.0, must_pass=True), _judgement(1)])
+        assert scores["rubric_partial_credit"] == 1.0
+        assert scores["rubric_all_pass"] is True
+
+    def test_no_criteria_is_zero_not_a_crash(self) -> None:
+        scores = aggregate_rubric_scores([])
+        assert scores["rubric_partial_credit"] == 0.0
+        assert scores["rubric_weighted_fraction"] is None
+        assert scores["rubric_fraction"] is None
 
 
 class TestScoreExtraction:
@@ -501,9 +625,8 @@ class TestScoreExtraction:
     def test_braces_inside_quoted_evidence(self, text) -> None:
         """Regression: the 27Q run lost a whole question to this reply shape.
 
-        The evidence quote carries the answer's LaTeX subscripts (``EBITDAR_{WMT}``),
-        so a non-greedy ``{.*?}`` regex ended its match on the inner brace and every
-        retry failed the same way. Extraction has to be brace-balanced.
+        LaTeX subscripts in the quoted evidence (``EBITDAR_{WMT}``) end a ``{.*?}``
+        match on the inner brace, so extraction has to be brace-balanced.
         """
         assert FinanceAgentV2ResourcesServer._extract_score(text) == 1
         assert "EBITDAR_{WMT}" in FinanceAgentV2ResourcesServer._extract_json_payload(text)["extracted_evidence"]
@@ -549,20 +672,51 @@ class TestVerifyRubricJudge:
         assert all(j.unanimous for j in res.rubric_judgements)
 
     @pytest.mark.asyncio
-    async def test_one_criterion_fails_zeroes_reward_but_keeps_partial_credit(self) -> None:
+    async def test_one_criterion_fails_earns_partial_credit(self) -> None:
+        """Reward is graded, not binary: missing one of three non-gating criteria
+        keeps two thirds of the credit."""
         server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0], _C3: [1, 1, 1]})
         res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2, _C3)))
 
-        assert res.reward == 0.0
+        assert res.reward == pytest.approx(2 / 3)
+        assert res.rubric_partial_credit == pytest.approx(2 / 3)
         assert res.rubric_passed == 2
         assert res.rubric_fraction == pytest.approx(2 / 3)
         assert res.rubric_all_pass is False
-        # Partial credit is the only thing separating this from a total miss, so
-        # the reward alone must not be the whole record.
         assert res.judge_error is None
         by_criterion = {j.criteria: j for j in res.rubric_judgements}
         assert by_criterion[_C2].score == 0
         assert by_criterion[_C2].votes == [0, 0, 0]
+
+    @pytest.mark.asyncio
+    async def test_severity_and_dealbreakers_flow_from_rubric_to_reward(self) -> None:
+        """End-to-end: the dataset's modifiers reach the reward, and the judge never
+        sees them (it must grade a criterion the same whether or not it is fatal)."""
+        rubric = json.dumps(
+            [
+                {"criteria": _C1, "modifiers": {"severity": 3.0}},
+                {"criteria": _C2, "modifiers": {"severity": 1.0, "category": "must_pass"}},
+            ]
+        )
+        server, stub = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0]})
+        res = await server.verify(_mock_request(), _submitted_request(rubric))
+
+        assert res.reward == 0.0  # the dealbreaker gates
+        assert res.rubric_weighted_fraction == pytest.approx(0.75)  # 3 of 4 weight passed
+        assert (res.rubric_dealbreakers_total, res.rubric_dealbreakers_failed) == (1, 1)
+        by_criterion = {j.criteria: j for j in res.rubric_judgements}
+        assert (by_criterion[_C1].severity, by_criterion[_C1].must_pass) == (3.0, False)
+        assert (by_criterion[_C2].severity, by_criterion[_C2].must_pass) == (1.0, True)
+        assert not any("severity" in p or "must_pass" in p for p in stub.prompts)
+
+    @pytest.mark.asyncio
+    async def test_weighting_is_backward_compatible_without_modifiers(self) -> None:
+        """A rubric with no modifiers scores exactly as it did before weighting."""
+        server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        assert res.reward == 0.5 == res.rubric_fraction
+        assert res.rubric_dealbreakers_total == 0
 
     @pytest.mark.asyncio
     async def test_majority_vote_resolves_and_flags_disagreement(self) -> None:
@@ -676,8 +830,25 @@ class TestVerifyRubricJudge:
         assert by_criterion[_C1].error is not None
         assert res.rubric_unresolved == 1
         assert res.rubric_all_pass is False
-        assert res.reward == 0.0
+        # Weighed as a miss, so the resolved criterion still earns its half. The
+        # score is only meaningful once judge_error has been used to filter the row.
+        assert res.reward == 0.5
         assert res.judge_error is not None and "unresolved" in res.judge_error
+
+    @pytest.mark.asyncio
+    async def test_unresolved_dealbreaker_zeroes_the_reward(self, no_sleep) -> None:
+        rubric = json.dumps(
+            [
+                {"criteria": _C1, "modifiers": {"category": "must_pass"}},
+                {"criteria": _C2},
+            ]
+        )
+        server, _ = _rubric_server({_C1: ["garbage"] * 20, _C2: [1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(rubric))
+
+        assert res.reward == 0.0
+        assert res.rubric_dealbreakers_failed == 1
+        assert res.judge_error is not None
 
     @pytest.mark.asyncio
     async def test_evidence_and_reason_recorded_per_vote(self) -> None:
@@ -719,6 +890,18 @@ class TestVerifyRubricJudge:
         assert res.judge_error is None  # a real failure, not a judge problem
         assert res.rubric_judgements is None
         assert sum(stub.calls.values()) == 0
+
+    @pytest.mark.asyncio
+    async def test_agent_stop_reason_reaches_the_rollout(self) -> None:
+        """verify() must pass the agent's stop_reason through, or the results file
+        cannot tell a truncated trajectory from a wrong answer."""
+        response = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": _ANSWER})))
+        response.metadata = {"stop_reason": "max_time", "steps": "42"}
+        server, _ = _rubric_server({_C1: [1, 1, 1]})
+
+        res = await server.verify(_mock_request(), _make_verify_request(response, rubric=_rubric(_C1)))
+
+        assert res.response.metadata == {"stop_reason": "max_time", "steps": "42"}
 
     @pytest.mark.asyncio
     async def test_missing_rubric_is_flagged_as_unscorable(self) -> None:
@@ -763,6 +946,10 @@ class TestAggregateMetrics:
             "rubric_unresolved": 0,
             "rubric_fraction": 1.0,
             "rubric_all_pass": True,
+            "rubric_partial_credit": 1.0,
+            "rubric_weighted_fraction": 1.0,
+            "rubric_dealbreakers_total": 1,
+            "rubric_dealbreakers_failed": 0,
             "judge_error": None,
             "rubric_judgements": [
                 {"criteria": _C1, "score": 1, "unanimous": True, "attempts_used": 3},
@@ -781,6 +968,9 @@ class TestAggregateMetrics:
             rubric_passed=1,
             rubric_fraction=0.5,
             rubric_all_pass=False,
+            rubric_partial_credit=0.0,
+            rubric_weighted_fraction=0.5,
+            rubric_dealbreakers_failed=1,
             rubric_judgements=[
                 {"criteria": _C1, "score": 1, "unanimous": False, "attempts_used": 3, "parse_failures": 1},
                 {"criteria": _C2, "score": 0, "unanimous": True, "attempts_used": 4, "api_failures": 1},
@@ -790,6 +980,12 @@ class TestAggregateMetrics:
 
         assert metrics["mean/rubric_fraction"] == 0.75
         assert metrics["mean/rubric_all_pass"] == 0.5
+        assert metrics["mean/rubric_partial_credit"] == 0.5
+        # Reported next to partial credit so the cost of the gate is visible: half
+        # the weight passed in the second rollout, and the dealbreaker took it all.
+        assert metrics["mean/rubric_weighted_fraction"] == 0.75
+        assert metrics["mean/rubric_dealbreaker_tripped"] == 0.5
+        assert metrics["rubric/dealbreakers_failed"] == 1
         # Denominator is criteria, not questions.
         assert metrics["rubric/criteria_total"] == 4
         assert metrics["mean/criterion_pass_rate"] == 0.75
@@ -825,23 +1021,41 @@ class TestAggregateMetrics:
         assert metrics["rubric/rollouts_without_submission"] == 1
         assert metrics["rubric/criteria_total"] == 0
         assert "mean/criterion_pass_rate" not in metrics
+        # A rollout with nothing to grade had no dealbreaker to trip, so counting it
+        # would dilute the rate with rows that were never eligible to fail one.
+        assert "mean/rubric_dealbreaker_tripped" not in metrics
+
+    def test_legacy_rollouts_omit_the_weighted_metrics(self) -> None:
+        """Pre-weighting rollouts have no partial credit to average; inventing one
+        from their binary reward would mislabel a scoring change as a model result."""
+        legacy = {"reward": 1.0, "rubric_fraction": 1.0, "rubric_all_pass": True, "rubric_judgements": []}
+        metrics = _make_server().compute_metrics([[legacy]])
+
+        assert metrics["mean/rubric_fraction"] == 1.0
+        assert "mean/rubric_partial_credit" not in metrics
+        assert "mean/rubric_weighted_fraction" not in metrics
 
     def test_key_metrics_promote_judge_health(self) -> None:
         agent_metrics = {
             "mean/reward": 0.5,
             "mean/rubric_fraction": 0.75,
+            "mean/rubric_partial_credit": 0.5,
             "std/reward": 0.1,
             "rubric/criteria_unresolved": 2,
             "rubric/rollouts_with_judge_error": 1,
             "rubric/rollouts_without_submission": 0,
+            "rubric/dealbreakers_failed": 4,
             "rubric/parse_failures": 3,
         }
         key = _make_server().get_key_metrics(agent_metrics)
 
         assert key["mean/reward"] == 0.5
         assert key["mean/rubric_fraction"] == 0.75
+        assert key["mean/rubric_partial_credit"] == 0.5
         assert "std/reward" not in key
         # A run whose judge failed must not read as a low score.
         assert key["rubric/criteria_unresolved"] == 2
         assert key["rubric/rollouts_with_judge_error"] == 1
+        # Dealbreakers explain most of the gap between weighted and gated scores.
+        assert key["rubric/dealbreakers_failed"] == 4
         assert "rubric/parse_failures" not in key

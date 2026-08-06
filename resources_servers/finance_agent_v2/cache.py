@@ -14,16 +14,13 @@
 # limitations under the License.
 """Disk-backed cache for the Finance Agent v2 tools.
 
-``ToolCache`` is a small, dependency-free key/value store on disk. It is
-deliberately *dumb*: it does atomic reads/writes, and knows nothing about
-pricing/SEC semantics. The tool-specific key derivation and merge logic live in
-``cached_tools.py``.
+``ToolCache`` is a dependency-free key/value store on disk. It is deliberately dumb:
+atomic reads and writes, no knowledge of pricing/SEC semantics — key derivation and
+merge logic live in ``cached_tools.py``.
 
-There are exactly two states: **on** (read *and* write) or **off**. When on, a
-hit is served from disk and a miss is fetched live and persisted; when off, the
-tools run fully live. The cache stores the *raw upstream response* and lets the
-untouched upstream serializer render it, so a hit is byte-identical to a live
-call (see ``cached_tools`` for the parity argument).
+It is either on (read and write) or off (tools run live). It stores the raw upstream
+response and lets the untouched upstream serializer render it, so a hit is
+byte-identical to a live call.
 
 Cache namespaces live as subdirectories under the root:
   - ``pricing/``        per-(endpoint, ticker) master records (Tiingo)
@@ -48,17 +45,10 @@ logger = logging.getLogger(__name__)
 
 
 class ToolCache:
-    """Namespaced, atomic disk cache with a simple on/off switch.
+    """Namespaced, atomic disk cache with an on/off switch.
 
-    Parameters
-    ----------
-    cache_dir:
-        Root directory for cache files. When ``use_cache`` is on and this is
-        ``None``, a default under ``~/.cache/nemo_gym/finance_agent_v2`` is used.
-        Relative paths resolve from the current working directory.
-    use_cache:
-        ``True`` (default) enables read+write caching; ``False`` disables it
-        entirely (tools run live).
+    ``cache_dir`` roots the cache (relative paths resolve from the CWD); when unset
+    and enabled, it defaults under ``~/.cache/nemo_gym/finance_agent_v2``.
     """
 
     def __init__(

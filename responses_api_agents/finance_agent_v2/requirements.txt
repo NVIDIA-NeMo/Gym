@@ -16,4 +16,4 @@ model-library @ git+https://gitlab-master.nvidia.com/swdl-nemollm-mlops/alignmen
 
 # Vals finance-agent-v2 (provides finance_agent.get_agent / .tools / .exceptions).
 # No upstream tags exist; pinned to the HEAD commit at integration time.
-finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@22a5ed49aceea6adcd1160ea9f8c0cc1cc7e4d78
+finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@bb460b524472ae0955abdf243bbbac06958dc8c9

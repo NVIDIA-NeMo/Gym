@@ -32,11 +32,6 @@ finance_agent_v2_resources_server:
         name: search_judge_model
       judge_responses_create_params:
         input: []
-        # Generous headroom, not a tuning knob: gpt-5.2 answers this prompt in ~200
-        # output tokens at effort=high (~80 of them reasoning), so 8192 is ~40x what
-        # a healthy judge needs. Raising it does not fix unparseable replies. No
-        # temperature: the gpt-5.x reasoning models reject the parameter, and votes
-        # already vary because sampling is stochastic at the API default.
         max_output_tokens: 8192
         reasoning:
           effort: high
@@ -100,3 +95,5 @@ finance_agent_v2:
       - name: example
         type: example
         jsonl_fpath: resources_servers/finance_agent_v2/data/example.jsonl
+        # First 5 questions of the public 27Q set, from vals-ai/finance-agent-v2.
+        license: MIT

@@ -114,7 +114,11 @@ Faithful within the constraints of Gym's architecture, but not identical:
 - **History compaction.** Upstream supports compaction as an alternative to
   truncation. v2's `AgentConfig` does not enable it, so only truncation is
   implemented.
-- **Stop reason.** `StopReason` mirrors `model_library.agent.AgentStopReason` and
-  is logged at the end of every rollout, but is not yet carried into the verify
-  response — distinguishing "never submitted" from "judged wrong" in the metrics
-  needs a resource-server change.
+- **Stop reason.** `StopReason` mirrors `model_library.agent.AgentStopReason` and is
+  written to `response.metadata` as `stop_reason` (plus a `steps` count), so it
+  reaches the rollout file through `/verify` without a resource-server change.
+  `metadata` is the Responses API's own string-keyed side channel, which is why it
+  survives the round trip. Use it to tell a trajectory that ran out of time or turns
+  from one that answered and was judged wrong — under dealbreaker-gated scoring both
+  land at reward 0.0. Runs collected before this was added have no `stop_reason`, and
+  `scripts/report_run.py` shows those as `(not recorded)`.
