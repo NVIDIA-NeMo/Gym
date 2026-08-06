@@ -80,7 +80,8 @@ COPY --from=nemo-gym pyproject.toml uv.lock ./
 COPY --from=nemo-gym nemo_gym/__init__.py nemo_gym/package_info.py ./nemo_gym/
 
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --no-install-project && \
+    uv pip uninstall -y torchvision torchaudio 2>/dev/null || true
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
