@@ -79,23 +79,30 @@ class LabToolExecutor:
             command = parsed.get("command")
             if not isinstance(command, str) or not command:
                 return "Error: command is required"
-            result = await self._run(["/bin/bash", "-lc", command])
+            # Commands may contain generated documents or scripts large enough
+            # to exceed the host's argv limit.  Preserve login-shell behavior,
+            # but stream the command over stdin so argv remains fixed-size.
+            result = await self._run(["/bin/bash", "-l", "-s"], stdin=command.encode())
         else:
-            result = await self._run(["/usr/local/bin/python", str(CONTAINER_TOOL_RUNNER), name, json.dumps(parsed)])
+            result = await self._run(
+                ["/usr/local/bin/python", str(CONTAINER_TOOL_RUNNER), name],
+                stdin=json.dumps(parsed).encode(),
+            )
         full_read = name == "read" and "limit" in parsed and parsed.get("limit") in {0, None}
         return result if full_read else self._truncate(result)
 
-    async def _run(self, command: list[str]) -> str:
+    async def _run(self, command: list[str], *, stdin: bytes | None = None) -> str:
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd="/workspace/output",
             env=os.environ.copy(),
+            stdin=asyncio.subprocess.PIPE if stdin is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
+            stdout, stderr = await asyncio.wait_for(process.communicate(input=stdin), timeout=self.timeout_seconds)
         except asyncio.TimeoutError:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
