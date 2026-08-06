@@ -312,7 +312,7 @@ def test_read_host_cgroup_usage_returns_unavailable_for_missing_or_unsafe_paths(
             ),
         ),
         (
-            "usage_usec=invalid\nmemory_peak=1048576\n",
+            "usage_usec=invalid\nmemory_peak=1048576\n",  # pragma: allowlist secret
             SandboxResourceUsage(peak_memory_mib=1, source="docker_container_cgroup_v2"),
         ),
         ("usage_usec=\nmemory_peak=\n", SandboxResourceUsage()),
