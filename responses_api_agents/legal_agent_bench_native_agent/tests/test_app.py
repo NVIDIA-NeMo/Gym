@@ -153,6 +153,59 @@ async def test_model_failure_preserves_partial_trajectory(monkeypatch) -> None:
     assert any(isinstance(item, NeMoGymFunctionCallOutput) for item in result.output)
 
 
+async def test_model_timeout_sets_structured_failure_metadata(monkeypatch) -> None:
+    agent = _agent()
+    agent.server_client.post = AsyncMock(
+        side_effect=[
+            _raw_response(_model_response([_function_call()])),
+            TimeoutError(),
+        ]
+    )
+    monkeypatch.setattr(app.LabToolExecutor, "execute", AsyncMock(return_value="file.txt"))
+
+    result = await agent.responses(
+        SimpleNamespace(path_params={}),
+        NeMoGymResponseCreateParamsNonStreaming(input="Do the task"),
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.message == "LAB model call timed out after 1800s"
+    assert result.metadata == {app.AGENT_FAILURE_CLASS_METADATA_KEY: "agent_timed_out"}
+    assert any(isinstance(item, NeMoGymResponseFunctionToolCall) for item in result.output)
+    assert any(isinstance(item, NeMoGymFunctionCallOutput) for item in result.output)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_failure_class"),
+    [
+        (429, app.MODEL_CONNECTION_FAILURE_CLASS),
+        (500, app.MODEL_CONNECTION_FAILURE_CLASS),
+        (400, None),
+    ],
+)
+async def test_model_http_failures_classify_only_retryable_statuses(status, expected_failure_class) -> None:
+    agent = _agent()
+    agent.server_client.post = AsyncMock(
+        side_effect=app.aiohttp.ClientResponseError(
+            request_info=MagicMock(real_url="http://policy/v1/responses"),
+            history=(),
+            status=status,
+            message="model request failed",
+        )
+    )
+
+    result = await agent.responses(
+        SimpleNamespace(path_params={}),
+        NeMoGymResponseCreateParamsNonStreaming(input="Do the task"),
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert f"ClientResponseError: {status}" in result.error.message
+    assert (result.metadata or {}).get(app.AGENT_FAILURE_CLASS_METADATA_KEY) == expected_failure_class
+
+
 async def test_turn_limit_is_a_scoreable_incomplete_outcome(monkeypatch) -> None:
     agent = _agent(max_turns=1)
     agent.server_client.post = AsyncMock(return_value=_raw_response(_model_response([_function_call()])))
@@ -336,6 +389,9 @@ async def test_model_error_response_is_returned_with_trajectory() -> None:
     assert result.status == "failed"
     assert result.error is not None
     assert result.error.message == "policy backend failed"
+    assert result.metadata == {
+        app.AGENT_FAILURE_CLASS_METADATA_KEY: app.MODEL_CONNECTION_FAILURE_CLASS,
+    }
     assert any(isinstance(item, NeMoGymResponseOutputMessage) for item in result.output)
 
 

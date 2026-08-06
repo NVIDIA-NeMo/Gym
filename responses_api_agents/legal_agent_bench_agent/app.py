@@ -59,6 +59,8 @@ PORTABLE_PYTHON_SH = PACKAGE_DIR / "setup_scripts" / "_portable_python.sh"
 DATASET_ALIAS = "legal_agent_bench"
 INITIAL_USER_PROMPT = "Please begin working on the task described in the system prompt."
 NATIVE_AGENT_MODULE = "responses_api_agents.legal_agent_bench_native_agent.app"
+AGENT_FAILURE_CLASS_METADATA_KEY = "nemo_gym_failure_class"
+PROPAGATED_AGENT_FAILURE_CLASSES = frozenset({"agent_timed_out", "model_connection_failed"})
 LAB_SYSTEM_PROMPT = (
     PARENT_DIR / "resources_servers" / "legal_agent_bench" / "vendor" / "harvey_labs" / "harness" / "system-prompt.md"
 ).read_text(encoding="utf-8")
@@ -663,6 +665,17 @@ def agent_response_failure(response: NeMoGymResponse, agent_server_module: str) 
     if total_tokens == 0 and not has_tool_activity and not _response_output_text(response):
         return f"{key} produced no model activity"
     return None
+
+
+def agent_response_failure_flags(response: NeMoGymResponse, agent_server_module: str) -> tuple[bool, bool]:
+    """Return structured model-connection and timeout flags from a failed native response."""
+    if agent_server_module != NATIVE_AGENT_MODULE or response.error is None:
+        return False, False
+    metadata = response.metadata or {}
+    failure_class = metadata.get(AGENT_FAILURE_CLASS_METADATA_KEY)
+    if failure_class not in PROPAGATED_AGENT_FAILURE_CLASSES:
+        return False, False
+    return failure_class == "model_connection_failed", failure_class == "agent_timed_out"
 
 
 def _task_name(instance_id: str) -> str:
@@ -1371,6 +1384,12 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
             failure_reason = failure_reason or str(exc)
         verifier_error = normalized_reward["verifier_error"]
         judge_errors = normalized_reward["judge_error_count"]
+        verifier_failed = verifier_failed or bool(verifier_error or judge_errors)
+        if failure_reason is None and judge_errors:
+            suffix = "error" if judge_errors == 1 else "errors"
+            failure_reason = f"Verifier reported {judge_errors} judge {suffix}"
+        elif failure_reason is None and verifier_error:
+            failure_reason = "Verifier reported an internal error"
         unreliable = bool(
             agent_failed
             or model_connection_failed
@@ -1536,6 +1555,11 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 else:
                     agent_failed = True
                     failure_reason = failure_reason or "Agent did not produce response.json"
+                response_model_connection_failed, response_agent_timed_out = agent_response_failure_flags(
+                    response, self.config.agent_server_module
+                )
+                model_connection_failed = model_connection_failed or response_model_connection_failed
+                agent_timed_out = agent_timed_out or response_agent_timed_out
                 if not agent_failed:
                     response_failure = agent_response_failure(response, self.config.agent_server_module)
                     if response_failure:
