@@ -207,9 +207,9 @@ dependencies = [
     "pyarrow>=23.0.1",
 
     # wandb: E2E rollout collection data and metrics upload
-    # Updated: Mon May 19, 2026 with wandb==0.27.0
+    # Updated: Tue Aug 05, 2026 with wandb>=0.28.1
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
-    "wandb",
+    "wandb>=0.28.1",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
     # Updated: Mon May 19, 2026 with GitPython>=3.1.50
@@ -333,6 +333,14 @@ constraint-dependencies = [
 override-dependencies = [
     # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
     "spacy>=3.8.13",
+
+    # Codec-bearing packages — excluded from the shipped container.
+    # Their binary wheels bundle static FFmpeg executables (H.264, H.265, AAC)
+    # that may incur MPEG-LA royalties. Install before testing via
+    # docker/install_codec_deps.sh (--no-config bypasses this override).
+    "opencv-python-headless; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Don't add a package any
