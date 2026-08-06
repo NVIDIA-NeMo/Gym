@@ -23,6 +23,7 @@ import nemo_gym.cli.setup_command
 from nemo_gym.cli.setup_command import (
     _get_nemo_gym_install_flags,
     _get_nemo_gym_version_spec,
+    resolve_server_venv_path,
     run_command,
     setup_env_command,
 )
@@ -238,6 +239,44 @@ class TestCLISetupCommandSetupEnvCommand:
 
         expected_command = f"cd {server_dir} && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate"
         assert expected_command == actual_command
+
+
+class TestResolveServerVenvPath:
+    """`gym env start` launches servers with this path's interpreter, so it must agree with the
+    `source .../bin/activate` that `setup_env_command` emits - otherwise a relocated venv whose
+    `bin/activate` still names its original prefix silently wins."""
+
+    _setup_server_dir = TestCLISetupCommandSetupEnvCommand._setup_server_dir
+    _debug_global_config_dict = TestCLISetupCommandSetupEnvCommand._debug_global_config_dict
+
+    def test_defaults_to_server_dir_venv(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+
+        venv_path = resolve_server_venv_path(server_dir, self._debug_global_config_dict(tmp_path))
+
+        assert venv_path == server_dir / ".venv"
+
+    def test_uses_uv_venv_dir_when_set(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        uv_venv_dir = tmp_path / "uv_venv_dir"
+
+        venv_path = resolve_server_venv_path(
+            server_dir, self._debug_global_config_dict(tmp_path) | {"uv_venv_dir": str(uv_venv_dir)}
+        )
+
+        assert venv_path == uv_venv_dir / "first_level/second_level/.venv"
+
+    @pytest.mark.parametrize("uv_venv_dir_set", [False, True])
+    def test_agrees_with_the_activate_setup_env_command_emits(self, tmp_path: Path, uv_venv_dir_set: bool) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        global_config_dict = self._debug_global_config_dict(tmp_path)
+        if uv_venv_dir_set:
+            global_config_dict = global_config_dict | {"uv_venv_dir": str(tmp_path / "uv_venv_dir")}
+
+        venv_path = resolve_server_venv_path(server_dir, global_config_dict)
+        command = setup_env_command(dir_path=server_dir, global_config_dict=global_config_dict, prefix="p")
+
+        assert f"source {venv_path}/bin/activate" in command
 
 
 class TestCLISetupCommandRunCommand:

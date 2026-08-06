@@ -100,14 +100,24 @@ def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
         return ""
 
 
+def resolve_server_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
+    """Resolve the venv a server runs from: ``uv_venv_dir/<type>/<name>/.venv``, else ``<server dir>/.venv``.
+
+    Callers need this to launch a server with the venv's own interpreter rather than trusting whatever
+    ``bin/activate`` puts on PATH. A venv copied or moved after creation keeps the *original* prefix
+    hard-coded in ``bin/activate``, so sourcing it silently hands the server a different interpreter than
+    the one ``uv_venv_dir`` asked for.
+    """
+    root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
+    if Path(root_venv_path).resolve() != PARENT_DIR.resolve():
+        return Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
+    return (dir_path / ".venv").absolute()
+
+
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
-    root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
-    if Path(root_venv_path).resolve() != PARENT_DIR.resolve():
-        venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
-    else:
-        venv_path = (dir_path / ".venv").absolute()
+    venv_path = resolve_server_venv_path(dir_path, global_config_dict)
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv_path}"
 

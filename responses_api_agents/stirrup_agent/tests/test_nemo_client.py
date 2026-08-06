@@ -171,3 +171,162 @@ def test_defaults_match_pre_lift_behaviour() -> None:
     assert client._top_p == 0.95
     assert client._enable_thinking is True
     assert client._max_completion_tokens_cap == 64000
+    assert client._truncation_recovery is True
+
+
+# ---------------------------------------------------------------------------
+# Thinking-overrun recovery
+# ---------------------------------------------------------------------------
+
+
+def _make_client(**kwargs):
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=200_000,
+        base_url="http://test",
+        api_key="k",
+        max_completion_tokens_cap=64_000,
+        **kwargs,
+    )
+    client._client = MagicMock()
+    return client
+
+
+def _overrun_response():
+    """A call that spent its whole budget thinking and never called a tool."""
+    response = _make_response(content="<think>" + "reasoning " * 50)
+    response.choices[0].finish_reason = "length"
+    response.choices[0].message.tool_calls = []
+    return response
+
+
+def _tool_call_response(finish_reason: str = "stop"):
+    response = _make_response(content="")
+    response.choices[0].finish_reason = finish_reason
+    tool_call = MagicMock()
+    tool_call.id = "call_1"
+    tool_call.function.name = "code_exec"
+    tool_call.function.arguments = '{"cmd":"true"}'
+    response.choices[0].message.tool_calls = [tool_call]
+    return response
+
+
+@pytest.mark.asyncio
+async def test_budget_overrun_without_tool_call_arms_recovery() -> None:
+    """The next call drops thinking and carries an explicit instruction."""
+    client = _make_client()
+    fake_create = AsyncMock(side_effect=[_overrun_response(), _make_response()])
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+    assert client._recover_from_truncation is True
+    assert client._truncation_overruns == 1
+
+    first_sent = fake_create.await_args_list[0].kwargs
+    assert first_sent["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
+    assert len(first_sent["messages"]) == 1
+
+    await client.generate([UserMessage(content="hi")], tools={})
+    recovery_sent = fake_create.await_args_list[1].kwargs
+
+    assert recovery_sent["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert len(recovery_sent["messages"]) == 2
+    assert "hit the output token limit" in recovery_sent["messages"][-1]["content"]
+    # The budget must NOT be clamped: recovery turns are usually large
+    # single-shot deliverable writes (median 34.6k tokens on the measured run),
+    # so shrinking it would convert a recovery into a truncated tool call.
+    assert recovery_sent["max_completion_tokens"] == 64_000
+
+
+@pytest.mark.asyncio
+async def test_recovery_applies_to_one_turn_only() -> None:
+    client = _make_client()
+    fake_create = AsyncMock(side_effect=[_overrun_response(), _make_response(), _make_response()])
+    client._client.chat.completions.create = fake_create
+
+    for _ in range(3):
+        await client.generate([UserMessage(content="hi")], tools={})
+
+    assert fake_create.await_args_list[1].kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    third = fake_create.await_args_list[2].kwargs
+    assert third["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
+    assert len(third["messages"]) == 1
+    assert client._recover_from_truncation is False
+
+
+@pytest.mark.asyncio
+async def test_consecutive_overruns_each_arm_recovery() -> None:
+    """The failure is sticky, so re-arming on every overrun is the point."""
+    client = _make_client()
+    fake_create = AsyncMock(side_effect=[_overrun_response(), _overrun_response(), _make_response()])
+    client._client.chat.completions.create = fake_create
+
+    for _ in range(3):
+        await client.generate([UserMessage(content="hi")], tools={})
+
+    assert client._truncation_overruns == 2
+    for index in (1, 2):
+        sent = fake_create.await_args_list[index].kwargs
+        assert sent["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+async def test_truncated_call_that_still_made_a_tool_call_is_left_alone() -> None:
+    """Truncation only matters when nothing was accomplished."""
+    client = _make_client()
+    fake_create = AsyncMock(side_effect=[_tool_call_response(finish_reason="length"), _make_response()])
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+    assert client._recover_from_truncation is False
+    assert client._truncation_overruns == 0
+
+    await client.generate([UserMessage(content="hi")], tools={})
+    second = fake_create.await_args_list[1].kwargs
+    assert second["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
+    assert len(second["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_text_only_response_that_finished_normally_is_left_alone() -> None:
+    """A short text-only turn is a different problem; don't touch it."""
+    client = _make_client()
+    fake_create = AsyncMock(side_effect=[_make_response(), _make_response()])
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+    assert client._recover_from_truncation is False
+
+    await client.generate([UserMessage(content="hi")], tools={})
+    assert fake_create.await_args_list[1].kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_can_be_disabled_for_unsteered_rollouts() -> None:
+    """RL rollouts that must not be steered opt out; detection still logs."""
+    client = _make_client(truncation_recovery=False)
+    fake_create = AsyncMock(side_effect=[_overrun_response(), _make_response()])
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+    assert client._truncation_overruns == 1
+
+    await client.generate([UserMessage(content="hi")], tools={})
+    second = fake_create.await_args_list[1].kwargs
+    assert second["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
+    assert len(second["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_nudge_never_enters_the_trajectory() -> None:
+    """The instruction is a wire-only steer; agent history stays clean."""
+    client = _make_client()
+    fake_create = AsyncMock(side_effect=[_overrun_response(), _make_response()])
+    client._client.chat.completions.create = fake_create
+
+    history = [UserMessage(content="hi")]
+    await client.generate(history, tools={})
+    await client.generate(history, tools={})
+
+    assert len(history) == 1
+    assert history[0].content == "hi"

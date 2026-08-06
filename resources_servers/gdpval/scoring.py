@@ -26,12 +26,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from pathlib import Path
 from typing import Any, Optional
 
 from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwargs, sample_judge
+
+
+# The SDK default is 600s with 2 silent retries, so one slow request (a
+# multi-page PDF rasterised to images) burns 30 minutes and then surfaces as a
+# bare transient 500 that never mentions a timeout. Retries do not help: a
+# request too slow once is too slow three times.
+# Marks metadata the SCORER produced on failure. Keyed separately from a
+# plain "error" field because on the success path the metadata IS the judge's
+# own parsed JSON, and a judge that emits its own "error" must not be discarded.
+SCORING_ERROR_KEY = "scoring_error"
+
+JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "1800"))
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +133,12 @@ async def score_with_rubric(
         deliverable_text=deliverable_text,
     )
 
-    client = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+    client = AsyncOpenAI(
+        base_url=judge.base_url,
+        api_key=judge.api_key,
+        timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     max_retries = 5
     base_delay = 2.0
@@ -187,7 +205,10 @@ async def score_with_rubric(
         except json.JSONDecodeError:
             score = _score_from_truncated_json(response_text)
             print(f"Rubric JSON was truncated, computed partial score: {score}", flush=True)
-            return score, None
+            # A salvage, not a judgement: criteria the judge never emitted are
+            # simply absent, so the number is biased low. Tag it so the caller
+            # can flag the row instead of averaging it in as a real score.
+            return score, {SCORING_ERROR_KEY: "truncated_json", "partial_score": score}
 
         print(f"Rubric judge parsed keys: {list(result.keys())}", flush=True)
         if "criteria_scores" in result:
@@ -268,7 +289,12 @@ async def score_with_rubric_visual(
     content: list[dict] = [{"type": "text", "text": judge_text}]
     content.extend(deliverable_content_blocks)
 
-    client = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+    client = AsyncOpenAI(
+        base_url=judge.base_url,
+        api_key=judge.api_key,
+        timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     max_retries = 5
     base_delay = 2.0
@@ -326,7 +352,10 @@ async def score_with_rubric_visual(
         except json.JSONDecodeError:
             score = _score_from_truncated_json(response_text)
             print(f"Visual judge JSON was truncated, computed partial score: {score}", flush=True)
-            return score, None
+            # A salvage, not a judgement: criteria the judge never emitted are
+            # simply absent, so the number is biased low. Tag it so the caller
+            # can flag the row instead of averaging it in as a real score.
+            return score, {SCORING_ERROR_KEY: "truncated_json", "partial_score": score}
 
         print(f"Visual judge parsed keys: {list(result.keys())}", flush=True)
         if "criteria_scores" in result:
@@ -403,7 +432,12 @@ async def score_with_rubric_structured(
     def _client_for(judge: ResolvedJudge) -> Any:
         key = (judge.base_url, judge.api_key)
         if key not in client_cache:
-            client_cache[key] = AsyncOpenAI(base_url=judge.base_url, api_key=judge.api_key)
+            client_cache[key] = AsyncOpenAI(
+                base_url=judge.base_url,
+                api_key=judge.api_key,
+                timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         return client_cache[key]
 
     # Compute max possible score from rubric. Different upstream formats name
@@ -520,7 +554,11 @@ async def score_with_rubric_structured(
 
     if not scores:
         print("[structured-rubric] no valid scores from any trial", flush=True)
-        no_valid_metadata: dict = {"error": "no_valid_scores", "num_trials": num_trials}
+        no_valid_metadata: dict = {
+            "error": "no_valid_scores",  # pre-existing key, read by operators
+            SCORING_ERROR_KEY: "no_valid_scores",
+            "num_trials": num_trials,
+        }
         if include_raw_responses:
             no_valid_metadata["raw_responses"] = trial_responses
         return 0.0, no_valid_metadata

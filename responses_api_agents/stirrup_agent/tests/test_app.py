@@ -33,6 +33,7 @@ from responses_api_agents.stirrup_agent.app import (
     StirrupAgentWrapper,
     StirrupAgentWrapperConfig,
     StirrupRunRequest,
+    TaskPerAttemptTimeoutError,
     _load_task_registry,
     _task_finished,
     _verify_cache_path,
@@ -40,7 +41,7 @@ from responses_api_agents.stirrup_agent.app import (
 )
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 from responses_api_agents.stirrup_agent.stirrup_utils import convert_stirrup_history_to_output_items
-from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
+from responses_api_agents.stirrup_agent.task_strategy import TaskSampleSkipError, TaskStrategy
 
 
 STIRRUP_AGENT_DIR = Path(__file__).resolve().parent.parent
@@ -882,3 +883,108 @@ class TestExampleDataset:
             # reference_files / rubric_json are JSON-encoded strings.
             json.loads(metadata["reference_files"])
             json.loads(metadata["rubric_json"])
+
+
+class TestPerTaskTimeoutIsRetryable:
+    """A per-task timeout describes the attempt's conditions, not the task.
+
+    Per-stream decode slows as in-flight count rises, so the same task can
+    breach the cap under load and finish comfortably on a quieter allocation.
+    Marking it terminal converted recoverable contention into permanent data
+    loss, and hid it — aggregate rollouts/hr *improves* as this gets worse.
+    """
+
+    def _make_body(self, task_id: str = "task-1") -> StirrupRunRequest:
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": task_id, "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        return StirrupRunRequest(responses_create_params=params, task_id=task_id, prompt="do the thing")
+
+    @pytest.mark.asyncio
+    async def test_timeout_goes_to_sidecar_without_terminal_flag(self, tmp_path) -> None:
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        timeout = TaskPerAttemptTimeoutError("per-task timeout exceeded (12600 s)")
+        with patch.object(StirrupAgentWrapper, "responses", AsyncMock(side_effect=timeout)):
+            result = await wrapper.run(request, self._make_body())
+
+        assert result[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+        # The whole point: retryable, so a resume re-dispatches it.
+        assert NG_TERMINAL_KEY not in result
+        assert NG_NO_PERSIST_KEY not in result
+        # Contention at the time of failure, so a timeout at concurrency 1 stays
+        # distinguishable from one at concurrency 16.
+        assert result["_ng_timeout_concurrency_limit"] == config.concurrency
+        assert result["_ng_timeout_inflight"] == 1
+
+    @pytest.mark.asyncio
+    async def test_skipped_sample_stays_terminal(self, tmp_path) -> None:
+        """A sample that cannot be built is genuinely unretryable."""
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        with patch.object(
+            StirrupAgentWrapper, "responses", AsyncMock(side_effect=TaskSampleSkipError("unusable sample"))
+        ):
+            result = await wrapper.run(request, self._make_body())
+
+        assert result[NG_FAILURE_CLASS_KEY] == "skipped"
+        assert result[NG_TERMINAL_KEY] is True
+
+    @pytest.mark.asyncio
+    async def test_failure_rows_carry_elapsed_seconds(self, tmp_path) -> None:
+        """Without this the resume-time longest-first sort has nothing to sort on.
+
+        Successes get ``elapsed_seconds`` from the Ray result, but failure rows
+        are built from the request body and used to carry no timing at all — so
+        the timed-out tasks, whose length is exactly what the ordering wants to
+        know, were invisible to it.
+        """
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        with patch.object(
+            StirrupAgentWrapper,
+            "responses",
+            AsyncMock(side_effect=TaskPerAttemptTimeoutError("per-task timeout exceeded")),
+        ):
+            result = await wrapper.run(request, self._make_body())
+
+        assert result["elapsed_seconds"] >= 0.0
+        assert isinstance(result["elapsed_seconds"], float)
+
+    @pytest.mark.asyncio
+    async def test_inflight_returns_to_zero_after_a_failure(self, tmp_path) -> None:
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        assert wrapper.inflight == 0
+        with patch.object(
+            StirrupAgentWrapper,
+            "responses",
+            AsyncMock(side_effect=TaskPerAttemptTimeoutError("per-task timeout exceeded")),
+        ):
+            await wrapper.run(request, self._make_body())
+        assert wrapper.inflight == 0
