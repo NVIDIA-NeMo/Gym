@@ -33,6 +33,9 @@ python resources_servers/swebench/apply_golden_patch.py \
 
 ## Expected golden patch resolve rates
 SWE Bench Verified
+```bash
+Resolved: 492 / 500 (98.40%): 500it [19:29, 258.00s/it]
+```
 
 SWE Bench Multilingual
 
