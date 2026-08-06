@@ -246,7 +246,9 @@ def test_verify_metadata_none(server) -> None:
     assert resp.judge_error == "bad_metadata"
 
 
+@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
 def test_verify_metadata_not_a_dict(server) -> None:
+    """The assignment below bypasses validation on purpose, so model_dump() warns; that is expected."""
     body = _request("Paris")
     body.verifier_metadata = ["not", "a", "dict"]  # type: ignore[assignment]
     resp = _verify(server, body)

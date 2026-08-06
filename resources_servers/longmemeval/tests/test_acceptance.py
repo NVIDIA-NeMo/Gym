@@ -574,6 +574,7 @@ def test_ac_malformed_metadata_scores_zero(
     server.server_client.post.assert_not_called()
 
 
+@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
 def test_ac_malformed_metadata_not_a_dict_scores_zero(
     server: LongMemEvalResourcesServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
