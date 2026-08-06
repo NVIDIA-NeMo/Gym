@@ -155,7 +155,7 @@ class TestParseOpenclawOutput:
     def test_empty(self) -> None:
         items, usage = parse_openclaw_output("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
 
     def test_text_message_and_usage(self) -> None:
         raw = _envelope(
@@ -168,6 +168,7 @@ class TestParseOpenclawOutput:
         assert items[0].content[0].text == "the answer is 4"
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
+        assert usage["cached_tokens"] == 5
 
     def test_no_text_no_items(self) -> None:
         raw = _envelope([], usage={"input": 1, "output": 0})
@@ -313,7 +314,6 @@ class TestBuildOpenclawConfig:
     def test_model_server_replaces_provider_base_url_for_rollout(self) -> None:
         agent = _make_agent(
             model_server=ModelServerRef(type="responses_api_models", name="policy"),
-            openclaw_config={"models": {"providers": {"nvinf": {"api": "openai-completions"}}}},
         )
         with patch.object(
             OpenClawAgent,
@@ -322,7 +322,7 @@ class TestBuildOpenclawConfig:
         ):
             cfg = agent._build_openclaw_config({}, "7-2")
 
-        assert cfg["models"]["providers"]["nvinf"]["baseUrl"] == "http://policy/ng-rollout/7-2/v1"
+        assert cfg["models"]["providers"]["nemo"]["baseUrl"] == "http://policy/ng-rollout/7-2/v1"
 
     def test_responses_propagates_rollout_path(self) -> None:
         agent = _make_agent()
@@ -459,7 +459,7 @@ class TestObservability:
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
         with patch.object(agent, "_run_openclaw", run_openclaw):
-            episode = asyncio.run(agent.responses_with_observations(None, body))
+            episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         assert episode.response.output[0].content[0].text == ""
         [invocation] = _invocations(episode.observations)
@@ -479,7 +479,7 @@ class TestObservability:
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
         with patch.object(agent, "_run_openclaw", run_openclaw):
-            episode = asyncio.run(agent.responses_with_observations(None, body))
+            episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         [invocation] = _invocations(episode.observations)
         assert invocation.conversation == [
@@ -518,7 +518,10 @@ class TestObservability:
 
         with patch.object(agent, "_run_openclaw", run_openclaw):
             episode = asyncio.run(
-                agent.responses_with_observations(None, NeMoGymResponseCreateParamsNonStreaming(input="solve"))
+                agent._create_episode(
+                    NeMoGymResponseCreateParamsNonStreaming(input="solve"),
+                    rollout_id="1-2",
+                )
             )
 
         [invocation] = _invocations(episode.observations)
@@ -572,7 +575,9 @@ class TestObservability:
         [invocation] = _invocations(observations)
         assert invocation.invocation_id == "session-1"
         assert invocation.conversation
-        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["rollout_id"] == "1-2"
+        verify_json = agent.server_client.post.await_args_list[-1].kwargs["json"]
+        assert verify_json["rollout_id"] == "1-2"
+        assert "_ng_agent_observations" not in verify_json["response"]
 
     def test_observation_failure_does_not_change_response(self) -> None:
         agent = _make_agent()
@@ -601,7 +606,7 @@ class TestObservability:
                 side_effect=RuntimeError("observer failed"),
             ),
         ):
-            episode = asyncio.run(agent.responses_with_observations(None, body))
+            episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         assert episode.response.output == baseline.output
         assert episode.response.usage == baseline.usage

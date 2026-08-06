@@ -8,6 +8,7 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import (
     AgentInvocation,
+    AgentObservationBundle,
     ContextCompactionObservation,
     ToolCallObservation,
 )
@@ -108,6 +109,17 @@ def test_missing_child_transcript_is_explicit(tmp_path: Path) -> None:
         ("agent_transcript_unavailable", "child-key"),
         ("subagent_hierarchy_incomplete", None),
     }
+
+
+def test_tree_reports_missing_invocation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "responses_api_agents.openclaw_agent.observability.build_openclaw_observations",
+        lambda *args, **kwargs: AgentObservationBundle(source="openclaw"),
+    )
+
+    bundle = build_openclaw_observation_tree([("session-1", None, [], [])])
+
+    assert [(gap.code, gap.invocation_id) for gap in bundle.gaps] == [("agent_invocation_unavailable", "session-1")]
 
 
 def test_three_duplicate_session_keys_are_reported_without_crashing(tmp_path: Path) -> None:
