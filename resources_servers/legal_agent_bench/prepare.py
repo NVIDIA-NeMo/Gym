@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -657,21 +658,31 @@ def _hardlink_or_copy(source: str, destination: str) -> str:
 
 def _replace_directory(source: Path, target: Path) -> None:
     backup = target.with_name(f".{target.name}.backup")
-    if backup.exists():
-        shutil.rmtree(backup)
-    if target.exists():
-        target.rename(backup)
-    try:
-        source.rename(target)
-    except Exception:
-        if target.exists():
-            shutil.rmtree(target)
-        if backup.exists():
-            backup.rename(target)
-        raise
-    else:
-        if backup.exists():
-            shutil.rmtree(backup)
+    lock_path = target.with_name(f".{target.name}.replace.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            if backup.exists():
+                if target.exists():
+                    shutil.rmtree(backup)
+                else:
+                    backup.rename(target)
+            if target.exists():
+                target.rename(backup)
+            try:
+                source.rename(target)
+            except Exception:
+                if target.exists():
+                    shutil.rmtree(target)
+                if backup.exists():
+                    backup.rename(target)
+                raise
+            else:
+                if backup.exists():
+                    shutil.rmtree(backup)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _migrate_legacy_agent_index(tasks_dir: Path) -> bool:
