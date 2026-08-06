@@ -50,6 +50,10 @@ class CapacityUnavailableError(RuntimeError):
     pass
 
 
+class BenchmarkPreconditionError(RuntimeError):
+    """A deterministic task/environment setup failure for the current deployment."""
+
+
 BackendFactory = Callable[
     [BrowserGymWebResourcesServerConfig, str, WebArtifactStore],
     WebEnvironmentBackend,
@@ -151,7 +155,7 @@ class BrowserGymSessionManager:
         try:
             lease = await self._site_pool.acquire(session_id, body.task)
             backend = self._backend_factory(self.config, session_id, self._artifacts)
-            observation, seed_info = await self._run_backend(backend.reset, body.task)
+            observation, seed_info = await self._reset_backend(backend, body.task)
             now = time.time()
             state = WebSessionState(
                 session_id=session_id,
@@ -199,7 +203,7 @@ class BrowserGymSessionManager:
         async with state.lock:
             state.status = "resetting"
             try:
-                observation, seed_info = await self._run_backend(state.backend.reset, body.task)
+                observation, seed_info = await self._reset_backend(state.backend, body.task)
                 state.task = body.task
                 state.observation = observation
                 state.seed_info = seed_info
@@ -321,6 +325,18 @@ class BrowserGymSessionManager:
             raise RuntimeError("BrowserGym session manager has already stopped")
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._browser_executor, partial(operation, *args))
+
+    async def _reset_backend(
+        self, backend: WebEnvironmentBackend, task: WebTask
+    ) -> tuple[WebObservation, dict[str, Any]]:
+        try:
+            return await self._run_backend(backend.reset, task)
+        except ValueError as exc:
+            # BrowserGym uses ValueError for deterministic reset preconditions,
+            # including invalid task configuration and unavailable VWA input
+            # images. Retrying the same rollout against the unchanged benchmark
+            # deployment cannot repair those conditions.
+            raise BenchmarkPreconditionError(str(exc)) from exc
 
     @staticmethod
     def _make_site_pool(config: BrowserGymWebResourcesServerConfig) -> SitePool:

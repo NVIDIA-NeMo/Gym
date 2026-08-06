@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from typing import Any, Literal, Optional
 
@@ -20,7 +21,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.web.actions import ActionParseError, parse_model_action
 from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask, WebVerifierResult
@@ -90,6 +91,55 @@ def _extract_output_text(response: NeMoGymResponse) -> str:
             if getattr(block, "type", None) == "output_text":
                 parts.append(str(getattr(block, "text", "")))
     return "\n".join(part for part in parts if part).strip()
+
+
+def _http_error_payload(exc: Exception) -> dict[str, Any]:
+    response_content = getattr(exc, "response_content", None)
+    if isinstance(response_content, bytes):
+        response_content = response_content.decode("utf-8", errors="replace")
+    if not isinstance(response_content, str) or not response_content.strip():
+        return {}
+    try:
+        payload = json.loads(response_content)
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
+    """Map a bounded exception to sidecar retry and terminal semantics."""
+
+    metadata: dict[str, Any] = {}
+    failure_class = "retryable_infrastructure"
+    terminal = False
+    failure_kind = f"infrastructure_error:{type(exc).__name__}"
+    if not isinstance(exc, ClientResponseError):
+        return failure_class, terminal, failure_kind, metadata
+
+    metadata["http_status"] = exc.status
+    payload = _http_error_payload(exc)
+    error_kind = payload.get("error_kind")
+    retryable = payload.get("retryable")
+    if isinstance(error_kind, str):
+        metadata["error_kind"] = error_kind
+    else:
+        error_kind = None
+
+    if retryable is False:
+        terminal = True
+        if error_kind in {"benchmark_precondition", "invalid_task"}:
+            failure_class = "benchmark_precondition"
+        else:
+            failure_class = "configuration_error"
+        failure_kind = error_kind or f"{failure_class}:http_{exc.status}"
+    elif retryable is not True and exc.status in {400, 401, 403, 422}:
+        # Backward-compatible fallback for an older resource server that does
+        # not yet emit the structured retryability envelope.
+        terminal = True
+        failure_class = "configuration_error"
+        failure_kind = f"configuration_error:http_{exc.status}"
+
+    return failure_class, terminal, failure_kind, metadata
 
 
 def _resolve_task(body: WebAgentRunRequest) -> WebTask:
@@ -488,13 +538,15 @@ class WebAgent(SimpleResponsesAPIAgent):
         task: WebTask,
         exc: Exception,
     ) -> WebAgentRunResponse:
-        """Return a retryable sidecar row for a bounded infrastructure failure.
+        """Return a classified sidecar row for a bounded runtime failure.
 
         A real scheduler/process kill cannot return a response and therefore
         naturally leaves only a checkpoint gap.  Once this method runs, the
         agent has converted the failure into a bounded, attributable outcome;
         persisting it in the failure sidecar is what lets resume enforce the
-        per-task retry budget instead of redispatching the row forever.
+        per-task retry budget instead of redispatching the row forever. A
+        structured non-retryable HTTP precondition is terminal and remains
+        masked rather than being scored as a model failure.
         """
 
         detail = f"{type(exc).__name__}: {exc}"
@@ -504,15 +556,15 @@ class WebAgent(SimpleResponsesAPIAgent):
         if response_content:
             detail = f"{detail}; response_body={str(response_content).strip()}"
         detail = detail[:500]
-        failure_kind = f"infrastructure_error:{type(exc).__name__}"
+        failure_class, terminal, failure_kind, failure_metadata = _failure_route(exc)
         print(
-            f"[web-agent-retryable_infrastructure] {task.benchmark.value}/{task.task_id}: {detail}",
+            f"[web-agent-{failure_class}] {task.benchmark.value}/{task.task_id}: {detail}",
             flush=True,
         )
         verifier_result = WebVerifierResult(
             valid_sample=False,
             failure_kind=failure_kind,
-            metadata={"error": detail},
+            metadata={"error": detail, **failure_metadata},
         )
         empty_response = NeMoGymResponse(
             id=f"web-agent-failure-{task.benchmark.value}-{task.task_id}",
@@ -524,6 +576,12 @@ class WebAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=False,
             tool_choice="auto",
         )
+        routing = {
+            NG_FAILURE_CLASS_KEY: failure_class,
+            "error": detail,
+        }
+        if terminal:
+            routing[NG_TERMINAL_KEY] = True
         return WebAgentRunResponse(
             responses_create_params=body.responses_create_params,
             response=empty_response,
@@ -533,10 +591,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             mask_sample=True,
             failure_kind=failure_kind,
             verifier_result=verifier_result,
-            **{
-                NG_FAILURE_CLASS_KEY: "retryable_infrastructure",
-                "error": detail,
-            },
+            **routing,
         )
 
     @staticmethod

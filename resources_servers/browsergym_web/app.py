@@ -28,11 +28,23 @@ from resources_servers.browsergym_web.models import (
     WebVerifyResponse,
 )
 from resources_servers.browsergym_web.session_manager import (
+    BenchmarkPreconditionError,
     BrowserGymSessionManager,
     CapacityUnavailableError,
     SessionConflictError,
     SessionNotFoundError,
 )
+
+
+def _error_response(*, status_code: int, detail: str, error_kind: str, retryable: bool) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "detail": detail,
+            "error_kind": error_kind,
+            "retryable": retryable,
+        },
+    )
 
 
 class BrowserGymWebResourcesServer(SimpleResourcesServer):
@@ -75,24 +87,58 @@ class BrowserGymWebResourcesServer(SimpleResourcesServer):
             authorization = request.headers.get("authorization", "")
             supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
             if not supplied or not hmac.compare_digest(supplied, expected):
-                return JSONResponse(status_code=401, content={"detail": "invalid bearer token"})
+                return _error_response(
+                    status_code=401,
+                    detail="invalid bearer token",
+                    error_kind="authentication_error",
+                    retryable=False,
+                )
             return await call_next(request)
 
         @app.exception_handler(SessionNotFoundError)
         async def session_not_found(_request, exc: SessionNotFoundError):
-            return JSONResponse(status_code=404, content={"detail": f"unknown session: {exc.args[0]}"})
+            return _error_response(
+                status_code=404,
+                detail=f"unknown session: {exc.args[0]}",
+                error_kind="session_not_found",
+                retryable=True,
+            )
 
         @app.exception_handler(SessionConflictError)
         async def session_conflict(_request, exc: SessionConflictError):
-            return JSONResponse(status_code=409, content={"detail": str(exc)})
+            return _error_response(
+                status_code=409,
+                detail=str(exc),
+                error_kind="session_conflict",
+                retryable=True,
+            )
 
         @app.exception_handler(CapacityUnavailableError)
         async def capacity_unavailable(_request, exc: CapacityUnavailableError):
-            return JSONResponse(status_code=503, content={"detail": str(exc)})
+            return _error_response(
+                status_code=503,
+                detail=str(exc),
+                error_kind="capacity_unavailable",
+                retryable=True,
+            )
+
+        @app.exception_handler(BenchmarkPreconditionError)
+        async def benchmark_precondition(_request, exc: BenchmarkPreconditionError):
+            return _error_response(
+                status_code=422,
+                detail=str(exc),
+                error_kind="benchmark_precondition",
+                retryable=False,
+            )
 
         @app.exception_handler(ValueError)
         async def invalid_request(_request, exc: ValueError):
-            return JSONResponse(status_code=400, content={"detail": str(exc)})
+            return _error_response(
+                status_code=400,
+                detail=str(exc),
+                error_kind="invalid_task",
+                retryable=False,
+            )
 
         app.get("/healthz")(self.healthz)
         app.get("/session")(self.session_status)

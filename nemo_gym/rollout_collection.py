@@ -50,7 +50,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     get_wandb_run,
 )
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.path_utils import failures_path_for, population_status_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -114,6 +114,83 @@ NG_TRAJECTORY_KEY = "ng_trajectory"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+class RolloutPopulationStatus(BaseModel):
+    status: Literal["complete", "incomplete"]
+    expected: int
+    completed: int
+    terminal: int
+    exhausted: int
+    retryable: int
+    missing: int
+    failure_attempts: int
+    max_attempts: int
+    dispatch_complete: bool
+    scorable_complete: bool
+
+
+def _population_status_from_files(config: "RolloutCollectionConfig") -> RolloutPopulationStatus:
+    """Classify the complete materialized rollout population from durable files."""
+
+    def key(row: dict[str, Any]) -> tuple[int, int] | None:
+        task_index = row.get(TASK_INDEX_KEY_NAME)
+        rollout_index = row.get(ROLLOUT_INDEX_KEY_NAME)
+        if type(task_index) is not int or type(rollout_index) is not int:
+            return None
+        return task_index, rollout_index
+
+    def load_jsonl(path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        with path.open("rb") as stream:
+            for line in stream:
+                line = line.strip()
+                if line:
+                    value = orjson.loads(line)
+                    if isinstance(value, dict):
+                        rows.append(value)
+        return rows
+
+    expected_keys = {candidate for row in load_jsonl(config.materialized_jsonl_fpath) if (candidate := key(row))}
+    completed_keys = {
+        candidate for row in load_jsonl(Path(config.output_jsonl_fpath)) if (candidate := key(row)) in expected_keys
+    }
+    attempts_by_key: Counter = Counter()
+    terminal_keys: set[tuple[int, int]] = set()
+    for row in load_jsonl(failures_path_for(Path(config.output_jsonl_fpath))):
+        candidate = key(row)
+        if candidate not in expected_keys or candidate in completed_keys:
+            continue
+        attempts_by_key[candidate] += 1
+        if row.get(NG_TERMINAL_KEY):
+            terminal_keys.add(candidate)
+
+    max_attempts = _get_max_rollout_attempts()
+    exhausted_keys = {
+        candidate
+        for candidate, attempts in attempts_by_key.items()
+        if attempts >= max_attempts and candidate not in terminal_keys
+    }
+    retryable_keys = set(attempts_by_key) - terminal_keys - exhausted_keys
+    classified_keys = completed_keys | terminal_keys | exhausted_keys | retryable_keys
+    missing_keys = expected_keys - classified_keys
+    scorable_complete = completed_keys == expected_keys
+    dispatch_complete = not retryable_keys and not missing_keys
+    return RolloutPopulationStatus(
+        status="complete" if scorable_complete else "incomplete",
+        expected=len(expected_keys),
+        completed=len(completed_keys),
+        terminal=len(terminal_keys),
+        exhausted=len(exhausted_keys),
+        retryable=len(retryable_keys),
+        missing=len(missing_keys),
+        failure_attempts=sum(attempts_by_key.values()),
+        max_attempts=max_attempts,
+        dispatch_complete=dispatch_complete,
+        scorable_complete=scorable_complete,
+    )
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -735,6 +812,8 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        failures_fpath = failures_path_for(output_fpath)
+        population_status_fpath = population_status_path_for(output_fpath)
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,
         # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
@@ -742,6 +821,10 @@ class RolloutCollectionHelper(BaseModel):
         # write -- a user pointing --output at a not-yet-existing directory is the common case
         # outside a git clone.
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
+        # A status file describes a quiescent checkpoint. Remove it while this
+        # invocation may still append rollout or failure rows, then publish a
+        # new status atomically after both streams are closed.
+        population_status_fpath.unlink(missing_ok=True)
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
@@ -777,13 +860,12 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            failures_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
-
-        failures_fpath = failures_path_for(output_fpath)
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
@@ -863,6 +945,21 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
+        population_status = _population_status_from_files(config)
+        population_status_tmp = population_status_fpath.with_name(population_status_fpath.name + ".tmp")
+        population_status_tmp.write_bytes(
+            orjson.dumps(population_status.model_dump(mode="json"), option=orjson.OPT_INDENT_2) + b"\n"
+        )
+        population_status_tmp.replace(population_status_fpath)
+        if not population_status.scorable_complete:
+            print(
+                "WARNING: rollout population is incomplete and aggregate metrics are not publishable: "
+                f"completed={population_status.completed}/{population_status.expected}, "
+                f"terminal={population_status.terminal}, exhausted={population_status.exhausted}, "
+                f"retryable={population_status.retryable}, missing={population_status.missing}",
+                flush=True,
+            )
+
         if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
             print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
             result_strs = [[orjson.dumps(_rollout_for_wandb(result))] for result in results]
@@ -893,6 +990,7 @@ class RolloutCollectionHelper(BaseModel):
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
+Population status: {population_status_fpath} ({population_status.status})
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results

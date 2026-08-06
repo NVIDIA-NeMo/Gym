@@ -36,6 +36,12 @@ WebArena these are `WA_SHOPPING`, `WA_SHOPPING_ADMIN`, `WA_REDDIT`,
 `VWA_SHOPPING`, `VWA_REDDIT`, `VWA_WIKIPEDIA`, `VWA_CLASSIFIEDS`,
 `VWA_CLASSIFIEDS_RESET_TOKEN`, and `VWA_HOMEPAGE`.
 
+For VisualWebArena, a successful request to the `VWA_HOMEPAGE` root is not a
+sufficient readiness check. The homepage service must expose every input image
+referenced by the prepared task population. Validate those URLs before a long
+run; a missing task image is reported as a masked `benchmark_precondition`, not
+as a model failure or a retryable capacity error.
+
 VisualWebArena 0.0.15 also hard-codes `gpt-4-1106-preview` for fuzzy and
 unachievable-answer evaluator calls. Set `OPENAI_BASE_URL` and
 `OPENAI_API_KEY` for the judge endpoint, then set
@@ -63,3 +69,8 @@ Step `execution_ok` reports whether the browser action executed; evaluator
 score is returned separately as `benchmark_reward`. Browser/evaluator
 infrastructure failures are surfaced for masking rather than converted into a
 benchmark score of zero.
+
+The HTTP error envelope includes `error_kind` and `retryable`. Capacity,
+session-loss, and session-conflict failures remain retryable. Invalid tasks and
+deterministic BrowserGym reset preconditions return a non-retryable error so
+the agent does not spend its rollout retry budget on an unchanged deployment.

@@ -18,6 +18,7 @@ from nemo_gym.web.models import (
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.models import WebSeedSessionRequest, WebStepRequest
 from resources_servers.browsergym_web.session_manager import (
+    BenchmarkPreconditionError,
     BrowserGymSessionManager,
     CapacityUnavailableError,
     SessionConflictError,
@@ -218,4 +219,29 @@ async def test_cancelled_seed_releases_creating_capacity(tmp_path):
     health = await manager.health()
     assert health["creating"] == 0
     assert health["sessions"] == 0
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_reset_value_error_is_a_terminal_benchmark_precondition(tmp_path):
+    backends: list[FakeBackend] = []
+
+    class MissingAssetBackend(FakeBackend):
+        def reset(self, task: WebTask):
+            del task
+            raise ValueError("Could not download image: HTTP 404")
+
+    def factory(*args):
+        backend = MissingAssetBackend(*args)
+        backends.append(backend)
+        return backend
+
+    manager = BrowserGymSessionManager(_config(tmp_path), backend_factory=factory)
+    with pytest.raises(BenchmarkPreconditionError, match="Could not download image"):
+        await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+
+    health = await manager.health()
+    assert health["creating"] == 0
+    assert health["sessions"] == 0
+    assert backends[0].closed is True
     await manager.stop()

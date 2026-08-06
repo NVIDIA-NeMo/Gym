@@ -461,3 +461,40 @@ async def test_seed_session_does_not_retry_client_failure():
         )
 
     agent._post_json.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_classifies_seed_precondition_as_terminal_masked_failure():
+    agent = _agent(seed_request_timeout_secs=1.0)
+    error = ClientResponseError(
+        request_info=MagicMock(),
+        history=(),
+        status=422,
+        message="benchmark setup failed",
+    )
+    error.response_content = json.dumps(
+        {
+            "detail": "Could not download image: HTTP 404",
+            "error_kind": "benchmark_precondition",
+            "retryable": False,
+        }
+    ).encode()
+    agent._post_json = AsyncMock(side_effect=error)
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(benchmark=WebBenchmark.VISUALWEBARENA, task_id="36"),
+    )
+
+    result = await agent.run(request, body)
+    dumped = result.model_dump()
+
+    assert result.mask_sample is True
+    assert result.failure_kind == "benchmark_precondition"
+    assert dumped["_ng_failure_class"] == "benchmark_precondition"
+    assert dumped["_ng_failure_terminal"] is True
+    assert result.verifier_result.metadata["http_status"] == 422
+    assert result.verifier_result.metadata["error_kind"] == "benchmark_precondition"
+    assert "Could not download image" in dumped["error"]
+    agent._post_json.assert_awaited_once()
