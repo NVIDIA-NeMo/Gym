@@ -286,7 +286,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 )
                 break
             except Exception as e:
-                if "POD_IP_NOT_AVAILABLE" in str(e) or "command not found" in str(e):
+                if (
+                    "POD_IP_NOT_AVAILABLE" in str(e)
+                    or "command not found" in str(e)
+                    or "Get command status failed" in str(e)
+                ):
                     print(f"Exec try #{tries} hit error.", format_exc(), file=sys.stderr)
                     continue
                 raise e
