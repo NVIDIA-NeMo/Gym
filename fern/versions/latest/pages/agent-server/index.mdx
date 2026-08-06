@@ -1,10 +1,10 @@
 ---
 title: "Configure Agents"
-description: "The Agent server holds an environment's agent harness. Use a built-in agent, an agent that wraps an external harness, or your own."
+description: "The Agent server holds the agent harness. Use an agent server NeMo Gym ships, whether its implementation is Gym-native or a third-party harness, or drive an agent you host yourself."
 position: 1
 ---
 
-An environment is made of four parts: a dataset, an agent harness, a verifier, and per-task state. The Agent server is where the harness lives.
+An environment integrates four independent components: a dataset, an agent harness, a verifier, and per-task state. The Agent server is where the harness lives.
 
 A harness decides how a model interacts with the world: how many turns it gets, what its system prompt says, which tools it can reach, how tool results are fed back, when it stops, and what scaffolding (planning, compaction, sub-agents) sits between the model and the task. The Agent server does not run an LLM itself. It is orchestration code that delegates text generation to the Model server and tool execution, state, and scoring to the Resources server.
 
@@ -12,8 +12,8 @@ A harness decides how a model interacts with the world: how many turns it gets, 
 
 Because the harness is a separate server rather than part of the dataset or the verifier, it can be changed independently of the rest of the environment:
 
-- Run several harnesses against one environment, with the dataset and verifier held fixed.
-- Run one harness across many environments. The Agent server references a Resources server by name, so switching benchmarks is a config change.
+- Run several harnesses in one environment, with the dataset and verifier held fixed.
+- Run one harness in many environments. The Agent server is linked to the Resources server by name, so switching benchmarks is a config change.
 - Use the same environment for evaluation and training. A harness that reports token IDs and log probabilities produces rollouts a training framework can consume, and nothing else about the environment changes.
 
 ## Rollout Lifecycle
@@ -55,16 +55,18 @@ class Agent:
         return conversation
 ```
 
-An agent that wraps an external harness replaces the middle phase with the harness's own loop. The outer shape is the same: NeMo Gym seeds the session, verifies the finished trajectory, and reports the reward.
+An Agent server built on an external harness replaces the inner interaction loop with the policy model, which the harness supplies. The episode orchestration is unchanged: NeMo Gym seeds the session, verifies the finished trajectory, and reports the reward.
 
-## Choosing an Agent
+## Choosing an Agent Server to Implement Your Agent
 
-There are three options. Use a built-in NeMo Gym agent — `simple_agent` handles multi-step tool calling against any Resources server. Use one of the agents that wraps an external harness, such as a coding CLI, an agent framework, or a benchmark's own scaffold; these need configuration but no code. Or keep your agent in your own repo and expose an endpoint that follows the OpenAI Responses contract, and let `remote_agent` drive the loop against it.
+There are three options, and what separates the first two is who implements the agent, not where the code lives — both ship in the NeMo Gym repo.
+
+Use an agent server with a Gym-native implementation: `simple_agent` handles multi-step tool calling in any environment. Use an agent server that runs a third-party harness — a coding CLI, an agent framework, or a benchmark's own scaffold — where the harness owns the loop and the agent server adapts its output to NeMo Gym. Either way you write configuration, not code. The third option is `remote_agent`: keep the agent in your own repo, expose an endpoint that follows the OpenAI Responses contract, and let NeMo Gym drive the loop against that endpoint.
 
 <Cards>
 
 <Card title="Integrate Existing Agents" href="/agent-server/integrate-existing-agents">
-Built-in and external agents, how each external harness is wrapped, and what a wrapper needs to support training.
+The agent servers NeMo Gym ships, how each third-party harness is wrapped, and what a wrapper needs to support training.
 </Card>
 
 <Card title="Drive a Remote Agent" href="/agent-server/remote-agent">
@@ -76,7 +78,7 @@ Set [Agent Skills](https://agentskills.io/specification) per run, separately fro
 </Card>
 
 <Card title="Agent Server Fields" href="/reference/configuration#agent-server-fields">
-Configuration syntax for wiring an agent to its Resources server and Model server.
+Configuration syntax for wiring an agent server to a compatible Resources server and Model server.
 </Card>
 
 </Cards>
