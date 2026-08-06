@@ -497,7 +497,12 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     async def shutdown(self):
         """Cleanup resources on server shutdown."""
         if self.tool_manager:
-            await self.tool_manager.shutdown()
+            try:
+                await self.tool_manager.shutdown()
+            except (asyncio.CancelledError, Exception):
+                # Tool-manager teardown must not skip pool teardown: unkilled pool
+                # pods stay allocated (and billed against pool capacity) until TTL.
+                logger.warning("tool_manager.shutdown failed; continuing to pool teardown", exc_info=True)
 
         if self.config.sandbox_type == "opensandbox_pool":
             import osb_sandbox
