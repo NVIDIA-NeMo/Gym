@@ -38,11 +38,6 @@ apt-get install -y --no-install-recommends \
     less \
     vim
 
-# Remove any FFmpeg or codec libraries that the base image may have pre-installed.
-# FFmpeg and its codec libs (libavcodec, libavformat, libswscale, libx264, libx265,
-# libfdk-aac) may incur MPEG-LA royalties. Purge them so no bundled codec binaries
-# ship with the container. Use || true so the build succeeds on base images that
-# don't have these packages.
 apt-get purge -y \
     ffmpeg \
     libavcodec* \

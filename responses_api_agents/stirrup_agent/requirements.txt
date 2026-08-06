@@ -1,7 +1,5 @@
 -e nemo-gym[dev] @ ../../
-# imageio-ffmpeg binary wheels bundle static FFmpeg executables that include
-# royalty-bearing codecs (H.264, H.265, AAC). Install from sdist only — no
-# bundled executables; the stirrup agent does not perform video encode/decode.
+# Install imageio-ffmpeg from sdist only — binary wheels bundle patented codec executables.
 --no-binary imageio-ffmpeg
 # Stirrup agent framework + HF tokenizer for dynamic max_tokens sizing.
 # Kept out of the outer nemo-gym pyproject.toml so core users don't pay

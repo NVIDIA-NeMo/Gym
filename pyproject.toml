@@ -335,11 +335,7 @@ override-dependencies = [
     # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
     "spacy>=3.8.13",
 
-    # Codec-bearing packages — excluded from the shipped container.
-    # Their binary wheels bundle static FFmpeg executables or libavcodec libs
-    # (H.264, H.265, AAC, MP3) that may incur MPEG-LA royalties.
-    # Install before testing via docker/install_codec_deps.sh
-    # (--no-config bypasses this override).
+    # Bundled codec packages — not shipped in the container; install via docker/install_codec_deps.sh.
     "opencv-python-headless; sys_platform == 'never'",
     "opencv-python; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
