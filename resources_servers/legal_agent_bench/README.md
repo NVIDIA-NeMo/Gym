@@ -229,6 +229,29 @@ This setting is forwarded to each task verifier as
 The task container requires network access because the policy agent and
 verifier call configured endpoints.
 
+### Output, context, and timeout limits
+
+LAB does not define one model-independent output-token limit. Upstream harness
+adapters use provider- and model-specific per-call caps, typically near each
+model's supported output capacity. For locally hosted policy models, start with
+`++responses_create_params.max_output_tokens=64000` when the endpoint, total
+context window, and available KV cache support it. See
+[Choose output, context, and timeout limits](../../benchmarks/legal_agent_bench/README.md#choose-output-context-and-timeout-limits)
+for the full guidance and concurrency tradeoff.
+
+Avoid an unnecessarily low output cap or context window: either can truncate a
+valid long-running agent trajectory, and LAB will score that incomplete result.
+Record the limits used when reporting benchmark scores.
+
+LAB does not specify one whole-task wall-clock timeout. Gym's recommended
+defaults are a 3-hour agent phase, a 30-minute policy request for the native and
+Harbor loops, a 1-hour verifier phase, and a 90-second judge request with one
+retry. Native and Harbor shell commands use 60 seconds; Hermes terminal calls
+use 180 seconds. These are operational safety limits rather than LAB scoring
+parameters. See
+[Timeouts and turn limits](../../benchmarks/legal_agent_bench/README.md#timeouts-and-turn-limits)
+for the complete table, override paths, and guidance for slow local models.
+
 ## Caches and outputs
 
 The default paths are:
