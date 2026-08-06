@@ -83,6 +83,8 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
 
     model_patch: Optional[str]
 
+    log_dir: str
+
 
 # @bxyu-nvidia: This is a wrapper that can be passed directly to a very lightly modified version of `run_instance`
 # The method is almost identical to the original, just with async awaits rather than sync.
@@ -270,6 +272,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,
+            log_dir=str(Path(__file__).parent / "logs/run_evaluation" / run_id),
         )
 
 
