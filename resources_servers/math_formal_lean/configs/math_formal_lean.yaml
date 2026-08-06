@@ -25,6 +25,9 @@ math_formal_lean:
               background_exec: true
         image: ${oc.env:NS_SANDBOX_IMAGE,}
         max_concurrent: ${oc.env:LEAN_SANDBOX_MAX_CONCURRENT,8}
+        # 0 = a fresh pod per verify. N > 0 = N warm pods reused across verifies —
+        # a cold pod's first compile lazy-pulls ~5GB of oleans (~15 min); warm ~4s.
+        pool_size: ${oc.env:LEAN_SANDBOX_POOL_SIZE,0}
       compilation_timeout: 30.0
       domain: math
       verified: false

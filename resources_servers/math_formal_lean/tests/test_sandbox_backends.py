@@ -85,10 +85,14 @@ class _FakeSandbox:
 
     async def exec(self, command, **kwargs):
         self.exec_command = command
+        self.exec_commands = getattr(self, "exec_commands", []) + [command]
         self.exec_timeout_s = kwargs.get("timeout_s")
         if self.raise_on_exec:
             raise self.raise_on_exec
         return self.exec_result
+
+    async def upload(self, local_path, remote_path):
+        self.uploaded = getattr(self, "uploaded", []) + [remote_path]
 
     async def stop(self):
         self.stopped = True
@@ -165,3 +169,38 @@ class TestOpenSandboxLean4Client:
         out = asyncio.run(main())
         assert out == {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
         assert not fake_sandbox.instances, "no pod may be created past a failed admission"
+
+class TestPooledMode:
+    def test_pool_reuses_pods_across_verifies(self, fake_sandbox):
+        client = _client(pool_size=2)
+
+        async def scenario():
+            return [await client.execute_lean4("theorem t : True := trivial", timeout=5.0) for _ in range(3)]
+
+        results = asyncio.run(scenario())
+        assert [r["process_status"] for r in results] == ["completed"] * 3
+        # 2 pool pods serve 3 verifies — no per-verify creates.
+        assert len(fake_sandbox.instances) == 2
+        pod = fake_sandbox.instances[0]
+        # First exec on a pool pod is the olean prefetch; compiles clean up their proof file.
+        assert pod.exec_commands[0].startswith("find ")
+        assert "rm -f" in pod.exec_commands[-1] and "timeout -s KILL 5.0" in pod.exec_commands[-1]
+        assert not pod.stopped
+
+    def test_pool_replaces_failed_pod_and_retries(self, fake_sandbox):
+        client = _client(pool_size=1, acquire_timeout_s=5.0)
+
+        async def scenario():
+            # Warm the pool, then arm the NEXT pod acquisition's exec to fail once.
+            first = await client.execute_lean4("theorem t : True := trivial", timeout=5.0)
+            bad = fake_sandbox.instances[0]
+            bad.raise_on_exec = RuntimeError("pod lost")
+            second = await client.execute_lean4("theorem t : True := trivial", timeout=5.0)
+            return first, bad, second
+
+        first, bad, second = asyncio.run(scenario())
+        assert first["process_status"] == "completed"
+        # The dead pod was stopped and replaced; the retry ran on the replacement.
+        assert bad.stopped
+        assert second["process_status"] == "completed"
+        assert len(fake_sandbox.instances) >= 2
