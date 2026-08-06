@@ -16,11 +16,9 @@
 HTTP protocol, with sessions multiplexed across them by sticky routing.
 
 Sharing is what makes large batches feasible: 16k concurrent sessions ride K pods
-(each pod's NS server multiplexes many sessions), instead of 16k pods. The
-OpenSandbox SDK's client-side pool (``SandboxPoolAsync``) is the create/heal engine:
-it keeps warm spares and health-checks acquisitions, so filling a slot at warmup or
-replacing a dead pod is one ``acquire()`` — create retries, readiness, and warm
-inventory are SDK-owned, not reimplemented here.
+(each pod's NS server multiplexes many sessions), instead of 16k pods. Slots fill
+and heal with direct async ``Sandbox.create`` calls — a full fan-out warm wave is
+~5s per pod on cell-2, so no warm-spare inventory layer is needed.
 
 This module is imported only when ns_tools selects the ``opensandbox_pool`` backend;
 the default ``local`` backend never touches it.
@@ -74,12 +72,11 @@ class _Slot:
 
 
 class OpenSandboxPool:
-    """K shared NS-sandbox pods with sticky session routing; slots fill and heal
-    through the SDK's warm client-side pool.
+    """K shared NS-sandbox pods with sticky session routing.
 
-    The constructor is pure (validation only); ``start()`` kicks the SDK pool, a
-    budgeted non-blocking warmup, and the health/idle-sweep loops. ``route()``
-    lazily starts everything as a safety net if the owner never called ``start()``.
+    The constructor is pure (validation only); ``start()`` kicks a non-blocking
+    warmup and the health/idle-sweep loops. ``route()`` lazily starts everything
+    as a safety net if the owner never called ``start()``.
     """
 
     def __init__(
@@ -89,7 +86,6 @@ class OpenSandboxPool:
         image: str,
         port: int = 6000,
         size: int = 8,
-        warm_spares: int = 2,
         ttl_s: Optional[float] = None,
         env: Optional[Dict[str, str]] = None,
         entrypoint: Optional[list] = None,
@@ -102,7 +98,6 @@ class OpenSandboxPool:
         ready_timeout_s: float = 30.0,
         health_budget_s: float = 300.0,
         warmup_fill_concurrency: int = 0,  # 0 = full fan-out (all slots at once)
-        use_sdk_pool: bool = False,
         health_interval_s: float = 15.0,
         health_timeout_s: float = 10.0,
         heal_creates_per_s: float = 4.0,
@@ -118,7 +113,6 @@ class OpenSandboxPool:
         self._image = image
         self._port = int(port)
         self._size = int(size)
-        self._warm_spares = int(warm_spares)
         self._ttl_s = float(ttl_s) if ttl_s else None
         self._env = dict(env or {})
         self._entrypoint = list(entrypoint) if entrypoint else None
@@ -135,7 +129,6 @@ class OpenSandboxPool:
         self._ready_timeout_s = float(ready_timeout_s)
         self._health_budget_s = float(health_budget_s)
         self._warmup_fill_concurrency = int(warmup_fill_concurrency) or self._size
-        self._use_sdk_pool = bool(use_sdk_pool)
         self._connection_config: Any = None
         self._health_interval_s = health_interval_s
         self._health_timeout_s = health_timeout_s
@@ -154,7 +147,6 @@ class OpenSandboxPool:
         self._session_last_used: Dict[str, float] = {}
         self._prepared_ids: set = set()
         self._lock = asyncio.Lock()
-        self._sdk_pool: Any = None
         self._started = False
         self._warmup_done = False
         self._closed = False
@@ -177,62 +169,12 @@ class OpenSandboxPool:
         if self._started or self._closed:
             return
         self._started = True
-        from opensandbox._async_pool_store import InMemoryAsyncPoolStateStore
         from opensandbox.config.connection import ConnectionConfig
-        from opensandbox.pool_async import SandboxPoolAsync
-        from opensandbox.pool_types import PoolCreationSpec
 
-        # NOTE: a shared httpx_aiohttp.AiohttpTransport here corrupted concurrent creates at
-        # 128-burst (pods materialized with missing image layers); single-pod creates through
-        # it were fine. The SDK default transport survives the same burst 128/128 — keep it.
         self._connection_config = ConnectionConfig(**self._connection_kwargs)
-
-        if self._use_sdk_pool:
-            self._sdk_pool = SandboxPoolAsync(
-                pool_name=self._run_label,
-                max_idle=self._warm_spares,
-                state_store=InMemoryAsyncPoolStateStore(),
-                connection_config=self._connection_config,
-                creation_spec=PoolCreationSpec(
-                    image=self._image,
-                    entrypoint=self._entrypoint,
-                    env=self._env or None,
-                    resource=self._resources or None,
-                    metadata=dict(self._metadata),
-                ),
-                warmup_sandbox_preparer=self._prepare if self._needs_prepare else None,
-                # Warm creates and renewals use idle_timeout as the sandbox TTL; the SDK
-                # default (24h) exceeds the server's configured maximum (8h on cell-2).
-                idle_timeout=timedelta(seconds=self._ttl_s or 14400.0),
-                sandbox_creator=self._create_sandbox_with_requests if self._resource_requests else None,
-                acquire_ready_timeout=timedelta(seconds=self._ready_timeout_s),
-                warmup_ready_timeout=timedelta(seconds=self._ready_timeout_s),
-                acquire_skip_health_check=True,
-            )
-            await self._sdk_pool.start()
         self._tasks.append(asyncio.create_task(self._warmup(), name="osb-pool-warmup"))
         self._tasks.append(asyncio.create_task(self._heal_loop(), name="osb-pool-heal"))
         self._tasks.append(asyncio.create_task(self._sweep_loop(), name="osb-pool-sweep"))
-
-    async def _create_sandbox_with_requests(self, context: Any) -> Any:
-        from opensandbox import Sandbox
-
-        return await Sandbox.create(
-            image=self._image,
-            entrypoint=self._entrypoint,
-            env=self._env or None,
-            metadata=dict(self._metadata),
-            resource=self._resources or None,
-            resource_requests=self._resource_requests or None,
-            timeout=context.idle_timeout,
-            ready_timeout=context.ready_timeout,
-            # ALWAYS ready-gate creation (Gym-main provider semantics): exec runs only
-            # after the sandbox reports ready. The acquire-time EXEC check is skipped
-            # separately (it would kill a warm pod's running service); slot liveness is
-            # gated on proxied HTTP health instead.
-            skip_health_check=False,
-            connection_config=context.connection_config,
-        )
 
     async def aclose(self) -> None:
         self._closed = True
@@ -252,11 +194,6 @@ class OpenSandboxPool:
                     LOGGER.warning("pool slot %d teardown failed (TTL will reap): %s", slot.index, exc)
                 slot.sandbox = None
                 slot.healthy = False
-        if self._sdk_pool is not None:
-            try:
-                await self._sdk_pool.shutdown(graceful=True)
-            except Exception as exc:
-                LOGGER.warning("SDK pool shutdown failed: %s", exc)
         if self._http is not None and not self._http.closed:
             await self._http.close()
 
@@ -289,9 +226,8 @@ class OpenSandboxPool:
         self._prepared_ids.add(str(sandbox.id))
 
     async def _ensure_prepared(self, sandbox: Any) -> None:
-        """Direct-created acquisitions bypass the SDK warmup preparer; prepare them here.
-        Warm-acquired pods were prepared by the SDK preparer (same process) — an exec-based
-        probe would kill their running service, so membership is checked in memory."""
+        """Prepare a freshly created pod exactly once. Membership is checked in memory —
+        an exec-based probe would kill a prepared pod's running service."""
         if not self._needs_prepare:
             return
         if str(sandbox.id) in self._prepared_ids:
@@ -312,8 +248,8 @@ class OpenSandboxPool:
         return url.rstrip("/"), headers
 
     async def _create_slot(self, slot: _Slot) -> None:
-        """Fill one slot from the SDK pool. Single-flight per slot: a duplicate landing
-        late would overwrite base_url under pinned sessions and leak a pod until TTL."""
+        """Fill one slot. Single-flight per slot: a duplicate landing late would
+        overwrite base_url under pinned sessions and leak a pod until TTL."""
         if slot.creating:
             return
         slot.creating = True
@@ -323,13 +259,6 @@ class OpenSandboxPool:
             slot.creating = False
 
     async def _acquire_sandbox(self) -> Any:
-        if self._use_sdk_pool:
-            sandbox_timeout = timedelta(seconds=self._ttl_s) if self._ttl_s else None
-            return await self._sdk_pool.acquire(sandbox_timeout=sandbox_timeout)
-        # Direct async create: the fastest, and the only create path that has never
-        # produced content-broken pods on cell-2.
-        from datetime import timedelta as _td
-
         from opensandbox import Sandbox
 
         return await Sandbox.create(
@@ -339,8 +268,8 @@ class OpenSandboxPool:
             metadata=dict(self._metadata),
             resource=self._resources or None,
             resource_requests=self._resource_requests or None,
-            timeout=_td(seconds=self._ttl_s or 14400.0),
-            ready_timeout=_td(seconds=self._ready_timeout_s),
+            timeout=timedelta(seconds=self._ttl_s or 14400.0),
+            ready_timeout=timedelta(seconds=self._ready_timeout_s),
             connection_config=self._connection_config,
         )
 
