@@ -37,7 +37,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.cli.setup_command import run_command, setup_env_command
+from nemo_gym.cli.setup_command import resolve_server_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -204,10 +204,17 @@ class RunHelper:  # pragma: no cover
             # Resolve cwd-first (a local server), else the install location for built-ins.
             dir_path = _resolve_server_dir(Path(first_key, second_key))
 
+            # Launch with the resolved venv's own interpreter instead of the bare `python` that
+            # `source bin/activate` puts on PATH. A venv that was copied or moved after creation still
+            # names its original prefix in `bin/activate`, so activating it would silently run a
+            # different interpreter than `uv_venv_dir` selected - with no trace of it in the logs.
+            venv_path = resolve_server_venv_path(dir_path, global_config_dict)
+            print(f"Starting `{top_level_path}` from venv {venv_path}")
+
             command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
     && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
-    python {str(entrypoint_fpath)}"""
+    {venv_path}/bin/python {str(entrypoint_fpath)}"""
 
             process = run_command(command, dir_path, server_name=top_level_path)
             self._processes[top_level_path] = process
