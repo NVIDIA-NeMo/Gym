@@ -4,30 +4,30 @@ description: "The agent servers NeMo Gym ships — Gym-native implementations, a
 position: 2
 ---
 
-All the agent servers below ship in the NeMo Gym repo. They divide by who implements the agent: some are NeMo Gym code, others hand the work to a third-party harness and adapt the result. If neither fits, you can keep your agent in your own repo and [drive it remotely](/agent-server/remote-agent).
+All the agent servers below ship in the NeMo Gym repo. Some are NeMo Gym code; others run a third-party harness and translate its output. If neither fits, you can keep your agent in your own repo and [drive it remotely](/agent-server/remote-agent).
 
-These are the general-purpose agent servers — ones you can point at more than one environment. `responses_api_agents/` also holds benchmark-specific agent servers whose control flow is coupled to a single benchmark; those are documented with the benchmark rather than here.
+These are the general-purpose agent servers, meaning they work with more than one environment. `responses_api_agents/` also holds agent servers whose control flow is specific to a single benchmark; those are documented with that benchmark.
 
 ## Agent Servers with a Gym-Native Implementation
 
 These are NeMo Gym code, with no external dependency. They call the Model server, route tool calls to the Resources server, and call the Resources server's `/verify` to score the trajectory.
 
-| Agent Server | Use it when |
+| Agent Server | What it does |
 |---|---|
-| [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) | You want general-purpose multi-step tool calling with a configurable step budget. Works with any Resources server, and is the usual starting point. |
-| [`non_executing_simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/non_executing_simple_agent) | The tool call itself is the answer. Forwards one request to the model and passes the response to the verifier without executing anything. |
-| [`tool_simulation_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/tool_simulation_agent) | Tool results should be simulated rather than really executed. |
-| [`gymnasium_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/gymnasium_agent) | Your environment is a `GymnasiumServer` Resources server and you need a compatible Agent server to drive its reset/step loop. |
+| [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) | Calls the model, executes any tool calls against the Resources server, appends the results, and repeats until the model returns no tool calls or the step limit is reached. Works with any Resources server. |
+| [`non_executing_simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/non_executing_simple_agent) | Makes one model call and passes the response to the verifier. Does not execute tool calls. Normalizes a string `input` into a message list and propagates session cookies. |
+| [`tool_simulation_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/tool_simulation_agent) | Makes one model call and passes the response to the verifier. Does not execute tool calls. Used with datasets that supply simulated tool results. |
+| [`gymnasium_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/gymnasium_agent) | Drives the reset/step loop of a `GymnasiumServer` Resources server. |
 
 ## Agent Servers That Run a Third-Party Harness
 
-Each of these hands the loop to an external harness. The harness keeps its own prompts and tools; NeMo Gym seeds the session, translates the resulting trajectory into Responses API format, and verifies it against the Resources server.
+In these, the external harness owns the agent loop and keeps its own prompts and tools. NeMo Gym seeds the session, translates the resulting trajectory into Responses API format, and verifies it against the Resources server.
 
 Because verification stays on the NeMo Gym side, an agent harness that brings its own tools can often run in an existing environment by adding a `<benchmark>_<agent>` config, leaving the dataset and verifier unchanged — only the Resources server's task data and `/verify` are used. This is how `hermes_agent` is used with the math, coding, reasoning_gym, MCQA, and instruction-following benchmarks. It does not hold for every harness: agent servers such as `swe_agents`, `osworld_agent`, and `tau2` are tied to specific benchmarks.
 
 ### Coding CLIs
 
-Agent servers that shell out to a coding CLI. The CLI runs its own tools internally and its output stream is parsed back into NeMo Gym format.
+Agent servers that run a coding CLI as a subprocess. The CLI executes its own tools, and its output is parsed back into NeMo Gym format.
 
 | Agent Server | Harness | Notes |
 |---|---|---|
@@ -71,7 +71,7 @@ Benchmarks that come with their own agent scaffold, wired in at the agent-server
 
 ### Agent-Agnostic Task Runners
 
-These are not harnesses. They wire together another NeMo Gym Agent server, run it inside a benchmark's task container, and grade what it leaves behind.
+These are not harnesses. They run another NeMo Gym Agent server inside a benchmark's task container, then grade the container's final state.
 
 | Agent Server | What it does |
 |---|---|
@@ -82,22 +82,20 @@ Alongside these, `responses_api_agents/` also holds benchmark-specific custom Ag
 
 ## Choose an Agent Server
 
-Start with the simplest one that provides the interaction pattern your environment needs.
+Match the agent server to the interaction pattern the environment needs.
 
-- Plain tool calling, or no tools at all: `simple_agent`. Use `non_executing_simple_agent` only when the model's tool call is the final answer and must not be executed.
+- Tool calling, or no tools: `simple_agent`.
+- One model call with no tool execution: `non_executing_simple_agent`, or `tool_simulation_agent` if the dataset supplies simulated tool results. The two behave almost identically, so follow whichever the environment's existing configs use.
 - A `reset`/`step` environment: `gymnasium_agent`.
-- Tool results produced by simulation rather than real execution: `tool_simulation_agent`.
-- SWE-bench-style coding: `swe_agents` for OpenHands or opencode, `mini_swe_agent_2` for mini-swe-agent on the provider-neutral sandbox API, or `anyswe_agent` to run several different Gym agent servers through one execution and grading path. `mini_swe_agent` remains for the older Docker workflow.
-- Terminal-Bench tasks: `anyterminal_agent`, which puts the agent and the task's tests in the same container.
-- Agentic coding through an external CLI: `claude_code_agent`, `codex_agent`, `kilocode_agent`, `opencode_agent`, `openclaw_agent`, or `pi_agent`. All are evaluation-only today — check the README before planning to train on their rollouts.
-- Multi-step tool use you intend to train on: `hermes_agent`, which is pinned to a fork carrying the token-ID and sampling-parameter patches training needs.
-- LangGraph research patterns: `langgraph_agent`. Graphs that produce non-monotonic trajectories, such as parallel thinking, work for evaluation but need extra handling before NeMo RL training.
+- SWE-bench-style coding: `swe_agents` for OpenHands or opencode, `mini_swe_agent_2` for mini-swe-agent on the sandbox API, or `anyswe_agent` to run several Gym agent servers through one execution and grading path. `mini_swe_agent` uses the older Docker workflow.
+- Terminal-Bench tasks: `anyterminal_agent`, which runs the agent and the task's tests in the same container.
+- Coding through an external CLI: `claude_code_agent`, `codex_agent`, `kilocode_agent`, `opencode_agent`, `openclaw_agent`, or `pi_agent`. All are evaluation-only; check the README before training on their rollouts.
+- Multi-step tool use for training: `hermes_agent`, pinned to a fork with the token-ID and sampling-parameter patches training requires.
+- LangGraph graphs: `langgraph_agent`. Graphs with non-monotonic trajectories, such as parallel thinking, work for evaluation but need extra handling before NeMo RL training.
 - Environments from an external library: `aviary_agent` for FutureHouse Aviary, `verifiers_agent` for Prime Intellect Verifiers.
-- An agent you host yourself: `remote_agent`, if your service can implement the OpenAI `/v1/responses` contract.
+- An agent you host: `remote_agent`, if your service implements the OpenAI `/v1/responses` contract.
 
-<Tip>
-For a new environment, start with `simple_agent` unless the environment protocol or an external harness requires one of the specialized adapters. It keeps the model, tools, and verifier easy to isolate while you get the task working.
-</Tip>
+For a new environment, start with `simple_agent` unless the environment protocol or an external harness requires one of the others.
 
 ## Configure and Run
 
@@ -139,7 +137,7 @@ mini_swe_agent_2:
 
 The provider's own config lives in a separate file that defines the named `sandbox` block, so switching between OpenSandbox, Docker, and Apptainer means passing a different `--config` rather than editing the agent. See [Sandbox](/infrastructure/sandbox) for provider setup and `SandboxSpec` fields.
 
-An external RL trainer that routes each episode through its own recording proxy can override the policy endpoint per rollout. `mini_swe_agent` and `mini_swe_agent_2` accept optional `policy_base_url` and `policy_api_key` fields on the `/run` request:
+`mini_swe_agent` and `mini_swe_agent_2` accept optional `policy_base_url` and `policy_api_key` fields on the `/run` request, so a caller can point one rollout at its own OpenAI-compatible endpoint. External RL trainers use this to route each episode through a per-episode recording proxy:
 
 ```json
 {
@@ -163,20 +161,20 @@ gym env start --config path/to/agent-and-resources.yaml --model-type vllm_model
 gym eval run --no-serve --agent my_agent --input data/tasks.jsonl --output results/rollouts.jsonl
 ```
 
-`gym env validate` checks the same configuration without starting Ray or any servers, which is worth doing before a long run.
+`gym env validate` checks the same configuration without starting Ray or any servers.
 
 ## How an External Harness Is Wrapped
 
-The wrappers vary in size — the container-based ones do considerably more setup than the CLI ones — but they share four responsibilities. The `swe_agents` opencode integration states the underlying rule as "swap the transport, keep the loop": leave the harness's prompts, tools, and control flow alone, and change only where it gets tokens from and where its trajectory goes.
+Wrappers differ in size, but share four responsibilities. The `swe_agents` opencode integration states the rule as "swap the transport, keep the loop": leave the harness's prompts, tools, and control flow unchanged, and change only where it gets tokens from and where its trajectory goes.
 
-1. Run the harness from the Agent server's `responses()`. A subprocess for a CLI, an in-process import for a Python framework, a container for a sandboxed benchmark. `run()` stays the episode orchestrator — it seeds the session, calls `responses()`, and verifies — so the harness is confined to the one method that produces a trajectory.
-2. Point it at a NeMo Gym Model server by setting whatever base URL the harness uses. Model servers accept `POST /v1/responses` (including the streaming form Codex uses), `POST /v1/chat/completions`, and `POST /v1/messages` for Anthropic-style clients, so most harnesses need no change on this step. Going through the Model server is what lets one harness run against vLLM, OpenAI, or an inference provider, and it is required for training.
+1. Run the harness from the Agent server's `responses()` — a subprocess for a CLI, an in-process import for a Python framework, a container for a sandboxed benchmark. `run()` remains the episode orchestrator: it seeds the session, calls `responses()`, and verifies.
+2. Point the harness at a NeMo Gym Model server by setting whatever base URL it uses. Model servers accept `POST /v1/responses` (including the streaming form Codex uses), `POST /v1/chat/completions`, and `POST /v1/messages`, so most harnesses need no change here. This is what lets one harness run against vLLM, OpenAI, or an inference provider, and it is required for training.
 3. Translate the harness's output into Responses API items. The source varies — a JSON event stream, a SQLite session, per-turn files on disk — so this is the per-harness part of the code and usually the bulk of the wrapper.
 4. From `run()`, send the finished trajectory to the Resources server's `/verify` and return the reward. Harnesses that bring their own tools use only the Resources server's task data and verifier; harnesses that accept externally supplied tools can also route tool calls to it.
 
 ## Evaluation-Only vs Training-Grade
 
-Producing scores is easier than producing rollouts that can be trained on. For RL, the harness must:
+For rollouts to be trainable, the harness must:
 
 - Call through NeMo Gym's Model server rather than the provider directly.
 - Include prompt and generation token IDs in requests, so trainers can apply on-policy token-ID correction instead of re-tokenizing.
@@ -192,7 +190,7 @@ Existing agents may come with predefined tools, allowing you to leverage them di
 <Cards>
 
 <Card title="Drive a Remote Agent" href="/agent-server/remote-agent">
-No wrapper at all — keep your agent in your own repo and expose one Responses-compatible endpoint.
+Keep your agent in your own repo and expose one Responses-compatible endpoint.
 </Card>
 
 <Card title="Agent Server" href="/agent-server">
