@@ -64,7 +64,7 @@ sandbox:
       close_timeout_s: 30
       # Short status/log polls instead of one long-lived SSE stream, for load
       # balancers that cap stream duration. Costs extra round trips.
-      background_exec: false
+      background_exec: true
       # Poll interval backs off from initial to interval.
       background_poll_initial_s: 0.25
       background_poll_interval_s: 2.0
