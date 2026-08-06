@@ -29,7 +29,9 @@
 # Note: top_p 1.0 overrides the 0.95 in env.yaml — intentional for this benchmark.
 
 # Used judge: Qwen3-235B-A22B-Instruct-2507 (non-reasoning)
-JUDGE_MODEL="${JUDGE_MODEL:?}"
+AALCR_JUDGE_MODEL="${AALCR_JUDGE_MODEL:?}"
+
+POLICY=policy_model.responses_api_models.vllm_model
 
 gym eval prepare --benchmark aalcr
 
@@ -40,10 +42,10 @@ gym eval run \
   ${RESUME:+--resume} \
   --output "${OUT:-./results/aa-lcr}/evaluator_rollouts.jsonl" \
   --top-p 1.0 \
-  "++Qwen3-235B-A22B-Instruct-2507-FP8.responses_api_models.vllm_model.model=$JUDGE_MODEL" \
-  "++policy_model.responses_api_models.vllm_model.sequential_reasoning_allowed=false" \
-  "++policy_model.responses_api_models.vllm_model.chat_template_kwargs={enable_thinking: true}" \
-  "++policy_model.responses_api_models.vllm_model.extra_body={skip_special_tokens: false}" \
+  "++Qwen3-235B-A22B-Instruct-2507-FP8.responses_api_models.vllm_model.model=$AALCR_JUDGE_MODEL" \
+  "++$POLICY.sequential_reasoning_allowed=false" \
+  "++$POLICY.chat_template_kwargs={enable_thinking: true}" \
+  "++$POLICY.extra_body={skip_special_tokens: false}" \
   "++overwrite_metrics_conflicts=true" \
   ${LIMIT:+--limit "$LIMIT"} \
   ${PARALLEL:+--concurrency "$PARALLEL"}

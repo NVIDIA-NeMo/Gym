@@ -33,6 +33,10 @@
 
 # Used judge: gpt-4o (wired as judge_model in env.yaml)
 
+JUDGE=hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge
+JPARAMS=equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params
+POLICY=policy_model.responses_api_models.vllm_model
+
 gym eval prepare --benchmark hle
 
 gym eval run \
@@ -42,26 +46,26 @@ gym eval run \
   --split benchmark \
   ${RESUME:+--resume} \
   --output "${OUT:-./results/hle}/evaluator_rollouts.jsonl" \
-  "++hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge.judge_model_server.name=judge_model" \
-  "++hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge.judge_equal_label=HLE_JUDGE_CORRECT" \
-  "++hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge.judge_not_equal_label=HLE_JUDGE_INCORRECT" \
-  "++hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge.response_extract_regex='(?s)\A(?:(.{1,8192})\Z|(?=.{8193,}\Z))'" \
-  "++hle_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge.msg_extraction_failure=''" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.temperature=0.0" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.top_p=0.95" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.type=json_schema" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.name=hle_judge" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.strict=true" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.schema.type=object" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.schema.properties.correct.type=string" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.schema.properties.correct.enum=[HLE_JUDGE_CORRECT,HLE_JUDGE_INCORRECT]" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.schema.properties.extracted_final_answer.type=string" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.schema.properties.reasoning.type=string" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.schema.properties.confidence.type=integer" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.schema.required=[correct,extracted_final_answer,reasoning,confidence]" \
-  "++equivalence_llm_judge.resources_servers.equivalence_llm_judge.judge_responses_create_params.text.format.schema.additionalProperties=false" \
-  "++policy_model.responses_api_models.vllm_model.chat_template_kwargs={enable_thinking: true}" \
-  "++policy_model.responses_api_models.vllm_model.extra_body={seed: 0, skip_special_tokens: false}" \
+  "++$JUDGE.judge_model_server.name=judge_model" \
+  "++$JUDGE.judge_equal_label=HLE_JUDGE_CORRECT" \
+  "++$JUDGE.judge_not_equal_label=HLE_JUDGE_INCORRECT" \
+  "++$JUDGE.response_extract_regex='(?s)\A(?:(.{1,8192})\Z|(?=.{8193,}\Z))'" \
+  "++$JUDGE.msg_extraction_failure=''" \
+  "++$JPARAMS.temperature=0.0" \
+  "++$JPARAMS.top_p=0.95" \
+  "++$JPARAMS.text.format.type=json_schema" \
+  "++$JPARAMS.text.format.name=hle_judge" \
+  "++$JPARAMS.text.format.strict=true" \
+  "++$JPARAMS.text.format.schema.type=object" \
+  "++$JPARAMS.text.format.schema.properties.correct.type=string" \
+  "++$JPARAMS.text.format.schema.properties.correct.enum=[HLE_JUDGE_CORRECT,HLE_JUDGE_INCORRECT]" \
+  "++$JPARAMS.text.format.schema.properties.extracted_final_answer.type=string" \
+  "++$JPARAMS.text.format.schema.properties.reasoning.type=string" \
+  "++$JPARAMS.text.format.schema.properties.confidence.type=integer" \
+  "++$JPARAMS.text.format.schema.required=[correct,extracted_final_answer,reasoning,confidence]" \
+  "++$JPARAMS.text.format.schema.additionalProperties=false" \
+  "++$POLICY.chat_template_kwargs={enable_thinking: true}" \
+  "++$POLICY.extra_body={seed: 0, skip_special_tokens: false}" \
   "++overwrite_metrics_conflicts=true" \
   ${LIMIT:+--limit "$LIMIT"} \
   ${PARALLEL:+--concurrency "$PARALLEL"}
