@@ -40,25 +40,33 @@ Vals and is **not** byte-parity, so keep it out of eval. See
 
 ## Dependencies
 
-`requirements.txt` pins both upstream packages from git — neither is on PyPI, and
-both pins are exact so the benchmark stays reproducible (bump deliberately):
+Both upstream pins are exact so the benchmark stays reproducible (bump
+deliberately):
 
 ```
 -e nemo-gym[dev] @ ../../
-model-library @ git+https://gitlab-master.nvidia.com/swdl-nemollm-mlops/alignment-data/model-library.git@<pinned-sha>
+model-library==0.1.25
 finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@<pinned-sha>
 ```
 
-`model-library` is an **NVIDIA fork** of `vals-ai/model-library@v0.1.25`, not the
-upstream tag. Upstream floors `openai>=2.28.0`, which conflicts with the
-vllm-compatible `openai` (2.7.2) that Gym broadcasts from its head server. The
-fork drops that floor (`>=2.28.0` → `<3.0`) and keeps a static
-`version = "0.1.25"` so it still satisfies `finance-agent`'s
-`model-library==0.1.25` pin — which is why no core `openai`/`vllm` bump is needed
-in Gym. `finance-agent` publishes no tags, so it is pinned to the HEAD commit at
-integration time.
+`model-library` declares `openai[aiohttp]>=2.28.0`, which cannot resolve against
+the vllm-compatible `openai` that Gym pins. The upstream code runs on the older
+client, so only the declared floor is the problem, and `overrides.txt` drops it:
 
-Both nemo-gym and finance-agent require Python >=3.12.
+```
+openai[aiohttp]<=2.7.2
+```
+
+`uv --override` replaces *every* declared constraint on a package, Gym's included,
+so this mirrors the cap in the root `pyproject.toml` rather than merely widening
+the floor — `openai<3.0` here would pull a far newer client than Gym is tested
+against. Bump the two together; a test asserts they stay in sync. No core
+`openai`/`vllm` bump is needed.
+
+`finance-agent` publishes no tags and is not on PyPI, so it is pinned to the HEAD
+commit at integration time.
+
+nemo-gym requires Python >=3.13.14, which is the binding floor here.
 
 ## Setup (`env.yaml`)
 
@@ -346,25 +354,22 @@ set) and `category: must_pass` (a dealbreaker) — and the reward is **Partial
 Credit**: the severity-weighted pass fraction, forced to `0.0` if any dealbreaker
 failed.
 
-> **The reward changed meaning in Aug 2026.** It used to be all-or-nothing; it is
-> now graded. `mean/reward` from a run collected before that change is not
-> comparable to one collected after. The old definition is still reported as
-> `rubric_all_pass`, and `scripts/rescore_rubrics.py` converts old runs without
-> re-judging anything.
+The stricter every-criterion-passed flag is reported alongside as
+`rubric_all_pass`, and `scripts/rescore_rubrics.py` recomputes both from stored
+rollouts without re-judging anything.
 
 The judge is deliberately **not** shown severity or `must_pass`. It grades each
 criterion on its merits and the weighting is applied afterwards, so a criterion
 cannot be graded more harshly for being expensive to fail. Criteria with no
-`modifiers` at all default to severity 1.0 and non-gating, which reproduces the
-pre-Aug-2026 unweighted behaviour exactly — so older datasets still reverify to the
-numbers they were originally scored at.
+`modifiers` at all default to severity 1.0 and non-gating, so an unlabeled dataset
+scores as a plain unweighted pass fraction.
 
 | Field | Meaning |
 |---|---|
 | `reward` | **Partial Credit** — the weighted pass fraction, zeroed by any failed dealbreaker |
 | `rubric_partial_credit` | the same number under Vals's name for it |
 | `rubric_weighted_fraction` | Partial Credit *before* gating; the gap between the two is what the dealbreakers cost |
-| `rubric_all_pass` | `true` only when every criterion resolved and passed (the pre-Aug-2026 reward) |
+| `rubric_all_pass` | `true` only when every criterion resolved and passed — Vals's All-Pass |
 | `rubric_fraction` | criteria passed / total, unweighted |
 | `rubric_weight_passed` / `rubric_weight_total` | the severity mass behind the weighted fraction |
 | `rubric_dealbreakers_failed` / `rubric_dealbreakers_total` | how many `must_pass` criteria there were and how many failed |
@@ -464,8 +469,9 @@ reverify only calls `/verify`.
 
 ## Analyzing a finished run
 
-Reverify re-runs the judge. When only the *aggregation* changed — which is what the
-Aug 2026 weighting was — the stored verdicts are still valid and rescoring is free:
+Reverify re-runs the judge. When only the *aggregation* changes — different severity
+weights, or gating disabled — the stored verdicts are still valid and rescoring is
+free:
 
 This one imports `app.py`, so it needs **this server's** venv:
 
@@ -516,7 +522,8 @@ resources_servers/finance_agent_v2/         # server code + gym env test fixture
 ├── app.py                         # Resource server: tool endpoints + retrieval shim + verify
 ├── cache.py                       # ToolCache: namespaced atomic disk cache + read/write policy
 ├── cached_tools.py                # Cached* wrappers (price/edgar/parse) + SecFilingSearch
-├── requirements.txt               # Pins nemo-gym + Vals model-library (NVIDIA fork) + finance-agent
+├── requirements.txt               # Pins nemo-gym + Vals model-library + finance-agent
+├── overrides.txt                  # Drops model-library's openai floor (see Dependencies)
 ├── configs/
 │   └── finance_agent_v2.yaml      # Resources-server config used by gym env test / gym dataset collate
 │                                  # (the benchmark recipe config_paths-chains to this; no duplication)
@@ -561,10 +568,10 @@ with NeMo Gym and the SPDX headers in each source file (`app.py`,
 | Package | Source | License |
 |---------|--------|---------|
 | `finance-agent` (`finance_agent.tools` / `finance_agent.prompt`; also the source of the benchmark's `upstream_spec.json` snapshot) | [vals-ai/finance-agent-v2](https://github.com/vals-ai/finance-agent-v2) | MIT |
-| `model-library` (`model_library.*`) | NVIDIA fork of [vals-ai/model-library](https://github.com/vals-ai/model-library)@`v0.1.25` (openai floor dropped, static version) | MIT |
+| `model-library` (`model_library.*`) | [vals-ai/model-library](https://github.com/vals-ai/model-library)@`0.1.25`, from PyPI | MIT |
 
 We import these packages at install time and do not copy their source into this
-repo, so their MIT terms apply to that code as distributed by the upstream/fork.
+repo, so their MIT terms apply to that code as distributed upstream.
 
 **Dataset.** The `example.jsonl` fixtures (here) and
 `benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl` derive
@@ -577,4 +584,4 @@ subject to that project's terms. The public release ships **no official grader**
 the public `rubric` field, voted over repeated calls. Vals's private grader
 (prompts + reward logic) was obtained under a separate license and is
 **deliberately not reproduced** in this public code; the prompt here was written
-from scratch, so scores are not comparable to Vals's published numbers.
+from scratch, so scores are not directly comparable to Vals's published numbers.

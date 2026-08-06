@@ -4,10 +4,11 @@
 # The public FABv2 release ships no grader, so we score the dataset's `rubric`
 # criteria with our own per-criterion judge: each criterion is graded on its own
 # (1 = the answer asserts it, 0 = it does not) over judge_required_successes
-# parsed verdicts, decided by majority vote. Reward is all-or-nothing — 1.0 only
-# when every criterion passes — with rubric_fraction reported alongside for
-# partial credit. Scores are NOT comparable to Vals's published numbers: the
-# judge model and prompt are ours, not their private grader.
+# parsed verdicts, decided by majority vote. Reward is Vals's Partial Credit —
+# the severity-weighted pass fraction, forced to 0.0 when any must_pass
+# criterion fails — with rubric_all_pass and the unweighted rubric_fraction
+# reported alongside. The judge model and prompt are ours, not Vals's private
+# grader, so treat comparisons against their published numbers as approximate.
 finance_agent_v2_resources_server:
   resources_servers:
     finance_agent_v2:

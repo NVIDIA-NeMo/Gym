@@ -18,6 +18,7 @@ import ast
 import asyncio
 import inspect
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -237,13 +238,30 @@ class TestUpstreamParity:
             return {
                 line.strip()
                 for line in path.read_text().splitlines()
-                if line.strip().startswith(("finance-agent @", "model-library @"))
+                if line.strip().startswith(("finance-agent", "model-library"))
             }
 
         agent_pins = _pins(_REPO_ROOT / "responses_api_agents" / "finance_agent_v2" / "requirements.txt")
         server_pins = _pins(_REPO_ROOT / "resources_servers" / "finance_agent_v2" / "requirements.txt")
         assert agent_pins, "no upstream pins found in the agent requirements"
+        assert len(agent_pins) == 2, f"expected finance-agent and model-library pins, got {agent_pins}"
         assert agent_pins == server_pins
+
+    def test_openai_override_matches_the_nemo_gym_pin(self) -> None:
+        """``overrides.txt`` exists only to drop model-library's openai floor.
+
+        uv applies an override to every declared constraint on the package, so a
+        looser bound here would replace nemo-gym's cap too and silently install a
+        newer client than the one Gym is tested against. Bump both together.
+        """
+        gym_pin = re.search(r'"openai(<=|==)([\d.]+)"', (_REPO_ROOT / "pyproject.toml").read_text())
+        assert gym_pin, "nemo-gym no longer pins openai; revisit this override"
+
+        for component in ("responses_api_agents", "resources_servers"):
+            overrides = (_REPO_ROOT / component / "finance_agent_v2" / "overrides.txt").read_text()
+            assert f"openai[aiohttp]<={gym_pin.group(2)}" in overrides, (
+                f"{component}/finance_agent_v2/overrides.txt is out of sync with nemo-gym's openai pin"
+            )
 
 
 # ---------------------------------------------------------------------------

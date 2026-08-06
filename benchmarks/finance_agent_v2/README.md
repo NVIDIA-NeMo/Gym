@@ -124,11 +124,10 @@ rather than reading them as zeros). Swap in
 `responses_api_models/vllm_model/configs/vllm_model.yaml` and point `policy_*` at
 your endpoint to run on a self-hosted model.
 
-> **Reward semantics changed in Aug 2026.** It used to be all-or-nothing and is now
-> graded, so `mean/reward` from an older run is not comparable. Rescore old rollouts
-> with `resources_servers/finance_agent_v2/scripts/rescore_rubrics.py` (no
-> re-judging needed — only the aggregation changed), and use
-> `scripts/report_run.py` for confidence intervals before calling a difference real.
+> Read `mean/reward` through
+> `resources_servers/finance_agent_v2/scripts/report_run.py`, which prints
+> question-level bootstrap confidence intervals. At 27 questions the interval is wide
+> enough that small gaps between models are usually noise.
 
 ## Caching
 
@@ -142,12 +141,12 @@ reused across seeds/jobs. Full design in the
 
 Environment code (this recipe + `resources_servers/finance_agent_v2/`) is
 **Apache-2.0**. Tools are **imported, not vendored**: `finance-agent` (MIT) and
-`model-library` (MIT, NVIDIA fork). The dataset derives from the **public** Vals
+`model-library` (MIT). The dataset derives from the **public** Vals
 FABv2 release (subject to that project's terms). The public release ships **no
 official grader** — reward is computed by **our own** judge, run once per criterion
 of the public `rubric` field and voted over repeated calls. Vals's private grader
-is licensed and deliberately not reproduced here, so scores are not comparable to
-their published numbers. Licensing detail:
+is licensed and deliberately not reproduced here, so scores are not directly
+comparable to their published numbers. Licensing detail:
 [resources-server README](../../resources_servers/finance_agent_v2/README.md#licensing).
 
 Before comparing anything here to the Vals leaderboard, read

@@ -11,7 +11,7 @@ Data: N/A
 
 Dependencies
 - nemo_gym: Apache 2.0
-- model-library: MIT (NVIDIA fork of vals-ai/model-library@v0.1.25)
+- model-library: MIT (vals-ai/model-library@0.1.25, from PyPI)
 - finance-agent: MIT (vals-ai/finance-agent-v2)
 
 # Why this is a separate component
