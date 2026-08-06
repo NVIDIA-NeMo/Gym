@@ -21,7 +21,7 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.server_utils import ServerClient
 
 
-async def main(examples: list) -> list[dict]:
+async def main(examples: list) -> None:
     tasks = []
     for example in examples:
         task = server_client.post(
@@ -34,7 +34,6 @@ async def main(examples: list) -> list[dict]:
     num_resolved = 0
     num_total = 0
     pbar = tqdm(total=len(examples))
-    results = []
     write_file = open("temp2.jsonl", "w")
     for future in asyncio.as_completed(tasks):
         result = await future
@@ -46,11 +45,8 @@ async def main(examples: list) -> list[dict]:
         resolved_pct = 100 * num_resolved / num_total
         pbar.set_description_str(desc=f"Resolved: {num_resolved} / {num_total} ({resolved_pct:.2f}%)")
         pbar.update(1)
-        results.append(result)
-        f.write(json.dumps(result) + "\n")
+        f.write(json.dumps(data) + "\n")
     write_file.close()
-
-    return results
 
 
 if __name__ == "__main__":
@@ -79,4 +75,4 @@ if __name__ == "__main__":
 
     server_client = ServerClient.load_from_global_config()
 
-    results = asyncio.run(main(examples))
+    asyncio.run(main(examples))
