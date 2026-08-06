@@ -52,7 +52,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -682,6 +682,27 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
+        workers = [self._setup_server(monkeypatch) for _ in range(2)]
+        for worker in workers:
+            worker._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        workers[0]._session_id_to_client = {"prior-a": workers[0]._clients[0]}
+        workers[1]._session_id_to_client = {
+            "prior-b": workers[1]._clients[0],
+            "prior-c": workers[1]._clients[1],
+            "prior-d": workers[1]._clients[2],
+        }
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "target-session"}
+
+        client_indices = []
+        for worker in workers:
+            selected_client = worker._resolve_client(request)
+            client_indices.append(next(i for i, client in enumerate(worker._clients) if client is selected_client))
+
+        assert client_indices[0] == client_indices[1]
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
