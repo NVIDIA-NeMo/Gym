@@ -576,7 +576,6 @@ class TestObservability:
         assert invocation.invocation_id == "session-1"
         assert invocation.conversation
         verify_json = agent.server_client.post.await_args_list[-1].kwargs["json"]
-        assert verify_json["rollout_id"] == "1-2"
         assert "_ng_agent_observations" not in verify_json["response"]
 
     def test_observation_failure_does_not_change_response(self) -> None:

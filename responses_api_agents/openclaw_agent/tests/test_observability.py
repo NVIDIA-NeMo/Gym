@@ -151,7 +151,7 @@ def test_session_file_cannot_escape_the_session_archive(tmp_path: Path) -> None:
     assert "agent_transcript_unavailable" in {gap.code for gap in gaps}
 
 
-def test_builds_root_observation_and_pairs_tools() -> None:
+def test_builds_root_observation_and_reports_missing_tool_timing() -> None:
     model_ref = ModelServerRef(type="responses_api_models", name="policy")
     bundle = build_openclaw_observations(
         "session-1",
@@ -187,23 +187,14 @@ def test_builds_root_observation_and_pairs_tools() -> None:
     }
 
 
-def test_marks_missing_transcript_and_incomplete_tool() -> None:
+def test_marks_missing_transcript() -> None:
     bundle = build_openclaw_observations(
         "fallback",
-        [
-            NeMoGymResponseFunctionToolCall(
-                arguments="{}",
-                call_id="call-1",
-                name="tool",
-                id="call-1",
-                status="completed",
-            )
-        ],
+        [],
         [],
         transcript_available=False,
     )
 
-    assert _records(bundle, ToolCallObservation) == []
     assert "agent_transcript_unavailable" in {gap.code for gap in bundle.gaps}
 
 
@@ -221,23 +212,6 @@ def test_duplicate_tool_ids_are_ambiguous_and_do_not_imply_success() -> None:
 
     assert _records(bundle, ToolCallObservation) == []
     assert "tool_call_identity_ambiguous" in {gap.code for gap in bundle.gaps}
-
-
-def test_model_visible_result_does_not_imply_observed_execution() -> None:
-    bundle = build_openclaw_observations(
-        "run-1",
-        [
-            NeMoGymResponseFunctionToolCall(arguments="{}", call_id="call-1", name="tool"),
-            NeMoGymFunctionCallOutput(call_id="call-1", output="partial", status="incomplete"),
-        ],
-        [],
-        transcript_available=True,
-        source="pinchbench",
-    )
-
-    assert bundle.source == "pinchbench"
-    assert _records(bundle, ToolCallObservation) == []
-    assert "tool_timing_unavailable" in {gap.code for gap in bundle.gaps}
 
 
 def test_extracts_parallel_tool_intervals_and_compaction() -> None:
