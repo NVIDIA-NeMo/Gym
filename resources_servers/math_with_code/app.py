@@ -15,6 +15,7 @@
 import asyncio
 import io
 import json
+import logging
 import multiprocessing
 import signal
 import time
@@ -36,6 +37,10 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
+logger = logging.getLogger(__name__)
+
+_PARENT_TIMEOUT_GRACE_SECONDS = 2
+
 
 class PythonExecutorResourcesServerConfig(BaseResourcesServerConfig):
     max_execution_time: int = 10
@@ -51,6 +56,10 @@ class ExecutePythonResponse(BaseModel):
     stderr: str
     error_message: Optional[str] = None
     result: Optional[str] = None
+
+
+class PythonWorkerError(RuntimeError):
+    """Raised when the persistent Python worker exits unexpectedly."""
 
 
 def _session_worker(child_conn, max_execution_time: int):
@@ -120,28 +129,68 @@ class _SessionHandle:
     def __init__(self, max_execution_time: int):
         parent_conn, child_conn = multiprocessing.Pipe()
         self._conn = parent_conn
+        self._max_execution_time = max_execution_time
+        self._closed = False
         self._proc = multiprocessing.Process(
             target=_session_worker,
             args=(child_conn, max_execution_time),
             daemon=True,
         )
         self._proc.start()
+        child_conn.close()
         self.last_used = time.time()
 
     def exec(self, code: str):
+        if self._closed:
+            raise PythonWorkerError("Python tool worker is closed")
+
         self._conn.send({"cmd": "exec", "code": code})
-        reply = self._conn.recv()
+        parent_timeout = self._max_execution_time + _PARENT_TIMEOUT_GRACE_SECONDS
+        if not self._conn.poll(parent_timeout):
+            self._terminate()
+            raise TimeoutError(
+                f"Python tool execution exceeded {self._max_execution_time} seconds"
+            )
+
+        try:
+            reply = self._conn.recv()
+        except EOFError as error:
+            self._terminate()
+            raise PythonWorkerError("Python tool worker exited unexpectedly") from error
+
         self.last_used = time.time()
         if reply["ok"]:
             return reply["out"], reply["err"], reply["res"]
         raise RuntimeError(reply["error"])
 
     def close(self):
+        if self._closed:
+            return
+
         try:
             self._conn.send({"cmd": "close"})
         except (BrokenPipeError, EOFError):
             pass
         self._proc.join(timeout=1)
+        if self._proc.is_alive():
+            self._terminate()
+        else:
+            self._closed = True
+            self._conn.close()
+
+    def _terminate(self):
+        """Force-stop and reap a worker that cannot answer the parent."""
+        if self._closed:
+            return
+
+        self._closed = True
+        if self._proc.is_alive():
+            self._proc.terminate()
+            self._proc.join(timeout=1)
+        if self._proc.is_alive():
+            self._proc.kill()
+            self._proc.join(timeout=1)
+        self._conn.close()
 
 
 # ------------------------------
@@ -180,12 +229,12 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
 
     async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
         loop = asyncio.get_running_loop()
-        try:
-            sid = request.session[SESSION_ID_KEY]
-            if sid not in self._sessions:
-                self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
-            handle = self._sessions[sid]
+        sid = request.session[SESSION_ID_KEY]
+        if sid not in self._sessions:
+            self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
+        handle = self._sessions[sid]
 
+        try:
             stdout, stderr, result = await loop.run_in_executor(
                 None,
                 handle.exec,
@@ -196,6 +245,16 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 stdout=stdout,
                 stderr=stderr,
                 result=result,
+            )
+        except (TimeoutError, PythonWorkerError) as e:
+            logger.warning("Resetting Python tool session %s: %s", sid, e)
+            if self._sessions.get(sid) is handle:
+                self._cleanup_session(sid)
+            return ExecutePythonResponse(
+                success=False,
+                stdout="",
+                stderr="",
+                error_message=str(e),
             )
         except Exception as e:
             return ExecutePythonResponse(
