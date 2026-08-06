@@ -6,11 +6,11 @@ position: 2
 
 All the agent servers below ship in the NeMo Gym repo. Some are NeMo Gym code; others run a third-party harness and translate its output. If neither fits, you can keep your agent in your own repo and [drive it remotely](/agent-server/remote-agent).
 
-These are the general-purpose agent servers, meaning they work with more than one environment. `responses_api_agents/` also holds agent servers whose control flow is specific to a single benchmark; those are documented with that benchmark.
+Some work with any Resources server; others are built around a single benchmark and are grouped that way below.
 
 ## Agent Servers with a Gym-Native Implementation
 
-These are NeMo Gym code, with no external dependency. They call the Model server, route tool calls to the Resources server, and call the Resources server's `/verify` to score the trajectory.
+These are NeMo Gym code; their only dependency is `nemo_gym` itself. They call the Model server and score against the Resources server, though how differs: `simple_agent`, `non_executing_simple_agent`, and `tool_simulation_agent` call `/verify`, while `gymnasium_agent` sums the per-step rewards returned by `/reset` and `/step`.
 
 | Agent Server | What it does |
 |---|---|
@@ -36,7 +36,7 @@ Agent servers that run a coding CLI as a subprocess. The CLI executes its own to
 | [`opencode_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/opencode_agent) | OpenCode (`opencode run`) | Reads the run's SQLite session to recover the full trajectory including tool calls. |
 | [`kilocode_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/kilocode_agent) | Kilo Code (`kilo run`) | A fork of OpenCode; mirrors `opencode_agent` but parses the CLI's JSON event stream. |
 | [`openclaw_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/openclaw_agent) | OpenClaw (`openclaw agent --local --json`) | |
-| [`pi_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/pi_agent) | pi (`pi --print --mode json`) | |
+| [`pi_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/pi_agent) | pi (`pi --print --mode json --no-session`) | |
 
 <Note>
 Every agent server in this table is evaluation-only today: token IDs and log probabilities are not threaded through, so the rollouts are not trainable. All of them accept an optional `model_server` ref that routes generation through NeMo Gym, which makes the model calls capturable and lets one config run against different backends; a configured model server takes precedence over a direct provider URL. See [Evaluation-only vs training-grade](#evaluation-only-vs-training-grade).
@@ -44,7 +44,7 @@ Every agent server in this table is evaluation-only today: token IDs and log pro
 
 ### External Frameworks
 
-Python agent and environment frameworks embedded in the Agent server process.
+Python agent and environment frameworks that the Agent server imports and drives in-process. Several then manage their own execution backends: `harbor_agent` runs trials in Singularity, Docker, Daytona, or a NeMo Gym sandbox depending on `harbor_environment_type`, and `stirrup_agent` executes code through Stirrup's own tool backends.
 
 | Agent Server | Framework | Notes |
 |---|---|---|
@@ -118,7 +118,7 @@ my_agent:
 
 The `model_server` reference points at the top-level `policy_model` block selected by `--model-type` or supplied in a config file, so the same agent config runs against vLLM, OpenAI, or another backend without naming a network address. Some of the CLI-backed agent servers also accept a provider URL directly; the README says which takes precedence. See [Agent Server Fields](/reference/configuration#agent-server-fields) for the full syntax.
 
-Sandbox-backed agent servers name a provider and give a per-task `sandbox_spec`. `mini_swe_agent_2` requires `sandbox_provider` and fails at startup without it:
+Sandbox-backed agent servers name a provider and give a per-task `sandbox_spec`. `mini_swe_agent_2` requires `sandbox_provider`; without it, the server starts but every `/run` request fails:
 
 ```yaml
 mini_swe_agent_2:
@@ -149,7 +149,7 @@ The provider's own config lives in a separate file that defines the named `sandb
 
 When set, they take precedence over the configured `model_server` for that rollout; when absent, the configured model server is used. This is not a general Agent server field — only those two agent servers read it, and the others silently ignore it because their run-request models allow extra keys. Check the agent server's request model before relying on it.
 
-Skills are a run-level input, set with `+skills.path` on `gym eval run`. NeMo Gym records and forwards a `skills_ref`, but the agent server still has to stage the files where its runtime looks for them — `claude_code_agent` and `codex_agent` are the two with native adapters today. Rollout collection accepting `skills.path` does not by itself mean the agent server loads the skills. See [Agent Skills](/agent-server/agent-skills).
+Skills are a run-level input, set with `+skills.path` on `gym eval run`. NeMo Gym records and forwards a `skills_ref`, but the agent server still has to stage the files where its runtime looks for them — `claude_code_agent` and `codex_agent` are the two with native adapters today. Rollout collection accepting `skills.path` does not by itself mean the agent server loads the skills; `remote_agent`, for instance, logs a warning that it cannot stage them. See [Agent Skills](/agent-server/agent-skills).
 
 To run, start the composed servers and then collect rollouts against the top-level agent server name:
 
