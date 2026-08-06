@@ -1,0 +1,657 @@
+{
+  "$defs": {
+    "AdoptedFrom": {
+      "additionalProperties": false,
+      "properties": {
+        "reconciled": {
+          "format": "date",
+          "title": "Reconciled",
+          "type": "string"
+        },
+        "ref": {
+          "minLength": 1,
+          "pattern": "^[^\\s]+$",
+          "title": "Ref",
+          "type": "string"
+        },
+        "source": {
+          "pattern": "^(?:(?:https?|ssh|git|file)://\\S+|[^@\\s]+@[^:\\s]+:\\S+)$",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "ref",
+        "reconciled"
+      ],
+      "title": "AdoptedFrom",
+      "type": "object"
+    },
+    "DatasetKind": {
+      "enum": [
+        "train",
+        "validation",
+        "example",
+        "benchmark"
+      ],
+      "title": "DatasetKind",
+      "type": "string"
+    },
+    "Determinism": {
+      "enum": [
+        "seeded",
+        "stochastic",
+        "unknown"
+      ],
+      "title": "Determinism",
+      "type": "string"
+    },
+    "Domain": {
+      "description": "The capability a resources server primarily evaluates or trains.\n\nPick the single domain that best fits the task. If several seem to apply, choose the most\nspecific one (e.g. prefer `math` or `coding` over `agent`); use `other` only when none\nof the specific values fit. The values:\n\n- `math`                  \u2014 mathematical problem solving (e.g. AIME, MATH, GSM8K).\n- `coding`                \u2014 code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).\n- `agent`                 \u2014 multi-step, tool-using / environment-interacting tasks (e.g. tau2,\n  workplace_assistant). Prefer a more specific value when the task is really math/coding/etc.\n- `knowledge`             \u2014 factual or domain-knowledge question answering (e.g. GPQA, MMLU).\n- `instruction_following` \u2014 adherence to explicit formatting/constraints (e.g. IFEval).\n- `long_context`          \u2014 reasoning over long inputs (e.g. RULER, long-document QA).\n- `safety`                \u2014 refusing harmful content / resisting jailbreaks & prompt injection.\n- `games`                 \u2014 interactive game environments (e.g. blackjack, tetris).\n- `translation`           \u2014 machine translation quality (e.g. WMT).\n- `e2e`                   \u2014 end-to-end pipelines spanning multiple capabilities at once.\n- `rlhf`                  \u2014 preference / reward-model / LLM-as-judge evaluations.\n- `other`                 \u2014 catch-all when no specific domain above applies.",
+      "enum": [
+        "math",
+        "coding",
+        "agent",
+        "knowledge",
+        "instruction_following",
+        "long_context",
+        "safety",
+        "games",
+        "translation",
+        "e2e",
+        "rlhf",
+        "other"
+      ],
+      "title": "Domain",
+      "type": "string"
+    },
+    "EnvironmentKind": {
+      "enum": [
+        "environment",
+        "benchmark"
+      ],
+      "title": "EnvironmentKind",
+      "type": "string"
+    },
+    "EnvironmentState": {
+      "enum": [
+        "none",
+        "per_session"
+      ],
+      "title": "EnvironmentState",
+      "type": "string"
+    },
+    "IntegrationProfile": {
+      "enum": [
+        "stock-loop",
+        "measured-loop",
+        "external-loop",
+        "custom-driver"
+      ],
+      "title": "IntegrationProfile",
+      "type": "string"
+    },
+    "Lifecycle": {
+      "enum": [
+        "active",
+        "deprecated"
+      ],
+      "title": "Lifecycle",
+      "type": "string"
+    },
+    "ManifestDataset": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "benchmark"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "prepare_script": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "prepare_script"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "jsonl_fpath": {
+          "minLength": 1,
+          "title": "Jsonl Fpath",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "num_repeats": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Num Repeats",
+          "type": "integer"
+        },
+        "prepare_script": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prepare Script"
+        },
+        "prompt_config": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Config"
+        },
+        "type": {
+          "$ref": "#/$defs/DatasetKind"
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "jsonl_fpath"
+      ],
+      "title": "ManifestDataset",
+      "type": "object"
+    },
+    "Reward": {
+      "additionalProperties": false,
+      "properties": {
+        "higher_is_better": {
+          "title": "Higher Is Better",
+          "type": "boolean"
+        },
+        "range": {
+          "description": "Inclusive lower and upper reward endpoints.",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Range",
+          "type": "array"
+        }
+      },
+      "required": [
+        "range",
+        "higher_is_better"
+      ],
+      "title": "Reward",
+      "type": "object"
+    },
+    "SessionModel": {
+      "enum": [
+        "episode",
+        "step"
+      ],
+      "title": "SessionModel",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "benchmark"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "canonical_split": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "datasets": {
+            "contains": {
+              "properties": {
+                "type": {
+                  "const": "benchmark"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "standard_prompt_config": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "canonical_split",
+          "standard_prompt_config"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "integration_profile": {
+            "const": "stock-loop"
+          }
+        },
+        "required": [
+          "integration_profile"
+        ]
+      },
+      "then": {
+        "properties": {
+          "agent_server": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "datasets": {
+            "minItems": 1,
+            "type": "array"
+          },
+          "model_server": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "resources_server": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "resources_server",
+          "agent_server",
+          "model_server",
+          "datasets"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "integration_profile": {
+            "const": "measured-loop"
+          }
+        },
+        "required": [
+          "integration_profile"
+        ]
+      },
+      "then": {
+        "properties": {
+          "agent_server": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "datasets": {
+            "minItems": 1,
+            "type": "array"
+          },
+          "model_server": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "resources_server": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "resources_server",
+          "agent_server",
+          "model_server",
+          "datasets"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "integration_profile": {
+            "const": "external-loop"
+          }
+        },
+        "required": [
+          "integration_profile"
+        ]
+      },
+      "then": {
+        "properties": {
+          "agent_server": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "datasets": {
+            "minItems": 1,
+            "type": "array"
+          },
+          "resources_server": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "resources_server",
+          "agent_server",
+          "datasets"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "integration_profile": {
+            "const": "custom-driver"
+          }
+        },
+        "required": [
+          "integration_profile"
+        ]
+      },
+      "then": {
+        "properties": {
+          "datasets": {
+            "minItems": 1,
+            "type": "array"
+          },
+          "resources_server": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "rollout_driver": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "resources_server",
+          "datasets",
+          "rollout_driver"
+        ]
+      }
+    },
+    {
+      "else": {
+        "properties": {
+          "rollout_driver": {
+            "type": "null"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "integration_profile": {
+            "const": "custom-driver"
+          }
+        },
+        "required": [
+          "integration_profile"
+        ]
+      }
+    }
+  ],
+  "description": "Authored metadata plus a read-only mirror of the resolved Gym composition.",
+  "properties": {
+    "adopted_from": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AdoptedFrom"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "agent_server": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Agent Server"
+    },
+    "authors": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Authors",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "canonical_split": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Canonical Split"
+    },
+    "datasets": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/ManifestDataset"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Datasets"
+    },
+    "description": {
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "determinism": {
+      "$ref": "#/$defs/Determinism",
+      "default": "unknown"
+    },
+    "domain": {
+      "$ref": "#/$defs/Domain"
+    },
+    "grading_mode": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Grading Mode"
+    },
+    "integration_profile": {
+      "$ref": "#/$defs/IntegrationProfile"
+    },
+    "kind": {
+      "$ref": "#/$defs/EnvironmentKind"
+    },
+    "licensing": {
+      "default": "unknown",
+      "pattern": "^(?:internal|proprietary|unknown|[A-Za-z0-9][A-Za-z0-9.-]*|LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*|DocumentRef-[A-Za-z0-9][A-Za-z0-9.-]*:LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*)$",
+      "title": "Licensing",
+      "type": "string"
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/Lifecycle",
+      "default": "active"
+    },
+    "modality": {
+      "minLength": 1,
+      "title": "Modality",
+      "type": "string"
+    },
+    "model_server": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Server"
+    },
+    "name": {
+      "pattern": "^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$",
+      "title": "Name",
+      "type": "string"
+    },
+    "resources_server": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Resources Server"
+    },
+    "reward": {
+      "$ref": "#/$defs/Reward"
+    },
+    "rollout_driver": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rollout Driver"
+    },
+    "sandbox": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sandbox"
+    },
+    "session_model": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SessionModel"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "standard_prompt_config": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Standard Prompt Config"
+    },
+    "state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "version": {
+      "description": "Semantic version of the resolved composition.",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "version",
+    "kind",
+    "integration_profile",
+    "domain",
+    "description",
+    "modality",
+    "authors",
+    "reward"
+  ],
+  "title": "NeMo Gym Environment Manifest",
+  "type": "object"
+}
