@@ -17,7 +17,7 @@ interactive_browser:
       #       session_provider:
       #         static_cdp: {cdp_url: "http://127.0.0.1:9222"}
       # A hosted browser service plugs in as another session provider; see
-      # configs/lexmount.yaml and providers/ for a worked example.
+      # providers/ for a worked example (code, config and docs together).
 
 interactive_browser_simple_agent:
   responses_api_agents:
