@@ -199,9 +199,16 @@ def apply_reference_overrides(
     output_rows = copy.deepcopy(rows)
     row_by_id = {row.get("task_id"): row for row in output_rows}
     applied: list[str] = []
+    absent: list[str] = []
     for task_id, override in raw_overrides.items():
         if task_id not in row_by_id:
-            raise ValueError(f"{override_path}: unknown task_id {task_id!r}")
+            # One overrides file is shared by every run over a dataset, while an input is
+            # routinely a slice of it: a re-collection of the tasks a repeat missed, or a
+            # smoke subset. Rejecting the superset makes the shared file unusable for any
+            # partial run - it blocked a 29-task recovery outright. Overrides for tasks
+            # that are simply not in this input are irrelevant, not wrong.
+            absent.append(task_id)
+            continue
         if not isinstance(override, dict) or set(override) != {"reference_files", "reference_file_urls"}:
             raise ValueError(f"{override_path}: {task_id} must contain only reference_files and reference_file_urls")
         files = override["reference_files"]
@@ -229,6 +236,16 @@ def apply_reference_overrides(
         row["reference_files"] = files
         row["reference_file_urls"] = urls
         applied.append(task_id)
+
+    # Deliberately not an error when nothing applies. These files are sparse - the
+    # AfterQuery one repairs 2 tasks out of 1013 - so a slice of the dataset sharing none
+    # of them is the common case, not a sign the wrong file was passed. Report it and let
+    # the run proceed; the input rows are validated on their own terms either way.
+    if absent:
+        print(
+            f"{override_path}: {len(applied)} override(s) applied, "
+            f"{len(absent)} for task_id(s) outside this input (ignored)"
+        )
     return output_rows, applied
 
 

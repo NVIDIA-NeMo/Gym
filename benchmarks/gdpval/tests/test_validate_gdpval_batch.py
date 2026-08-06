@@ -53,6 +53,62 @@ def test_reference_overrides_are_prompt_backed_and_do_not_mutate_source(tmp_path
     assert validate_input_rows(launch_rows, expected_count=1) == ([], [])
 
 
+def test_overrides_for_tasks_outside_this_input_are_ignored(tmp_path):
+    """One overrides file serves a whole dataset; an input is routinely a slice of it.
+
+    A re-collection of the tasks a repeat missed carries the dataset-wide overrides file,
+    so most of its keys name tasks that are legitimately absent from this input. Rejecting
+    those blocked a 29-task recovery run outright.
+    """
+    override_path = tmp_path / "overrides.json"
+    override_path.write_text(
+        json.dumps(
+            {
+                "GDP-00001": {
+                    "reference_files": ["paper.pdf"],
+                    "reference_file_urls": ["https://example.test/paper.pdf"],
+                },
+                "GDP-09999": {
+                    "reference_files": ["absent.pdf"],
+                    "reference_file_urls": ["https://example.test/absent.pdf"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    launch_rows, applied = apply_reference_overrides([_input_row()], override_path)
+
+    assert applied == ["GDP-00001"]
+    assert launch_rows[0]["reference_files"] == ["paper.pdf"]
+
+
+def test_overrides_matching_nothing_in_the_input_are_not_an_error(tmp_path):
+    """Matching nothing is normal, because these files are sparse.
+
+    The AfterQuery overrides file repairs 2 tasks out of 1013, so a 29-task recovery slice
+    sharing none of them is the expected case rather than a mispassed file. Treating it as
+    an error is what blocked that recovery run.
+    """
+    override_path = tmp_path / "overrides.json"
+    override_path.write_text(
+        json.dumps(
+            {
+                "GDP-09999": {
+                    "reference_files": ["absent.pdf"],
+                    "reference_file_urls": ["https://example.test/absent.pdf"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    launch_rows, applied = apply_reference_overrides([_input_row()], override_path)
+
+    assert applied == []
+    assert launch_rows[0]["reference_files"] == []
+
+
 def test_reference_override_rejects_url_absent_from_prompt(tmp_path):
     override_path = tmp_path / "overrides.json"
     override_path.write_text(
