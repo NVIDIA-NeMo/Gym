@@ -35,6 +35,7 @@ async def main(examples: list) -> list[dict]:
     num_total = 0
     pbar = tqdm(total=len(examples))
     results = []
+    write_file = open("temp2.jsonl", "w")
     for future in asyncio.as_completed(tasks):
         result = await future
         data = await result.json()
@@ -46,6 +47,8 @@ async def main(examples: list) -> list[dict]:
         pbar.set_description_str(desc=f"Resolved: {num_resolved} / {num_total} ({resolved_pct:.2f}%)")
         pbar.update(1)
         results.append(result)
+        f.write(json.dumps(result) + "\n")
+    write_file.close()
 
     return results
 
@@ -77,5 +80,3 @@ if __name__ == "__main__":
     server_client = ServerClient.load_from_global_config()
 
     results = asyncio.run(main(examples))
-    with open("temp2.jsonl", "w") as f:
-        f.writelines((json.dumps(r) + "\n" for r in results))
