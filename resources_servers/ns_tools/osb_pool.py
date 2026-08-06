@@ -82,6 +82,7 @@ class OpenSandboxPool:
         *,
         provider: Dict[str, Any],
         image: str,
+        pool_ref: str = "",
         port: int = 6000,
         size: int = 8,
         ttl_s: Optional[float] = None,
@@ -104,6 +105,7 @@ class OpenSandboxPool:
         run_label: Optional[str] = None,
     ) -> None:
         self._connection_kwargs = _parse_connection(provider)
+        self._pool_ref = str(pool_ref or "")
         if not image:
             raise ValueError("opensandbox_pool backend selected but image is empty — set NS_SANDBOX_IMAGE")
         if int(size) < 1:
@@ -249,6 +251,20 @@ class OpenSandboxPool:
     async def _acquire_sandbox(self) -> Any:
         from opensandbox import Sandbox
 
+        if self._pool_ref:
+            # Pool mode: claim a prewarmed sandbox from the server-side Pool CRD.
+            # Image/entrypoint/resources come from the pool template; the pod is
+            # already running its service, so no prepare step follows.
+            return await Sandbox.create(
+                # The SDK's local validation requires an image even in pool mode; the
+                # pool template still defines what actually runs.
+                image=self._image,
+                extensions={"poolRef": self._pool_ref},
+                metadata=dict(self._metadata),
+                timeout=timedelta(seconds=self._ttl_s or 14400.0),
+                ready_timeout=timedelta(seconds=self._ready_timeout_s),
+                connection_config=self._connection_config,
+            )
         return await Sandbox.create(
             image=self._image,
             entrypoint=self._entrypoint,
