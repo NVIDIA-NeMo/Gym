@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from shlex import quote
 from time import time
+from traceback import format_exc
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -273,11 +274,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
-        result = await sandbox.exec(
-            command=command,
-            timeout_s=self.config.sandbox_timeout,
-            env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
-        )
+        # TODO @bxyu-nvidia: This is a dirty hack to retry this first exec after the connect
+        # Eventually as things stabilize we can remove this.
+        tries = 0
+        while True:
+            try:
+                result = await sandbox.exec(
+                    command=command,
+                    timeout_s=self.config.sandbox_timeout,
+                    env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
+                )
+                break
+            except Exception as e:
+                if "POD_IP_NOT_AVAILABLE" in str(e):
+                    print(f"Try #{tries} hit POD_IP_NOT_AVAILABLE error.", format_exc(), file=sys.stderr)
+                raise e
+
         if self.config.debug:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
