@@ -374,6 +374,27 @@ def _fair_text_allowances(sizes: list[int], total_budget: int, per_file_cap: int
     return allowances
 
 
+_libreoffice_unavailable_warned = False
+
+
+def _warn_libreoffice_unavailable(exc: OSError) -> None:
+    """Warn once per process that Office deliverables cannot be rendered.
+
+    Per file this would be noise; never saying it at all is worse, because the
+    silent consequence is that every Office deliverable is judged from extracted
+    text instead of its rendered pages.
+    """
+    global _libreoffice_unavailable_warned
+    if _libreoffice_unavailable_warned:
+        return
+    _libreoffice_unavailable_warned = True
+    print(
+        f"[file_reader] LibreOffice is unavailable ({exc}); Office deliverables will fall back to text "
+        "extraction. Preconvert them to PDF for full-fidelity judging.",
+        flush=True,
+    )
+
+
 def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | None:
     """Convert a .docx/.xlsx/.pptx file to PDF using LibreOffice headless.
 
@@ -432,6 +453,14 @@ def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | N
         return out_pdf
     except subprocess.TimeoutExpired:
         print(f"[file_reader] LibreOffice conversion timed out for {fpath.name}", flush=True)
+        return None
+    except OSError as exc:
+        # Usually LibreOffice simply isn't installed on this host. Returning None
+        # degrades to the caller's text-extraction fallback; letting it propagate
+        # would replace the entire deliverable with an "[Error: ...]" block, which a
+        # judge reads as a missing artifact and scores near zero. That is not
+        # hypothetical - it once manufactured a spurious "much worse" verdict.
+        _warn_libreoffice_unavailable(exc)
         return None
     finally:
         shutil.rmtree(profile_dir, ignore_errors=True)
