@@ -961,30 +961,18 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 if sandbox_observation.error_type is None:
                     sandbox_observation.error_type = type(exc).__name__
             elif provider_name is not None and sandbox_started is not None:
+                outcome = "unknown"
                 if isinstance(exc, TimeoutError):
-                    sandbox_observation = SandboxObservation(
-                        role="agent",
-                        provider=provider_name,
-                        outcome="timeout",
-                        wall_time_s=time.perf_counter() - sandbox_started,
-                        error_type=type(exc).__name__,
-                    )
+                    outcome = "timeout"
                 elif isinstance(exc, SandboxCreateError):
-                    sandbox_observation = SandboxObservation(
-                        role="agent",
-                        provider=provider_name,
-                        outcome="sandbox_error",
-                        wall_time_s=time.perf_counter() - sandbox_started,
-                        error_type=type(exc).__name__,
-                    )
-                else:
-                    sandbox_observation = SandboxObservation(
-                        role="agent",
-                        provider=provider_name,
-                        outcome="unknown",
-                        wall_time_s=time.perf_counter() - sandbox_started,
-                        error_type=type(exc).__name__,
-                    )
+                    outcome = "sandbox_error"
+                sandbox_observation = SandboxObservation(
+                    role="agent",
+                    provider=provider_name,
+                    outcome=outcome,
+                    wall_time_s=time.perf_counter() - sandbox_started,
+                    error_type=type(exc).__name__,
+                )
             LOG.warning("[pinchbench-%s] %s: %s: %s", failure_class, task_id, type(exc).__name__, exc)
             result = {
                 "reward": 0.0,

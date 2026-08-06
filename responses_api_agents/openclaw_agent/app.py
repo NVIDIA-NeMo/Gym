@@ -760,9 +760,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump()
-                | {"response": agent_resp_json}
-                | ({"rollout_id": rollout_id} if rollout_id is not None else {}),
+                json=body.model_dump() | {"response": agent_resp_json},
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
