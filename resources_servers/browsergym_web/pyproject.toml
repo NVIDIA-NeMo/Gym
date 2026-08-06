@@ -12,6 +12,10 @@ dependencies = [
     # libvisualwebarena 0.0.15 pins beartype 0.12.0, whose NumPy NDArray
     # annotations are not understood when resolved against NumPy 2.x.
     "numpy>=1.26.4,<2",
+    # evaluate leaves datasets unconstrained. With the current package index,
+    # the resolver can otherwise select datasets 2.14.4 with pyarrow 25, but
+    # that datasets release imports the removed pyarrow.PyExtensionType API.
+    "datasets==5.0.1",
     # Keep the benchmark-era NLTK behavior. Newer NLTK import-security hooks
     # reject component-local virtualenv imports when Gym starts this server
     # with the component directory as its working directory.

@@ -26,6 +26,10 @@ release that predates Python 3.13. This component overrides greenlet to 3.1.1,
 the first compatible line with CPython 3.13 wheels. The override is declared in
 both `pyproject.toml` (for `uv sync`) and `overrides.txt` (for Gym's isolated
 component installer); the BrowserGym and Playwright versions remain pinned.
+The component also pins `datasets==5.0.1`: the otherwise valid resolver choice
+of `datasets==2.14.4` with current `pyarrow` releases fails at evaluator import
+because that older datasets release still uses the removed
+`pyarrow.PyExtensionType` API.
 
 The `data/` files are five schema and data-validation fixtures, not benchmark
 scores. End-to-end results require the official site stack and evaluator.
