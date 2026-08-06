@@ -210,11 +210,16 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         /root/.m2 \
         /root/.gradle/init.d \
         /home/gradle/.gradle/init.d \
-        /home/user/.gradle/init.d""")
+        /home/user/.gradle/init.d \
+        $GRADLE_USER_HOME/init.d \
+        $HOME/.gradle/init.d""")
         await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
         await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
-        await sandbox.upload(init_gradle_path, "/home/gradle/.gradle/init.d/maven_central_mirror.gradle")
-        await sandbox.upload(init_gradle_path, "/home/user/.gradle/init.d/maven_central_mirror.gradle")
+        await sandbox.exec("""cp /root/.gradle/init.d/maven_central_mirror.gradle /home/gradle/.gradle/init.d/ \
+        cp /root/.gradle/init.d/maven_central_mirror.gradle /home/user/.gradle/init.d/ \
+        cp /root/.gradle/init.d/maven_central_mirror.gradle $GRADLE_USER_HOME/init.d/ \
+        cp /root/.gradle/init.d/maven_central_mirror.gradle $HOME/.gradle/init.d/
+        """)
 
     def _make_test_spec(self, body: SWEBenchVerifyRequest) -> TestSpec:
         return make_test_spec(
