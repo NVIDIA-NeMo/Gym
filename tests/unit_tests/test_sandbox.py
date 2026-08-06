@@ -23,7 +23,6 @@ from uuid import uuid4
 
 import pytest
 
-import nemo_gym.sandbox.api as sandbox_api
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -33,7 +32,6 @@ from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
-    SandboxResourceUsage,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
@@ -201,20 +199,6 @@ class PlainSandboxProvider:
         return None
 
 
-class UsageSandboxProvider(FakeSandboxProvider):
-    def __init__(self) -> None:
-        super().__init__()
-        self.usage_calls: list[SandboxHandle] = []
-
-    async def resource_usage(self, handle: SandboxHandle) -> SandboxResourceUsage:
-        self.usage_calls.append(handle)
-        return SandboxResourceUsage(
-            cpu_time_s=3.25,
-            peak_memory_mib=512,
-            source="fake_counter",
-        )
-
-
 class TransferOnlySandboxProvider:
     name = "transfer-only"
 
@@ -291,7 +275,6 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     provider = FakeSandboxProvider.last_instance
     assert provider is not None
     handle = provider.created_handles[0]
-    assert sandbox.sandbox_id == handle.sandbox_id
     assert provider.marker == "configured"
     assert provider.created_specs[0].image == "image:tag"
     assert provider.created_specs[0].metadata == {"suite": "unit"}
@@ -326,7 +309,6 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
 
     await sandbox.stop()
     await sandbox.stop()
-    assert sandbox.sandbox_id == handle.sandbox_id
     assert provider.closed[-1] == handle
     assert await sandbox.status() == SandboxStatus.STOPPED
     assert provider.aclosed is True
@@ -376,7 +358,6 @@ def test_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
 
 async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
     sandbox = AsyncSandbox(FakeSandboxProvider())
-    assert sandbox.sandbox_id is None
     assert await sandbox.status() == SandboxStatus.UNKNOWN
     with pytest.raises(ValueError, match="requires a SandboxSpec"):
         await sandbox.start()
@@ -389,37 +370,6 @@ async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> No
         await plain.endpoint(9000)
     with pytest.raises(ValueError, match="between 1 and 65535"):
         await plain.endpoint(0)
-    await plain.stop()
-
-
-def test_async_sandbox_resource_usage_is_explicit_and_provider_optional(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    asyncio.run(_assert_async_sandbox_resource_usage_is_explicit_and_provider_optional(monkeypatch))
-
-
-async def _assert_async_sandbox_resource_usage_is_explicit_and_provider_optional(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ticks = iter((10.0, 12.5, 20.0, 21.0))
-    monkeypatch.setattr(sandbox_api.time, "perf_counter", lambda: next(ticks))
-
-    provider = UsageSandboxProvider()
-    sandbox = AsyncSandbox(provider)
-    await sandbox.start(SandboxSpec(image="image:tag"))
-    usage = await sandbox.resource_usage()
-    assert usage == SandboxResourceUsage(
-        wall_time_s=2.5,
-        cpu_time_s=3.25,
-        peak_memory_mib=512,
-        source="fake_counter",
-    )
-    assert provider.usage_calls == provider.created_handles
-    await sandbox.stop()
-
-    plain = AsyncSandbox(PlainSandboxProvider())
-    await plain.start(SandboxSpec(image="image:tag"))
-    assert await plain.resource_usage() == SandboxResourceUsage(wall_time_s=1.0)
     await plain.stop()
 
 
@@ -467,12 +417,6 @@ def test_sandbox_spec_keeps_legacy_positional_provider_options() -> None:
 
     assert spec.provider_options == provider_options
     assert spec.ports == ()
-
-
-@pytest.mark.parametrize("value", [-1, float("inf"), float("nan")])
-def test_sandbox_resource_usage_rejects_invalid_values(value: float) -> None:
-    with pytest.raises(ValueError, match="finite non-negative"):
-        SandboxResourceUsage(cpu_time_s=value)
 
 
 def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -688,7 +632,6 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
         provider = FakeSandboxProvider.last_instance
         assert provider is not None
         handle = provider.created_handles[0]
-        assert sandbox.sandbox_id == handle.sandbox_id
         assert provider.marker == "configured"
         assert provider.created_specs[0].image == "image:tag"
         assert provider.created_specs[0].metadata == {"suite": "unit"}

@@ -58,6 +58,7 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.openclaw_agent.observability import (
+    OPENCLAW_OBSERVATION_SOURCE,
     OpenClawSessionTree,
     build_openclaw_observation_tree,
     build_openclaw_observations,
@@ -298,7 +299,7 @@ def parse_openclaw_session_events(session_text: str) -> list[dict[str, Any]]:
     for line in session_text.splitlines():
         try:
             event = json.loads(line)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             event = {"raw": line}
         events.append(event if isinstance(event, dict) else {"raw": line})
     return events
@@ -722,7 +723,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         except Exception:
             LOG.exception("failed to build OpenClaw observations")
             observations = AgentObservationBundle(
-                source="openclaw",
+                source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed")],
             )
         return AgentEpisode(response=response, observations=observations)
