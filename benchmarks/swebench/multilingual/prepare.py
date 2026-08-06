@@ -44,6 +44,10 @@ def prepare():
                 "subset": "verified",
                 "split": "test",
             }
+            row["FAIL_TO_PASS"] = json.dumps(row["FAIL_TO_PASS"])
+            row["PASS_TO_PASS"] = json.dumps(row["PASS_TO_PASS"])
+            row["environment_setup_commit"] = ""  # SWE Bench Multilingual doesn't have/use this
+
             fout.write(json.dumps(row) + "\n")
 
     print(f"Wrote {len(ds)} problems to {OUTPUT_FPATH}")
