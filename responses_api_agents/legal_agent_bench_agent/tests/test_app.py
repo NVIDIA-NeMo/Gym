@@ -778,6 +778,34 @@ def test_partial_response_with_harness_error_is_an_agent_failure() -> None:
     assert "adapter failed after partial output" in failure
 
 
+def test_native_timeout_failure_metadata_propagates_timeout_flag() -> None:
+    response = app.NeMoGymResponse.model_validate(
+        {
+            **_successful_response().model_dump(mode="json"),
+            "status": "failed",
+            "error": {"code": "server_error", "message": "LAB model call timed out after 1800s"},
+            "metadata": {app.AGENT_FAILURE_CLASS_METADATA_KEY: "agent_timed_out"},
+        }
+    )
+
+    assert app.agent_response_failure_flags(response, app.NATIVE_AGENT_MODULE) == (False, True)
+    assert app.agent_response_failure_flags(response, "responses_api_agents.codex_agent.app") == (False, False)
+
+
+def test_native_model_connection_failure_metadata_propagates_connection_flag() -> None:
+    response = app.NeMoGymResponse.model_validate(
+        {
+            **_successful_response().model_dump(mode="json"),
+            "status": "failed",
+            "error": {"code": "server_error", "message": "LAB model call failed: HTTP 500"},
+            "metadata": {app.AGENT_FAILURE_CLASS_METADATA_KEY: "model_connection_failed"},
+        }
+    )
+
+    assert app.agent_response_failure_flags(response, app.NATIVE_AGENT_MODULE) == (True, False)
+    assert app.agent_response_failure_flags(response, "responses_api_agents.codex_agent.app") == (False, False)
+
+
 def test_response_masks_harness_and_verifier_failures() -> None:
     runner = app.LegalAgentBenchAgent.model_construct(config=_config())
     params = NeMoGymResponseCreateParamsNonStreaming(input=[])
@@ -803,6 +831,36 @@ def test_response_masks_harness_and_verifier_failures() -> None:
     assert response.mask_sample is True
     assert response.model_dump()["_ng_failure_class"] == "model_connection_failed"
     assert "_ng_failure_terminal" not in response.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("reward_data", "expected_reason"),
+    [
+        ({"judge_error_count": 1}, "Verifier reported 1 judge error"),
+        ({"judge_error_count": 3}, "Verifier reported 3 judge errors"),
+        ({"verifier_error": 1}, "Verifier reported an internal error"),
+    ],
+)
+def test_response_synthesizes_failure_reason_for_unreliable_verifier_metrics(reward_data, expected_reason) -> None:
+    runner = app.LegalAgentBenchAgent.model_construct(config=_config())
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+    body = app.LegalAgentBenchRunRequest(
+        instance_id="legal_agent_bench::area__task",
+        responses_create_params=params,
+    )
+
+    response = runner._response(
+        body=body,
+        params=params,
+        response=app._empty_response("policy"),
+        reward_data=reward_data,
+        paths=None,
+    )
+
+    assert response.failure_reason == expected_reason
+    assert response.verifier_failed is True
+    assert response.mask_sample is True
+    assert response.model_dump()["_ng_failure_class"] == "verifier_failed"
 
 
 @pytest.mark.parametrize(
@@ -1182,6 +1240,12 @@ async def test_incomplete_limit_outcomes_are_verified_for_every_harness(
     async def ensure_runtime(_image):
         return deps
 
+    async def stage_agent(*args, **kwargs):
+        return None
+
+    async def collect_agent(*args, **kwargs):
+        return {}
+
     def write_runner(paths, params, model_url):
         incomplete = app.NeMoGymResponse.model_validate(
             _successful_response().model_dump(mode="json")
@@ -1333,6 +1397,94 @@ async def test_model_connectivity_failure_is_masked_and_skips_verifier(monkeypat
     terminal_output = capsys.readouterr().out
     assert "LAB rollout artifacts:" in terminal_output
     assert "LAB rollout failed:" in terminal_output
+
+
+@pytest.mark.asyncio
+async def test_native_model_timeout_is_masked_routed_and_skips_verifier(monkeypatch, tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    skills = _skills(tmp_path)
+    deps = tmp_path / "deps"
+    deps.mkdir()
+    events = []
+
+    class AgentSandbox:
+        async def start(self):
+            events.append("agent:start")
+
+        async def exec(self, *args, **kwargs):
+            events.append("agent:exec")
+            return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+
+        async def stop(self):
+            events.append("agent:stop")
+
+    runner = app.LegalAgentBenchAgent.model_construct(
+        config=_config(
+            agent_server_module=app.NATIVE_AGENT_MODULE,
+            agent_server_class="LegalAgentBenchNativeAgent",
+            agent_config_class="LegalAgentBenchNativeAgentConfig",
+        )
+    )
+    runner._sem = app.asyncio.Semaphore(1)
+    runner._session_results_dir = tmp_path / "results"
+
+    async def ensure_image(_task):
+        return "lab:image"
+
+    async def ensure_runtime(_image):
+        return deps
+
+    async def stage_agent(*args, **kwargs):
+        return None
+
+    async def collect_agent(*args, **kwargs):
+        return {}
+
+    def write_runner(paths, params, model_url):
+        failed = app.NeMoGymResponse.model_validate(
+            {
+                **_successful_response("Partial work").model_dump(mode="json"),
+                "status": "failed",
+                "error": {"code": "server_error", "message": "LAB model call timed out after 1800s"},
+                "metadata": {app.AGENT_FAILURE_CLASS_METADATA_KEY: "agent_timed_out"},
+            }
+        )
+        (paths["runtime"] / "response.json").write_text(failed.model_dump_json())
+
+    monkeypatch.setattr(app, "resolve_task_dir", lambda runtime, instance: task)
+    monkeypatch.setattr(app, "resolve_repo_path", lambda path: skills)
+    monkeypatch.setattr(app, "compose_agent_input", lambda task_dir, skills_dir, params, **kwargs: params)
+    monkeypatch.setattr(runner, "_ensure_image", ensure_image)
+    monkeypatch.setattr(runner, "_ensure_runtime", ensure_runtime)
+    monkeypatch.setattr(runner, "_stage_agent_source", lambda paths: None)
+    monkeypatch.setattr(runner, "_write_runner_config", write_runner)
+    monkeypatch.setattr(runner, "_model_url", lambda body: "http://model")
+    monkeypatch.setattr(runner, "_model_name", lambda: "policy")
+    monkeypatch.setattr(runner, "_agent_sandbox", lambda **kwargs: AgentSandbox())
+    monkeypatch.setattr(runner, "_stage_agent_sandbox", stage_agent)
+    monkeypatch.setattr(runner, "_collect_agent_sandbox", collect_agent)
+    monkeypatch.setattr(runner, "_materialize_agent_downloads", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "_verifier_sandbox",
+        lambda **kwargs: pytest.fail("verifier must not run after a native model timeout"),
+    )
+    monkeypatch.setattr(runner, "_artifacts", lambda *args, **kwargs: None)
+    body = app.LegalAgentBenchRunRequest(
+        instance_id="legal_agent_bench::area__task",
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+
+    response = await runner.run(None, body)
+
+    assert events == ["agent:start", "agent:exec", "agent:stop"]
+    assert response.agent_failed is True
+    assert response.agent_timed_out is True
+    assert response.model_connection_failed is False
+    assert response.mask_sample is True
+    assert response.model_dump()["_ng_failure_class"] == "agent_timed_out"
+    assert "timed out after 1800s" in response.failure_reason
+    assert response.response.output
 
 
 class _FakeSandbox:

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+import aiohttp
 from fastapi import Body, Request
 from pydantic import ConfigDict, Field
 
@@ -35,6 +36,25 @@ INITIAL_EMPTY_RESPONSE_NUDGE = (
 )
 CONTAINER_TOOL_RUNNER = Path("/opt/legal-agent-bench/container_tool_runner.py")
 SUPPORTED_TOOLS = frozenset({"bash", "read", "write", "write_docx", "edit", "glob", "grep"})
+AGENT_FAILURE_CLASS_METADATA_KEY = "nemo_gym_failure_class"
+MODEL_CONNECTION_FAILURE_CLASS = "model_connection_failed"
+RETRYABLE_MODEL_ERROR_CODES = frozenset({"connection_error", "rate_limit_error", "server_error"})
+
+
+def _is_model_connection_exception(exc: BaseException) -> bool:
+    """Return whether a model-call exception is an operational transport failure."""
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return exc.status in {408, 429} or 500 <= exc.status < 600
+    return isinstance(exc, (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError))
+
+
+def _with_model_failure_class(response: NeMoGymResponse) -> NeMoGymResponse:
+    """Annotate retryable Responses API errors without masking incomplete outcomes."""
+    if response.error is None or response.error.code not in RETRYABLE_MODEL_ERROR_CODES:
+        return response
+    metadata = dict(response.metadata or {})
+    metadata[AGENT_FAILURE_CLASS_METADATA_KEY] = MODEL_CONNECTION_FAILURE_CLASS
+    return response.model_copy(update={"metadata": metadata})
 
 
 class LegalAgentBenchNativeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -164,6 +184,7 @@ def _failed_response(
     output: list[Any],
     usage: Any,
     message: str,
+    failure_class: Optional[str] = None,
 ) -> NeMoGymResponse:
     base = response or NeMoGymResponse(
         id=f"resp_{uuid4().hex}",
@@ -175,11 +196,15 @@ def _failed_response(
         tool_choice=body.tool_choice,
         tools=body.tools,
     )
+    metadata = dict(base.metadata or {})
+    if failure_class is not None:
+        metadata[AGENT_FAILURE_CLASS_METADATA_KEY] = failure_class
     return NeMoGymResponse.model_validate(
         base.model_dump(mode="json")
         | {
             "status": "failed",
             "error": {"code": "server_error", "message": message[-2000:]},
+            "metadata": metadata,
             "output": output,
             "usage": usage,
         }
@@ -270,6 +295,15 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(raw_response)
                 model_response = NeMoGymResponse.model_validate(await get_response_json(raw_response))
                 model_cookies = raw_response.cookies
+            except TimeoutError:
+                return _failed_response(
+                    body=body,
+                    response=last_response,
+                    output=trajectory,
+                    usage=usage,
+                    message=f"LAB model call timed out after {self.config.model_timeout_seconds}s",
+                    failure_class="agent_timed_out",
+                )
             except Exception as exc:
                 return _failed_response(
                     body=body,
@@ -277,12 +311,17 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                     output=trajectory,
                     usage=usage,
                     message=f"LAB model call failed: {type(exc).__name__}: {exc}",
+                    failure_class=(MODEL_CONNECTION_FAILURE_CLASS if _is_model_connection_exception(exc) else None),
                 )
 
             last_response = model_response
             usage = _merge_usage(usage, model_response.usage)
             trajectory.extend(model_response.output)
-            if model_response.error is not None or model_response.incomplete_details is not None:
+            if model_response.error is not None:
+                return _with_model_failure_class(
+                    model_response.model_copy(update={"output": trajectory, "usage": usage})
+                )
+            if model_response.incomplete_details is not None:
                 return model_response.model_copy(update={"output": trajectory, "usage": usage})
 
             function_calls = [
