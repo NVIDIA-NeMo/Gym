@@ -18,7 +18,7 @@ HTTP protocol, with sessions multiplexed across them by sticky routing.
 Sharing is what makes large batches feasible: 16k concurrent sessions ride K pods
 (each pod's NS server multiplexes many sessions), instead of 16k pods. Slots fill
 and heal with direct async ``Sandbox.create`` calls — a full fan-out warm wave is
-~5s per pod on cell-2, so no warm-spare inventory layer is needed.
+~5s per pod measured in production, so no warm-spare inventory layer is needed.
 
 This module is imported only when ns_tools selects the ``opensandbox_pool`` backend;
 the default ``local`` backend never touches it.

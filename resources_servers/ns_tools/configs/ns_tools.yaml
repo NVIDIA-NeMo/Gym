@@ -57,7 +57,7 @@ ns_tools:
               # the SDK default request_timeout (30s) fails the whole cold warmup wave.
               request_timeout: 180
         image: ${oc.env:NS_SANDBOX_IMAGE,}
-        # Server-side Pool CRD name (cell-2 pools.sandbox.opensandbox.io). When set,
+        # Server-side Pool CRD name (pools.sandbox.opensandbox.io). When set,
         # creates claim prewarmed pods via extensions.poolRef — image/resources come
         # from the pool template and warmup drops to allocation time.
         pool_ref: ${oc.env:NS_SANDBOX_POOL_REF,}

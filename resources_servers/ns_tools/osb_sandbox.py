@@ -18,7 +18,7 @@ Registers ``sandbox_type: opensandbox_pool`` with the nemo_skills sandbox regist
 class IS a ``LocalSandbox`` — same request preparation, same session bookkeeping — with the
 transport re-pointed: each request resolves (base_url, headers) from the pool by session
 uuid, and rides a shared AIOHTTP session (httpx/httpcore's O(n^2) connection pooling
-collapses at high concurrency — see CLAUDE.md; measured on cell-2: health-only GETs fell
+collapses at high concurrency — see CLAUDE.md; measured: health-only GETs fell
 from 87 to 8 calls/s between 64 and 512 in-flight on httpx). Exception TYPES stay httpx
 because the nemo_skills base class's execute_code catches those; anything non-200 or
 transport-level is normalized to the NS timeout contract so infra failures degrade rewards

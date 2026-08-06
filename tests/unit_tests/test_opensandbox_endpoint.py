@@ -80,7 +80,7 @@ def test_endpoint_headers_default_to_empty_dict_without_configured_key() -> None
 
 def test_schemeless_endpoint_is_absolutized_and_key_header_injected() -> None:
     """The SDK returns proxy endpoints without a scheme and with empty headers (observed on
-    cell-2, SDK 0.1.15); the provider must produce an absolute URL and carry the API key."""
+    a production cluster, SDK 0.1.15); the provider must produce an absolute URL and carry the API key."""
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"domain": "http://elb.example", "api_key": "secret"},
         probe={"command": None},

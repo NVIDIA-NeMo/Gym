@@ -163,7 +163,7 @@ class OpenSandboxLean4Client:
     semaphore, destroyed in finally). With ``pool_size=N`` a warm pool of N pods is
     built lazily and reused across verifies: a fresh pod's first `import Mathlib`
     lazy-pulls ~5GB of olean files through nydus one FUSE fault at a time (measured
-    902s on cell-2), while a warmed pod compiles in ~4s — so pool pods bulk-prefetch
+    902s measured on a production cluster), while a warmed pod compiles in ~4s — so pool pods bulk-prefetch
     the olean tree once at prepare and then serve verifies back-to-back. A pod that
     hits an infra error (incl. TTL expiry) is killed and replaced in place; the
     verify retries once on a second pod before degrading. Infra failures degrade to
