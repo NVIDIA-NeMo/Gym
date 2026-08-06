@@ -15,9 +15,10 @@
 
 """Prepare SWE Bench Pro benchmark data for NeMo Gym."""
 
+import json
 from pathlib import Path
 
-from ..prepare_utils import prepare_helper
+from datasets import load_dataset
 
 
 BENCHMARK_DIR = Path(__file__).parent.parent
@@ -27,7 +28,26 @@ OUTPUT_FPATH = DATA_DIR / "swebench_pro_benchmark.jsonl"
 
 
 def prepare():
-    return prepare_helper(hf_path="ScaleAI/SWE-bench_Pro", output_fpath=OUTPUT_FPATH)
+    ds = load_dataset("ScaleAI/SWE-bench_Pro", split="test")
+
+    with OUTPUT_FPATH.open("w", encoding="utf-8") as fout:
+        for row in ds:
+            row = row | {
+                "responses_create_params": {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": row["problem_statement"],
+                        }
+                    ],
+                },
+                "subset": "verified",
+                "split": "test",
+            }
+            fout.write(json.dumps(row) + "\n")
+
+    print(f"Wrote {len(ds)} problems to {OUTPUT_FPATH}")
+    return OUTPUT_FPATH
 
 
 if __name__ == "__main__":

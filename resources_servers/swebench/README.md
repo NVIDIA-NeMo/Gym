@@ -31,6 +31,14 @@ python resources_servers/swebench/apply_golden_patch.py \
 ```
 
 
+## Expected golden patch resolve rates
+SWE Bench Verified
+
+SWE Bench Multilingual
+
+SWE Bench Pro
+
+
 # Licensing information
 Code: ?
 Data: ?
