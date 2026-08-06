@@ -101,7 +101,7 @@ class OpenSandboxPool:
         health_path: str = "/health",
         ready_timeout_s: float = 30.0,
         health_budget_s: float = 300.0,
-        warmup_fill_concurrency: int = 8,
+        warmup_fill_concurrency: int = 32,
         health_interval_s: float = 15.0,
         health_timeout_s: float = 10.0,
         heal_creates_per_s: float = 4.0,
@@ -361,7 +361,7 @@ class OpenSandboxPool:
                     last_error = f"HTTP {response.status}"
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 last_error = repr(exc)
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
         raise RuntimeError(f"pod never became healthy through the proxy: {last_error}")
 
     async def _warmup(self) -> None:
