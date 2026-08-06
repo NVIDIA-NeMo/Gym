@@ -176,11 +176,23 @@ class OpenSandboxPool:
         from opensandbox.pool_async import SandboxPoolAsync
         from opensandbox.pool_types import PoolCreationSpec
 
+        connection_kwargs = dict(self._connection_kwargs)
+        try:
+            # The SDK's control plane rides httpx; back it with aiohttp (Gym main's
+            # connection.transport_backend=aiohttp pattern) for stability at concurrency.
+            from httpx_aiohttp import AiohttpTransport
+
+            connection_kwargs["transport"] = AiohttpTransport(
+                limits=httpx.Limits(max_connections=512, max_keepalive_connections=512)
+            )
+        except ImportError:
+            LOGGER.warning("httpx-aiohttp not installed; SDK control plane stays on the httpx transport")
+
         self._sdk_pool = SandboxPoolAsync(
             pool_name=self._run_label,
             max_idle=self._warm_spares,
             state_store=InMemoryAsyncPoolStateStore(),
-            connection_config=ConnectionConfig(**self._connection_kwargs),
+            connection_config=ConnectionConfig(**connection_kwargs),
             creation_spec=PoolCreationSpec(
                 image=self._image,
                 entrypoint=self._entrypoint,
@@ -359,7 +371,10 @@ class OpenSandboxPool:
                 except Exception as exc:
                     LOGGER.warning("pool warmup: slot %d failed (heal loop will retry): %s", slot.index, exc)
 
-        await asyncio.gather(*(one(slot) for slot in self._slots))
+        # Prime the cell's image-conversion cache with ONE sequential create before the
+        # concurrent wave: first-conversion races cache broken artifacts (observed).
+        await one(self._slots[0])
+        await asyncio.gather(*(one(slot) for slot in self._slots[1:]))
         ready = sum(1 for slot in self._slots if slot.healthy)
         self._warmup_done = True
         LOGGER.info("pool ready %d/%d", ready, self._size)
