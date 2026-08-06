@@ -287,6 +287,19 @@ class TestHealWarmupRace:
         assert healed == [], "heal loop must not touch slots before warmup completes"
 
 
+class TestEnvStringify:
+    def test_env_values_are_stringified(self):
+        from osb_pool import OpenSandboxPool
+
+        pool = OpenSandboxPool(
+            provider={"opensandbox": {"connection": {"domain": "http://elb", "api_key": "k"}}},
+            image="img:tag",
+            env={"NUM_WORKERS": 4, "FLAG": True},
+        )
+        # The create API's env map is string->string; ints/bools 422 server-side.
+        assert pool._env == {"NUM_WORKERS": "4", "FLAG": "True"}
+
+
 class TestPoolRefFallback:
     """pool_ref acquire semantics — SDK required (create is monkeypatched, no network)."""
 

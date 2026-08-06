@@ -66,6 +66,7 @@ class _Slot:
     healthy: bool = False
     strikes: int = 0
     creating: bool = False
+    heal_failures: int = 0
     sessions: set = field(default_factory=set)
 
 
@@ -116,7 +117,9 @@ class OpenSandboxPool:
         self._port = int(port)
         self._size = int(size)
         self._ttl_s = float(ttl_s) if ttl_s else None
-        self._env = dict(env or {})
+        # Hydra/YAML overrides deliver bare numbers as ints; the create API's env map
+        # is string->string and the server 422s on anything else.
+        self._env = {k: str(v) for k, v in (env or {}).items()}
         self._entrypoint = list(entrypoint) if entrypoint else None
         self._resources = {k: str(v) for k, v in (resources or {}).items()}
         # k8s schedules on REQUESTS; keeping them far below limits packs many more pods
@@ -404,9 +407,22 @@ class OpenSandboxPool:
             await asyncio.sleep(wait)
         try:
             await self._create_slot(slot)
-            LOGGER.info("pool slot %d healed", slot.index)
+            if slot.heal_failures:
+                LOGGER.info("pool slot %d healed after %d failed attempts", slot.index, slot.heal_failures)
+            else:
+                LOGGER.info("pool slot %d healed", slot.index)
+            slot.heal_failures = 0
         except Exception as exc:
-            LOGGER.warning("pool slot %d heal attempt failed (will retry next interval): %s", slot.index, exc)
+            slot.heal_failures += 1
+            # A dead cell spams 2 lines/slot/interval otherwise; warn on the first
+            # failure and every 10th, whisper the rest.
+            log = LOGGER.warning if slot.heal_failures == 1 or slot.heal_failures % 10 == 0 else LOGGER.debug
+            log(
+                "pool slot %d heal attempt %d failed (will retry next interval): %s",
+                slot.index,
+                slot.heal_failures,
+                exc,
+            )
 
     async def _drop_slot_sessions(self, slot: _Slot) -> None:
         async with self._lock:
