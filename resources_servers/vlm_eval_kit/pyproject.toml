@@ -102,11 +102,5 @@ requires = ["setuptools>=61", "setuptools-scm"]
 where = [".."]
 include = ["local_vllm_model"]
 
-[tool.uv]
-override-dependencies = [
-    "opencv-python; sys_platform == 'never'",
-    "decord2; sys_platform == 'never'",
-]
-
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }

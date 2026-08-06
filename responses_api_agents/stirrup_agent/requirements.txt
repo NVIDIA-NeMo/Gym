@@ -1,6 +1,4 @@
 -e nemo-gym[dev] @ ../../
-# Install imageio-ffmpeg from sdist only — binary wheels bundle patented codec executables.
---no-binary imageio-ffmpeg
 # Stirrup agent framework + HF tokenizer for dynamic max_tokens sizing.
 # Kept out of the outer nemo-gym pyproject.toml so core users don't pay
 # the PyTorch/transformers install cost.

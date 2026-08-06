@@ -335,17 +335,6 @@ override-dependencies = [
     # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
     "spacy>=3.8.13",
 
-    # Packages with bundled codec libraries — excluded from the shipped container.
-    # Removed from the container via explicit uninstall in docker/Dockerfile.
-    # torchaudio and torchvision are intentionally NOT listed here: they are
-    # needed by server venvs (longmt_eval, wmt_translation) and don't bundle
-    # static codec executables — they rely on system libraries instead.
-    "opencv-python-headless; sys_platform == 'never'",
-    "opencv-python; sys_platform == 'never'",
-    "av; sys_platform == 'never'",
-    "decord2; sys_platform == 'never'",
-    "ffmpeg-python; sys_platform == 'never'",
-    "pydub; sys_platform == 'never'",
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Don't add a package any
