@@ -33,7 +33,7 @@ async def main(examples: list) -> None:
 
     num_resolved = 0
     num_total = 0
-    pbar = tqdm()
+    pbar = tqdm(total=len(examples))
     for future in asyncio.as_completed(tasks):
         result = await future
         data = await result.json()
