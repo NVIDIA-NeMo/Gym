@@ -288,6 +288,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             except Exception as e:
                 if "POD_IP_NOT_AVAILABLE" in str(e):
                     print(f"Try #{tries} hit POD_IP_NOT_AVAILABLE error.", format_exc(), file=sys.stderr)
+                    continue
                 raise e
 
         if self.config.debug:
