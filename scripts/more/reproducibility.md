@@ -4,6 +4,10 @@
 
 ## Prerequisites
 
+- **Python 3.13.14 or newer.** Gym does not install on 3.12.
+- **`uv` on your `PATH`.** Some benchmarks shell out to scripts that call it and
+  fail with a bare `exit 127` without it.
+
 ## Running a recipe
 
 ## Benchmarks needing extra setup
