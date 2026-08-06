@@ -36,8 +36,13 @@ from typing import Any, Dict, Optional, Tuple
 import aiohttp
 import httpx  # exception types only: the nemo_skills client contract catches httpx errors
 
+from nemo_gym.sandbox.attribution import RUN_KEY, resolve_attribution, resolve_run_id
+
 
 LOGGER = logging.getLogger(__name__)
+
+# Same prefixed-key namespace the Gym opensandbox provider injects (k8s labels on the pod).
+_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 
 _PREPARED_MARKER = "/opt/ns/.pool_prepared"
 
@@ -94,6 +99,8 @@ class OpenSandboxPool:
         setup_commands: Optional[list] = None,
         service_command: Optional[str] = None,
         health_path: str = "/health",
+        ready_timeout_s: float = 30.0,
+        health_budget_s: float = 300.0,
         warmup_fill_concurrency: int = 8,
         health_interval_s: float = 15.0,
         health_timeout_s: float = 10.0,
@@ -121,16 +128,25 @@ class OpenSandboxPool:
         self._setup_commands = list(setup_commands or [])
         self._service_command = service_command
         self._health_path = health_path
+        # First pull of a large image on a fresh node can take minutes; the SDK default
+        # (30s) fails creates that would have succeeded.
+        self._ready_timeout_s = float(ready_timeout_s)
+        self._health_budget_s = float(health_budget_s)
         self._warmup_fill_concurrency = warmup_fill_concurrency
         self._health_interval_s = health_interval_s
         self._health_timeout_s = health_timeout_s
         self._heal_min_interval_s = 1.0 / heal_creates_per_s if heal_creates_per_s > 0 else 0.0
         self._session_idle_sweep_s = session_idle_sweep_s
         self._run_label = run_label or "ns-tools-pool"
+        attribution = resolve_attribution()
+        attribution[RUN_KEY] = resolve_run_id(self._run_label)
+        self._metadata = {f"{_ATTRIBUTION_KEY_PREFIX}{k}": v for k, v in attribution.items()}
+        self._metadata["purpose"] = "ns-tools-sandbox-pool"
 
         self._slots = [_Slot(index=i) for i in range(self._size)]
         self._session_to_slot: Dict[str, int] = {}
         self._session_last_used: Dict[str, float] = {}
+        self._prepared_ids: set = set()
         self._lock = asyncio.Lock()
         self._sdk_pool: Any = None
         self._started = False
@@ -170,7 +186,7 @@ class OpenSandboxPool:
                 entrypoint=self._entrypoint,
                 env=self._env or None,
                 resource=self._resources or None,
-                metadata={"purpose": "ns-tools-sandbox-pool", "run": self._run_label},
+                metadata=dict(self._metadata),
             ),
             warmup_sandbox_preparer=self._prepare if self._needs_prepare else None,
             # Warm creates and renewals use idle_timeout as the sandbox TTL; the SDK default
@@ -179,6 +195,11 @@ class OpenSandboxPool:
             # PoolCreationSpec cannot express the requests/limits split; a custom creator
             # calls Sandbox.create with resource_requests for both warmup and direct-create.
             sandbox_creator=self._create_sandbox_with_requests if self._resource_requests else None,
+            acquire_ready_timeout=timedelta(seconds=self._ready_timeout_s),
+            warmup_ready_timeout=timedelta(seconds=self._ready_timeout_s),
+            # The SDK's acquire-time health check EXECS in the pod, which would reap the
+            # warmup-started service; slots are gated on proxied HTTP health instead.
+            acquire_skip_health_check=True,
         )
         await self._sdk_pool.start()
         self._tasks.append(asyncio.create_task(self._warmup(), name="osb-pool-warmup"))
@@ -192,12 +213,16 @@ class OpenSandboxPool:
             image=self._image,
             entrypoint=self._entrypoint,
             env=self._env or None,
-            metadata={"purpose": "ns-tools-sandbox-pool", "run": self._run_label},
+            metadata=dict(self._metadata),
             resource=self._resources or None,
             resource_requests=self._resource_requests or None,
             timeout=context.idle_timeout,
             ready_timeout=context.ready_timeout,
-            skip_health_check=context.skip_health_check,
+            # ALWAYS ready-gate creation (Gym-main provider semantics): exec runs only
+            # after the sandbox reports ready. The acquire-time EXEC check is skipped
+            # separately (it would kill a warm pod's running service); slot liveness is
+            # gated on proxied HTTP health instead.
+            skip_health_check=False,
             connection_config=context.connection_config,
         )
 
@@ -234,7 +259,10 @@ class OpenSandboxPool:
         return bool(self._setup_files or self._setup_commands or self._service_command)
 
     async def _prepare(self, sandbox: Any) -> None:
-        """Bootstrap a pod that is not a baked self-starting image. Idempotent via marker."""
+        """Bootstrap a pod. INVARIANT: the service start is the LAST execd command this pod
+        ever sees — execd reaps a completed command's backgrounded children when any later
+        command runs (probed empirically: service->touch->10s = dead listener; service->
+        nothing = alive). Preparedness is tracked in-process, never probed via exec."""
         for target_path, local_path in self._setup_files.items():
             with open(local_path, "rb") as fh:
                 await sandbox.files.write_file(target_path, fh.read())
@@ -242,19 +270,25 @@ class OpenSandboxPool:
             execution = await sandbox.commands.run(command)
             if (execution.exit_code or 0) != 0:
                 raise RuntimeError(f"setup command failed rc={execution.exit_code}: {command!r}")
+        await sandbox.commands.run(f"touch {_PREPARED_MARKER}")
         if self._service_command:
+            # Plain shell backgrounding (cmd &): setsid and execd background:true both
+            # freeze the child during module import (probed); a plain & child reparents
+            # to the pod's PID 1 and survives — as long as nothing execs afterwards.
             execution = await sandbox.commands.run(self._service_command)
             if (execution.exit_code or 0) != 0:
                 raise RuntimeError(f"service command failed rc={execution.exit_code}")
-        await sandbox.commands.run(f"touch {_PREPARED_MARKER}")
+        self._prepared_ids.add(str(sandbox.id))
 
     async def _ensure_prepared(self, sandbox: Any) -> None:
-        """Direct-created acquisitions bypass the SDK warmup preparer; prepare them here."""
+        """Direct-created acquisitions bypass the SDK warmup preparer; prepare them here.
+        Warm-acquired pods were prepared by the SDK preparer (same process) — an exec-based
+        probe would kill their running service, so membership is checked in memory."""
         if not self._needs_prepare:
             return
-        execution = await sandbox.commands.run(f"test -f {_PREPARED_MARKER}")
-        if (execution.exit_code or 0) != 0:
-            await self._prepare(sandbox)
+        if str(sandbox.id) in self._prepared_ids:
+            return
+        await self._prepare(sandbox)
 
     def _normalize_endpoint(self, resolved: Any) -> Tuple[str, Dict[str, str]]:
         url = str(getattr(resolved, "endpoint", "") or "")
@@ -287,7 +321,7 @@ class OpenSandboxPool:
             await self._ensure_prepared(sandbox)
             resolved = await sandbox.get_endpoint(self._port)
             base_url, headers = self._normalize_endpoint(resolved)
-            await self._wait_healthy(base_url, headers, budget_s=120.0)
+            await self._wait_healthy(base_url, headers, budget_s=self._health_budget_s)
         except Exception:
             try:
                 await sandbox.kill()
