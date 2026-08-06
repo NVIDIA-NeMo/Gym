@@ -63,6 +63,7 @@ policy_model_name: your-policy-model
 judge_base_url: https://your-judge-endpoint.example/v1
 judge_api_key: your-judge-key
 judge_model_name: your-judge-model
+judge_reasoning_effort: medium  # optional; only for judges that support it
 ```
 
 The judge credentials are injected only into the regenerated, gitignored

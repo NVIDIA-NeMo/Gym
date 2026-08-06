@@ -14,6 +14,7 @@ legal_agent_bench:
       judge_base_url: ${oc.select:judge_base_url,null}
       judge_api_key: ${oc.select:judge_api_key,null}
       judge_model_name: ${oc.select:judge_model_name,null}
+      judge_reasoning_effort: ${oc.select:judge_reasoning_effort,null}
       judge_temperature: null
       judge_request_timeout_seconds: 90
       judge_max_retries: 1
