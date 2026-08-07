@@ -18,9 +18,9 @@
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -29,7 +29,17 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.sandbox import AsyncSandbox
 from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
+from resources_servers.sandbox_backend import (
+    SANDBOX_BACKEND_GYM,
+    SANDBOX_BACKEND_SKILLS,
+    build_sandbox_spec_from_mapping,
+    named_configs_from_server_client,
+    normalize_sandbox_backend,
+    resolve_gym_provider_config,
+    resolve_gym_provider_metadata,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -339,8 +349,18 @@ def build_correction_prompt(
 
 
 class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
+    # Dual path: skills_sidecar (default) keeps Lean4SandboxClient HTTP; gym_sandbox
+    # uses nemo_gym.sandbox.AsyncSandbox via sandbox_provider + sandbox_spec.
+    sandbox_backend: str = SANDBOX_BACKEND_SKILLS
     sandbox_host: str = "127.0.0.1"
     sandbox_port: int = 6000
+    # gym_sandbox only: name ref ("sandbox") or inline {provider: {...}}
+    sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
+    # Path inside the sandbox where the proof is written before compile.
+    lean_proof_path: str = "/sandbox/proof.lean"
+    # Shell command to compile; `{proof_path}` is substituted.
+    lean_compile_command: str = "lean {proof_path}"
     compilation_timeout: float = 30.0
     max_output_characters: int = 1000
     extract_code_mode: str = "last"
@@ -384,16 +404,66 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._sandbox_client = Lean4SandboxClient(
-            host=self.config.sandbox_host,
-            port=self.config.sandbox_port,
-            max_output_characters=self.config.max_output_characters,
-        )
+        self._sandbox_backend = normalize_sandbox_backend(self.config.sandbox_backend)
+        self._sandbox_client: Optional[Lean4SandboxClient] = None
+        if self._sandbox_backend == SANDBOX_BACKEND_SKILLS:
+            self._sandbox_client = Lean4SandboxClient(
+                host=self.config.sandbox_host,
+                port=self.config.sandbox_port,
+                max_output_characters=self.config.max_output_characters,
+            )
+        else:
+            # Fail fast at startup if gym path is misconfigured (no silent Skills fallback).
+            named = named_configs_from_server_client(self.server_client)
+            resolve_gym_provider_config(self.config.sandbox_provider, named)
         self._proof_build_config = ProofBuildConfig(
             extract_code_mode=self.config.extract_code_mode,
             restate_formal_statement=self.config.restate_formal_statement,
             strip_theorem_from_proof=self.config.strip_theorem_from_proof,
         )
+
+    def _truncate(self, text: str) -> str:
+        if len(text) <= self.config.max_output_characters:
+            return text
+        return text[: self.config.max_output_characters]
+
+    async def _execute_lean4(self, code: str, timeout: float) -> Dict[str, Any]:
+        if self._sandbox_backend == SANDBOX_BACKEND_SKILLS:
+            assert self._sandbox_client is not None
+            return await self._sandbox_client.execute_lean4(code=code, timeout=timeout)
+        return await self._execute_lean4_gym(code=code, timeout=timeout)
+
+    async def _execute_lean4_gym(self, code: str, timeout: float) -> Dict[str, Any]:
+        named = named_configs_from_server_client(self.server_client)
+        provider_config = resolve_gym_provider_config(self.config.sandbox_provider, named)
+        default_metadata = resolve_gym_provider_metadata(self.config.sandbox_provider, named)
+        proof_path = self.config.lean_proof_path
+        spec = build_sandbox_spec_from_mapping(
+            self.config.sandbox_spec,
+            default_metadata=default_metadata,
+            extra_files={proof_path: code},
+        )
+        command = self.config.lean_compile_command.format(proof_path=proof_path)
+        try:
+            async with AsyncSandbox(provider_config, spec) as sandbox:
+                await sandbox.start()
+                result = await sandbox.exec(command, timeout_s=timeout)
+        except TimeoutError:
+            LOG.warning("Gym sandbox Lean compile timed out after %.1f seconds", timeout)
+            return {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
+        except Exception as e:
+            LOG.error("Gym sandbox Lean compile failed: %s", e)
+            return {"process_status": "error", "stdout": "", "stderr": str(e)}
+
+        stdout = self._truncate(result.stdout or "")
+        stderr = self._truncate(result.stderr or "")
+        if result.error_type == "timeout":
+            return {"process_status": "timeout", "stdout": stdout, "stderr": stderr or "Client timed out"}
+        if result.error_type == "sandbox" or (result.return_code != 0 and result.error_type):
+            return {"process_status": "error", "stdout": stdout, "stderr": stderr or result.error_type}
+        if result.return_code != 0:
+            return {"process_status": "error", "stdout": stdout, "stderr": stderr}
+        return {"process_status": "completed", "stdout": stdout, "stderr": stderr}
 
     async def verify(self, body: MathFormalLeanVerifyRequest) -> MathFormalLeanVerifyResponse:
         """Verify a proof attempt with multi-turn self-correction support.
@@ -441,7 +511,7 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
             config=self._proof_build_config,
         )
 
-        compiler_output = await self._sandbox_client.execute_lean4(
+        compiler_output = await self._execute_lean4(
             code=predicted_proof,
             timeout=self.config.compilation_timeout,
         )
