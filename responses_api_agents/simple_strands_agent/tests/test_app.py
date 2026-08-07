@@ -7,7 +7,7 @@ import pytest
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
-    NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseFunctionToolCall,
 )
 from responses_api_agents.simple_strands_agent.app import (
     _extract_instruction,
@@ -29,7 +29,7 @@ def test_extract_instruction() -> None:
     assert system == "Be precise\n\nUse tools"
 
 
-def test_trajectory_preserves_reasoning_tools_and_training() -> None:
+def test_trajectory_preserves_reasoning_and_tools() -> None:
     messages = [
         {"role": "user", "content": [{"text": "Solve"}]},
         {
@@ -59,16 +59,7 @@ def test_trajectory_preserves_reasoning_tools_and_training() -> None:
         },
         {"role": "assistant", "content": [{"text": "\\boxed{42}"}]},
     ]
-    training_turns = [
-        {
-            "prompt_token_ids": [1],
-            "generation_token_ids": [2],
-            "generation_log_probs": [-0.1],
-        },
-        {},
-    ]
-
-    output = trajectory_to_output_items(messages, training_turns)
+    output = trajectory_to_output_items(messages)
 
     assert [item.type for item in output] == [
         "reasoning",
@@ -76,8 +67,7 @@ def test_trajectory_preserves_reasoning_tools_and_training() -> None:
         "function_call_output",
         "message",
     ]
-    assert isinstance(output[1], NeMoGymResponseFunctionToolCallForTraining)
-    assert output[1].prompt_token_ids == [1]
+    assert isinstance(output[1], NeMoGymResponseFunctionToolCall)
     assert output[2].output == "42"
     assert output[3].content[0].text == "\\boxed{42}"
 

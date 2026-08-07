@@ -26,14 +26,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
-    NeMoGymResponseReasoningItemForTraining,
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
@@ -78,35 +75,18 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, "\n\n".join(system_messages) or None
 
 
-def _training_item(item: Any, fields: dict[str, Any]) -> Any:
-    required = {"prompt_token_ids", "generation_token_ids", "generation_log_probs"}
-    if not required.issubset(fields):
-        return item
-    classes = {
-        NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageForTraining,
-        NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallForTraining,
-        NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
-    }
-    training_class = classes.get(item.__class__)
-    if training_class is None:
-        return item
-    return training_class(**item.model_dump(), **fields)
-
-
 def _tool_output(block: dict[str, Any]) -> str:
     content = block.get("content") or []
     return "\n".join(text for item in content if (text := _content_text(item)))
 
 
-def trajectory_to_output_items(messages: list[dict[str, Any]], training_turns: list[dict[str, Any]]) -> list[Any]:
+def trajectory_to_output_items(messages: list[dict[str, Any]]) -> list[Any]:
     output_items: list[Any] = []
-    assistant_index = 0
     item_index = 0
     for message in messages:
         role = message.get("role")
         content = message.get("content") or []
         if role == "assistant":
-            turn_start = len(output_items)
             for block in content:
                 if "reasoningContent" in block:
                     reasoning = block["reasoningContent"].get("reasoningText") or {}
@@ -141,13 +121,6 @@ def trajectory_to_output_items(messages: list[dict[str, Any]], training_turns: l
                         )
                     )
                     item_index += 1
-            fields = training_turns[assistant_index] if assistant_index < len(training_turns) else {}
-            for index in range(len(output_items) - 1, turn_start - 1, -1):
-                trained = _training_item(output_items[index], fields)
-                if trained is not output_items[index]:
-                    output_items[index] = trained
-                    break
-            assistant_index += 1
         elif role == "user":
             for block in content:
                 tool_result = block.get("toolResult")
@@ -288,7 +261,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             if not self.config.keep_workspaces:
                 shutil.rmtree(work_dir, ignore_errors=True)
 
-        output_items = trajectory_to_output_items(result.get("messages") or [], result.get("training_turns") or [])
+        output_items = trajectory_to_output_items(result.get("messages") or [])
         if not any(getattr(item, "type", None) == "message" for item in output_items):
             output_items.append(
                 NeMoGymResponseOutputMessage(

@@ -10,7 +10,7 @@ import signal
 import subprocess
 import traceback
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import ssa
 from omegaconf import OmegaConf
@@ -20,13 +20,10 @@ from ssa.conversation_manager.conversation_manager import AdaptiveConversationMa
 from ssa.environments import LocalEnvironment, create_environment
 from ssa.hooks import initialize_hooks
 from ssa.metrics import MetricsCollector
-from ssa.models.openai import SROpenAIModel
+from ssa.models import sr_model
 from ssa.prompts.prompt_gen import PromptGenerator
 from ssa.tools import load_tools
 from strands.handlers.callback_handler import CompositeCallbackHandler
-from strands.types.content import Messages, SystemContentBlock
-from strands.types.streaming import StreamEvent
-from strands.types.tools import ToolChoice, ToolSpec
 
 
 importlib.import_module("ssa.utils.monkey_patch")
@@ -35,92 +32,6 @@ importlib.import_module("ssa.utils.monkey_patch")
 class QuietCallback:
     def __call__(self, **kwargs: Any) -> None:
         pass
-
-
-class GymOpenAIModel(SROpenAIModel):
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.training_turns: list[dict[str, Any]] = []
-
-    async def stream(
-        self,
-        messages: Messages,
-        tool_specs: list[ToolSpec] | None = None,
-        system_prompt: str | None = None,
-        *,
-        tool_choice: ToolChoice | None = None,
-        system_prompt_content: list[SystemContentBlock] | None = None,
-        **kwargs: Any,
-    ) -> AsyncGenerator[StreamEvent, None]:
-        request = self.format_request(
-            messages,
-            tool_specs,
-            system_prompt,
-            tool_choice,
-            system_prompt_content=system_prompt_content,
-            **kwargs,
-        )
-        request["stream"] = False
-        request.pop("stream_options", None)
-        async with self._get_client() as client:
-            response = await client.chat.completions.create(**request)
-        self.training_turns.append(_training_fields(response))
-        for event in self._format_non_streaming_response(response):
-            yield event
-
-
-def _dump(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    return {}
-
-
-def _token_ids(value: Any) -> list[int] | None:
-    if not isinstance(value, list):
-        return None
-    result = []
-    for token in value:
-        if isinstance(token, str) and token.startswith("token_id:"):
-            token = token.removeprefix("token_id:")
-        try:
-            result.append(int(token))
-        except (TypeError, ValueError):
-            return None
-    return result
-
-
-def _training_fields(response: Any) -> dict[str, Any]:
-    response_data = _dump(response)
-    choices = response_data.get("choices") or []
-    choice = choices[0] if choices else {}
-    message = choice.get("message") or {}
-    prompt_ids = _token_ids(message.get("prompt_token_ids") or response_data.get("prompt_token_ids"))
-    generation_ids = _token_ids(message.get("generation_token_ids"))
-    log_probs = message.get("generation_log_probs")
-    if log_probs is None:
-        content_log_probs = (choice.get("logprobs") or {}).get("content") or []
-        log_probs = [item.get("logprob") for item in content_log_probs]
-    if (
-        not prompt_ids
-        or not generation_ids
-        or not isinstance(log_probs, list)
-        or len(log_probs) != len(generation_ids)
-    ):
-        return {}
-    try:
-        generation_log_probs = [float(value) for value in log_probs]
-    except (TypeError, ValueError):
-        return {}
-    fields = {
-        "prompt_token_ids": prompt_ids,
-        "generation_token_ids": generation_ids,
-        "generation_log_probs": generation_log_probs,
-    }
-    if message.get("routed_experts") is not None:
-        fields["routed_experts"] = message["routed_experts"]
-    return fields
 
 
 def _portable_execute_bash(
@@ -232,17 +143,7 @@ def _run(payload: dict[str, Any]) -> dict[str, Any]:
     )
     callbacks = CompositeCallbackHandler(ThrottlingCallback(), QuietCallback())
     hooks = initialize_hooks(cfg, str(output_dir))
-    invoker_params = OmegaConf.to_container(cfg.agent.invoker_params, resolve=True)
-    client_args = invoker_params.pop("client_args")
-    invoker_params.pop("use_responses_api")
-    invoker_params.pop("cache_client")
-    model = GymOpenAIModel(
-        model_id=payload["model"].removeprefix("openai/"),
-        params=invoker_params,
-        client_args=client_args,
-        use_responses_api=False,
-        cache_client=False,
-    )
+    model = sr_model(cfg)
 
     tools, tool_params = load_tools(cfg)
     environment = create_environment(cfg, str(output_dir))
@@ -274,7 +175,6 @@ def _run(payload: dict[str, Any]) -> dict[str, Any]:
     usage = dict(agent.event_loop_metrics.accumulated_usage or {})
     return {
         "messages": agent.messages,
-        "training_turns": model.training_turns,
         "usage": usage,
         "stop_reason": result.stop_reason if result else "",
     }
