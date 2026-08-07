@@ -68,6 +68,19 @@ def _connection_key() -> ConnectionKey:
     )
 
 
+class _FakeClock:
+    """Drop-in for the `time` module so deadlines can be exercised without real waiting."""
+
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
 _TCP_KEEPALIVE_TEST_IDLE = 42
 _TCP_KEEPALIVE_TEST_INTERVAL = 7
 _TCP_KEEPALIVE_TEST_PROBES = 2
@@ -539,59 +552,32 @@ class TestServerUtils:
 
         assert 1 == capsys.readouterr().out.count("[request_retry")
 
-    async def test_request_still_retries_unreachable_endpoints_forever(self, monkeypatch: MonkeyPatch) -> None:
-        """M1 changes reporting only. A refused connect must still retry without limit."""
+    async def test_request_gives_up_on_a_peer_that_keeps_dropping(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
-        refused = ClientConnectorError(_connection_key(), OSError(errno.ECONNREFUSED, "refused"))
-
-        num_calls = 0
-
-        async def request_mock(**_kwargs) -> str:
-            nonlocal num_calls
-            num_calls += 1
-            if num_calls < 200:
-                raise refused
-            return "my mock response"
-
         monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+
         client_mock = MagicMock()
-        client_mock.return_value.request = request_mock
+        client_mock.return_value.request = AsyncMock(side_effect=ServerDisconnectedError())
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
 
-        assert "my mock response" == await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
-        assert 200 == num_calls
-
-    async def test_request_still_retries_dropped_connections_forever(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
-
-        num_calls = 0
-
-        async def request_mock(**_kwargs) -> str:
-            nonlocal num_calls
-            num_calls += 1
-            if num_calls < 200:
-                raise ServerDisconnectedError()
-            return "my mock response"
-
-        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
-        client_mock = MagicMock()
-        client_mock.return_value.request = request_mock
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
-
-        assert "my mock response" == await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
-        assert 200 == num_calls
-
-    async def test_request_still_raises_unknown_errors_after_max_num_tries(self, monkeypatch: MonkeyPatch) -> None:
-        """The generic branch keeps its 3-tries-then-raise behaviour for external calls."""
-        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
-        client_mock = MagicMock()
-        client_mock.return_value.request = AsyncMock(side_effect=TypeError("programming error"))
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
-
-        with raises(TypeError):
+        with raises(nemo_gym.server_utils.RequestFailedError) as exc_info:
             await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
 
-        assert nemo_gym.server_utils.MAX_NUM_TRIES == client_mock.return_value.request.await_count
+        assert "peer_drop" in str(exc_info.value)
+        # PEER_DROP is the overload case, so it gets more attempts than UNREACHABLE.
+        assert 5 == client_mock.return_value.request.await_count
+
+    async def test_request_rides_out_a_burst_of_dropped_connections(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(
+            side_effect=[ServerDisconnectedError(), ServerDisconnectedError(), "my mock response"]
+        )
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        assert "my mock response" == await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
 
     async def test_request_success_path_is_untouched(self, monkeypatch: MonkeyPatch, capsys: CaptureFixture) -> None:
         client_mock = MagicMock()
@@ -658,3 +644,106 @@ class TestServerUtils:
         await server_client.get(server_name="my_server", url_path="/blah", timeout=caller_timeout)
 
         assert caller_timeout is client_mock.return_value.request.await_args.kwargs["timeout"]
+
+    def test_retry_budgets_cover_every_kind(self) -> None:
+        assert set(_RequestFailureKind) == set(nemo_gym.server_utils._RETRY_BUDGETS)
+
+        budgets = nemo_gym.server_utils._RETRY_BUDGETS
+        # Self-correcting, so bounded by time rather than by a count.
+        assert budgets[_RequestFailureKind.RESOURCE].max_attempts is None
+        # Waiting cannot help, so no retry at all.
+        assert 0 == budgets[_RequestFailureKind.FATAL].max_attempts
+
+    def test_retry_budget_remains_stops_on_attempts_and_on_deadline(self) -> None:
+        remains = nemo_gym.server_utils._retry_budget_remains
+        unreachable = _RequestFailureKind.UNREACHABLE
+
+        assert remains(unreachable, attempts=1, elapsed_seconds=0.0)
+        # The attempt cap fires with the deadline nowhere near.
+        assert not remains(unreachable, attempts=3, elapsed_seconds=0.0)
+        # The deadline fires with attempts to spare.
+        assert not remains(unreachable, attempts=1, elapsed_seconds=10.0)
+        # RESOURCE has no attempt cap, so only its deadline stops it.
+        assert remains(_RequestFailureKind.RESOURCE, attempts=10_000, elapsed_seconds=0.0)
+        assert not remains(_RequestFailureKind.RESOURCE, attempts=1, elapsed_seconds=120.0)
+
+    def test_retry_delay_grows_then_caps_and_only_ever_shortens(self) -> None:
+        delay = nemo_gym.server_utils._retry_delay
+        initial = nemo_gym.server_utils._RETRY_INITIAL_DELAY_SECONDS
+        cap = nemo_gym.server_utils._RETRY_MAX_DELAY_SECONDS
+
+        for attempts in range(1, 12):
+            ceiling = min(initial * (2 ** (attempts - 1)), cap)
+            for _ in range(20):
+                seconds = delay(attempts)
+                # Jitter only ever shortens the wait, so the deadline stays the real bound.
+                assert ceiling / 2 <= seconds <= ceiling
+
+        assert cap / 2 <= delay(50) <= cap
+
+    async def test_request_gives_up_on_an_unreachable_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        refused = ClientConnectorError(_connection_key(), OSError(errno.ECONNREFUSED, "refused"))
+
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(side_effect=refused)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        with raises(nemo_gym.server_utils.RequestFailedError) as exc_info:
+            await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+
+        assert "http://localhost:8000/v1/responses" in str(exc_info.value)
+        assert "unreachable" in str(exc_info.value)
+        assert exc_info.value.__cause__ is refused
+        # Callers already catching aiohttp errors keep working.
+        assert isinstance(exc_info.value, ClientError)
+        assert 3 == client_mock.return_value.request.await_count
+
+    async def test_request_recovers_inside_the_budget(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        refused = ClientConnectorError(_connection_key(), OSError(errno.ECONNREFUSED, "refused"))
+
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(side_effect=[refused, refused, "my mock response"])
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        assert "my mock response" == await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+
+    async def test_request_raises_fatal_immediately_and_unwrapped(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(side_effect=TypeError("programming error"))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        # Not wrapped in RequestFailedError: a programming error should surface as itself.
+        with raises(TypeError):
+            await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+
+        assert 1 == client_mock.return_value.request.await_count
+
+    async def test_request_deadline_runs_from_the_first_failure(self, monkeypatch: MonkeyPatch) -> None:
+        """A long call that fails at the end must still get its retries."""
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        clock = _FakeClock()
+        clock.advance(1200.0)
+        monkeypatch.setattr(nemo_gym.server_utils, "time", clock)
+
+        refused = ClientConnectorError(_connection_key(), OSError(errno.ECONNREFUSED, "refused"))
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(side_effect=[refused, refused, "my mock response"])
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        assert "my mock response" == await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+
+    async def test_request_still_propagates_cancellation(self, monkeypatch: MonkeyPatch) -> None:
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(side_effect=asyncio.CancelledError())
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        with raises(asyncio.CancelledError):
+            await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")

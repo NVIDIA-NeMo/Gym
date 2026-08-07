@@ -16,6 +16,7 @@ import asyncio
 import atexit
 import errno as errno_module
 import json
+import random
 import resource
 import socket
 import sys
@@ -187,9 +188,10 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
             ),
         ),
         # `total` stays unset: generations legitimately run for minutes and must not be cut off.
-        # Only `sock_connect` is set, so a blackholed connect fails on our deadline rather than the
-        # kernel's SYN retry budget. Deliberately not `connect`, which also covers waiting for a
-        # free pooled connection; at Gym's concurrency that wait is normal and not a failure.
+        # Only `sock_connect` is set, so a connect to a host that silently drops packets fails on
+        # this deadline rather than on the kernel's SYN retry budget. Not `connect`, which also
+        # covers waiting for a free pooled connection; at Gym's concurrency that wait is normal and
+        # should not be counted as a failure.
         timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
         cookie_jar=DummyCookieJar(),
     )
@@ -328,10 +330,11 @@ _FAILURE_KIND_HELP_TEXT = {
     _RequestFailureKind.FATAL: "",
 }
 
-# Reporting on the first failure is right for one request and wrong for sixteen thousand, so the
-# full diagnostic goes out once per endpoint and kind and is then summarised on this interval.
-# Keyed by (origin, kind) -> (when it was last reported, failures suppressed since). Grows with the
-# number of distinct endpoints a process talks to, not with the number of requests.
+# The full diagnostic is printed once per endpoint and kind, then summarised on this interval.
+# Printing every failure would be fine for a single request and unusable for the thousands a run
+# can have in flight at once. Keyed by (origin, kind) -> (when it was last reported, failures
+# suppressed since), so it grows with the number of endpoints a process talks to, not with the
+# number of requests.
 _FAILURE_REPORT_INTERVAL_SECONDS: float = 30.0
 _FAILURE_REPORT_STATE: Dict[Tuple[str, _RequestFailureKind], Tuple[float, int]] = {}
 
@@ -388,6 +391,77 @@ def _report_request_failure(url: str, exc: BaseException, kind: _RequestFailureK
     )
 
 
+class RequestFailedError(ClientError):
+    """`request()` exhausted the retry budget for a failure kind.
+
+    Subclasses `aiohttp.ClientError` so that callers already catching that keep working, for
+    example `finance_sec_search/app.py:530` and `ecs_fargate/engine.py:1044`. The diagnostic lives
+    in the message rather than a note: `setup_exception_middleware` returns `repr(e)` as the 500
+    body and `repr()` drops notes.
+    """
+
+
+class _RetryBudget(BaseModel):
+    """How long `request()` keeps trying one failure kind.
+
+    `max_attempts` of `None` means no attempt cap, for kinds that are self-correcting and where the
+    deadline is the real bound.
+    """
+
+    max_attempts: Optional[int]
+    deadline_seconds: float
+
+
+# Each kind gets both an attempt count and a deadline. A single counter cannot express both a
+# dead port, where more attempts add nothing, and an overloaded server, where the endpoint is
+# expected back after a while. UNREACHABLE is short on the assumption that waiting for a server
+# that has not started yet happens before the run rather than inside this loop. RESOURCE gets no
+# attempt cap because file descriptors free up on their own, so time is the useful bound.
+_RETRY_BUDGETS = {
+    _RequestFailureKind.UNREACHABLE: _RetryBudget(max_attempts=3, deadline_seconds=10.0),
+    _RequestFailureKind.RESOURCE: _RetryBudget(max_attempts=None, deadline_seconds=120.0),
+    _RequestFailureKind.PEER_DROP: _RetryBudget(max_attempts=5, deadline_seconds=60.0),
+    _RequestFailureKind.TIMEOUT: _RetryBudget(max_attempts=3, deadline_seconds=30.0),
+    _RequestFailureKind.FATAL: _RetryBudget(max_attempts=0, deadline_seconds=0.0),
+}
+
+_RETRY_INITIAL_DELAY_SECONDS = 0.5
+_RETRY_MAX_DELAY_SECONDS = 8.0
+
+
+def _retry_delay(attempts: int) -> float:
+    """Capped exponential backoff, randomised downward.
+
+    The jitter keeps every in-flight request from retrying in lockstep against a peer that is
+    already struggling. It only ever shortens the wait, so the deadline stays the real bound.
+    """
+    ceiling = min(_RETRY_INITIAL_DELAY_SECONDS * (2 ** (attempts - 1)), _RETRY_MAX_DELAY_SECONDS)
+    return ceiling * random.uniform(0.5, 1.0)
+
+
+def _retry_budget_remains(kind: _RequestFailureKind, attempts: int, elapsed_seconds: float) -> bool:
+    budget = _RETRY_BUDGETS[kind]
+    if budget.max_attempts is not None and attempts >= budget.max_attempts:
+        return False
+    return elapsed_seconds < budget.deadline_seconds
+
+
+def _request_failed_message(
+    url: str, kind: _RequestFailureKind, attempts: int, elapsed_seconds: float, exc: BaseException, internal: bool
+) -> str:
+    where = (
+        "Check `gym env status`; this is a call to another NeMo Gym server."
+        if internal
+        else "Check `policy_base_url`, your API key, and whether the provider is up."
+    )
+    help_text = _FAILURE_KIND_HELP_TEXT[kind]
+    return (
+        f"gave up on {url} after {attempts} attempt(s) over {elapsed_seconds:.1f}s "
+        f"(kind={kind.value}, last error: {type(exc).__name__}: {exc}). {where}"
+        + (f"\n{help_text}" if help_text else "")
+    )
+
+
 async def request(
     method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
 ) -> ClientResponse:  # pragma: no cover
@@ -398,37 +472,35 @@ async def request(
         kwargs["headers"]["Content-Type"] = "application/json"
 
     client = get_global_aiohttp_client()
-    num_tries = 1
+    attempts = 0
+    first_failure_at: Optional[float] = None
     while True:
         try:
             return await client.request(method=method, url=url, **kwargs)
-        except (ServerDisconnectedError, ClientOSError) as e:
-            # Both were already retried without a limit, and still are; the kind only selects the
-            # diagnostic. `ClientConnectorError` arrives here as a `ClientOSError` subclass, which
-            # is why a refused connection used to be reported as an overloaded server.
-            _report_request_failure(url, e, _classify_request_failure(e), time.monotonic())
-
-            await asyncio.sleep(0.5)
         except Exception as e:
+            # `asyncio.CancelledError` is a `BaseException`, so it is never caught here and
+            # cancellation still propagates.
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
-            # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
-            if not _internal:
-                kind = _classify_request_failure(e)
-                help_text = _FAILURE_KIND_HELP_TEXT[kind]
-                print(
-                    f"""Hit an exception while making a request (try {num_tries}, kind {kind.value}): {type(e)}: {e}
-Sleeping 0.5s and retrying...
-"""
-                    + (f"{help_text}\n" if help_text else "")
-                )
-                if num_tries >= MAX_NUM_TRIES:
-                    raise e
+            kind = _classify_request_failure(e)
+            attempts += 1
+            now = time.monotonic()
+            if first_failure_at is None:
+                # From the first failure, not from the start of the request: a twenty-minute
+                # generation that fails at the end would otherwise have spent every deadline
+                # before it got a single retry.
+                first_failure_at = now
+            elapsed = now - first_failure_at
 
-                num_tries += 1
+            _report_request_failure(url, e, kind, now)
 
-            await asyncio.sleep(0.5)
+            if kind is _RequestFailureKind.FATAL:
+                raise
+            if not _retry_budget_remains(kind, attempts, elapsed):
+                raise RequestFailedError(_request_failed_message(url, kind, attempts, elapsed, e, _internal)) from e
+
+            await asyncio.sleep(_retry_delay(attempts))
 
 
 async def raise_for_status(
