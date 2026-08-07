@@ -56,6 +56,7 @@ gym eval run \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
     ++overwrite_metrics_conflicts=true \
     ++split=benchmark \
+    ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
     ++policy_base_url=\$ip \
     ++policy_api_key=dummy_api_key \
