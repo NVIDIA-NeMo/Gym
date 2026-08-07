@@ -16,6 +16,13 @@ config_paths:
 
 nv_inference_api_key: dummy  # pragma: allowlist secret
 
+# Used in SWE Verified
+sandbox:
+  opensandbox:
+    connection:
+      domain: dummy
+      api_key: dummy  # pragma: allowlist secret
+
 ########################################
 # END Secrets
 ########################################
@@ -27,13 +34,6 @@ nv_inference_api_key: dummy  # pragma: allowlist secret
 policy_base_url: dummy
 policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
-
-# Used in SWE Verified
-sandbox:
-  opensandbox:
-    connection:
-      domain: dummy
-      api_key: ${nv_inference_api_key}
 
 # Used in Tau3 Banking
 gpt-5_4-mini-2026-03-17:
