@@ -140,6 +140,10 @@ class TestOpenCodeSandboxedAgent:
         sandbox_mock.return_value.exec.return_value.stdout = "my dir"
 
         monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.exists",
+            lambda self: True,
+        )
+        monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
             lambda self: json.dumps(opencode_export_test_data),
         )
