@@ -36,7 +36,6 @@ from responses_api_agents.conversational_tool_use.domain_generation.app import (
 )
 from responses_api_agents.conversational_tool_use.domain_generation.assets import (
     DOMAIN_PROMPT_PATH,
-    archive_prompt_paths,
     load_domain_prompt,
 )
 
@@ -291,17 +290,10 @@ def test_checked_in_config_exposes_default_followup_count() -> None:
 
 
 def test_prompt_assets_are_complete_and_whitespace_free() -> None:
-    expected_hashes = {
-        "domain_generation.txt": "f90c8b57ed564fb8c918b4d2c2d9dc4da537285fe8bcc56500db168a54200211",  # pragma: allowlist secret
-        "domains_sample_1.txt": "f0786c302797ef8543a062b41fe3da37094e9863d5ff8adabcd1fca861fe3688",  # pragma: allowlist secret
-        "domains_sample_sectors.txt": "0f7d851ffa1502fc24b82758d86731ac52bd5633023a5978f01928cd7211b5bd",  # pragma: allowlist secret
-    }
-    prompt_paths = (DOMAIN_PROMPT_PATH, *archive_prompt_paths())
+    expected_hash = "f90c8b57ed564fb8c918b4d2c2d9dc4da537285fe8bcc56500db168a54200211"  # pragma: allowlist secret
 
-    assert {path.name for path in prompt_paths} == set(expected_hashes)
-    assert all(not any(character.isspace() for character in path.name) for path in prompt_paths)
-    for path in prompt_paths:
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_hashes[path.name]
+    assert not any(character.isspace() for character in DOMAIN_PROMPT_PATH.name)
+    assert hashlib.sha256(DOMAIN_PROMPT_PATH.read_bytes()).hexdigest() == expected_hash
     assert load_domain_prompt() == DOMAIN_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 

@@ -16,13 +16,8 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
-from responses_api_agents.conversational_tool_use.policy_tool_generation.assets import (
-    GOLDENS_DIR,
-    PROMPTS_DIR,
-    load_assets,
-)
+from responses_api_agents.conversational_tool_use.policy_tool_generation import assets
 from responses_api_agents.conversational_tool_use.policy_tool_generation.compat import (
     format_domain_name,
     parse_judgment,
@@ -45,37 +40,22 @@ ACTIVE_PROMPT_HASHES = {
 }
 
 
-def _tree_hash(directory: Path) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    paths = sorted(path for path in directory.iterdir() if path.is_file())
-    for path in paths:
-        digest.update(path.name.encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-    return len(paths), digest.hexdigest()
-
-
 def test_prompt_and_reference_bytes_and_filenames() -> None:
-    active_paths = sorted(PROMPTS_DIR.glob("*.txt"))
+    active_paths = sorted(assets.PROMPTS_DIR.glob("*.txt"))
     assert {path.name for path in active_paths} == set(ACTIVE_PROMPT_HASHES)
     for path in active_paths:
         assert hashlib.sha256(path.read_bytes()).hexdigest() == ACTIVE_PROMPT_HASHES[path.name]
 
-    assert _tree_hash(GOLDENS_DIR) == (
-        16,
-        "c1c621e88f763dab8fa23e6721180376d65b1386b99e662d32c652dcf28e1cd6",  # pragma: allowlist secret
+    assert assets.GOLDEN_FILENAMES == tuple(
+        filename for index in range(1, 9) for filename in (f"policy-{index}.md", f"tools_{index}.jsonl")
     )
-    assert _tree_hash(PROMPTS_DIR / "archive") == (
-        42,
-        "fd4d674dea96fee4d258daef1defa55b4aa42dfe6bc7720ac2b0e44aa41c5d90",  # pragma: allowlist secret
-    )
-    all_paths = [*active_paths, *GOLDENS_DIR.iterdir(), *(PROMPTS_DIR / "archive").iterdir()]
+    all_paths = [*active_paths, *assets.GOLDENS_DIR.iterdir()]
     assert all(not any(character.isspace() for character in path.name) for path in all_paths)
-    markdown_names = sorted(path.name for path in GOLDENS_DIR.glob("*.md"))
+    markdown_names = sorted(path.name for path in assets.GOLDENS_DIR.glob("*.md"))
     assert markdown_names == [f"policy-{index}.md" for index in range(1, 9)]
     assert all("_" not in name for name in markdown_names)
-    assert len(load_assets("general").golden_pairs) == 8
-    assert len(load_assets("proactive").golden_pairs) == 8
+    assert len(assets.load_assets("general").golden_pairs) == 8
+    assert len(assets.load_assets("proactive").golden_pairs) == 8
 
 
 def test_case_sensitive_last_tag_and_json_repair_parsing() -> None:

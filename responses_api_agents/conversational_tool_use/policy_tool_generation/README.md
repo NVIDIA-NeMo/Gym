@@ -61,7 +61,7 @@ Agent controls:
 | `max_judge_concurrency` | `null` | Per-rollout cap for concurrent calls within a judge phase; `null` means no agent cap |
 | `random_seed` | `null` | Optional base seed for rollout-local timestamp and reference sampling |
 
-Counts for packaged references cannot exceed the eight checked-in reference pairs. The proactive profile still omits
+Counts for prepared references cannot exceed the eight downloaded reference pairs. The proactive profile still omits
 references from policy refinement. Because each golden prompt is evaluated against both target labels, deterministic
 judge output commonly produces a `0.5` golden failure fraction; lowering that maximum changes the existing gate
 substantially.
@@ -70,6 +70,29 @@ Internal requests continue to contain only `messages`. Configure temperature, to
 concurrency on the corresponding model-server copies. Provider retry behavior remains model-server-specific.
 `gym eval run --concurrency` separately controls concurrent policy/tool rollouts. Unknown agent settings are rejected
 so misspelled controls cannot silently fall back to defaults.
+
+## Prepare Reference Assets
+
+Download the pinned golden policy/tool references before starting this generation stage:
+
+```bash
+python -m responses_api_agents.conversational_tool_use.policy_tool_generation.prepare
+```
+
+The downloader reads the
+[`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets)
+dataset at the revision pinned in `prepare.py`. It validates the complete file set and its content checksum before
+replacing the local reference directory. Historical prompt revisions are not required at runtime; materialize them
+only when inspecting prompt development history:
+
+```bash
+python -m responses_api_agents.conversational_tool_use.policy_tool_generation.prepare \
+  --include-prompt-history
+```
+
+The active prompt templates remain package-local because they are executable agent assets.
+
+## Run
 
 Start the agent and its model servers:
 

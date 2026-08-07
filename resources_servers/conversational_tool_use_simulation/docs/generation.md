@@ -14,6 +14,12 @@ export MODEL_API_KEY="<api-key>"
 export MODEL_NAME="<model-id>"
 ```
 
+Prepare the policy/tool generation references once per checkout:
+
+```bash
+python -m responses_api_agents.conversational_tool_use.policy_tool_generation.prepare
+```
+
 ## Start the Pipeline Servers
 
 Start the model, generation agents, conversation agent, and simulation resource server once:
