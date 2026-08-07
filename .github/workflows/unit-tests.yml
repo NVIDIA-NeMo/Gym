@@ -155,7 +155,7 @@ jobs:
           curl -LsSf "$UV_INSTALL_URL" | sh
           uv venv
           source .venv/bin/activate
-          uv sync --extra dev --extra sandbox
+          uv sync --extra dev --extra sandbox --extra openshell
 
       - name: Test
         run: |
