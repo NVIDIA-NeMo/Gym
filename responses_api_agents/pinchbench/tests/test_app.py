@@ -19,10 +19,11 @@ fast and offline.
 """
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pinchbench.app import (
     NG_FAILURE_CLASS_KEY,
@@ -30,6 +31,7 @@ from responses_api_agents.pinchbench.app import (
     NG_TERMINAL_KEY,
     PinchBenchAgent,
     PinchBenchAgentConfig,
+    PinchBenchRunRequest,
     SandboxKilledError,
     _classify_task_failure,
 )
@@ -76,6 +78,7 @@ def test_task_env_gateway_mode():
     assert env["OPENCLAW_GATEWAY_TOKEN"]  # gateway daemon mode
     assert "PINCHBENCH_FORCE_LOCAL" not in env
     assert env["MODEL_NAME"] == "vendor/model"
+    assert env["MODEL_BASE_URL"] == "http://endpoint/v1"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
     assert env["BRAVE_API_KEY"] == "brave-key"
 
@@ -88,6 +91,20 @@ def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
     assert 'custom_provider["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'defaults["timeoutSeconds"] = provider_timeout_s' in wrapper_text
     assert 'agent["timeoutSeconds"] = provider_timeout_s' in wrapper_text
+
+
+def test_task_env_resolves_configured_gym_model_server():
+    agent = make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+    with patch.object(
+        PinchBenchAgent,
+        "resolve_model_base_url",
+        autospec=True,
+        return_value="http://model-server/ng-rollout/7-2/v1",
+    ) as resolve:
+        env = agent._task_env("task_x", "7-2")
+
+    resolve.assert_called_once_with(agent, "policy_model", "7-2")
+    assert env["MODEL_BASE_URL"] == "http://model-server/ng-rollout/7-2/v1"
 
 
 def test_build_spec_from_config():
@@ -242,7 +259,7 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     otherwise ng_collect_rollouts (fail-fast) aborts the whole collection."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -277,7 +294,7 @@ async def test_generic_failure_routes_to_sidecar_not_main(tmp_path, monkeypatch)
     """A failed task must carry a failure class so it never lands in the main jsonl."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -293,7 +310,7 @@ async def test_signal_killed_sandbox_is_kill_shaped_and_unpersisted(tmp_path, mo
     """Walltime SIGTERM shape: no row anywhere; resume's set-difference re-dispatches."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def killed(task_id, out_dir):
+    async def killed(task_id, out_dir, rollout_id=None):
         raise SandboxKilledError("direct apptainer exec killed (rc=-15) for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", killed)
@@ -308,7 +325,7 @@ async def test_task_timeout_is_terminal_sidecar(tmp_path, monkeypatch):
     """Per-task timeout consumed its budget: one sidecar row, never retried."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def slow(task_id, out_dir):
+    async def slow(task_id, out_dir, rollout_id=None):
         raise TimeoutError("direct apptainer exec timed out for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", slow)
@@ -324,7 +341,7 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
     """Scored rollouts must keep landing in the main jsonl (no sentinel keys)."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def ok(task_id, out_dir):
+    async def ok(task_id, out_dir, rollout_id=None):
         return None
 
     monkeypatch.setattr(agent, "_run_in_sandbox", ok)
@@ -346,6 +363,68 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
     assert dumped["reward"] == 1.0
     for key in (NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY):
         assert key not in dumped
+
+
+@pytest.mark.parametrize(
+    ("observability_enabled", "expected_rollout_id", "model_base_url"),
+    [
+        (True, "7-2", "http://model-server/ng-rollout/7-2/v1"),
+        (False, None, "http://model-server/v1"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_run_resolves_model_server_with_optional_rollout_correlation(
+    tmp_path,
+    monkeypatch,
+    observability_enabled,
+    expected_rollout_id,
+    model_base_url,
+):
+    agent = make_agent(
+        work_root=str(tmp_path / "work"),
+        transcripts_dir=str(tmp_path / "arch"),
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+    )
+    agent.server_client.global_config_dict = {"observability_enabled": observability_enabled}
+    captured = {}
+
+    async def capture_env(task_id, out_dir, rollout_id=None):
+        captured["env"] = agent._task_env(task_id, rollout_id)
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", capture_env)
+    monkeypatch.setattr(
+        agent,
+        "_parse_result",
+        lambda task_id, out_dir: {
+            "reward": 1.0,
+            "grading_type": "automated",
+            "breakdown": {},
+            "notes": "ok",
+            "status": "success",
+        },
+    )
+    monkeypatch.setattr(agent, "_response_from_transcript", lambda task_id, out_dir: agent._empty_response(task_id))
+    monkeypatch.setattr(agent, "_collect_transcript", lambda task_id, out_dir, run_id: ([], ""))
+    body = PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "solve"},
+            "verifier_metadata": {"task_id": "task_x"},
+            "_ng_task_index": 7,
+            "_ng_rollout_index": 2,
+        }
+    )
+
+    with patch.object(
+        PinchBenchAgent,
+        "resolve_model_base_url",
+        autospec=True,
+        return_value=model_base_url,
+    ) as resolve:
+        response = await agent.run(body=body)
+
+    assert response.reward == 1.0
+    resolve.assert_called_once_with(agent, "policy_model", expected_rollout_id)
+    assert captured["env"]["MODEL_BASE_URL"] == model_base_url
 
 
 def test_classify_task_failure_mapping():
