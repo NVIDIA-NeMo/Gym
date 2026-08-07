@@ -11,6 +11,12 @@
 #     docker buildx build --build-context nemo-gym=. -f docker/Dockerfile \
 #       --tag <registry>/nemo-gym:latest --push .
 #
+#   Test image from a specific git commit (runs as a non-root user):
+#     docker buildx build -f docker/Dockerfile --build-arg GYM_GIT_REF=<commit> \
+#       --target test --load --tag nemo-gym:test .
+#     docker run --rm --entrypoint bash nemo-gym:test -lc \
+#       'PYTEST_ADDOPTS="-m \"not sandbox\" --cov-report= --cov-fail-under=0" ng_dev_test'
+#
 
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.03-cuda13.2-devel-ubuntu24.04
 
@@ -23,6 +29,9 @@ ADD --keep-git-dir=true https://github.com/NVIDIA-NeMo/Gym.git#${GYM_GIT_REF} /
 FROM ${BASE_IMAGE} AS base
 ENV NEMO_GYM_CONTAINER=1
 USER root
+
+ARG NEMO_GYM_UID=10001
+ARG NEMO_GYM_GID=10001
 
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -38,13 +47,19 @@ apt-get install -y --no-install-recommends \
     less \
     vim
 
+groupadd --gid "${NEMO_GYM_GID}" nemo-gym
+useradd --uid "${NEMO_GYM_UID}" --gid "${NEMO_GYM_GID}" --create-home --shell /bin/bash nemo-gym
+
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
 
 ARG UV_VERSION=0.11.29
 ARG PYTHON_VERSION=3.13.14
-ENV PATH="/root/.local/bin:$PATH"
+ENV HOME=/home/nemo-gym \
+    UV_CACHE_DIR=/opt/uv/cache \
+    UV_INSTALL_DIR=/usr/local/bin \
+    UV_PYTHON_INSTALL_DIR=/opt/uv/python
 RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh && \
     uv python install ${PYTHON_VERSION}
 
@@ -102,5 +117,19 @@ if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
 fi
 EOF
 
+RUN chown -R nemo-gym:nemo-gym /home/nemo-gym /opt/nemo-gym /opt/nemo_gym_venv /opt/uv
+
+USER nemo-gym
 ENTRYPOINT ["gym"]
 CMD ["--help"]
+
+
+FROM release AS test
+
+USER root
+RUN UV_LINK_MODE=symlink uv sync --locked --extra dev --extra sandbox --extra vllm && \
+    chown -R nemo-gym:nemo-gym /home/nemo-gym /opt/nemo-gym /opt/nemo_gym_venv /opt/uv
+
+USER nemo-gym
+ENTRYPOINT []
+CMD ["bash"]
