@@ -31,8 +31,9 @@ simple_strands_math_agent:
       ssa_source_root: ${oc.env:SSA_SOURCE_ROOT,null}
       ssa_python: ${oc.env:SSA_PYTHON,null}
       system_prompt: |
-        This is a standalone math task, not a repository task. Do not edit files. Use bash to
-        compute or verify results when helpful. Put only the final answer in \boxed{}.
+        This is a standalone math task, not a repository task. Do not edit files. Bash is
+        available for calculation and verification when useful. Put only the final answer in
+        \boxed{}.
       datasets:
       - name: train
         type: train
