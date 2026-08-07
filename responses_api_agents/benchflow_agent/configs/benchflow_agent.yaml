@@ -1,0 +1,54 @@
+benchflow_agent:
+  responses_api_agents:
+    benchflow_agent:
+      # Python module entrypoint loaded by NeMo Gym.
+      entrypoint: app.py
+      domain: agent
+      description: BenchFlow integration for running agentic benchmarks (e.g. SkillsBench).
+      value: Evaluate models on agentic benchmarks via BenchFlow.
+
+      # NeMo Gym model server reference.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Max number of concurrent `/run` requests handled by the NeMo Gym agent server process.
+      concurrency: 256
+
+      # Local directory of BenchFlow task definitions (e.g. a SkillsBench `tasks/` dir).
+      tasks_dir: null
+      # Output directory for BenchFlow results/artifacts/logs.
+      jobs_dir: "jobs"
+
+      # BenchFlow agent harness.
+      agent: openhands
+      # Extra environment variables forwarded to the agent harness. Example:
+      #   agent_env:
+      #     DEBUG: "1"
+      agent_env: null
+      # BenchFlow sandbox/environment type.
+      environment: singularity
+      # Sandbox user. null = root.
+      sandbox_user: null
+      # Abort a rollout if the agent makes no tool call for this many seconds.
+      agent_idle_timeout: 1200
+      # Skill mode: "with-skill" | "no-skill" | "self-gen".
+      skill_mode: with-skill
+      # How many times BenchFlow should retry a task when an error occurs.
+      max_retries: 2
+
+      # Custom config overrides to apply to every task's task.md. Example:
+      #   task_config_overrides:
+      #     environment:
+      #       memory_mb: 131072
+      #     agent:
+      #       timeout_sec: 3600.0
+      task_config_overrides: null
+
+      # Path to prebuilt per-task containers (e.g. .sif files) containing a {task_name} placeholder.
+      # Will override the environment.docker_image field in each task's task.md.
+      # Example: "/path/to/containers/{task_name}.sif"
+      container_formatter: null
+
+      # List of datasets to evaluate on.
+      datasets: null
