@@ -46,8 +46,7 @@ git remote add origin $NEMO_GYM_GIT_URL
 git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
 
-# Gym main has upgraded to Python 3.13.14, but vLLM still uses 3.12.13
-# Rather than entirely rebuild the vLLM container from scratch, we just manually downgrade the Gym python here.
+# See the script for more information.
 python benchmarks/nemotron_3.5_super/downgrade_python.py
 
 uv sync --active

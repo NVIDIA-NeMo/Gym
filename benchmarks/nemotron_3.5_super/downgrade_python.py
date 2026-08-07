@@ -12,6 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Gym main has upgraded to Python 3.13.14, but vLLM still uses 3.12.13
+Rather than entirely rebuild the vLLM container from scratch, we just manually downgrade the Gym python here.
+
+In this script, we aim to revert the relevant changes from https://github.com/NVIDIA-NeMo/Gym/pull/2194
+"""
 
 from glob import glob
 from pathlib import Path
