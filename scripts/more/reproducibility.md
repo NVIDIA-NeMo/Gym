@@ -34,3 +34,15 @@ and the run scores 0 with no error.
 ## Results
 
 ## Comparing your numbers
+
+## Base (pretraining) model
+
+The recipes in this directory cover the **instruct** model. Recipes for the **base**
+model live in [`base/`](./base/) — 21 short-context benchmarks plus RULER for
+`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16`.
+
+They work differently: they are `nemo-evaluator-launcher` configs run with
+`nel run --config ...`, not Gym CLI scripts, because the base benchmarks are
+`lm-evaluation-harness` and `nemo-skills` tasks rather than Gym environments. See
+[`base/README.md`](./base/README.md) for their prerequisites, which differ from the ones
+above.
