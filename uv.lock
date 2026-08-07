@@ -2572,6 +2572,7 @@ all = [
     { name = "requests-mock" },
     { name = "ruff" },
     { name = "tenacity" },
+    { name = "tenki" },
 ]
 dev = [
     { name = "coverage" },
@@ -2590,6 +2591,7 @@ sandbox = [
     { name = "opensandbox" },
     { name = "openshell" },
     { name = "tenacity" },
+    { name = "tenki" },
 ]
 vllm = [
     { name = "flashinfer-python" },
@@ -2639,6 +2641,7 @@ requires-dist = [
     { name = "rich" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "tenacity", marker = "extra == 'sandbox'", specifier = ">=9.1.4" },
+    { name = "tenki", marker = "extra == 'sandbox'", specifier = ">=0.5.4,<0.6" },
     { name = "tqdm" },
     { name = "urllib3", specifier = ">=2.7.0" },
     { name = "uvicorn" },
@@ -5028,6 +5031,20 @@ wheels = [
 ]
 
 [[package]]
+name = "tenki"
+version = "0.5.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+    { name = "websocket-client" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/30/85/9f311f784b92639de2d0aaae7c6d67c76c5ebfd60543d56739724c07683a/tenki-0.5.4.tar.gz", hash = "sha256:3d900ca3eedf98aea0ace315246a3f2bbdc19149d966a320cdb99fd406b681fa", size = 186073, upload-time = "2026-07-29T11:08:41.791Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/de/244e8d8bffe6673ae3a58423016b8c03465214ab9101a3e61234b5d4c076/tenki-0.5.4-py3-none-any.whl", hash = "sha256:d5df29fa5f7f93fc6c420d3a0b50e68e0b35fda63e17ed57c0f302a522cbf9ef", size = 158916, upload-time = "2026-07-29T11:08:40.023Z" },
+]
+
+[[package]]
 name = "threadpoolctl"
 version = "3.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5603,6 +5620,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/56/fe/cb8ef3d6f929d14158fdaaad9925985b7310abc9384dcd4d82dd0016fb59/watchfiles-1.2.0-cp315-cp315-manylinux_2_31_riscv64.whl", hash = "sha256:cee9d5efd929efdac5f7e58f72b3376f676b64050a91c5b99a7094c5b2317488", size = 465096, upload-time = "2026-05-18T04:31:30.384Z" },
     { url = "https://files.pythonhosted.org/packages/25/91/80908e835e100527a9267147b08c0eee1fa6ab0ffec15edc04d1d44885f7/watchfiles-1.2.0-cp315-cp315-musllinux_1_1_aarch64.whl", hash = "sha256:b718bf356bbc15e559bd8ef41782b573b8ae0e3f177ab244b440568d7ea02cfb", size = 630638, upload-time = "2026-05-18T04:30:49.89Z" },
     { url = "https://files.pythonhosted.org/packages/46/4b/95ab2f256bb4af3cb2eb23b9317bda984ee6e0f11733a5c004a6c95b06e3/watchfiles-1.2.0-cp315-cp315-musllinux_1_1_x86_64.whl", hash = "sha256:922c0e019fe68b3ae392965a766b02a71ba1168c932cebc3733cd52c5fe5b377", size = 657684, upload-time = "2026-05-18T04:31:32.027Z" },
+]
+
+[[package]]
+name = "websocket-client"
+version = "1.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/41/aa4bf9664e4cda14c3b39865b12251e8e7d239f4cd0e3cc1b6c2ccde25c1/websocket_client-1.9.0.tar.gz", hash = "sha256:9e813624b6eb619999a97dc7958469217c3176312b3a16a4bd1bc7e08a46ec98", size = 70576, upload-time = "2025-10-07T21:16:36.495Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/34/db/b10e48aa8fff7407e67470363eac595018441cf32d5e1001567a7aeba5d2/websocket_client-1.9.0-py3-none-any.whl", hash = "sha256:af248a825037ef591efbf6ed20cc5faa03d3b47b9e5a2230a529eeee1c1fc3ef", size = 82616, upload-time = "2025-10-07T21:16:34.951Z" },
 ]
 
 [[package]]

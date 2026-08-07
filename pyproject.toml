@@ -265,6 +265,13 @@ sandbox = [
     # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
     "openshell>=0.0.92,<0.1",
 
+    # Tenki SDK: used by the Tenki sandbox provider for create/exec/files/ports/terminate.
+    # Lower bound 0.5.4: first version validated against this provider's complete async API usage.
+    # Upper bound <0.6: the SDK is pre-1.0; the SDK-conformance unit test guards raising this ceiling.
+    # Updated: Wed Aug 05, 2026 with tenki>=0.5.4,<0.6
+    # License: MIT https://github.com/LuxorLabs/tenki-sdk-python/blob/main/LICENSE
+    "tenki>=0.5.4,<0.6",
+
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
     "daytona>=0.179.0",

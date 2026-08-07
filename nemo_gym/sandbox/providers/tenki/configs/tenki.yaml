@@ -1,0 +1,25 @@
+# Tenki sandbox provider config.
+#
+# TENKI_API_KEY is read by the SDK. Do not put credentials in this file.
+# TENKI_BASE_URL and TENKI_GATEWAY_URL may be set to override the hosted service.
+#
+# Usage:
+#   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/tenki/configs/tenki.yaml, $MODEL]"
+
+sandbox:
+  default_metadata:
+    sandbox-api: tenki-sdk
+  tenki:
+    connection:
+      timeout_s: 60
+    create:
+      ready_timeout_s: 300
+      # Bounds every sandbox even when SandboxSpec.ttl_s is omitted.
+      max_duration_s: 3600
+      probe_command: printf nemo-gym-tenki-ready
+      probe_expected_stdout: nemo-gym-tenki-ready
+      probe_timeout_s: 30
+    operations:
+      close_timeout_s: 120
+      close_poll_interval_s: 0.5
+      transfer_timeout_s: 300

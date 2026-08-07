@@ -167,6 +167,12 @@ def _load_openshell_provider() -> ProviderClass:
     return OpenShellProvider
 
 
+def _load_tenki_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.tenki import TenkiProvider
+
+    return TenkiProvider
+
+
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
@@ -174,3 +180,4 @@ _BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
 _BUILTIN_PROVIDER_LOADERS["enroot"] = _load_enroot_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
 _BUILTIN_PROVIDER_LOADERS["openshell"] = _load_openshell_provider
+_BUILTIN_PROVIDER_LOADERS["tenki"] = _load_tenki_provider
