@@ -52,7 +52,7 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 
 ## Communication & Async Patterns
 
-Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling via a singleton aiohttp client.
+Servers communicate via `ServerClient`, which wraps aiohttp with retry logic and connection pooling via a singleton aiohttp client. See `nemo_gym/server_utils.py::request` for the retry policy.
 
 - **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.server_utils.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
 - **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
