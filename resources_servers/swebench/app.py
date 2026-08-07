@@ -104,9 +104,6 @@ class DockerContainer(BaseModel):
         workdir: Optional[str] = None,
         user: Optional[str] = None,
     ) -> ExecResult:
-        import sys
-
-        print("COMMAND:", command, file=sys.stderr)
         res = await self._inner_container.exec(
             command=command,
             cwd=workdir,
@@ -121,9 +118,6 @@ class DockerContainer(BaseModel):
         )
 
     async def exec_run_with_timeout(self, command: str, timeout: int) -> Tuple[str, bool, float]:
-        import sys
-
-        print("COMMAND:", command, file=sys.stderr)
         # Returns: test_output: str, timed_out: bool, total_runtime: float
         start_time = time()
         try:
