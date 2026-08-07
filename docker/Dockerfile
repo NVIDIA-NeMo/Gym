@@ -81,13 +81,7 @@ COPY --from=nemo-gym nemo_gym/__init__.py nemo_gym/package_info.py ./nemo_gym/
 
 RUN uv venv --seed && \
     uv sync --link-mode symlink --locked --extra vllm --no-install-project && \
-    uv pip uninstall -y \
-        torchvision torchaudio \
-        opencv-python-headless opencv-python \
-        imageio-ffmpeg \
-        av decord2 \
-        ffmpeg-python pydub \
-        2>/dev/null || true
+    uv pip uninstall -y torchvision torchaudio opencv-python-headless 2>/dev/null || true
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
