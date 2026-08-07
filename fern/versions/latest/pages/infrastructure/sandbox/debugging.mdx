@@ -209,6 +209,28 @@ delivered to the container:
 Debian-style images (`python:3.12-slim`) read the system store and need none of this.
 </Warning>
 
+### Overriding what the server resolved
+
+`--env`, `--metadata` and `--provider-option` are the top layer of the resolution chain: they apply
+on top of both the declarative `sandbox_spec` and whatever a `spec_resolver` returned. That matters
+for a server that computes its spec in Python, because the resolver's spec wins outright over
+config — without these flags there would be no way to add anything to it from the command line.
+
+`--provider-option` decodes its value as JSON when it decodes, since provider options are not all
+strings; anything that is not valid JSON stays a string, so ids and names need no quoting.
+
+Asking a sandbox for a transparently-intercepting egress sidecar needs one of each, which is what
+this looks like in practice:
+
+```bash
+gym sandbox debug --config $AGENT --config $PROVIDER --task django__django-10973 \
+    --command "pip install --no-input tabulate" \
+    --env OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true \
+    --env SSL_CERT_FILE=/opt/opensandbox/mitmproxy-ca-cert.pem \
+    --metadata istio.io/dataplane-mode=none \
+    --provider-option 'network_policy={"defaultAction":"allow","egress":[]}'
+```
+
 ### With and without the wrapper
 
 `--bare` runs the command exactly as typed, skipping the server's `exec_wrapper`. The
