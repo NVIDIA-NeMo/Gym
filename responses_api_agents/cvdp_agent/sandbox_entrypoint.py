@@ -75,6 +75,9 @@ def main() -> None:
         if hasattr(agent, "_resolve_model_base_url"):
             v1 = model_url if model_url.endswith("/v1") else model_url + "/v1"
             agent._resolve_model_base_url = lambda: v1
+        if hasattr(agent, "resolve_model_base_url"):
+            v1 = model_url if model_url.endswith("/v1") else model_url + "/v1"
+            object.__setattr__(agent, "resolve_model_base_url", lambda model_server_name, rollout_id=None: v1)
         if hasattr(agent, "_resolve_base_url"):
             agent._resolve_base_url = lambda: model_url
 

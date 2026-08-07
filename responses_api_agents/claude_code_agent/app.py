@@ -651,7 +651,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
+        rollout_id = request.path_params.get("rollout_id") if request is not None else None
+        return await self._create_response(body, rollout_id=rollout_id)
 
     async def _create_episode(
         self,
