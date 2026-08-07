@@ -4,6 +4,7 @@ config_paths:
 - benchmarks/tau2/configs/tau2.yaml
 - benchmarks/aalcr/config.yaml
 - benchmarks/scicode/config.yaml
+- benchmarks/critpt/config.yaml
 # - benchmarks/swebench/verified/opencode.yaml
 # - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
@@ -21,6 +22,11 @@ sandbox:
   opensandbox:
     connection:
       domain: dummy
+      api_key: dummy  # pragma: allowlist secret
+
+critpt_benchmark_resources_server:
+  resources_servers:
+    critpt:
       api_key: dummy  # pragma: allowlist secret
 
 ########################################
