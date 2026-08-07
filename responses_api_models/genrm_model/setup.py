@@ -22,9 +22,9 @@ dependencies = [
     "nemo-gym[dev]",
 
     # We specifically pin the vllm dependency because we have tested on this version.
-    # Updated Mon Aug 04, 2026 with vllm==0.24.0
+    # Updated Fri Aug 07, 2026 with vllm==0.25.1
     # License: Apache 2.0 https://github.com/vllm-project/vllm/blob/main/LICENSE
-    # "vllm==0.24.0",
+    # "vllm==0.25.1",
     # VLLM is resolved below since installation on Macs requires special workarounds.
 
     # hf_transfer for faster model download from HuggingFace
@@ -47,12 +47,12 @@ dependencies = [
 if platform == "darwin":
     dependencies.append("vllm==0.11.0")
 else:
-    dependencies.append("vllm==0.24.0")
-    # Pin flashinfer to the exact version vllm 0.24.0 requires — pre-compiled CUDA kernels,
+    dependencies.append("vllm==0.25.1")
+    # Pin flashinfer to the exact version vllm 0.25.1 requires — pre-compiled CUDA kernels,
     # avoids JIT compilation on first generation. Must stay in sync with pyproject.toml [vllm].
-    # Updated Mon Aug 04, 2026 with flashinfer-python==0.6.12
+    # Updated Fri Aug 07, 2026 with flashinfer-python==0.6.13
     # License: Apache 2.0 https://github.com/flashinfer-ai/flashinfer/blob/main/LICENSE
-    dependencies.append("flashinfer-python==0.6.12")
+    dependencies.append("flashinfer-python==0.6.13")
 
 
 setuptools.setup(install_requires=dependencies)
