@@ -38,11 +38,11 @@ class TestApp:
         client = TestClient(app)
 
         monkeypatch.setattr(
-            "resources_servers.swebench.app.AsyncSandbox", lambda *args, **kwargs: MagicMock(start=AsyncMock())
+            "resources_servers.swebench.app.SwebenchResourcesServer._create_sandbox", AsyncMock(start=AsyncMock())
         )
         monkeypatch.setattr(
             "resources_servers.swebench.app.run_instance",
-            AsyncMock(return_value=dict(resolved=True, evaluation_completed=True)),
+            AsyncMock(return_value=dict(resolved=True, completed=True)),
         )
 
         res = client.post(
