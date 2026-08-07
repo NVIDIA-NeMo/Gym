@@ -13,6 +13,5 @@ gym eval run --no-serve \
 ```
 
 ```bash
-uv run --no-project --python python3 --with reasoning-gym==0.1.25 python \
-  environments/simple_strands_reasoning_gym/prepare.py --task knights_knaves --size 1000
+python environments/simple_strands_reasoning_gym/prepare.py --task knights_knaves --size 1000
 ```

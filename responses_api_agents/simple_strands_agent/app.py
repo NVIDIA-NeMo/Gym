@@ -176,6 +176,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        ensure_ssa(self.config.ssa_source_root, self.config.ssa_python)
 
     def _workspace(self) -> Path:
         root = Path(self.config.workspace_root).expanduser()
