@@ -775,14 +775,12 @@ class OpenSandboxProvider:
         timeout_s: float | None,
         retries: int,
     ) -> Any:
-        """Submit a command, absorbing backend-connect 502s the command retries skip.
+        """Retry backend-connect 502s that ``command_retries`` deliberately skips.
 
-        The proxy's 502 is a TCP-connect failure — the command never reached
-        execd — so retrying cannot run it twice even when ``command_retries``
-        is 0. This covers the ~2s execd bind window after a pod first reports
-        Running. A backend that stays unreachable through the budget is dead
-        (sandbox containers never restart), so fail fast and typed rather
-        than retrying for hours.
+        A proxy 502 is a TCP-connect failure: the command never reached execd, so
+        retrying under ``operations.retries`` cannot double-run it (unlike a real
+        command failure). When that budget is exhausted the backend is dead, so
+        raise a typed error and fail fast instead of retrying for hours.
         """
         attempts = self._operations.retries + 1
         for attempt in range(1, attempts + 1):
