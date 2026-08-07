@@ -1,0 +1,28 @@
+simple_strands_agent:
+  responses_api_agents:
+    simple_strands_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: null
+      concurrency: 8
+      max_turns: 30
+      max_output_tokens: 4096
+      temperature: null
+      timeout: 900
+      model_timeout: 600
+      shell_timeout: 120
+      conversation_window: 300
+      tools: [bash, str_replace_editor]
+      prompt_tag: swe_generic_v2
+      native_user_prompt: false
+      system_prompt: null
+      api_key: gym
+      workspace_root: outputs/simple_strands_agent/workspaces
+      keep_workspaces: false
+      ssa_source_root: ${oc.env:SSA_SOURCE_ROOT,null}
+      ssa_python: ${oc.env:SSA_PYTHON,null}

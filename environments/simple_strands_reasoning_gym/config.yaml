@@ -1,0 +1,38 @@
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: agent
+      verified: true
+      description: Simple Strands Agent harness with reasoning gym tasks
+      value: Improve reasoning capabilities with Simple Strands Agent
+
+simple_strands_reasoning_gym_agent:
+  responses_api_agents:
+    simple_strands_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 8
+      max_turns: 30
+      max_output_tokens: 4096
+      timeout: 900
+      tools: [bash]
+      native_user_prompt: false
+      ssa_source_root: ${oc.env:SSA_SOURCE_ROOT,null}
+      ssa_python: ${oc.env:SSA_PYTHON,null}
+      system_prompt: |
+        This is a standalone reasoning task, not a repository task. Do not edit files. Use bash
+        when helpful. Put only the final answer in \boxed{}.
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: environments/simple_strands_reasoning_gym/data/train.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: environments/simple_strands_reasoning_gym/data/example.jsonl
