@@ -75,8 +75,8 @@ def _require_reference_assets() -> None:
     missing = [filename for filename in GOLDEN_FILENAMES if not (GOLDENS_DIR / filename).is_file()]
     if missing:
         raise FileNotFoundError(
-            "Conversational tool-use policy references are missing from the package. "
-            f"Expected {len(GOLDEN_FILENAMES)} checked-in file(s); missing {len(missing)}, including {missing[0]!r}."
+            f"Conversational tool-use policy references are not prepared. Run `{PREPARE_COMMAND}`; "
+            f"expected {len(GOLDEN_FILENAMES)} file(s), missing {len(missing)}, including {missing[0]!r}."
         )
 
 

@@ -79,7 +79,7 @@ Prepare the shared assets before running this agent:
 python -m resources_servers.conversational_tool_use_simulation.prepare
 ```
 
-This downloads the `.txt` generation prompts from
+This downloads the generation prompts and golden policy/tool references from
 [`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets)
 at the revision pinned by the preparation module. Add `--include-prompt-history` for the optional prompt history:
 
@@ -88,7 +88,7 @@ python -m resources_servers.conversational_tool_use_simulation.prepare \
   --include-prompt-history
 ```
 
-Golden policy/tool references, JSON schemas, and example JSONL files remain in Git.
+JSON schemas and example JSONL files remain in Git.
 
 ## Run
 

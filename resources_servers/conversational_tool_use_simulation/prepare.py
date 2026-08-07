@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prepare file-backed conversational tool-use prompts from Hugging Face."""
+"""Prepare file-backed conversational tool-use assets from Hugging Face."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from pathlib import Path
 
 
 DEFAULT_REPO_ID = "nvidia/NeMo-Gym-Conversational-Tool-Use-Assets"
-DEFAULT_REVISION = "2d9b0f64664847f75c31f7f7eebe602351489093"  # pragma: allowlist secret
+DEFAULT_REVISION = "eadee8ebb245a7090488f803e9a74289a97c04c7"  # pragma: allowlist secret
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREPARE_COMMAND = "python -m resources_servers.conversational_tool_use_simulation.prepare"
 
@@ -68,6 +68,16 @@ def _runtime_bundles(repo_root: Path) -> tuple[AssetBundle, ...]:
             ),
             file_count=9,
             tree_sha256="d602f69b263e124468e0e952a39f473ba83b0278fb46462e44b4d3ed2e6f412e",  # pragma: allowlist secret
+        ),
+        AssetBundle(
+            remote_dir=Path("conversational_tool_use_policy_tool_generation/references/golden_policies"),
+            local_dir=repo_root
+            / "responses_api_agents/conversational_tool_use/policy_tool_generation/references/golden_policies",
+            filenames=tuple(
+                filename for index in range(1, 9) for filename in (f"policy-{index}.md", f"tools_{index}.jsonl")
+            ),
+            file_count=16,
+            tree_sha256="c1c621e88f763dab8fa23e6721180376d65b1386b99e662d32c652dcf28e1cd6",  # pragma: allowlist secret
         ),
         AssetBundle(
             remote_dir=Path("conversational_tool_use_scenario_generation/prompts"),

@@ -55,6 +55,10 @@ def test_runtime_bundle_filenames_match_component_loaders(tmp_path: Path) -> Non
         bundles["conversational_tool_use_policy_tool_generation/prompts"].filenames
         == policy_tool_assets.PROMPT_FILENAMES
     )
+    assert (
+        bundles["conversational_tool_use_policy_tool_generation/references/golden_policies"].filenames
+        == policy_tool_assets.GOLDEN_FILENAMES
+    )
     assert bundles["conversational_tool_use_scenario_generation/prompts"].filenames == scenario_assets.PROMPT_FILENAMES
 
 

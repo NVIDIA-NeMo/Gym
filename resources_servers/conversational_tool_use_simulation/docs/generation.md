@@ -14,16 +14,16 @@ export MODEL_API_KEY="<api-key>"
 export MODEL_NAME="<model-id>"
 ```
 
-Prepare the standalone generation prompts once per checkout:
+Prepare the standalone generation and reference assets once per checkout:
 
 ```bash
 python -m resources_servers.conversational_tool_use_simulation.prepare
 ```
 
-The command downloads the `.txt` prompt assets from
+The command downloads the prompt and golden policy/tool reference assets from
 [`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets).
 Add `--include-prompt-history` for the optional prompt history. Prompts implemented directly in Python, JSON schemas,
-policy/tool references, and example JSONL files remain in Git.
+and example JSONL files remain in Git.
 
 ## Start the Pipeline Servers
 
