@@ -1,0 +1,3 @@
+# Generated splits (rebuild with prepare_longmemeval.py); only example.jsonl is committed.
+data/*.jsonl
+!data/example.jsonl

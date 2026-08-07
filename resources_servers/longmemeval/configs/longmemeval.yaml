@@ -1,0 +1,63 @@
+longmemeval:
+  resources_servers:
+    longmemeval:
+      entrypoint: app.py
+      domain: long_context
+      verified: false
+      description: LongMemEval long-term-memory QA (orig-session / JSON history / no-CoT) scored by an LLM judge with the upstream per-question-type rubrics.
+      value: Improve long-horizon memory recall, temporal reasoning, knowledge updating and abstention over multi-session chat history.
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        # Upstream evaluate_qa.py uses max_tokens=10 on Chat Completions. The
+        # Responses API enforces a floor of 16 on max_output_tokens, and a
+        # reasoning-capable judge spends part of the budget before emitting
+        # visible text — 10 would 400 or return "". 64 is the smallest safe
+        # value; the rubric still asks for "yes or no only".
+        max_output_tokens: 64
+        temperature: 0.0
+      judge_endpoint_max_concurrency: 32
+      # Bounded exponential backoff on judge 429/5xx, so rate limiting cannot
+      # silently shrink the accuracy denominator. Raise both if a run reports a
+      # non-zero n_judge_call_failed.
+      judge_max_retries: 5
+      judge_retry_base_delay: 1.0
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+longmemeval_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: longmemeval
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/longmemeval/data/example.jsonl
+        license: Creative Commons Attribution-NonCommercial 4.0
+      # Build with `python resources_servers/longmemeval/prepare_longmemeval.py`.
+      - name: oracle
+        type: validation
+        jsonl_fpath: resources_servers/longmemeval/data/oracle.jsonl
+        license: Creative Commons Attribution-NonCommercial 4.0
+
+# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides.
+# Recommended judge: gpt-4o-mini (upstream default). Must stay at end of file
+# for update_env_list.py. policy_* are intentionally NOT defaulted here: the
+# policy model is supplied by whichever model-server config is composed in.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null
