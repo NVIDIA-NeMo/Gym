@@ -127,7 +127,7 @@ CMD ["--help"]
 FROM release AS test
 
 USER root
-RUN uv sync --link-mode copy --locked --extra dev --extra sandbox --no-extra vllm && \
+RUN uv sync --link-mode copy --locked --reinstall --extra dev --extra sandbox --no-extra vllm && \
     uv cache clean && \
     chown -R nemo-gym:nemo-gym /home/nemo-gym /opt/nemo-gym /opt/nemo_gym_venv
 
