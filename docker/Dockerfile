@@ -133,3 +133,7 @@ RUN UV_LINK_MODE=symlink uv sync --locked --extra dev --extra sandbox --extra vl
 USER nemo-gym
 ENTRYPOINT []
 CMD ["bash"]
+
+
+# Keep the runtime image as the default output when no target is specified.
+FROM release AS final
