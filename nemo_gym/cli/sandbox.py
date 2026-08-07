@@ -184,6 +184,11 @@ class SandboxDebugConfig(BaseNeMoGymCLIConfig):
     cwd: Optional[str] = Field(default=None, description="Working directory for the command.")
     user: Optional[str] = Field(default=None, description="User to run the command as.")
     env: List[str] = Field(default_factory=list, description="Extra environment variables as KEY=VALUE.")
+    metadata: List[str] = Field(default_factory=list, description="Extra sandbox metadata as KEY=VALUE; repeatable.")
+    provider_option: List[str] = Field(
+        default_factory=list,
+        description="Extra provider option as KEY=VALUE, value parsed as JSON when it parses; repeatable.",
+    )
 
     concurrency: int = Field(default=4, description="Maximum sandboxes in flight.")
     timeout_setup: Optional[float] = Field(default=None, description="Seconds allowed for boot and upload.")
@@ -388,14 +393,34 @@ def _exec_kwargs(server_config: Dict[str, Any], config: Any) -> Dict[str, Any]:
     return kwargs
 
 
-def _parse_env(pairs: List[str]) -> Dict[str, str]:
-    env: Dict[str, str] = {}
+def _parse_pairs(pairs: List[str], *, flag: str) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
     for pair in pairs:
         key, separator, value = pair.partition("=")
         if not separator or not key:
-            raise ConfigError(f"--env expects KEY=VALUE, got {pair!r}")
-        env[key] = value
-    return env
+            raise ConfigError(f"{flag} expects KEY=VALUE, got {pair!r}")
+        parsed[key] = value
+    return parsed
+
+
+def _parse_env(pairs: List[str]) -> Dict[str, str]:
+    return _parse_pairs(pairs, flag="--env")
+
+
+def _parse_provider_options(pairs: List[str]) -> Dict[str, Any]:
+    """Parse --provider-option KEY=VALUE, decoding VALUE as JSON when it decodes.
+
+    Provider options are not all strings: a network policy is a mapping, and
+    skip_health_check is a bool. Falling back to the raw string keeps the simple
+    cases (an id, a name) free of quoting ceremony.
+    """
+    options: Dict[str, Any] = {}
+    for key, value in _parse_pairs(pairs, flag="--provider-option").items():
+        try:
+            options[key] = json.loads(value)
+        except json.JSONDecodeError:
+            options[key] = value
+    return options
 
 
 ########################################
@@ -565,6 +590,12 @@ def build_plan(
     exec_kwargs = _exec_kwargs(server_config, config)
 
     env = {**spec.env, **_parse_env(config.env)}
+    # CLI flags are the top layer, above both the declarative sandbox_spec and a
+    # spec_resolver's output. Without this a resolver-based server could not be
+    # given a networkPolicy or an istio label from the command line at all, since
+    # the resolver's spec wins outright over config.
+    metadata.update(_parse_pairs(config.metadata, flag="--metadata"))
+    provider_options = {**spec.provider_options, **_parse_provider_options(config.provider_option)}
     # An explicit --ttl is taken at face value; otherwise cap at the debugging
     # default, whether the server asked for a rollout-sized lifetime or none at all
     # (which providers read as "never auto-terminate").
@@ -586,7 +617,7 @@ def build_plan(
         metadata=metadata,
         resources=spec.resources,
         entrypoint=list(spec.entrypoint) if spec.entrypoint else None,
-        provider_options=dict(spec.provider_options),
+        provider_options=provider_options,
     )
 
     raw_command = config.command

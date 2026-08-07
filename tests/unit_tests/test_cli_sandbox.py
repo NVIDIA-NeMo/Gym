@@ -1163,3 +1163,29 @@ def test_list_tasks_is_a_standalone_action() -> None:
     """It needs no --command; asking what exists precedes running anything."""
     config = cli_sandbox.SandboxDebugConfig.model_validate({"list_tasks": True})
     assert config.list_tasks is True
+
+
+def test_provider_options_parse_json_and_fall_back_to_strings() -> None:
+    """Provider options are not all strings.
+
+    A network policy is a mapping and skip_health_check is a bool, so values are
+    decoded as JSON; anything that is not valid JSON (an id, a name) is kept as the
+    raw string rather than rejected.
+    """
+    parsed = cli_sandbox._parse_provider_options(
+        [
+            'network_policy={"defaultAction": "allow", "egress": []}',
+            "skip_health_check=true",
+            "snapshot_id=snap-123",
+        ]
+    )
+    assert parsed["network_policy"] == {"defaultAction": "allow", "egress": []}
+    assert parsed["skip_health_check"] is True
+    assert parsed["snapshot_id"] == "snap-123"
+
+
+def test_pair_flags_name_themselves_when_malformed() -> None:
+    with pytest.raises(ConfigError, match="--provider-option expects KEY=VALUE"):
+        cli_sandbox._parse_provider_options(["no-equals-sign"])
+    with pytest.raises(ConfigError, match="--env expects KEY=VALUE"):
+        cli_sandbox._parse_env(["no-equals-sign"])

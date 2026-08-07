@@ -782,6 +782,13 @@ COMMANDS = {
             SANDBOX_CWD,
             SANDBOX_USER,
             _text_list_flag("env", "env", "Extra environment variable; repeatable.", metavar="KEY=VALUE"),
+            _text_list_flag("metadata", "metadata", "Extra sandbox metadata; repeatable.", metavar="KEY=VALUE"),
+            _text_list_flag(
+                "provider-option",
+                "provider_option",
+                "Extra provider option, value parsed as JSON when it parses; repeatable.",
+                metavar="KEY=VALUE",
+            ),
             _value_flag("concurrency", "concurrency", "Maximum sandboxes in flight."),
             _value_flag("timeout-setup", "timeout_setup", "Seconds allowed for boot and upload."),
             SANDBOX_TIMEOUT_TOTAL,
