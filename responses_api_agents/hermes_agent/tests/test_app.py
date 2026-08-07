@@ -18,7 +18,9 @@ from unittest.mock import MagicMock
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
 )
 from nemo_gym.server_utils import ServerClient
@@ -200,7 +202,7 @@ class TestTrajectoryToOutputItems:
     def test_drops_input_prefix(self) -> None:
         msgs = [
             {"role": "user", "content": "q"},
-            {"role": "assistant", "content": "a"},
+            {"role": "assistant", "content": "a", "generation_token_ids": [3, 4]},
         ]
         out = _trajectory_to_output_items(msgs, 1)
         assert len(out) == 1
@@ -235,6 +237,7 @@ class TestTrajectoryToOutputItems:
             {
                 "role": "assistant",
                 "content": "",
+                "generation_token_ids": [5, 6],
                 "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": '{"cmd":"ls"}'}}],
             },
             {"role": "tool", "tool_call_id": "c1", "content": "file.txt\n"},
@@ -250,9 +253,51 @@ class TestTrajectoryToOutputItems:
         assert out[2].output == "file.txt\n"
 
     def test_skips_non_dict_items(self) -> None:
-        msgs = [None, "string", {"role": "assistant", "content": "ok"}]
+        msgs = [None, "string", {"role": "assistant", "content": "ok", "generation_token_ids": [7]}]
         out = _trajectory_to_output_items(msgs, 0)
         assert len(out) == 1
+
+    def test_assistant_without_tokens_is_not_trainable(self) -> None:
+        """Locally-synthesised assistant turns (max-iteration summary, error apology) carry no
+        token ids. They must not be presented to the trainer as policy output."""
+        msgs = [{"role": "assistant", "content": "I hit the iteration limit."}]
+        out = _trajectory_to_output_items(msgs, 0)
+        assert len(out) == 1
+        assert isinstance(out[0], NeMoGymResponseOutputMessage)
+        assert not isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
+        assert out[0].content[0].text == "I hit the iteration limit."
+
+    def test_empty_token_ids_are_not_trainable(self) -> None:
+        """An explicitly empty generation_token_ids is as untrainable as an absent one."""
+        msgs = [{"role": "assistant", "content": "x", "prompt_token_ids": [], "generation_token_ids": []}]
+        out = _trajectory_to_output_items(msgs, 0)
+        assert isinstance(out[0], NeMoGymResponseOutputMessage)
+        assert not isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
+
+    def test_assistant_without_tokens_still_emits_tool_calls(self) -> None:
+        """Downgrading the message type must not drop the tool calls attached to it."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": '{"cmd":"ls"}'}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "file.txt\n"},
+        ]
+        out = _trajectory_to_output_items(msgs, 0)
+        assert len(out) == 3
+        assert isinstance(out[0], NeMoGymResponseOutputMessage)
+        assert not isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
+        assert isinstance(out[1], NeMoGymResponseFunctionToolCall)
+        assert out[1].name == "terminal"
+        assert isinstance(out[2], NeMoGymFunctionCallOutput)
+
+    def test_routed_experts_survive_on_trainable_turns(self) -> None:
+        """The trainable branch must keep forwarding routed_experts (added upstream in #1716)."""
+        msgs = [{"role": "assistant", "content": "a", "generation_token_ids": [2], "routed_experts": [[[1, 2]]]}]
+        out = _trajectory_to_output_items(msgs, 0)
+        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
+        assert out[0].routed_experts == [[[1, 2]]]
 
 
 class TestRolloutCorrelation:
@@ -290,3 +335,60 @@ class TestRolloutCorrelation:
 
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["base_url"] == "http://h:1/v1"
+
+
+class TestResponsesEmitsNoFabricatedTokens:
+    """The /responses fallback path must never invent training token ids."""
+
+    async def _run(self, monkeypatch, messages, error="boom") -> list:
+        import asyncio as _asyncio
+
+        import run_agent
+
+        import nemo_gym.base_responses_api_agent as base_agent
+
+        # resolve_model_base_url is a public method on a pydantic model, so it cannot be
+        # monkeypatched on the instance. Stub out what it reads instead, as TestRolloutCorrelation does.
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(), server_client=server_client)
+        monkeypatch.setattr(run_agent, "AIAgent", MagicMock())
+
+        async def _fake_to_thread(fn, *args, **kwargs):
+            return {"messages": messages, "error": error}
+
+        monkeypatch.setattr(_asyncio, "to_thread", _fake_to_thread)
+        body = NeMoGymResponseCreateParamsNonStreaming(input="q", model="m")
+        resp = await agent.responses(MagicMock(), body)
+        return list(resp.output)
+
+    async def test_untrainable_trajectory_is_not_padded_with_fake_tokens(self, monkeypatch) -> None:
+        """Previously this emitted ...ForTraining with generation_token_ids=[0]."""
+        out = await self._run(monkeypatch, [{"role": "assistant", "content": "synthetic summary"}])
+        assert not any(isinstance(item, NeMoGymResponseOutputMessageForTraining) for item in out)
+        assert any(isinstance(item, NeMoGymResponseOutputMessage) for item in out)
+
+    async def test_does_not_reuse_token_ids_from_input_history(self, monkeypatch) -> None:
+        """Previously the fallback copied token ids off the last assistant message anywhere in
+        `messages` — including the prompt history, i.e. tokens this rollout never generated."""
+        messages = [
+            {"role": "assistant", "content": "from history", "prompt_token_ids": [1, 2], "generation_token_ids": [9]},
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "synthetic summary"},
+        ]
+        out = await self._run(monkeypatch, messages)
+        assert all(getattr(item, "generation_token_ids", None) != [9] for item in out)
+        assert not any(isinstance(item, NeMoGymResponseOutputMessageForTraining) for item in out)
+
+    async def test_real_generation_is_still_trainable(self, monkeypatch) -> None:
+        """A genuine policy turn is unaffected and keeps its token ids."""
+        messages = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a", "prompt_token_ids": [1], "generation_token_ids": [2, 3]},
+        ]
+        out = await self._run(monkeypatch, messages, error=None)
+        trainable = [item for item in out if isinstance(item, NeMoGymResponseOutputMessageForTraining)]
+        assert len(trainable) == 1
+        assert trainable[0].generation_token_ids == [2, 3]

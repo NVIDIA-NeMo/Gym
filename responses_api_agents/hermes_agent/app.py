@@ -42,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
@@ -60,19 +61,38 @@ def _trajectory_to_output_items(messages, n_input):
         if isinstance(content, list):
             content = "".join(c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "") for c in content)
         if role == "assistant":
-            output_items.append(
-                NeMoGymResponseOutputMessageForTraining(
-                    id=f"msg-{len(output_items)}",
-                    content=[NeMoGymResponseOutputText(type="output_text", text=content, annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                    prompt_token_ids=item.get("prompt_token_ids") or [],
-                    generation_token_ids=item.get("generation_token_ids") or [],
-                    generation_log_probs=item.get("generation_log_probs") or [],
-                    routed_experts=item.get("routed_experts"),
+            text_content = [NeMoGymResponseOutputText(type="output_text", text=content, annotations=[])]
+            if item.get("generation_token_ids"):
+                output_items.append(
+                    NeMoGymResponseOutputMessageForTraining(
+                        id=f"msg-{len(output_items)}",
+                        content=text_content,
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                        prompt_token_ids=item.get("prompt_token_ids") or [],
+                        generation_token_ids=item.get("generation_token_ids") or [],
+                        generation_log_probs=item.get("generation_log_probs") or [],
+                        routed_experts=item.get("routed_experts"),
+                    )
                 )
-            )
+            else:
+                # Not everything hermes appends with role="assistant" came from the policy: the
+                # max-iterations summary and the repeated-error apology are both synthesised
+                # locally and carry no token ids. Emitting those as ...ForTraining hands the
+                # trainer an assistant turn with an empty token sequence, which breaks the
+                # contiguity of the prompt/generation token chain across turns. Use the
+                # non-training message type instead — /verify still sees the text, so the rollout
+                # keeps its reward, but the turn is not presented as policy output.
+                output_items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg-{len(output_items)}",
+                        content=text_content,
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                )
             for tc in item.get("tool_calls") or []:
                 fn = tc.get("function") if isinstance(tc, dict) else None
                 if not fn:
@@ -324,37 +344,32 @@ class HermesAgent(SimpleResponsesAPIAgent):
         output_items = _trajectory_to_output_items(messages, n_input)
 
         has_assistant_message = any(
-            getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
+            getattr(item, "type", None) == "message"
+            and getattr(item, "role", None) == "assistant"
+            and getattr(item, "generation_token_ids", None)
             for item in output_items
         )
         if not has_assistant_message:
             LOG.warning(
-                "Hermes agent ended without an assistant message. Padding empty assistant message. This should not happen often, investigate: error=%r",
+                "Hermes agent ended without a trainable assistant message. Emitting a non-trainable assistant message so the rollout can still be verified. This should not happen often, investigate: error=%r",
                 result.get("error"),
             )
-            last_valid = next(
-                (
-                    m
-                    for m in reversed(messages)
-                    if isinstance(m, dict) and m.get("role") == "assistant" and m.get("generation_token_ids")
-                ),
-                None,
-            )
-            pti = last_valid["prompt_token_ids"] if last_valid else [0]
-            gti = last_valid["generation_token_ids"] if last_valid else [0]
-            glp = (last_valid.get("generation_log_probs") if last_valid else None) or [0.0]
-            routed_experts = last_valid.get("routed_experts") if last_valid else None
+            # Deliberately NOT ...ForTraining, and deliberately no fabricated token ids. The
+            # previous implementation substituted either literal [0] placeholders or the token ids
+            # of the last assistant message anywhere in `messages` — which includes the input
+            # history, i.e. tokens the policy did not generate for this rollout. Both handed the
+            # trainer fabricated samples that are indistinguishable from real ones downstream.
+            # A rollout with no policy output has nothing to train on; say so, and let the trainer
+            # decide what to do with it.
             output_items.append(
-                NeMoGymResponseOutputMessageForTraining(
+                NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
-                    content=[NeMoGymResponseOutputText(text=result.get("error") or "", annotations=[])],
+                    content=[
+                        NeMoGymResponseOutputText(type="output_text", text=result.get("error") or "", annotations=[])
+                    ],
                     role="assistant",
                     status="completed",
                     type="message",
-                    prompt_token_ids=pti,
-                    generation_token_ids=gti,
-                    generation_log_probs=glp,
-                    routed_experts=routed_experts,
                 )
             )
 
