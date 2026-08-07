@@ -807,7 +807,11 @@ class OpenSandboxProvider:
                 sleep_s = min(0.25 * 2 ** (attempt - 1), 2.0)
                 LOGGER.warning(
                     "Backend-connect 502 on %s; retrying submission %s/%s in %.1fs; sandbox_id=%s",
-                    operation, attempt, attempts, sleep_s, sandbox_id,
+                    operation,
+                    attempt,
+                    attempts,
+                    sleep_s,
+                    sandbox_id,
                 )
                 await asyncio.sleep(sleep_s)
 
