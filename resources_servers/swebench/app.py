@@ -147,6 +147,16 @@ class DockerContainer(BaseModel):
         return (test_output, timed_out, time() - start_time)
 
     async def copy(self, src: Path, dest: Path) -> None:
+        if "eval.sh" in str(src):
+            data = src.read_text()
+
+            # This init.d is necessary for some Java tests to properly pull from the maven mirror
+            # See `_apply_sandbox_patches`
+            data = data.replace(
+                "./gradlew test", "./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"
+            )
+            src.write_text(data)
+
         await self._inner_container.upload(local_path=src, remote_path=str(dest))
 
     async def cleanup(self) -> None:
@@ -206,21 +216,13 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         settings_xml_path = base_path / "settings.xml"
         init_gradle_path = base_path / "init.gradle"
 
-        await sandbox.exec("""mkdir -p \
-        /root/.m2 \
-        /root/.gradle/init.d \
-        /home/gradle/.gradle/init.d \
-        /home/user/.gradle/init.d \
-        $GRADLE_USER_HOME/init.d \
-        $HOME/.gradle/init.d""")
+        await sandbox.exec("""mkdir -p /root/.m2 /root/.gradle/init.d""")
+
+        # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
         await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
+
+        # This init.d is necessary for some Java tests to properly pull from the maven mirror
         await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
-        # We use || here rather than && since some of these places may refer to the same place.
-        await sandbox.exec("""cp /root/.gradle/init.d/maven_central_mirror.gradle /home/gradle/.gradle/init.d/ \
-        || cp /root/.gradle/init.d/maven_central_mirror.gradle /home/user/.gradle/init.d/ \
-        || cp /root/.gradle/init.d/maven_central_mirror.gradle $GRADLE_USER_HOME/init.d/ \
-        || cp /root/.gradle/init.d/maven_central_mirror.gradle $HOME/.gradle/init.d/
-        """)
 
     def _make_test_spec(self, body: SWEBenchVerifyRequest) -> TestSpec:
         return make_test_spec(

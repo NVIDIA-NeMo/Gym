@@ -7,7 +7,11 @@
 // build.gradle, in `dependencyResolutionManagement { }`, or by plugins
 // at any point during configuration are all rewritten.
 
+import org.gradle.api.artifacts.repositories.MavenArtifactRepository
+
 def MIRROR_URL = 'https://maven-central.storage-download.googleapis.com/maven2/'
+
+println ">>> Maven Central mirror init script loaded"
 
 def mavenCentralPrefixes = [
     'https://repo.maven.apache.org/maven2',
@@ -16,7 +20,17 @@ def mavenCentralPrefixes = [
     'http://repo1.maven.org/maven2',
 ]
 
+def redirect = { repo ->
+  if (repo instanceof MavenArtifactRepository &&
+      repo.url.host == "repo.maven.apache.org") {
+    println ">>> Redirecting ${repo.url}"
+    repo.setUrl(MIRROR_URL)
+    println ">>> New repository URL: ${repo.url}"
+  }
+}
+
 def rewriteHandler = { repositoryHandler ->
+    println ">>> Hit in rewriteHandler"
     repositoryHandler.all { repo ->
         if (repo instanceof MavenArtifactRepository) {
             def existing = repo.url?.toString() ?: ''
@@ -36,13 +50,17 @@ def rewriteHandler = { repositoryHandler ->
 }
 
 allprojects {
+    println ">>> Hit in allprojects"
     buildscript {
         rewriteHandler(repositories)
     }
     rewriteHandler(repositories)
+    buildscript.repositories.all(redirect)
+    repositories.all(redirect)
 }
 
 settingsEvaluated { settings ->
+    println ">>> Hit in settingsEvaluated"
     rewriteHandler(settings.pluginManagement.repositories)
     try {
         rewriteHandler(settings.dependencyResolutionManagement.repositories)
