@@ -736,6 +736,13 @@ class RolloutCollectionHelper(BaseModel):
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
+        # Create the output directory up front: every artifact this run writes (materialized inputs,
+        # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
+        # parent, and the materialized-inputs write below is the first one. Keep this above that
+        # write -- a user pointing --output at a not-yet-existing directory is the common case
+        # outside a git clone.
+        output_fpath.parent.mkdir(parents=True, exist_ok=True)
+
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
                 input_rows,
@@ -776,7 +783,6 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
-        output_fpath.parent.mkdir(exist_ok=True, parents=True)
         failures_fpath = failures_path_for(output_fpath)
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
