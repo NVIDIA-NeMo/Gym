@@ -23,7 +23,10 @@ entries through a ``TokenSource`` and stitches them into a trajectory.
 **This package is a leaf.** Importing it must not pull in fastapi, ray, uvicorn,
 aiohttp, requests, or torch, because a training framework's inference worker
 imports the record, the protocols, and the capture core to write into its own
-data plane (see ``protocols.py``).
+data plane (see ``protocols.py``). One module does need Gym's server stack and is
+deliberately *not* re-exported here: the rollout-record finalizer. Import
+``nemo_gym.token_id_capture.delivery`` directly from the code that already
+depends on Gym.
 
 Records are read back through a ``TokenSource``. ``TokenCaptureStore`` is one,
 and is what a reader sitting alongside the store uses. A framework staging
