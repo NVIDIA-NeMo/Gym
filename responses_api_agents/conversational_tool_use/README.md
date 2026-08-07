@@ -12,3 +12,15 @@ The conversational tool-use workflow is implemented by four Responses API agents
 The generation stages run in table order. The complete conversation stack, shared workflow documentation, and runnable
 resource-server configs live in
 [`resources_servers/conversational_tool_use_simulation`](../../resources_servers/conversational_tool_use_simulation).
+
+## Prepare Assets
+
+Prepare all runtime prompts and policy/tool golden references before running any stage:
+
+```bash
+python -m resources_servers.conversational_tool_use_simulation.prepare
+```
+
+The command downloads the assets from
+[`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets).
+Add `--include-prompt-history` for the optional prompt history. JSON schemas and example JSONL files remain in Git.

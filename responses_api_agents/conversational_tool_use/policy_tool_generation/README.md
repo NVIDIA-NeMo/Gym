@@ -51,7 +51,7 @@ Agent controls:
 | `judge_model_server` | `policy_tool_judge_model` | Model-server instance used for quality judgments |
 | `max_retries` | `20` | Full-pipeline retries after the first attempt |
 | `use_refinement` | `true` | Run policy and tool refinement after initial generation |
-| `initial_reference_count` | `8` | Shuffled packaged policy/tool references included in the initial prompts |
+| `initial_reference_count` | `8` | Shuffled prepared policy/tool references included in the initial prompts |
 | `policy_refine_reference_count` | `8` | Shuffled policy references used for general-profile policy refinement |
 | `minimum_tool_count` | `0` | Reject an attempt producing fewer tools; `0` preserves permissive validation |
 | `cohesion_judge_count` | `3` | Cohesion calls per attempt; `0` disables the cohesion gate |
@@ -71,26 +71,24 @@ concurrency on the corresponding model-server copies. Provider retry behavior re
 `gym eval run --concurrency` separately controls concurrent policy/tool rollouts. Unknown agent settings are rejected
 so misspelled controls cannot silently fall back to defaults.
 
-## Prepare Reference Assets
+## Prepare Assets
 
-Download the pinned golden policy/tool references before starting this generation stage:
+Prepare the shared assets before running this agent:
 
 ```bash
-python -m responses_api_agents.conversational_tool_use.policy_tool_generation.prepare
+python -m resources_servers.conversational_tool_use_simulation.prepare
 ```
 
-The downloader reads the
+This downloads all runtime prompts and policy/tool golden references from
 [`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets)
-dataset at the revision pinned in `prepare.py`. It validates the complete file set and its content checksum before
-replacing the local reference directory. Historical prompt revisions are not required at runtime; materialize them
-only when inspecting prompt development history:
+at the revision pinned by the preparation module. Add `--include-prompt-history` for the optional prompt history:
 
 ```bash
-python -m responses_api_agents.conversational_tool_use.policy_tool_generation.prepare \
+python -m resources_servers.conversational_tool_use_simulation.prepare \
   --include-prompt-history
 ```
 
-The active prompt templates remain package-local because they are executable agent assets.
+JSON schemas and example JSONL files remain in Git.
 
 ## Run
 

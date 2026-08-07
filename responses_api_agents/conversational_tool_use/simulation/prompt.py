@@ -18,38 +18,28 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 
-AGENT_SYSTEM_MESSAGE_TEMPLATE = """You are a customer service agent that helps the user.  The policy that determines how you should respond to requests from users is described below between the <policy> and </policy> tags.
+PACKAGE_DIR = Path(__file__).resolve().parent
+PROMPTS_DIR = PACKAGE_DIR / "prompts"
+PROMPT_FILENAMES = ("agent_parallel_system.txt", "agent_system.txt")
+PREPARE_COMMAND = "python -m resources_servers.conversational_tool_use_simulation.prepare"
 
-In each turn you can either:
-- Send a message to the user.
-- Make a tool call.
-You cannot do both at the same time.
 
-<policy>
-{domain_policy}
-</policy>
-
-Try to be helpful and always follow the policy."""
-
-AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE = """You are a customer service agent that helps the user.  The policy that determines how you should respond to requests from users is described below between the <policy> and </policy> tags.
-
-In each turn you can either:
-- Send a message to the user.
-- Make one or more tool calls.
-You cannot do both at the same time.
-
-<policy>
-{domain_policy}
-</policy>
-
-Try to be helpful and always follow the policy."""
+def _read_prompt(filename: str) -> str:
+    path = PROMPTS_DIR / filename
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Conversational tool-use prompts are not prepared. Run `{PREPARE_COMMAND}`; missing {path}."
+        )
+    return path.read_text(encoding="utf-8")
 
 
 def agent_system_message(policy: str, *, parallel_tool_calls: bool = False) -> str:
-    template = AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE if parallel_tool_calls else AGENT_SYSTEM_MESSAGE_TEMPLATE
+    filename = "agent_parallel_system.txt" if parallel_tool_calls else "agent_system.txt"
+    template = _read_prompt(filename)
     return template.format(domain_policy=policy)
 
 

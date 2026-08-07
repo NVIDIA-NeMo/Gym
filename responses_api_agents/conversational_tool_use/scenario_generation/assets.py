@@ -21,9 +21,9 @@ from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROMPTS_DIR = PACKAGE_DIR / "prompts"
-SYSTEM_PROMPT_PATH = PROMPTS_DIR / "scenario_system.txt"
-USER_PROMPT_PATH = PROMPTS_DIR / "scenario_user.txt"
+PROMPT_FILENAMES = ("scenario_system.txt", "scenario_user.txt")
 SCHEMA_PATH = PROMPTS_DIR / "customer_scenario_collection_schema.json"
+PREPARE_COMMAND = "python -m resources_servers.conversational_tool_use_simulation.prepare"
 
 
 @dataclass(frozen=True)
@@ -34,8 +34,14 @@ class ScenarioAssets:
 
 
 def load_assets() -> ScenarioAssets:
+    missing = [filename for filename in PROMPT_FILENAMES if not (PROMPTS_DIR / filename).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Conversational tool-use prompts are not prepared. "
+            f"Run `{PREPARE_COMMAND}`; missing {PROMPTS_DIR / missing[0]}."
+        )
     return ScenarioAssets(
-        system_prompt=SYSTEM_PROMPT_PATH.read_text(encoding="utf-8"),
-        user_prompt=USER_PROMPT_PATH.read_text(encoding="utf-8"),
+        system_prompt=(PROMPTS_DIR / "scenario_system.txt").read_text(encoding="utf-8"),
+        user_prompt=(PROMPTS_DIR / "scenario_user.txt").read_text(encoding="utf-8"),
         schema=SCHEMA_PATH.read_text(encoding="utf-8"),
     )

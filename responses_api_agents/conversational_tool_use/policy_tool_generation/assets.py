@@ -26,13 +26,24 @@ from responses_api_agents.conversational_tool_use.policy_tool_generation.models 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROMPTS_DIR = PACKAGE_DIR / "prompts"
 GOLDENS_DIR = PACKAGE_DIR / "references" / "golden_policies"
+PROMPT_FILENAMES = (
+    "cohesion_judge.txt",
+    "general_policy.txt",
+    "general_policy_refine.txt",
+    "general_tools.txt",
+    "golden_judge.txt",
+    "proactive_policy.txt",
+    "proactive_policy_refine.txt",
+    "proactive_tools.txt",
+    "tools_refine.txt",
+)
 GOLDEN_FILENAMES = tuple(
     filename for index in range(1, 9) for filename in (f"policy-{index}.md", f"tools_{index}.jsonl")
 )
 GOLDEN_TREE_SHA256 = (  # pragma: allowlist secret
     "c1c621e88f763dab8fa23e6721180376d65b1386b99e662d32c652dcf28e1cd6"
 )
-PREPARE_COMMAND = "python -m responses_api_agents.conversational_tool_use.policy_tool_generation.prepare"
+PREPARE_COMMAND = "python -m resources_servers.conversational_tool_use_simulation.prepare"
 
 
 @dataclass(frozen=True)
@@ -55,10 +66,15 @@ class PolicyToolAssets:
 
 
 def _read_prompt(filename: str) -> str:
-    return (PROMPTS_DIR / filename).read_text(encoding="utf-8").strip()
+    path = PROMPTS_DIR / filename
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Conversational tool-use prompts are not prepared. Run `{PREPARE_COMMAND}`; missing {path}."
+        )
+    return path.read_text(encoding="utf-8").strip()
 
 
-def _require_golden_assets() -> None:
+def _require_reference_assets() -> None:
     missing = [filename for filename in GOLDEN_FILENAMES if not (GOLDENS_DIR / filename).is_file()]
     if missing:
         raise FileNotFoundError(
@@ -69,7 +85,7 @@ def _require_golden_assets() -> None:
 
 
 def load_assets(profile: PolicyToolProfile) -> PolicyToolAssets:
-    _require_golden_assets()
+    _require_reference_assets()
     profile_prefix = "general" if profile == "general" else "proactive"
     golden_pairs = []
     for index in range(1, 9):

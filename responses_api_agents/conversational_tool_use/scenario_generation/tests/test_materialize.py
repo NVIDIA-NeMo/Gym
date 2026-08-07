@@ -26,9 +26,7 @@ from responses_api_agents.conversational_tool_use.scenario_generation.materializ
     main,
     materialize_rollouts,
 )
-from responses_api_agents.conversational_tool_use.simulation.prompt import (
-    AGENT_SYSTEM_MESSAGE_TEMPLATE,
-)
+from responses_api_agents.conversational_tool_use.simulation.prompt import agent_system_message
 
 
 def scenario(reason: str) -> dict:
@@ -138,7 +136,7 @@ def test_materialize_preserves_rollout_and_scenario_order(tmp_path: Path) -> Non
     assert rows[0]["responses_create_params"]["input"] == [
         {
             "role": "system",
-            "content": AGENT_SYSTEM_MESSAGE_TEMPLATE.format(domain_policy="Authenticate first."),
+            "content": agent_system_message("Authenticate first."),
         }
     ]
     assert set(rows[0]["responses_create_params"]) == {

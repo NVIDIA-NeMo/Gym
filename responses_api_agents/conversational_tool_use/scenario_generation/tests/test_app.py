@@ -39,9 +39,8 @@ from responses_api_agents.conversational_tool_use.scenario_generation.app import
     ScenarioGenerationRunRequest,
 )
 from responses_api_agents.conversational_tool_use.scenario_generation.assets import (
+    PROMPT_FILENAMES,
     SCHEMA_PATH,
-    SYSTEM_PROMPT_PATH,
-    USER_PROMPT_PATH,
     ScenarioAssets,
     load_assets,
 )
@@ -175,30 +174,19 @@ def run_request() -> ScenarioGenerationRunRequest:
     )
 
 
-def test_prompt_and_schema_bytes() -> None:
-    expected = {
-        SYSTEM_PROMPT_PATH: (
-            673,
-            "9b799cf3bd1110e9d637ca4db718f68d626c90943ecf5bcbf2ad808a511f3d90",  # pragma: allowlist secret
-        ),
-        USER_PROMPT_PATH: (
-            243,
-            "cad5e03e2ad1365c919da4520af339a0616ec0954a29e415779244df13b73cbd",  # pragma: allowlist secret
-        ),
-        SCHEMA_PATH: (
-            1877,
-            "b0a4d8385fbda3b77d8d9626bc5998f1d5e62a2f75a225c3f6198a663aa5991e",  # pragma: allowlist secret
-        ),
-    }
-    for path, (expected_length, expected_hash) in expected.items():
-        raw_bytes = path.read_bytes()
-        assert len(raw_bytes) == expected_length
-        assert hashlib.sha256(raw_bytes).hexdigest() == expected_hash
-
+def test_prepared_prompts_and_schema() -> None:
+    assert PROMPT_FILENAMES == ("scenario_system.txt", "scenario_user.txt")
     assets = load_assets()
-    assert assets.system_prompt == SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-    assert assets.user_prompt == USER_PROMPT_PATH.read_text(encoding="utf-8")
+    assert assets.system_prompt == "Policy: {domain_policy}\nScope: {policy_scope_instruction}"
+    assert assets.user_prompt == (
+        "Please create {scenario_count} different customer scenarios using {scenarios_schema}"
+    )
     assert assets.schema == SCHEMA_PATH.read_text(encoding="utf-8")
+    raw_schema = SCHEMA_PATH.read_bytes()
+    assert len(raw_schema) == 1877
+    assert hashlib.sha256(raw_schema).hexdigest() == (
+        "b0a4d8385fbda3b77d8d9626bc5998f1d5e62a2f75a225c3f6198a663aa5991e"  # pragma: allowlist secret
+    )
 
 
 def test_config_and_example_data_contract() -> None:

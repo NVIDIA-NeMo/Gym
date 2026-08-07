@@ -16,7 +16,7 @@
 import asyncio
 import json
 import time
-from typing import Any, ClassVar, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException, Request, Response
@@ -50,8 +50,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import split_responses_input_output_items
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.conversational_tool_use.simulation.prompt import (
-    AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE,
-    AGENT_SYSTEM_MESSAGE_TEMPLATE,
     agent_system_message,
     responses_api_tools,
 )
@@ -121,9 +119,6 @@ class ConversationalToolUseAgentVerifyResponse(BaseVerifyResponse):
 
 
 class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
-    AGENT_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = AGENT_SYSTEM_MESSAGE_TEMPLATE
-    AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE
-
     config: ConversationalToolUseAgentConfig
 
     async def responses(

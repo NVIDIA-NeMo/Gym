@@ -20,8 +20,22 @@ from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROMPTS_DIR = PACKAGE_DIR / "prompts"
-DOMAIN_PROMPT_PATH = PROMPTS_DIR / "domain_generation.txt"
+PROMPT_FILENAMES = ("domain_followup.txt", "domain_generation.txt")
+PREPARE_COMMAND = "python -m resources_servers.conversational_tool_use_simulation.prepare"
+
+
+def _read_prompt(filename: str) -> str:
+    path = PROMPTS_DIR / filename
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Conversational tool-use prompts are not prepared. Run `{PREPARE_COMMAND}`; missing {path}."
+        )
+    return path.read_text(encoding="utf-8").strip()
 
 
 def load_domain_prompt() -> str:
-    return DOMAIN_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    return _read_prompt("domain_generation.txt")
+
+
+def load_followup_instruction() -> str:
+    return _read_prompt("domain_followup.txt")

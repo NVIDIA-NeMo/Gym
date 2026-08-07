@@ -32,7 +32,7 @@ The input row has the initial prompt in `responses_create_params.input`:
 ```
 
 Use one rollout for each sampler. Collect as many independent rollouts as the dataset requires.
-`data/example.jsonl` contains the active prompt.
+`data/example.jsonl` shows the input-row format.
 
 The result extends Gym's normal verify response with:
 
@@ -53,9 +53,17 @@ correlated with the sampler rollout.
 The default one-follow-up trace retains `domain-generation/v1`. Configurations with zero or multiple follow-ups emit
 `domain-generation/v2`; the trace model accepts both versions.
 
-## Prompts
+## Prepare Assets
 
-`prompts/domain_generation.txt` is the active domain-generation prompt.
+Prepare the shared assets before running this agent:
+
+```bash
+python -m resources_servers.conversational_tool_use_simulation.prepare
+```
+
+This downloads all runtime prompts and policy/tool golden references from
+[`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets).
+Add `--include-prompt-history` for the optional prompt history. JSON schemas and example JSONL files remain in Git.
 
 ## Configuration
 

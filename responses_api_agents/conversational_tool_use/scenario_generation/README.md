@@ -5,7 +5,7 @@ This `SimpleResponsesAPIAgent` runs one customer-service domain per Gym rollout.
 
 - assigns 20 independent outside-policy-scope values with `random() < 0.1`
 - launches 20 `/v1/chat/completions` calls with at most 20 in flight
-- asks for 80 scenarios in every call using package-owned prompt and schema assets
+- asks for 80 scenarios in every call using prepared prompts and checked-in JSON schemas
 - sends only `messages` in each child request
 - performs fence removal and Pydantic JSON parsing without semantic retries
 - records individual failures and continues
@@ -26,6 +26,18 @@ is separate from `/run`, whose configured child Chat Completions requests contai
 [`data/example.jsonl`](data/example.jsonl) shows the one-domain input shape. `domain_name`, `policy`, and
 `responses_create_params` are required. Pipeline-materialized rows also retain the generation profile, source lineage,
 domain policy, and raw simulator tools.
+
+## Prepare Assets
+
+Prepare the shared assets before running this agent:
+
+```bash
+python -m resources_servers.conversational_tool_use_simulation.prepare
+```
+
+This downloads all runtime prompts and policy/tool golden references from
+[`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets).
+Add `--include-prompt-history` for the optional prompt history. JSON schemas and example JSONL files remain in Git.
 
 ## Configuration
 

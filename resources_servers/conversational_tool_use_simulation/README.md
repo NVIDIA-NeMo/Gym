@@ -27,6 +27,19 @@ Each generation agent README documents its input, output, and materializer. See
 [generation workflow](docs/generation.md) for runnable end-to-end commands and
 [rollout behavior](docs/rollout.md) for the session and verification contract.
 
+## Prepare Assets
+
+Prepare the shared assets once per checkout before starting any generation or simulation component:
+
+```bash
+python -m resources_servers.conversational_tool_use_simulation.prepare
+```
+
+This downloads all runtime prompts and policy/tool golden references from
+[`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets).
+Add `--include-prompt-history` to materialize the optional prompt history. JSON schemas and example JSONL files remain
+in Git.
+
 ## Rollout Resource Server
 
 It owns per-session domain state:
