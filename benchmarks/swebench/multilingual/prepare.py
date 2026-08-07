@@ -20,6 +20,8 @@ from pathlib import Path
 
 from datasets import load_dataset
 
+from nemo_gym.global_config import get_hf_token
+
 
 BENCHMARK_DIR = Path(__file__).parent.parent
 DATA_DIR = BENCHMARK_DIR / "data"
@@ -28,7 +30,7 @@ OUTPUT_FPATH = DATA_DIR / "swebench_multilingual_benchmark.jsonl"
 
 
 def prepare():
-    ds = load_dataset("SWE-bench/SWE-bench_Multilingual", split="test")
+    ds = load_dataset("SWE-bench/SWE-bench_Multilingual", split="test", token=get_hf_token())
 
     with OUTPUT_FPATH.open("w", encoding="utf-8") as fout:
         for row in ds:
