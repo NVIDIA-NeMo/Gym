@@ -44,6 +44,7 @@ class TALESSessionState:
     max_episode_steps: int
     last_score: float = 0.0
     total_score: float = 0.0
+    highscore: float = 0.0
     step_count: int = 0
     done: bool = False
     last_info: Dict[str, Any] = field(default_factory=dict)
@@ -98,7 +99,7 @@ class TALESResourcesServer(GymnasiumServer):
             observation=obs,
             max_episode_steps=max_episode_steps,
         )
-        return obs, self._build_info(info)
+        return obs, self._build_info(info) | {"framework": framework}
 
     async def step(
         self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
@@ -123,15 +124,75 @@ class TALESResourcesServer(GymnasiumServer):
         state.observation = obs
         state.done = bool(done)
 
+        # TALES' upstream wrappers report the cumulative game score in info["score"] for every
+        # framework (the paper's benchmark.py scores from it); the positional `score` is per-step
+        # for scienceworld/textworld_express and cumulative elsewhere, so it cannot be used
+        # cross-family. The paper metric is the running highscore normalized by max_score.
+        game_score = float((info or {}).get("score", score))
+        state.highscore = max(state.highscore, game_score)
+        max_score = (info or {}).get("max_score")
+        normalized_highscore = state.highscore / float(max_score) if max_score else None
+
         terminated = state.done
         truncated = (not terminated) and state.step_count >= state.max_episode_steps
 
         state.last_info = self._build_info(info) | {
-            "score": score,
+            "framework": state.framework,
+            "step_score": score,
+            "game_score": game_score,
+            "highscore": state.highscore,
+            "normalized_highscore": normalized_highscore,
             "total_score": state.total_score,
             "step_count": state.step_count,
         }
         return obs, reward, terminated, truncated, dict(state.last_info)
+
+    def compute_metrics(self, tasks: list[list[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Per-family normalized-highscore metrics matching the TALES paper's aggregation.
+
+        Paper metric (benchmark.py): per episode, running highscore / max_score; mean over
+        episodes of a game; mean over games of a framework; equal-weight macro-average across
+        frameworks. Reported on the paper's 0-100 scale. A pooled mean over raw rewards is
+        meaningless here (per-family reward scales are incomparable).
+        """
+        family_task_scores: Dict[str, list[float]] = {}
+        family_task_wins: Dict[str, list[float]] = {}
+        skipped = 0
+        for task_rollouts in tasks:
+            scores, wins, framework = [], [], None
+            for rollout in task_rollouts:
+                info = rollout.get("info") or {}
+                normalized = info.get("normalized_highscore")
+                if info.get("framework") is None or normalized is None:
+                    skipped += 1
+                    continue
+                framework = info["framework"]
+                scores.append(float(normalized) * 100.0)
+                wins.append(1.0 if info.get("won") else 0.0)
+            if framework is None:
+                continue
+            family_task_scores.setdefault(framework, []).append(sum(scores) / len(scores))
+            family_task_wins.setdefault(framework, []).append(sum(wins) / len(wins))
+
+        metrics: Dict[str, Any] = {}
+        for framework in sorted(family_task_scores):
+            task_scores = family_task_scores[framework]
+            task_wins = family_task_wins[framework]
+            metrics[f"tales/{framework}/normalized_highscore"] = sum(task_scores) / len(task_scores)
+            metrics[f"tales/{framework}/success_rate"] = sum(task_wins) / len(task_wins)
+        if family_task_scores:
+            family_means = [metrics[f"tales/{fw}/normalized_highscore"] for fw in family_task_scores]
+            family_win_means = [metrics[f"tales/{fw}/success_rate"] for fw in family_task_scores]
+            metrics["tales/macro_avg/normalized_highscore"] = sum(family_means) / len(family_means)
+            metrics["tales/macro_avg/success_rate"] = sum(family_win_means) / len(family_win_means)
+            metrics["tales/num_families"] = len(family_task_scores)
+        if skipped:
+            metrics["tales/rollouts_missing_score_fields"] = skipped
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        key_metrics = {k: v for k, v in agent_metrics.items() if k.startswith("tales/")}
+        return key_metrics or {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
 
     def _resolve(self, metadata: dict, key: str) -> Any:
         value = metadata.get(key)
