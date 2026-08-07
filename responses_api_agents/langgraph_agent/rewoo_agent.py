@@ -26,7 +26,7 @@ Graph: plan -> worker -> (loop for each step) -> solve -> END
 import re
 from typing import Annotated, List, TypedDict
 
-from app import LangGraphAgentAdapter, LangGraphAgentConfig
+from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
@@ -115,7 +115,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
 
     async def _call_model(self, state, prompt):
         input_messages = [NeMoGymEasyInputMessage(role="user", content=prompt)]
-        request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
+        request_body = state["request_body"].model_copy(update={"input": input_messages})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
@@ -210,7 +210,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         graph.add_node("worker", worker)
         graph.add_node("solve", solve)
         graph.set_entry_point("plan")
-        graph.add_edge("plan", "worker")
+        graph.add_conditional_edges("plan", route_worker, {"worker": "worker", "solve": "solve"})
         graph.add_conditional_edges("worker", route_worker, {"worker": "worker", "solve": "solve"})
         graph.add_edge("solve", END)
 
@@ -242,7 +242,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["policy_outputs"]
+        return response_output_items(final_state["policy_outputs"])
 
     async def run(self, request: Request, body: ReWOORunRequest) -> ReWOOVerifyResponse:
         cookies = request.cookies

@@ -1,0 +1,47 @@
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: OpenCode agent harness on Reasoning Gym tasks
+      value: Evaluate model reasoning capabilities in the OpenCode agent harness
+
+opencode_reasoning_gym_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      concurrency: 8
+      command: opencode
+      model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+      opencode_version: 1.17.11
+      thinking: false
+      setup_timeout: 900
+      timeout: 900
+      system_prompt: |
+        You are a precise reasoning assistant with a bash tool. Use Python to calculate or verify results when helpful.
+        Follow the requested final-answer format exactly.
+      opencode_config:
+        permission:
+          bash: allow
+          edit: allow
+          webfetch: allow
+        provider:
+          nvinf:
+            npm: "@ai-sdk/openai-compatible"
+            options:
+              baseURL: ${policy_base_url}
+              apiKey: ${policy_api_key}
+            models:
+              nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/opencode_reasoning_gym/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: environments/opencode_reasoning_gym/data/train_knights_knaves.jsonl
+        license: Apache 2.0

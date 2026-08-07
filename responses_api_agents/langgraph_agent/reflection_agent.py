@@ -24,7 +24,7 @@ Graph: generate -> should_continue? -> reflect -> generate (revised) -> ...
 
 from typing import Annotated, TypedDict
 
-from app import LangGraphAgentAdapter, LangGraphAgentConfig
+from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
@@ -74,7 +74,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
                 for m in state["messages"]
             ]
 
-            request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
+            request_body = state["request_body"].model_copy(update={"input": input_messages})
 
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -113,7 +113,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
                 for m in state["messages"]
             ] + [reflection_prompt]
 
-            request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
+            request_body = state["request_body"].model_copy(update={"input": input_messages})
 
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -134,10 +134,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             )
 
             return {
-                "messages": [
-                    HumanMessage(content="Critique your solution. What could be wrong?"),
-                    AIMessage(content=text),
-                ],
+                "messages": [HumanMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [reflection_prompt] + policy_response.output,
                 "cookies": resp.cookies,
                 "reflections": state["reflections"] + 1,
@@ -197,7 +194,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["policy_outputs"]
+        return response_output_items(final_state["policy_outputs"])
 
     async def run(self, request: Request, body: ReflectionAgentRunRequest) -> ReflectionAgentVerifyResponse:
         cookies = request.cookies
