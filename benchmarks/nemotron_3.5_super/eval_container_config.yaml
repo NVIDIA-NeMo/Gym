@@ -9,20 +9,31 @@ config_paths:
 - responses_api_models/vllm_model/configs/vllm_model.yaml
 - env.yaml
 
+########################################
+# START Secrets
+# The following secrets identified with `dummy` must be filled in via env.yaml at runtime
+########################################
+
+nv_inference_api_key: dummy  # pragma: allowlist secret
+
+########################################
+# END Secrets
+########################################
+
+########################################
+# START Nvidia-specific configs
+########################################
+
 policy_base_url: dummy
 policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
-
-########################################
-# The following secrets identified with `dummy` must be filled in via env.yaml at runtime
-########################################
 
 # Used in SWE Verified
 sandbox:
   opensandbox:
     connection:
       domain: dummy
-      api_key: dummy  # pragma: allowlist secret
+      api_key: ${nv_inference_api_key}
 
 # Used in Tau3 Banking
 gpt-5_4-mini-2026-03-17:
@@ -30,7 +41,7 @@ gpt-5_4-mini-2026-03-17:
     openai_model:
       openai_base_url: https://inference-api.nvidia.com/v1
       openai_model: azure/openai/gpt-5.4-mini
-      openai_api_key: dummy  # pragma: allowlist secret
+      openai_api_key: ${nv_inference_api_key}
 
 # Used in AA-LCR
 Qwen3-235B-A22B-Instruct-2507-FP8:
@@ -39,11 +50,25 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
       entrypoint: app.py
       model: nvidia/qwen/qwen-235b
       base_url: https://inference-api.nvidia.com/v1
-      api_key: dummy  # pragma: allowlist secret
+      api_key: ${nv_inference_api_key}
 
 gpt-5_2-2025-12-11:
   responses_api_models:
     openai_model:
       openai_base_url: https://inference-api.nvidia.com/v1
       openai_model: openai/openai/gpt-5.2
-      openai_api_key: dummy  # pragma: allowlist secret
+      openai_api_key: ${nv_inference_api_key}
+
+# TODO @bxyu-nvidia: Need to properly rename this and add this Gemini config
+genrm_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: gcp/google/gemini-3-flash-preview
+      openai_api_key: ${nv_inference_api_key}
+      max_concurrent_requests: 16
+
+########################################
+# END Nvidia-specific configs.
+########################################
