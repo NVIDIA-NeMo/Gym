@@ -2,7 +2,8 @@
 setuptools<71
 absl-py
 langdetect
-nltk
+# NLTK 3.10.1 rejects imports from Gym's nested server venv; 3.10.0 is the verified IFBench baseline.
+nltk==3.10.0
 immutabledict
 spacy
 emoji
