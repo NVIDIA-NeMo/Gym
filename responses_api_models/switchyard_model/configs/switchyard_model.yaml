@@ -1,0 +1,47 @@
+# Route Gym model calls through a Switchyard proxy, so any benchmark Gym supports can be run
+# against a router.
+#
+# Gym launches and manages the proxy for you. Point routing_profiles at your Switchyard routing
+# config and run:
+#
+#   gym eval run --benchmark <name> --model-type switchyard_model \
+#     ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
+#
+# Launching drives the `switchyard` CLI, which is installed with this server -- nemo-switchyard is
+# one of its dependencies. The proxy is started when this server starts and stopped when it exits.
+#
+# To attach to a proxy you already run instead -- to pin a specific Switchyard build, or to share
+# one instance across servers -- set switchyard_base_url and routing_profiles is not needed:
+#
+#   ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
+policy_model:
+  responses_api_models:
+    switchyard_model:
+      entrypoint: app.py
+
+      # The routing config Switchyard serves. Required unless switchyard_base_url is set.
+      routing_profiles: ${oc.env:SWITCHYARD_ROUTING_PROFILES,null}
+
+      # Route name to request. Switchyard maps it to a concrete target; the model that actually
+      # served each call comes back on the response.
+      switchyard_model: ${policy_model_name}
+
+      # Set to attach to an already-running proxy instead of launching one.
+      switchyard_base_url: ${oc.env:SWITCHYARD_BASE_URL,null}
+      switchyard_api_key: ${oc.env:SWITCHYARD_API_KEY,dummy}
+
+      # Wildcard bind so the proxy is reachable off-box; this server talks to it over loopback.
+      proxy_host: 0.0.0.0
+      # null picks a free port that does not collide with Gym's own servers.
+      proxy_port: null
+      proxy_startup_timeout_s: 120.0
+      switchyard_executable: switchyard
+
+      # Gym's rollout-attempt id is sent as Switchyard's opaque session id, so routing decisions
+      # and costs can be joined back to the rollout that produced them.
+      session_id_header: proxy_x_session_id
+      forward_session_id: true
+
+      extra_body: {}
+      default_headers: {}
+      max_concurrent_requests: null

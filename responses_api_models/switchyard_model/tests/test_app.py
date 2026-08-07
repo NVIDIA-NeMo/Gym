@@ -1,0 +1,531 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import signal
+import subprocess
+import urllib.error
+from contextlib import asynccontextmanager, contextmanager
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from pytest import MonkeyPatch
+
+import responses_api_models.switchyard_model.app as app_module
+from nemo_gym.server_utils import ServerClient
+from responses_api_models.switchyard_model.app import (
+    NeMoGymAsyncOpenAI,
+    SwitchyardModel,
+    SwitchyardModelConfig,
+    _RolloutSessionMiddleware,
+)
+
+
+# Captured before any test monkeypatches subprocess.Popen, so mocks keep a real spec.
+_REAL_POPEN = subprocess.Popen
+
+
+def _response_data() -> dict:
+    return {
+        "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
+        "created_at": 1753983920.0,
+        "model": "openai/gpt-5.2",
+        "object": "response",
+        "output": [
+            {
+                "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
+                "content": [{"annotations": [], "text": "Hello!", "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    }
+
+
+def _chat_data() -> dict:
+    return {
+        "id": "chatcmpl-BzRdCFjIEIp59xXLBNYjdPPrcpDaa",  # pragma: allowlist secret
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {"content": "Hello!", "role": "assistant"},
+            }
+        ],
+        "created": 1753983922,
+        "model": "openai/gpt-5.2",
+        "object": "chat.completion",
+    }
+
+
+class TestConfig:
+    def test_requires_a_routing_profile_or_a_base_url(self) -> None:
+        with pytest.raises(ValueError, match="routing_profiles"):
+            SwitchyardModelConfig(host="0.0.0.0", port=8081, entrypoint="", name="sy", switchyard_model="policy-model")
+
+    def test_routing_profiles_alone_means_gym_launches(self) -> None:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="sy",
+            switchyard_model="policy-model",
+            routing_profiles="/tmp/routes.yaml",
+        )
+        assert config.launches_proxy is True
+
+    def test_both_set_attaches_and_warns(self, caplog) -> None:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="sy",
+            switchyard_model="policy-model",
+            routing_profiles="/tmp/routes.yaml",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+        )
+
+        assert config.launches_proxy is False
+        assert "both switchyard_base_url and routing_profiles are set" in caplog.text
+
+    def test_base_url_alone_means_attach(self) -> None:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="sy",
+            switchyard_model="policy-model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+        )
+        assert config.launches_proxy is False
+
+
+class TestRolloutSessionMiddleware:
+    async def _rollout_id_for(self, path: str) -> object:
+        seen: dict = {}
+
+        async def inner(scope, receive, send):
+            seen["rollout_id"] = app_module._ROLLOUT_ID.get()
+
+        await _RolloutSessionMiddleware(inner)({"type": "http", "path": path}, None, None)
+        return seen["rollout_id"]
+
+    async def test_well_formed_rollout_id_is_published(self) -> None:
+        assert await self._rollout_id_for("/ng-rollout/task0-r1-a0/v1/responses") == "task0-r1-a0"
+
+    async def test_rollout_id_outside_the_contract_charset_is_ignored(self) -> None:
+        """The id becomes an upstream header value, so anything off-contract is dropped, not sent."""
+        assert await self._rollout_id_for("/ng-rollout/bad\r\nx-injected: 1/v1/responses") is None
+
+    async def test_non_http_scope_is_forwarded_untouched(self) -> None:
+        seen: dict = {}
+
+        async def inner(scope, receive, send):
+            seen["scope"] = scope
+
+        middleware = _RolloutSessionMiddleware(inner)
+        await middleware({"type": "lifespan"}, None, None)
+
+        assert seen["scope"] == {"type": "lifespan"}
+
+
+class TestApp:
+    def _setup_server(self, **overrides) -> SwitchyardModel:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+            switchyard_api_key="dummy_key",  # pragma: allowlist secret
+            switchyard_model="policy-model",
+            **overrides,
+        )
+        return SwitchyardModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def test_sanity(self) -> None:
+        server = self._setup_server()
+        assert server._client.base_url == "http://127.0.0.1:4000/v1"
+
+    def test_max_concurrent_requests_builds_semaphore(self) -> None:
+        server = self._setup_server(max_concurrent_requests=2)
+        assert server._semaphore._value == 2
+
+    def test_responses_forwards_route_and_session_id(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server()
+        seen: dict = {}
+
+        async def mock_create_response(self, **kwargs):
+            seen["headers"] = self.default_headers
+            seen["kwargs"] = kwargs
+            return _response_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/ng-rollout/task0-r1-a0/v1/responses",
+            json={"input": [{"role": "user", "content": "hi"}], "model": "ignored"},
+        )
+
+        assert response.status_code == 200
+        # The route name always wins -- a caller-supplied model must not bypass routing.
+        assert seen["kwargs"]["model"] == "policy-model"
+        assert seen["headers"]["proxy_x_session_id"] == "task0-r1-a0"
+        # The routed target is visible on the response.
+        assert response.json()["model"] == "openai/gpt-5.2"
+
+    def test_chat_completions_forwards_route_and_session_id(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server()
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen["headers"] = self.default_headers
+            seen["kwargs"] = kwargs
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/ng-rollout/task0-r1/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert seen["kwargs"]["model"] == "policy-model"
+        assert seen["headers"]["proxy_x_session_id"] == "task0-r1"
+
+    def test_uncorrelated_call_sends_no_session_id(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(default_headers={"x-team": "gym"})
+        seen: dict = {}
+
+        async def mock_create_response(self, **kwargs):
+            seen["headers"] = self.default_headers
+            return _response_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200
+        assert "proxy_x_session_id" not in seen["headers"]
+        assert seen["headers"]["x-team"] == "gym"
+
+    def test_forward_session_id_disabled(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(forward_session_id=False)
+        seen: dict = {}
+
+        async def mock_create_response(self, **kwargs):
+            seen["headers"] = self.default_headers
+            return _response_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post(
+            "/ng-rollout/task0-r1/v1/responses",
+            json={"input": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert "proxy_x_session_id" not in seen["headers"]
+
+    def test_extra_body_is_merged(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(extra_body={"max_output_tokens": 16})
+        seen: dict = {}
+
+        async def mock_create_response(self, **kwargs):
+            seen.update(kwargs)
+            return _response_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_response", mock_create_response)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200
+        assert seen["max_output_tokens"] == 16
+
+
+class TestProxyLifecycle:
+    def _launch_config(self, **overrides) -> SwitchyardModelConfig:
+        return SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_model="policy-model",
+            routing_profiles="/tmp/routes.yaml",
+            proxy_port=4123,
+            **overrides,
+        )
+
+    def _build(self) -> SwitchyardModel:
+        return SwitchyardModel(
+            config=self._launch_config(),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+
+    def _launch_server(self, monkeypatch: MonkeyPatch) -> SwitchyardModel:
+        """Build a launch-mode server with the spawn stubbed out."""
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
+        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
+        return self._build()
+
+    def test_constructing_the_server_does_not_spawn_a_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        """The proxy belongs to serving, not to config validation."""
+
+        def explode(*args, **kwargs):
+            raise AssertionError("constructing SwitchyardModel must not spawn a proxy")
+
+        monkeypatch.setattr(subprocess, "Popen", explode)
+
+        self._build()
+
+    def test_missing_executable_explains_how_to_fix(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._build()
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: None)
+
+        with pytest.raises(RuntimeError, match="nemo-switchyard"):
+            server.setup_webserver()
+
+    def test_start_proxy_builds_command_and_waits(self, monkeypatch: MonkeyPatch) -> None:
+        commands: list = []
+        process = MagicMock(spec=_REAL_POPEN)
+        process.poll.return_value = None
+
+        def mock_popen(command, *args, **kwargs):
+            commands.append(command)
+            return process
+
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
+
+        server = self._build()
+        server.setup_webserver()
+
+        # Bound on the wildcard so the proxy is reachable off-box, but addressed over loopback.
+        assert commands[0] == [
+            "switchyard",
+            "--routing-profiles",
+            "/tmp/routes.yaml",
+            "--",
+            "serve",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "4123",
+        ]
+        assert server._client.base_url == "http://127.0.0.1:4123/v1"
+
+    def test_wait_for_proxy_raises_when_process_dies(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._launch_server(monkeypatch)
+        # Drop the construction-time patches so the real wait_for_proxy runs below.
+        monkeypatch.undo()
+
+        dead = MagicMock(spec=_REAL_POPEN)
+        dead.poll.return_value = 1
+        dead.returncode = 1
+
+        with pytest.raises(RuntimeError, match="exited during startup"):
+            server.wait_for_proxy("http://127.0.0.1:4123", dead)
+
+    def test_stop_proxy_terminates_then_kills(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._launch_server(monkeypatch)
+
+        process = MagicMock(spec=_REAL_POPEN)
+        process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired(cmd="switchyard", timeout=30)
+        server._proxy_process = process
+
+        server.stop_proxy()
+
+        process.terminate.assert_called_once()
+        process.kill.assert_called_once()
+
+    def test_wait_for_proxy_returns_once_healthy(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._launch_server(monkeypatch)
+        monkeypatch.undo()
+
+        alive = MagicMock(spec=_REAL_POPEN)
+        alive.poll.return_value = None
+
+        attempts = {"count": 0}
+
+        @contextmanager
+        def mock_urlopen(url, timeout=None):
+            attempts["count"] += 1
+            # First probe refused, as it is while the proxy is still binding.
+            if attempts["count"] == 1:
+                raise urllib.error.URLError("connection refused")
+            yield MagicMock(status=200)
+
+        monkeypatch.setattr(app_module.urllib.request, "urlopen", mock_urlopen)
+        monkeypatch.setattr(app_module.time, "sleep", lambda seconds: None)
+
+        server.wait_for_proxy("http://127.0.0.1:4123", alive)
+
+        assert attempts["count"] == 2
+
+    def test_wait_for_proxy_times_out(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._launch_server(monkeypatch)
+        monkeypatch.undo()
+        server.config.proxy_startup_timeout_s = 0.0
+        server._proxy_process = None
+
+        alive = MagicMock(spec=_REAL_POPEN)
+        alive.poll.return_value = None
+
+        with pytest.raises(TimeoutError, match="did not become healthy"):
+            server.wait_for_proxy("http://127.0.0.1:4123", alive)
+
+    def test_stop_proxy_is_noop_when_already_exited(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._launch_server(monkeypatch)
+
+        process = MagicMock(spec=_REAL_POPEN)
+        process.poll.return_value = 0
+        server._proxy_process = process
+
+        server.stop_proxy()
+
+        process.terminate.assert_not_called()
+
+
+class TestProxyOutlivesNothing:
+    """The proxy is a child process, so it must not survive the server that launched it.
+
+    Gym's orchestrator sends SIGINT and escalates to SIGKILL after one second, so cleanup needs
+    both a graceful handler and a kernel-level tie for the shutdowns too abrupt to run one.
+    """
+
+    def _launch_config(self, **overrides) -> SwitchyardModelConfig:
+        return SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_model="policy-model",
+            routing_profiles="/tmp/routes.yaml",
+            proxy_port=4123,
+            **overrides,
+        )
+
+    def _launch_server(self, monkeypatch: MonkeyPatch) -> SwitchyardModel:
+        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
+        return SwitchyardModel(
+            config=self._launch_config(),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+
+    def test_graceful_shutdown_stops_the_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        """A clean shutdown must reap the proxy. atexit does not run on uvicorn's signal exit."""
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
+        server = self._launch_server(monkeypatch)
+
+        app = server.setup_webserver()
+
+        process = MagicMock(spec=_REAL_POPEN)
+        process.poll.return_value = None
+        server._proxy_process = process
+
+        # Entering and leaving the TestClient context runs the app's startup/shutdown events.
+        with TestClient(app):
+            process.terminate.assert_not_called()
+
+        process.terminate.assert_called_once()
+
+    def test_failed_startup_still_stops_the_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        """The proxy is up before the app finishes starting, so a failed startup must still reap it."""
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
+        server = self._launch_server(monkeypatch)
+
+        process = MagicMock(spec=_REAL_POPEN)
+        process.poll.return_value = None
+        server._proxy_process = process
+
+        app = FastAPI()
+
+        @asynccontextmanager
+        async def failing_lifespan(_app):
+            raise RuntimeError("startup failed")
+            yield  # pragma: no cover - unreachable; present so this is a generator
+
+        app.router.lifespan_context = failing_lifespan
+        server.setup_proxy_shutdown(app)
+
+        with pytest.raises(RuntimeError, match="startup failed"):
+            with TestClient(app):
+                pass  # pragma: no cover - startup raises before the body runs
+
+        process.terminate.assert_called_once()
+
+    def test_spawn_ties_proxy_lifetime_to_this_process(self, monkeypatch: MonkeyPatch) -> None:
+        """A SIGKILLed parent runs no handler, so the kernel must reap the child instead."""
+        spawns: list = []
+
+        def mock_popen(command, *args, **kwargs):
+            spawns.append(kwargs)
+            return MagicMock(spec=_REAL_POPEN)
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        server = self._launch_server(monkeypatch)
+
+        server.setup_webserver()
+
+        assert spawns[0]["preexec_fn"] is app_module._set_parent_death_signal
+
+    def test_parent_death_signal_is_requested_on_linux(self, monkeypatch: MonkeyPatch) -> None:
+        calls: list = []
+        monkeypatch.setattr(app_module.sys, "platform", "linux")
+        monkeypatch.setattr(
+            app_module.ctypes,
+            "CDLL",
+            lambda name, use_errno=False: MagicMock(prctl=lambda *args: calls.append(args)),
+        )
+
+        app_module._set_parent_death_signal()
+
+        assert calls == [(app_module._PR_SET_PDEATHSIG, signal.SIGTERM)]
+
+    def test_parent_death_signal_is_skipped_off_linux(self, monkeypatch: MonkeyPatch) -> None:
+        """macOS has no prctl; the spawn must still succeed there."""
+
+        def explode(*args, **kwargs):
+            raise AssertionError("must not touch libc off Linux")
+
+        monkeypatch.setattr(app_module.sys, "platform", "darwin")
+        monkeypatch.setattr(app_module.ctypes, "CDLL", explode)
+
+        app_module._set_parent_death_signal()
+
+    def test_missing_prctl_does_not_break_the_spawn(self, monkeypatch: MonkeyPatch) -> None:
+        """Losing the kernel tie is worse than nothing, but failing to launch is worse still."""
+        monkeypatch.setattr(app_module.sys, "platform", "linux")
+
+        def no_libc(name, use_errno=False):
+            raise OSError("libc.so.6 not found")
+
+        monkeypatch.setattr(app_module.ctypes, "CDLL", no_libc)
+
+        app_module._set_parent_death_signal()
