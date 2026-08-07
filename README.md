@@ -50,19 +50,22 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
 
 ## 📣 News
 
-* **[07/01/2026]** [Release v0.4.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.4.0):
-  * **Unified `gym` CLI**: discover agents and benchmarks with `gym list`, catch config errors before a run with `gym env validate`
-  * **BLADE diagnostics**: an analysis skill that reads your eval results and reports which tasks failed, why, and the highest-impact fix
-  * **Agent skill evaluation**: run the same tasks with different skill sets to measure each skill's impact
-  * **Pluggable sandboxes**: run tool-using agents in isolated environments via the sandbox provider of your choice
-  * **More agent harnesses**: OpenCode, OpenClaw, and Pi available out of the box
-  * **Hosted inference providers**: connect to Fireworks, Together.ai, OpenRouter, and more
-  * **New benchmarks**: across science, long-context, and interactive tasks
+* **[08/06/2026]** [Release v0.5.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.5.0):
+  * **Seven sandbox providers**: Docker, Daytona, ECS Fargate, Enroot, and OpenShell join existing OpenSandbox and Apptainer
+  * **Four new agent harnesses**: Codex CLI, KiloCode, RemoteAgent, and anyswe_agent (20 total)
+  * **21 new benchmarks** spanning agentic, knowledge, long-context, science, translation, and reasoning domains
+  * **Per-rollout model-call capture**: records requests, responses, token usage, and latency at the model server boundary
+  * **`gym eval reverify`**: recompute rewards from stored rollouts without re-running the agent
+  * **Extended CLI**: `gym list`/`gym search` now covers models, resource-servers, and agents; external plugin discovery via `--search-dir`
+
+  See the [full release notes](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.5.0) for the complete changelog.
 
 <details>
 <summary>Previous News</summary>
 
-* **[06/04/2026]** [Release v0.3.0!](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0): 70+ new environments, Nemotron 3 Ultra training datasets, VeRL integration, and out-of-the-box harnesses including Claude Code and Hermes.
+* **[07/01/2026]** [Release v0.4.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.4.0): Unified `gym` CLI, BLADE diagnostics, agent skill evaluation, pluggable sandboxes, more agent harnesses (OpenCode, OpenClaw, Pi), hosted inference providers, and new benchmarks.
+
+* **[06/04/2026]** [Release v0.3.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.3.0): 70+ new environments, Nemotron 3 Ultra training datasets, VeRL integration, and out-of-the-box harnesses including Claude Code and Hermes.
 
 </details>
 
