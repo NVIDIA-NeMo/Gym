@@ -325,10 +325,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Failed to get current working directory", file=sys.stderr)
             results_remote_fpath = None
 
+        results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_local_fpath = results_dir / export_fname
         if results_remote_fpath:
-            results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
-            results_dir.mkdir(parents=True, exist_ok=True)
-            results_local_fpath = results_dir / export_fname
             if self.config.debug:
                 print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
             try:
