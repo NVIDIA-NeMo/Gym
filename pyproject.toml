@@ -241,12 +241,12 @@ all = [
 
 vllm = [
     # Pin to the same version used by local_vllm_model / genrm_model server venvs.
-    # Updated: Mon Aug 04, 2026 with vllm==0.24.0
-    "vllm==0.24.0",
-    # Pin flashinfer to the exact version vllm 0.24.0 specifies, ensuring pre-compiled
+    # Updated: Fri Aug 07, 2026 with vllm==0.25.1
+    "vllm==0.25.1",
+    # Pin flashinfer to the exact version vllm 0.25.1 specifies, ensuring pre-compiled
     # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
     # flashinfer>=0.2 bundles compiled kernels in the python package directly.
-    "flashinfer-python==0.6.12",
+    "flashinfer-python==0.6.13",
 ]
 
 sandbox = [
