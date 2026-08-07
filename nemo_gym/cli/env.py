@@ -25,13 +25,14 @@ from shutil import rmtree
 from signal import SIGINT
 from subprocess import Popen, TimeoutExpired
 from threading import Thread
-from time import sleep, time
+from time import monotonic, sleep, time
 from typing import Dict, List, Optional, Tuple
 
+import requests
 import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
@@ -46,11 +47,12 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
@@ -75,6 +77,200 @@ from nemo_gym.server_utils import (
 _GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
 # Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
 _FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
+
+
+# Model servers name their upstream endpoint inconsistently: `openai_base_url` (openai_model,
+# azure_openai_model), `base_url` (inference_provider, vllm_model, and the local vLLM servers),
+# `anthropic_base_url`. Matching on the shape of the key rather than a fixed list also covers
+# configs that carry a provider URL literally instead of interpolating `policy_base_url`, which
+# most inference_provider variants do.
+_MODEL_SERVER_TYPE = "responses_api_models"
+_BASE_URL_KEY_SUFFIX = "base_url"
+_ENDPOINT_PROBE_TIMEOUT_SEC: float = 5.0
+_ENDPOINT_POLL_INTERVAL_SEC: float = 3.0
+
+# What a probe found. The distinction that matters is whether waiting could change the answer: a
+# name that does not resolve will not start resolving, while a refused connection may be a server
+# that is still coming up.
+_ENDPOINT_ANSWERING = "answering"
+_ENDPOINT_REFUSED = "refused"
+_ENDPOINT_UNRESOLVABLE = "unresolvable"
+
+
+def _collect_model_endpoints(global_config_dict: DictConfig) -> List[Tuple[str, str]]:
+    """The upstream model endpoints named in the resolved config, as (config key, url) pairs.
+
+    `wait_for_spinup` only polls Gym's own servers, and the Gym-side model server answers as soon
+    as it starts whether or not anything is behind it, so these are the URLs nothing checks.
+
+    `base_url` is typed `Union[str, List[str]]` on vllm_model and the local vLLM servers, where the
+    list form spreads load across replicas. The local ones default to an empty list and are filled
+    in after Gym launches vLLM, so an empty list means "not yet" rather than "misconfigured" and is
+    skipped, as is an unset value.
+
+    The key travels with the url because the endpoint that fails may be a judge or user model, and
+    a message naming `policy_base_url` would then be wrong.
+    """
+    endpoints: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for top_level_path, top_level_value in global_config_dict.items():
+        if top_level_path in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS or not isinstance(top_level_value, DictConfig):
+            continue
+
+        model_servers = top_level_value.get(_MODEL_SERVER_TYPE)
+        if not isinstance(model_servers, DictConfig):
+            continue
+
+        for server_config_dict in model_servers.values():
+            if not isinstance(server_config_dict, DictConfig):
+                continue
+
+            for key, value in server_config_dict.items():
+                if not str(key).endswith(_BASE_URL_KEY_SUFFIX):
+                    continue
+
+                urls = (
+                    [value] if isinstance(value, str) else list(value) if isinstance(value, (list, ListConfig)) else []
+                )
+                for url in urls:
+                    if not isinstance(url, str) or not url:
+                        continue
+                    # `http://x/v1` and `http://x/v1/` probe the same place.
+                    trimmed = url.rstrip("/")
+                    if trimmed in seen:
+                        continue
+                    seen.add(trimmed)
+                    endpoints.append((str(key), url))
+
+    return endpoints
+
+
+def _endpoint_probe_url(base_url: str) -> str:
+    """What to GET to find out whether `base_url` is being served.
+
+    `GET /v1/models` is part of the OpenAI API, so most endpoints behind a `/v1` base URL answer it,
+    but nothing here depends on that: any HTTP response counts as answering, so an endpoint without
+    it replies 404 and still passes. URLs that do not end in `/v1` are probed at their root.
+    """
+    trimmed = base_url.rstrip("/")
+    return f"{trimmed}/models" if trimmed.endswith("/v1") else trimmed
+
+
+def _is_dns_failure(error: BaseException) -> bool:
+    """Whether a `requests` connection error was a name that does not resolve.
+
+    `requests` reports this as a `ConnectionError` like any other, with the resolver failure nested
+    inside, so the cause chain has to be walked rather than the class inspected.
+    """
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ in ("NameResolutionError", "gaierror"):
+            return True
+        nested = next((arg for arg in getattr(error, "args", ()) if isinstance(arg, BaseException)), None)
+        error = nested or error.__cause__ or error.__context__
+    return False
+
+
+def _probe_endpoint(base_url: str, timeout_seconds: float = _ENDPOINT_PROBE_TIMEOUT_SEC) -> str:
+    """Whether anything answers at `base_url`, and if not, whether waiting could help.
+
+    Answering is the bar, not healthy: a 401 or 404 means something is there, and requiring a 200
+    would reject endpoints that need auth. A completed TLS handshake counts too, even against a
+    certificate this process does not trust, which is why `SSLError` is checked before
+    `ConnectionError` it inherits from.
+    """
+    try:
+        requests.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
+        return _ENDPOINT_ANSWERING
+    except requests.exceptions.SSLError:
+        return _ENDPOINT_ANSWERING
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        return _ENDPOINT_UNRESOLVABLE if _is_dns_failure(e) else _ENDPOINT_REFUSED
+    except requests.exceptions.RequestException:
+        # Not probeable at all, such as a bad scheme or a redirect loop. Not a reason to hold up
+        # startup; the request path reports it if it matters.
+        return _ENDPOINT_ANSWERING
+
+
+def _wait_for_model_endpoints(
+    endpoints: List[Tuple[str, str]],
+    timeout_seconds: float,
+    poll_interval_seconds: float = _ENDPOINT_POLL_INTERVAL_SEC,
+    monotonic=monotonic,
+    sleep_fn=sleep,
+) -> List[Tuple[str, str]]:
+    """Wait for every endpoint to answer. Returns the ones that never did.
+
+    Unresolvable names are reported once and not waited on. Refused connections are waited on,
+    because an inference server can take minutes to load weights and someone who starts thirty
+    seconds early should not have to start over.
+    """
+    if timeout_seconds <= 0 or not endpoints:
+        return []
+
+    # The clock starts before the first round, not after it. That round is not free: an
+    # unresolvable name costs a full resolver timeout, so several of them would otherwise push the
+    # real wall time well past the bound the caller asked for.
+    started_at = monotonic()
+
+    waiting = []
+    for key, url in endpoints:
+        result = _probe_endpoint(url)
+        if result == _ENDPOINT_UNRESOLVABLE:
+            print(
+                f"Model endpoint {url} ({key}) does not resolve. Waiting cannot fix a hostname, so it is not retried."
+            )
+        elif result == _ENDPOINT_REFUSED:
+            waiting.append((key, url))
+    if not waiting:
+        return []
+
+    print(
+        f"Waiting for {len(waiting)} model endpoint(s) to answer: "
+        + ", ".join(f"{url} ({key})" for key, url in waiting)
+        + f"\nIf an inference server is still loading weights this is expected. Waiting up to {timeout_seconds:.0f}s..."
+    )
+
+    poll_count = 0
+    while True:
+        if monotonic() - started_at >= timeout_seconds:
+            return waiting
+
+        sleep_fn(poll_interval_seconds)
+        waiting = [(key, url) for key, url in waiting if _probe_endpoint(url) != _ENDPOINT_ANSWERING]
+        if not waiting:
+            print(f"All model endpoints are answering after {monotonic() - started_at:.0f}s.")
+            return []
+
+        poll_count += 1
+        if poll_count % 10 == 0:
+            print(f"  still waiting, {monotonic() - started_at:.0f}s elapsed")
+
+
+# Matches the value `GlobalConfigDictParser` sets, so a caller that builds a config without going
+# through the parser gets the same behaviour instead of silently skipping the check.
+_DEFAULT_MODEL_ENDPOINT_READINESS_TIMEOUT_SEC: float = 600.0
+
+
+def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
+    """How long to wait for model endpoints, from config. 0 or a negative value skips the check.
+
+    An unset key falls back to the same default the config parser applies. A value that is not a
+    number is a configuration mistake, so it is reported as one rather than surfacing as a
+    `ValueError` traceback from `float()`.
+    """
+    value = global_config_dict.get(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME)
+    if value is None:
+        return _DEFAULT_MODEL_ENDPOINT_READINESS_TIMEOUT_SEC
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"`{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` must be a number of seconds, got {value!r}. "
+            "Set it to 0 to skip waiting for model endpoints."
+        ) from None
 
 
 def _resolve_server_dir(rel_path: Path) -> Path:
@@ -265,6 +461,7 @@ class RunHelper:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_spinup()
+            self.wait_for_model_endpoints(global_config_dict)
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
@@ -411,6 +608,38 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             pass
         finally:
             self.shutdown()
+
+    def wait_for_model_endpoints(self, global_config_dict: DictConfig) -> None:
+        """Block until every model endpoint named in the config answers, then return.
+
+        Reads the bound from `model_endpoint_readiness_timeout_seconds`, where 0 skips the check
+        entirely. Raises `ConfigError` naming the endpoints that never answered and the config key
+        each came from. It raises rather than exits because `RunHelper` is imported and driven as a
+        library, so the caller decides what an unreachable endpoint means; the CLI entrypoints turn
+        it into an exit.
+
+        The servers spawned above are shut down first. They hold ports and have neither a process
+        group nor an atexit handler, and every caller reaches its own `shutdown()` only after
+        `start()` returns.
+        """
+        timeout_seconds = _model_endpoint_timeout_seconds(global_config_dict)
+        unreachable = _wait_for_model_endpoints(_collect_model_endpoints(global_config_dict), timeout_seconds)
+        if not unreachable:
+            return
+
+        listed = "\n".join(f"  - {url} (from `{key}`)" for key, url in unreachable)
+        self.shutdown()
+        raise ConfigError(
+            f"""{len(unreachable)} model endpoint(s) never answered within {timeout_seconds:.0f}s:
+{listed}
+
+Nothing accepted a connection there. The server was never started, is still starting up, or the URL
+in your config does not match where it is listening.
+  - Check the config key named beside each URL. Verify with `curl -i <base_url>/models` for a
+    `/v1` endpoint, or `curl -i <base_url>` otherwise.
+  - Any response, including 401 or 404, means something is listening.
+  - Raise `{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` to wait longer, or set it to 0 to skip this check."""
+        )
 
     def check_http_server_statuses(self, successful_servers: List[str]) -> List[Tuple[str, ServerStatus]]:
         statuses = []
@@ -1145,9 +1374,12 @@ def pip_list():  # pragma: no cover
     && source .venv/bin/activate \\
     && {pip_list_cmd}"""
 
-    print(f"  Package list for: {config.entrypoint}")
-    print(f"Virtual environment: {venv_path.absolute()}")
-    print("-" * 72)
+    # Only in the default human view: an explicit --format (json, freeze) is meant to be piped, so stdout
+    # must carry nothing but `uv pip list` output.
+    if not config.format:
+        print(f"  Package list for: {config.entrypoint}")
+        print(f"Virtual environment: {venv_path.absolute()}")
+        print("-" * 72)
 
     proc = run_command(command, dir_path)
     return_code = proc.wait()
