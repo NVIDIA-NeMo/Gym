@@ -1,7 +1,10 @@
 config_paths:
 - benchmarks/gpqa/config.yaml
 - benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
-- benchmarks/swebench/verified/opencode.yaml
+- benchmarks/tau2/configs/tau2.yaml
+# - benchmarks/swebench/verified/opencode.yaml
+- benchmarks/aalcr/config.yaml
+# - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
 - env.yaml
 
@@ -9,8 +12,37 @@ policy_base_url: dummy
 policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
 
-# The following secrets must be filled in via env.yaml at runtime
+########################################
+# The following secrets identified with `dummy` must be filled in via env.yaml at runtime
+########################################
+
+# Used in SWE Verified
+sandbox:
+  opensandbox:
+    connection:
+      domain: dummy
+      api_key: dummy  # pragma: allowlist secret
+
+# Used in Tau3 Banking
 gpt-5_4-mini-2026-03-17:
   responses_api_models:
     openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: azure/openai/gpt-5.4-mini
+      openai_api_key: dummy  # pragma: allowlist secret
+
+# Used in AA-LCR
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      model: nvidia/qwen/qwen-235b
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: dummy  # pragma: allowlist secret
+
+gpt-5_2-2025-12-11:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: openai/openai/gpt-5.2
       openai_api_key: dummy  # pragma: allowlist secret
