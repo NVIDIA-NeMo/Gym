@@ -37,9 +37,11 @@ from subprocess import Popen
 from subprocess import run as subprocess_run
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 import ray
 import tomlkit
+from aiohttp import ClientTimeout
 from gprof2dot import main as gprof2dot_main
 from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
@@ -62,7 +64,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.server_utils import get_first_server_config_dict, get_response_json, raise_for_status, request
+from nemo_gym.switchyard_trace import SwitchyardTrace, reconstruct_switchyard_rollout
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -177,6 +180,18 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         "If False (default), selection is deterministic per instance_id.",
     )
 
+    switchyard_base_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Base URL of a token-capture-enabled Switchyard proxy, exactly http://<host>:<port>. When set "
+            "for an OpenHands run, agent policy calls are routed to Switchyard (via the agent container's "
+            "NEMO_GYM_CONFIG_DICT and oh_config.toml — no OpenHands change needed) and the captured "
+            "per-call token records are retrieved after the agent finishes to build the training rollout. "
+            "Must be reachable from both this process and the agent container. When absent, behavior is "
+            "unchanged."
+        ),
+    )
+
     openhands_should_log: bool = False
     debug: bool = False
 
@@ -255,6 +270,10 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     # GRPO related fields
     mask_sample: bool = False
 
+    # Switchyard capture session for this run (uuid4 hex). Set only for OpenHands
+    # agent runs with switchyard_base_url configured; None leaves behavior unchanged.
+    switchyard_session_id: Optional[str] = None
+
     @property
     def instance_id(self) -> str:
         return self.problem_info["instance_id"]
@@ -299,6 +318,8 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
+    # Why the Switchyard trace could not be applied (the sample is then masked).
+    switchyard_trace_error: Optional[str] = None
 
 
 ########################################
@@ -1497,6 +1518,36 @@ fi
         report_path.write_text(json.dumps(report, indent=2))
 
 
+def _parse_switchyard_base_url(switchyard_base_url: str) -> Tuple[str, int]:
+    """Host/port of the Switchyard proxy.
+
+    The agent container reaches Switchyard through the pinned OpenHands client's
+    ServerClient path, which can only target ``http://<host>:<port>`` — so the
+    configured base URL must be exactly that shape.
+    """
+    parsed = urlparse(switchyard_base_url)
+    if parsed.scheme != "http" or not parsed.hostname or not parsed.port or parsed.path.strip("/") or parsed.query:
+        raise ValueError(f"switchyard_base_url must have the form http://<host>:<port>, got {switchyard_base_url!r}")
+    return parsed.hostname, parsed.port
+
+
+def _switchyard_ng_config_dict_str(
+    ng_global_config_dict_str: str, model_server_name: str, switchyard_base_url: str
+) -> str:
+    """NEMO_GYM_CONFIG_DICT (shell-quoted YAML) for a Switchyard-routed agent container.
+
+    Rewrites the model server's host/port to Switchyard's, so the in-container
+    client's existing ``ServerClient.post(server_name=...)`` lands on the proxy
+    with no OpenHands change.
+    """
+    host, port = _parse_switchyard_base_url(switchyard_base_url)
+    global_config_dict = OmegaConf.create(shlex.split(ng_global_config_dict_str)[0])
+    server_config_dict = get_first_server_config_dict(global_config_dict, model_server_name)
+    server_config_dict.host = host
+    server_config_dict.port = port
+    return shlex.quote(OmegaConf.to_yaml(global_config_dict))
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
@@ -1591,6 +1642,27 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             "temperature": self.config.inference_params["temperature"],
             "top_p": self.config.inference_params["top_p"],
         }
+
+        # Zero-fork Switchyard transport. The pinned OpenHands client posts to the
+        # server named NEMO_GYM_MODEL_SERVER_NAME with the TOML model string, and
+        # litellm `completion_kwargs` land verbatim in its request body. So: make
+        # the model string the Switchyard route id (Switchyard dispatches on it),
+        # ride the capture session on the body field Switchyard strips before
+        # forwarding, and point the model-server entry of the agent container's
+        # NEMO_GYM_CONFIG_DICT at Switchyard. Agent container only: the eval
+        # container makes no policy calls and keeps the original config dict.
+        if self.config.switchyard_base_url and self.config.switchyard_session_id:
+            config["llm"]["model"]["model"] = self.config.model_server_name
+            config["llm"]["model"]["completion_kwargs"] = {
+                "proxy_x_session_id": self.config.switchyard_session_id,
+            }
+            ng_config_dict_str = _switchyard_ng_config_dict_str(
+                self.config.ng_global_config_dict_str,
+                self.config.model_server_name,
+                self.config.switchyard_base_url,
+            )
+        else:
+            ng_config_dict_str = self.config.ng_global_config_dict_str
 
         config_str = tomlkit.dumps(config)
 
@@ -1714,8 +1786,8 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f"{log_cmd}"
             f"{profiling_cmd}"
             f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
-            f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
-            f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
+            f"export NEMO_GYM_CONFIG_DICT={ng_config_dict_str} && "
+            f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
@@ -2760,6 +2832,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     ########################################
 
     def model_post_init(self, context: Any) -> None:
+        # Fail fast on a malformed Switchyard URL rather than masking every sample.
+        if self.config.switchyard_base_url:
+            _parse_switchyard_base_url(self.config.switchyard_base_url)
+
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         workspace_root = Path(__file__).parent
         # Only set up the agent harness that's actually selected. Both share the
@@ -3398,6 +3474,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         agent_run_id = f"{instance_id}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
 
+        # One Switchyard capture session per agent run. uuid4 hex is URL-safe, maps
+        # 1:1 through Switchyard's session-directory sanitizer, and is unique across
+        # retries. Golden-patch verification makes no policy calls, so no session.
+        switchyard_session_id = None
+        if (
+            self.config.switchyard_base_url
+            and self.config.agent_framework == "openhands"
+            and not self.config.verify_golden_patch
+        ):
+            switchyard_session_id = uuid.uuid4().hex
+
         # Ground-truth artifacts live here; hidden from the container by an empty overmount.
         eval_private_dir = persistent_dir / "eval_private"
         (eval_private_dir / ".empty").mkdir(parents=True, exist_ok=True)
@@ -3458,6 +3545,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             ray_queue_timestamp=time.time(),
             inference_params=inference_params,
             agent_run_id=agent_run_id,
+            switchyard_session_id=switchyard_session_id,
             instance_dataset_path=instance_dataset_path,
             agent_instance_dataset_path=agent_instance_dataset_path,
             trajectories_root=trajectories_root,
@@ -3685,16 +3773,57 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
 
+            instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
+            switchyard_trace_error = None
+            if instance_config.switchyard_base_url and instance_config.switchyard_session_id:
+                try:
+                    trace = await self._retrieve_switchyard_trace(instance_config)
+                    switchyard_input = [item.model_dump() for item in trace.input_items]
+                    switchyard_tools = [tool.model_dump() for tool in trace.tools]
+                    responses_create_params["input"] = switchyard_input
+                    responses_create_params["tools"] = switchyard_tools
+                    response.output = trace.output_items
+                    response.metadata = {
+                        "switchyard_source": "switchyard",
+                        "switchyard_session_id": instance_config.switchyard_session_id,
+                        "switchyard_record_uuids": json.dumps(trace.record_uuids),
+                        "switchyard_model": trace.model,
+                    }
+                except Exception as e:
+                    # Fail closed for training, open for diagnostics: keep the
+                    # OpenHands-derived rollout/patch/reward, but mask the sample
+                    # rather than emit a partially token-annotated trajectory.
+                    instance_config.mask_sample = True
+                    switchyard_trace_error = (
+                        f"session {instance_config.switchyard_session_id}: {type(e).__name__}: {e}"
+                    )
+
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
+                mask_sample=instance_config.mask_sample,
                 **metrics.model_dump(),
-                instance_config=SWEBenchWrapperInstanceConfig.model_validate_json(
-                    metadata["instance_config"]
-                ).model_dump(),
+                instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,
+                switchyard_trace_error=switchyard_trace_error,
             )
+
+    async def _retrieve_switchyard_trace(self, instance_config: SWEBenchWrapperInstanceConfig) -> SwitchyardTrace:
+        """Fetch this run's captured completions from Switchyard and rebuild the rollout.
+
+        No polling is needed: the agent has exited and Switchyard durably writes
+        each record before returning that call's model response. The GET is
+        idempotent, so the helper's transport retries are safe.
+        """
+        url = (
+            f"{instance_config.switchyard_base_url.rstrip('/')}"
+            f"/v1/sessions/{instance_config.switchyard_session_id}/completions"
+        )
+        response = await request("GET", url, timeout=ClientTimeout(total=60))
+        await raise_for_status(response)
+        envelope = await get_response_json(response)
+        return reconstruct_switchyard_rollout(envelope, instance_config.switchyard_session_id, self._vllm_converter)
 
 
 if __name__ == "__main__":

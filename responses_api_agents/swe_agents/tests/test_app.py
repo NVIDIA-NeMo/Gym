@@ -15,6 +15,7 @@
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import tempfile
 import time
@@ -22,14 +23,19 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openai.types.responses.function_tool import FunctionTool
 
 import responses_api_agents.swe_agents.app as swe_app
 from nemo_gym.config_types import ModelServerRef, OmegaConf
 from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.switchyard_trace import SwitchyardTrace, SwitchyardTraceError
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
     AgentPromptOverride,
@@ -50,8 +56,10 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
+    _parse_switchyard_base_url,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
+    _switchyard_ng_config_dict_str,
     file_lock,
     runner_ray_remote,
     update_and_read_metrics,
@@ -169,6 +177,15 @@ def _make_instance_config(tmpdir: str, **overrides) -> SWEBenchWrapperInstanceCo
     )
     defaults.update(overrides)
     return SWEBenchWrapperInstanceConfig(**defaults)
+
+
+def _ng_config_dict_str(host: str = "model-host", port: int = 9999) -> str:
+    """Shell-quoted NEMO_GYM_CONFIG_DICT YAML with a resolvable test_model entry."""
+    return shlex.quote(
+        OmegaConf.to_yaml(
+            OmegaConf.create({"test_model": {"responses_api_models": {"vllm_model": {"host": host, "port": port}}}})
+        )
+    )
 
 
 ########################################
@@ -932,6 +949,65 @@ class TestOpenHandsHarnessProcessor:
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
             assert "CAMEL_CASE_TOOL_NAMES=true" in self._read_agent_script(config)
+
+    def test_get_run_command_switchyard_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(
+                tmpdir,
+                switchyard_base_url="http://switchyard:4000",
+                switchyard_session_id="0123456789abcdef0123456789abcdef",
+                ng_global_config_dict_str=_ng_config_dict_str(),
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+            script = self._read_agent_script(config)
+            # The TOML model becomes the Switchyard route id and carries the
+            # capture session as a body field via litellm completion_kwargs.
+            assert 'model = "test_model"' in script
+            assert 'proxy_x_session_id = "0123456789abcdef0123456789abcdef"' in script
+            # The agent's NEMO_GYM_CONFIG_DICT points the model server at Switchyard.
+            assert "host: switchyard" in script
+            assert "port: 4000" in script
+
+    def test_get_run_command_no_switchyard_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir, ng_global_config_dict_str=_ng_config_dict_str())
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+            script = self._read_agent_script(config)
+            assert 'model = "test-model"' in script
+            assert "proxy_x_session_id" not in script
+            assert "host: switchyard" not in script
+
+
+class TestSwitchyardTransportConfig:
+    @pytest.mark.parametrize(
+        "url",
+        ["https://switchyard:4000", "http://switchyard:4000/v1", "http://switchyard", "switchyard:4000"],
+    )
+    def test_rejects_non_host_port_urls(self, url) -> None:
+        with pytest.raises(ValueError, match="http://<host>:<port>"):
+            _parse_switchyard_base_url(url)
+
+    def test_accepts_host_port(self) -> None:
+        assert _parse_switchyard_base_url("http://switchyard:4000") == ("switchyard", 4000)
+        assert _parse_switchyard_base_url("http://10.0.0.5:4000/") == ("10.0.0.5", 4000)
+
+    def test_config_dict_rewrite_points_model_server_at_switchyard(self) -> None:
+        rewritten = _switchyard_ng_config_dict_str(_ng_config_dict_str(), "test_model", "http://switchyard:4000")
+        loaded = OmegaConf.create(shlex.split(rewritten)[0])
+        assert loaded.test_model.responses_api_models.vllm_model.host == "switchyard"
+        assert loaded.test_model.responses_api_models.vllm_model.port == 4000
+
+    def test_wrapper_fails_fast_on_bad_url(self, monkeypatch) -> None:
+        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+        monkeypatch.setattr(BaseDatasetHarnessProcessor, "_run_setup_command", MagicMock(return_value=None))
+        config = _minimal_server_config()
+        config.switchyard_base_url = "http://switchyard:4000/v1"
+        with pytest.raises(ValueError, match="http://<host>:<port>"):
+            SWEBenchWrapper(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 ########################################
@@ -2286,6 +2362,72 @@ class TestSWEBenchWrapperSetupParams:
             # deterministic selection based on instance_id
             assert params.resolved_agent_cls in ["CodexAgent", "OpenCodeAgent"]
 
+    def _switchyard_body(self) -> NeMoGymResponseCreateParamsNonStreaming:
+        return NeMoGymResponseCreateParamsNonStreaming(
+            model="test-model",
+            input=[],
+            temperature=1.0,
+            top_p=1.0,
+            metadata={
+                "problem_statement": "Fix bug",
+                "instance_id": "django__django-12345",
+                "base_commit": "abc123",
+                "dataset_name": "SWE-bench",
+                "split": "test",
+                "instance_dict": json.dumps({"repo": "django/django"}),
+            },
+        )
+
+    def test_setup_params_switchyard_session(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "django__django-12345.sif").touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            wrapper.config.switchyard_base_url = "http://switchyard:4000"
+            wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
+
+            params, _ = wrapper._setup_params(self._switchyard_body())
+            session_id = params.switchyard_session_id
+            assert session_id is not None
+            assert len(session_id) == 32
+            assert set(session_id) <= set("0123456789abcdef")
+            # Routed into the agent container via the TOML and the rewritten
+            # NEMO_GYM_CONFIG_DICT — no OpenHands-side changes involved.
+            assert f'proxy_x_session_id = "{session_id}"' in params.agent_script
+            assert "host: switchyard" in params.agent_script
+
+            # Unique per run.
+            params2, _ = wrapper._setup_params(self._switchyard_body())
+            assert params2.switchyard_session_id != session_id
+
+    def test_setup_params_no_switchyard_by_default(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "django__django-12345.sif").touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
+
+            params, _ = wrapper._setup_params(self._switchyard_body())
+            assert params.switchyard_session_id is None
+            assert "proxy_x_session_id" not in params.agent_script
+            assert "host: switchyard" not in params.agent_script
+
+    def test_setup_params_no_switchyard_for_golden_patch(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "django__django-12345.sif").touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            wrapper.config.switchyard_base_url = "http://switchyard:4000"
+            wrapper.config.verify_golden_patch = True
+            wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str = _ng_config_dict_str()
+
+            params, _ = wrapper._setup_params(self._switchyard_body())
+            assert params.switchyard_session_id is None
+            assert "proxy_x_session_id" not in params.agent_script
+
 
 class TestSWEBenchWrapperResponses:
     def _setup_oh_dirs(self, wrapper):
@@ -2459,6 +2601,177 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 0.0
+
+    @staticmethod
+    def _run_body():
+        from nemo_gym.base_resources_server import BaseRunRequest
+
+        return BaseRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                metadata={
+                    "problem_statement": "Fix",
+                    "instance_id": "test-1",
+                    "base_commit": "abc",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                },
+            )
+        )
+
+    def _switchyard_response(self, **instance_config_overrides) -> NeMoGymResponse:
+        return NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps({"resolved": True, "patch_exists": True}),
+                "instance_config": _make_instance_config(
+                    tempfile.mkdtemp(),
+                    switchyard_base_url="http://switchyard:4000",
+                    switchyard_session_id="0123456789abcdef0123456789abcdef",
+                    **instance_config_overrides,
+                ).model_dump_json(),
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_switchyard_success_replaces_rollout(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+
+        trace = SwitchyardTrace(
+            input_items=[NeMoGymEasyInputMessage(role="user", content="Fix the bug.")],
+            output_items=[
+                NeMoGymResponseOutputMessageForTraining(
+                    id="msg_1",
+                    content=[NeMoGymResponseOutputText(type="output_text", text="All fixed.", annotations=[])],
+                    prompt_token_ids=[1, 2],
+                    generation_token_ids=[3],
+                    generation_log_probs=[-0.5],
+                )
+            ],
+            tools=[FunctionTool(type="function", name="editor", description=None, parameters=None, strict=None)],
+            record_uuids=["u1", "u2"],
+            model="Qwen/Qwen3-0.6B",
+        )
+
+        with (
+            patch.object(
+                SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._switchyard_response()
+            ),
+            patch.object(SWEBenchWrapper, "_retrieve_switchyard_trace", new_callable=AsyncMock, return_value=trace),
+        ):
+            result = await wrapper.run(self._run_body())
+
+        assert result.switchyard_trace_error is None
+        assert result.mask_sample is False
+        assert result.instance_config.mask_sample is False
+        assert result.reward == 1.0
+        assert [item.model_dump() for item in result.responses_create_params.input] == [
+            trace.input_items[0].model_dump()
+        ]
+        assert result.responses_create_params.tools == [trace.tools[0].model_dump()]
+        assert result.response.output == trace.output_items
+        assert result.response.metadata == {
+            "switchyard_source": "switchyard",
+            "switchyard_session_id": "0123456789abcdef0123456789abcdef",
+            "switchyard_record_uuids": json.dumps(["u1", "u2"]),
+            "switchyard_model": "Qwen/Qwen3-0.6B",
+        }
+
+    @pytest.mark.asyncio
+    async def test_run_switchyard_failure_masks_sample(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+
+        with (
+            patch.object(
+                SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=self._switchyard_response()
+            ),
+            patch.object(
+                SWEBenchWrapper,
+                "_retrieve_switchyard_trace",
+                new_callable=AsyncMock,
+                side_effect=SwitchyardTraceError("record 1 prompt does not extend the reconstructed history"),
+            ),
+        ):
+            result = await wrapper.run(self._run_body())
+
+        # Fail closed for training, open for diagnostics.
+        assert result.mask_sample is True
+        assert result.instance_config.mask_sample is True
+        assert result.switchyard_trace_error == (
+            "session 0123456789abcdef0123456789abcdef: SwitchyardTraceError: "
+            "record 1 prompt does not extend the reconstructed history"
+        )
+        assert result.reward == 1.0
+        assert result.response.output == []
+        assert result.responses_create_params.input == []
+        assert result.response.metadata is None
+
+    @pytest.mark.asyncio
+    async def test_run_without_switchyard_does_not_retrieve(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+
+        mock_response = NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps({"resolved": True, "patch_exists": True}),
+                "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+            },
+        )
+
+        with (
+            patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response),
+            patch.object(SWEBenchWrapper, "_retrieve_switchyard_trace", new_callable=AsyncMock) as retrieve,
+        ):
+            result = await wrapper.run(self._run_body())
+
+        retrieve.assert_not_called()
+        assert result.switchyard_trace_error is None
+        assert result.mask_sample is False
+        assert result.instance_config.mask_sample is False
+
+    @pytest.mark.asyncio
+    async def test_retrieve_switchyard_trace_url(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_config = _make_instance_config(
+                tmpdir,
+                switchyard_base_url="http://switchyard:4000/",
+                switchyard_session_id="0123456789abcdef0123456789abcdef",
+            )
+
+        request_mock = AsyncMock(return_value=MagicMock())
+        envelope = {"schema_version": 1}
+        monkeypatch.setattr(swe_app, "request", request_mock)
+        monkeypatch.setattr(swe_app, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(swe_app, "get_response_json", AsyncMock(return_value=envelope))
+        reconstruct_mock = MagicMock(return_value="trace")
+        monkeypatch.setattr(swe_app, "reconstruct_switchyard_rollout", reconstruct_mock)
+
+        result = await wrapper._retrieve_switchyard_trace(instance_config)
+
+        assert result == "trace"
+        args, kwargs = request_mock.await_args
+        assert args == ("GET", "http://switchyard:4000/v1/sessions/0123456789abcdef0123456789abcdef/completions")
+        assert kwargs["timeout"].total == 60
+        reconstruct_mock.assert_called_once_with(envelope, "0123456789abcdef0123456789abcdef", wrapper._vllm_converter)
 
 
 ########################################
