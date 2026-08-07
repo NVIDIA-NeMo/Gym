@@ -4,9 +4,22 @@ config_paths:
 - benchmarks/tau2/configs/tau2.yaml
 - benchmarks/aalcr/config.yaml
 - benchmarks/scicode/config.yaml
-- benchmarks/critpt/config.yaml
+# TODO @bxyu-nvidia: need to figure out AA key
+# - benchmarks/critpt/config.yaml
+# TODO @bxyu-nvidia: Implementing in the harness x benchmark decoupling effort.
 # - benchmarks/swebench/verified/opencode.yaml
 # - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+# SWE Bench Multilingual
+# SWE Bench Pro
+# Terminal Bench 2.1
+# TODO @bxyu-nvidia: need clarification from arajfer and config update in gym
+# HLE w/o tool
+# TODO @bxyu-nvidia: need test efficiency
+# BrowseComp
+# TODO @bxyu-nvidia: need pipeclean (may be very complex)
+# GDPVal-AA-V2
+# TODO @bxyu-nvidia: need internal branch
+# LM Arena proxy (To help text Arena)
 - responses_api_models/vllm_model/configs/vllm_model.yaml
 - env.yaml
 
