@@ -29,3 +29,9 @@ for path_to_fix in paths_to_fix:
     content = path_to_fix.read_text()
     content = content.replace("3.13.14", "3.12.13")
     path_to_fix.write_text(content)
+
+# Need to also downgrade Ray from 2.56.1 (no Python 3.12 support) to 2.55.1
+path = Path("pyproject.toml")
+content = path.read_text()
+content = content.replace("ray[default]>=2.56.1", "ray[default]==2.55.1")
+path.write_text(content)
