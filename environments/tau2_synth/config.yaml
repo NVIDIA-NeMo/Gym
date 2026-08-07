@@ -15,7 +15,7 @@ tau2_synth:
         domain: library
         user_model: openai/gpt-4.1
         user_base_url: https://api.openai.com/v1
-        user_api_key_var: OPENAI_API_KEY
+        user_api_key_var: OPENAI_API_KEY  # pragma: allowlist secret
         max_steps: 50
       group_size: 1
       max_concurrent_generation: -1
