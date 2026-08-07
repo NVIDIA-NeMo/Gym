@@ -141,7 +141,17 @@ POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 POLICY_MODEL_KEY_NAME = "policy_model"
 
-DEFAULT_HEAD_SERVER_PORT = 11000
+# Ports must stay below the OS ephemeral port range, which the kernel draws from for outgoing
+# connections. A port in that range can be taken between the time we probe it and the time a server
+# binds it, and startup then fails with EADDRINUSE. Where that range starts varies by OS and is
+# configurable, so keep the band low.
+DEFAULT_PORT_RANGE_LOW: int = 5000
+DEFAULT_PORT_RANGE_HIGH: int = 5999
+
+# Gym probes for every other port but pins this one, so it has to be free or the run fails. Take it
+# from the top of the band, since the bottom is more contended: 5000 is a common default for local
+# dev servers. This port is seeded into disallowed_ports so the allocator never hands it out again.
+DEFAULT_HEAD_SERVER_PORT: int = DEFAULT_PORT_RANGE_HIGH
 
 
 # W&B
@@ -670,8 +680,8 @@ Found global config dict yaml:
         initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
 
         with open_dict(global_config_dict):
-            port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 10_001)
-            port_range_high = global_config_dict.setdefault(PORT_RANGE_HIGH_KEY_NAME, 20_000)
+            port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, DEFAULT_PORT_RANGE_LOW)
+            port_range_high = global_config_dict.setdefault(PORT_RANGE_HIGH_KEY_NAME, DEFAULT_PORT_RANGE_HIGH)
 
         disallowed_ports = self.validate_and_populate_defaults(
             server_instance_configs=server_instance_configs,
@@ -892,6 +902,15 @@ def _find_open_port_using_range(
     max_retries: int = 50,
 ) -> int:  # pragma: no cover
     # Find an open port that doesn't conflict with disallowed ports.
+
+    # max_retries bounds the retry loop below, but not the rejection loop inside it, which resamples
+    # until it draws a port that is not disallowed. If the whole range is disallowed it never draws
+    # one, so check for that up front.
+    if set(range(port_range_low, port_range_high + 1)).issubset(disallowed_ports):
+        raise RuntimeError(
+            f"Every port in the range [{port_range_low}, {port_range_high}] is already taken by this run. "
+            f"Widen {PORT_RANGE_LOW_KEY_NAME}/{PORT_RANGE_HIGH_KEY_NAME} or start fewer servers."
+        )
 
     with socket() as s:
         for _ in range(max_retries):
