@@ -282,9 +282,12 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         else:
             original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
             original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
-            model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
+            try:
+                model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
+                model_patch = model_patch_result.stdout
+            except:
+                pass
             await original_sandbox.stop()
-            model_patch = model_patch_result.stdout
 
         run_id = request.session[SESSION_ID_KEY]
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
