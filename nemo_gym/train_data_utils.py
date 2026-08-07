@@ -37,6 +37,10 @@ from nemo_gym.config_types import (
     DownloadJsonlDatasetHuggingFaceConfig,
     ServerInstanceConfig,
 )
+
+# Importing DecontaminationConfig is cheap: heavy deps (torch, transformers)
+# are imported lazily inside nemo_gym.decontamination only when decontamination runs.
+from nemo_gym.decontamination import DecontaminationConfig, run_decontamination
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
@@ -78,6 +82,11 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     )
     overwrite_metrics_conflicts: bool = Field(
         default=False, description="Whether or not to overwrite metrics conflicts."
+    )
+    decontamination: Optional[DecontaminationConfig] = Field(
+        default=None,
+        description="If set, decontaminate the prepared splits against the provided test sets after collation. "
+        "Leave unset (default) to skip decontamination entirely with zero overhead.",
     )
 
     @property
@@ -341,6 +350,10 @@ class TrainDataProcessor(BaseModel):
 
         self._print_title("Collate samples and aggregate metrics")
         self.collate_samples(config, server_instance_configs, dataset_type_to_aggregate_metrics)
+
+        if config.decontamination is not None:
+            self._print_title("Decontaminate prepared splits against test sets")
+            run_decontamination(config, Path(config.output_dirpath))
 
         self._print_title("Finished!")
 
