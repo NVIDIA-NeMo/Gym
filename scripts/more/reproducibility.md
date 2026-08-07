@@ -1,28 +1,36 @@
 # Reproducing the published evaluation results
 
-Each recipe here reproduces one published benchmark result. A recipe is a small script
-that wraps `gym eval run` with the settings the published run used — sampling, judges,
-repeats and the per-benchmark overrides — so the parts that decide a score are not left
-to defaults.
+This tutorial demonstrates how to reproduce the evaluation results for the NVIDIA
+Nemotron 3.5 Lightning 30B A3B model using NeMo Gym.
 
-Copy the two templates, fill them in, then run a recipe from the Gym repo root:
+Most benchmarks ship as a recipe: a script that wraps `gym eval run` with the settings
+the published run used. To run one, copy the two templates, fill them in, and run from
+the Gym repo root:
 
 ```bash
-cp env.yaml.example env.yaml     # policy endpoint, judges
+cp env.yaml.example env.yaml     # policy endpoint and judges
 cp .env.example .env             # keys and paths
 set -a; source .env; set +a
 ./gpqa.sh
 ```
 
-`env.yaml` holds endpoints and model ids; `.env` holds keys and machine-specific paths.
-Every recipe takes `LIMIT` for a quick smoke, `OUT` for the output directory and
-`PARALLEL` for concurrency; results land in `./results/<benchmark>`.
+Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory and
+`PARALLEL` for concurrency. Results land in `./results/<benchmark>`.
+
+Terminal-Bench, SWE-bench and the base-model suite are not Gym recipes — each has its
+own section below.
 
 ## Prerequisites
 
-- **Python 3.13.14 or newer.** Gym does not install on 3.12.
-- **`uv` on your `PATH`.** Some benchmarks shell out to scripts that call it and
-  fail with a bare `exit 127` without it.
+- **Python 3.13.14 or newer** — Gym does not install on 3.12.
+- **[uv](https://docs.astral.sh/uv/getting-started/installation/) on your `PATH`** — Gym
+  builds every server's virtualenv with it, so nothing starts without it.
+- **Gym installed**, from the repo root:
+
+  ```bash
+  uv venv --python 3.13.14 && source .venv/bin/activate
+  uv sync
+  ```
 
 ## Overview
 
@@ -38,11 +46,10 @@ Every recipe takes `LIMIT` for a quick smoke, `OUT` for the output directory and
 | CritPt | Research-level physics | `./critpt.sh` |
 | GDPval | Real-world work products, judged | `./gdpval/gdpval.sh` |
 | PinchBench | The model as the brain of an OpenClaw agent | `./pinchbench.sh` |
-| Terminal-Bench 2.1 | Agentic terminal use | `nel eval run nel-next/…` |
-| SWE-bench Verified / Multilingual | Agentic coding against a repo's tests | `nel eval run nel-next/…` |
+| Terminal-Bench 2.1 | Agentic terminal use | `nel eval run nel-next/terminal-bench-2.1.yaml` |
+| SWE-bench Verified | Agentic coding against a repo's tests | `nel eval run nel-next/swebench-verified.yaml` |
+| SWE-bench Multilingual | The same, across languages | `nel eval run nel-next/swebench-multilingual.yaml` |
 | Base suite | 21 pretraining benchmarks plus RULER | see [`base/`](./base/) |
-
-The last three rows are not Gym recipes — see their sections below.
 
 ## Benchmarks needing extra setup
 
