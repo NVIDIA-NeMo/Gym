@@ -1,0 +1,59 @@
+# Resources server: owns this environment's task verification (verify()) and reward.
+swebench_resources_server:          # instance name — how agents/CLI refer to this server
+  resources_servers:                              # server type: resources_servers | responses_api_agents | responses_api_models
+    swebench:                        # implementation directory under resources_servers/
+      entrypoint: app.py                        # server entry module
+      domain: other                             # task domain; one of: math, coding, agent, knowledge,
+                                                #   instruction_following, long_context, safety, games, translation,
+                                                #   e2e, rlhf, other. Change 'other' to the closest fit.
+      verified: false                           # set true once the benchmark has been baselined and reviewed
+
+      evaluation_timeout: 1800
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
+          # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
+          disk_gib: 30
+        provider_options:
+          # Scheduling requests, kept below the limits so sandboxes pack densely.
+          resource_requests:
+            cpu: 0.5
+            memory_mib: 512
+            disk_gib: 30
+        metadata:
+          benchmark: swebench-verified
+          harness: mini-swe-agent
+
+# Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
+# swebench_simple_agent:               # this agent instance's name — pass as --agent to gym eval run
+#   responses_api_agents:
+#     simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
+#       entrypoint: app.py
+#       resources_server:                         # the resources server this agent interacts with for tools, state and verification
+#         type: resources_servers
+#         name: swebench_resources_server
+#       model_server:                             # the model that answers; 'policy_model' is resolved from a model config
+#         type: responses_api_models
+#         name: policy_model
+#       datasets:                                 # one block per split: train | validation | example
+#       - name: train
+#         type: train
+#         jsonl_fpath: resources_servers/swebench/data/train.jsonl   # local data file for this split
+#         num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
+#         license: Apache 2.0                     # required for train/validation; must be an allowed license string
+#         # to fetch this split from a registry instead, add a source: block (type: gitlab | huggingface)
+#       - name: validation
+#         type: validation
+#         jsonl_fpath: resources_servers/swebench/data/validation.jsonl
+#         num_repeats: 1
+#         license: Apache 2.0
+#       - name: example                           # 5 rows committed to git for quick smoke tests
+#         type: example
+#         jsonl_fpath: resources_servers/swebench/data/example.jsonl
+#         num_repeats: 1
