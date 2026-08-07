@@ -269,17 +269,30 @@ def test_build_sbatch_script_policy_model_flags(submit_config_with_policy, bench
 
 def test_resolve_env_literal():
     out = _resolve_env({"FOO": "bar", "BAZ": "qux"})
-    assert "export FOO=bar" in out
-    assert "export BAZ=qux" in out
+    assert "FOO=bar" in out
+    assert "BAZ=qux" in out
+    assert out.startswith("env ")
 
 
 def test_resolve_env_value_with_spaces():
     out = _resolve_env({"MSG": "hello world"})
-    assert "export MSG='hello world'" in out
+    assert "MSG='hello world'" in out
 
 
 def test_resolve_env_empty():
     assert _resolve_env({}) == ""
+
+
+def test_resolve_env_invalid_key_raises():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"X; rm -rf /": "v"})
+
+
+def test_resolve_env_valid_keys():
+    out = _resolve_env({"_VALID_KEY": "a", "key1": "b", "KEY_123": "c"})
+    assert "_VALID_KEY=a" in out
+    assert "key1=b" in out
+    assert "KEY_123=c" in out
 
 
 # ---------------------------------------------------------------------------
@@ -465,23 +478,24 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir, monkeypatc
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
-    svc_export_idx = script.index("export SVC_KEY=svc_val")
-    drv_export_idx = script.index("export DRV_KEY=drv_val")
+    svc_env_idx = script.index("SVC_KEY=svc_val")
+    drv_env_idx = script.index("DRV_KEY=drv_val")
     svc_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=vllm:latest")
     drv_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=python:3.12")
-    # Service export appears before service srun; driver export appears before driver srun.
-    assert svc_export_idx < svc_srun_idx
-    assert drv_export_idx < drv_srun_idx
-    # Service export appears before driver export.
-    assert svc_export_idx < drv_export_idx
+    # Service env prefix appears before service srun; driver env prefix appears before driver srun.
+    assert svc_env_idx < svc_srun_idx
+    assert drv_env_idx < drv_srun_idx
+    # Service env prefix appears before driver env prefix.
+    assert svc_env_idx < drv_env_idx
 
 
 def test_render_service_command_with_env():
     out = _render_service_command("svc", "img:latest", "cmd", {"FOO": "bar"})
-    lines = out.splitlines()
-    export_idx = next(i for i, line in enumerate(lines) if "export FOO=bar" in line)
-    srun_idx = next(i for i, line in enumerate(lines) if "srun" in line)
-    assert export_idx < srun_idx
+    assert "FOO=bar" in out
+    # env prefix must appear before srun on the same line or earlier
+    foo_idx = out.index("FOO=bar")
+    srun_idx = out.index("srun")
+    assert foo_idx < srun_idx
 
 
 def test_render_service_command_no_env():
@@ -511,8 +525,8 @@ def test_build_sbatch_script_service_env(bench_dir, monkeypatch):
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
-    assert "export HF_TOKEN=hf_test" in script
-    assert "export LIT=val" in script
+    assert "HF_TOKEN=hf_test" in script
+    assert "LIT=val" in script
 
 
 def test_build_sbatch_script_driver_env(bench_dir, monkeypatch):
@@ -532,7 +546,7 @@ def test_build_sbatch_script_driver_env(bench_dir, monkeypatch):
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
-    assert "export WANDB_API_KEY=wb_secret" in script
+    assert "WANDB_API_KEY=wb_secret" in script
 
 
 # ---------------------------------------------------------------------------

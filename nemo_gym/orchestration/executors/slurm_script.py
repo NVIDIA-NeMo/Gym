@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import shlex
 from pathlib import Path
 
@@ -75,21 +76,33 @@ def _render_pool_directives(pool_name: str, pool: NodePool) -> list[str]:
     return lines
 
 
+_VALID_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_env_key(key: str) -> None:
+    if not _VALID_ENV_KEY.match(key):
+        raise ValueError(f"Invalid environment variable name: {key!r}")
+
+
 def _resolve_env(env: dict[str, str]) -> str:
-    return "\n".join(f"export {k}={shlex.quote(v)}" for k, v in env.items())
+    """Return an 'env K=V ...' prefix string (trailing space) scoped to a single command, or '' if empty."""
+    if not env:
+        return ""
+    for k in env:
+        _validate_env_key(k)
+    pairs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+    return f"env {pairs} "
 
 
 def _render_service_command(name: str, container: str, command: str, env: dict[str, str] | None = None) -> str:
     var = bash_var(name)
-    env_block = _resolve_env(env) if env else ""
-    prefix = f"{env_block}\n" if env_block else ""
+    env_prefix = _resolve_env(env) if env else ""
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
     return (
         f"# service: {name}\n"
-        f"{prefix}"
-        f"srun --overlap --no-container-mount-home --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap --no-container-mount-home --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -148,12 +161,10 @@ def build_sbatch_script(
         prepare_cmd=prepare_cmd,
     )
     prepare_command = ""
-    driver_env_block = _resolve_env(config.driver.env) if config.driver.env else ""
-    driver_env_prefix = f"{driver_env_block}\n" if driver_env_block else ""
+    driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
     driver_command = (
         f"{gym_cmd}\n"
-        f"{driver_env_prefix}"
-        f"srun --overlap --no-container-mount-home --container-image={shlex.quote(config.driver.container)} "
+        f"{driver_env_prefix}srun --overlap --no-container-mount-home --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
 
