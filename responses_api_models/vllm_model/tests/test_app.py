@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -5394,6 +5395,68 @@ class TestPrefixSupplyReachesTokenize:
         assert chat_kwargs["required_prefix_token_ids"] == [11, 12, 13]
         # The assertion that matters: the same prefix rides the tokenize request.
         assert tokenize_kwargs.get("required_prefix_token_ids") == [11, 12, 13]
+
+    def _supply_and_return_prompt(self, tmp_path, prompt_tokens: list[int], rollout: str) -> CaptureContext:
+        """Run one supplied call against an engine that returns ``prompt_tokens``."""
+        model = self._model()
+        app = model.setup_webserver()
+
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout(rollout).record("parent", turn, [11, 12, 13], "d")
+
+        async def mock_create_chat_completion(**kwargs):
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                        "logprobs": {
+                            "content": [{"token": "token_id:77", "logprob": -0.5, "bytes": None, "top_logprobs": []}]
+                        },
+                    }
+                ],
+            }
+
+        async def mock_create_tokenize(**kwargs):
+            return {"tokens": prompt_tokens}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        context = CaptureContext(rollout_id=rollout, model_call_id="call-v", sink=TokenCaptureStore(tmp_path))
+        sink = set_token_sink(context)
+        try:
+            response = TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": turn + [{"role": "user", "content": "next"}]},
+            )
+        finally:
+            reset_token_sink(sink)
+        assert response.status_code == 200
+        return context
+
+    def test_a_backend_that_ignores_the_prefix_is_recorded_as_not_supplied(self, tmp_path, caplog) -> None:
+        """Supply sets a field on a request; only the returned prompt says whether it was used.
+
+        A backend without the field drops it and answers normally. Every check downstream is
+        satisfied by construction when the prefix was applied, so none of them can catch this.
+        """
+        with caplog.at_level(logging.ERROR):
+            context = self._supply_and_return_prompt(tmp_path, [900, 901, 77], "ver-ignored")
+        assert context.prefix_supplied is False
+        assert "ignoring required_prefix_token_ids" in caplog.text
+
+    def test_a_backend_that_applies_the_prefix_is_recorded_as_supplied(self, tmp_path) -> None:
+        """Control: the returned prompt starts with the supplied tokens."""
+        context = self._supply_and_return_prompt(tmp_path, [11, 12, 13, 77], "ver-applied")
+        assert context.prefix_supplied is True
 
     def test_tokenize_body_omits_the_prefix_when_supply_did_not_fire(self, tmp_path) -> None:
         """No parent resolved means no prefix on either call, not a stale one on one of them."""

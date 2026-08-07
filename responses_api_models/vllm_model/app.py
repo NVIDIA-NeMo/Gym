@@ -666,6 +666,30 @@ class VLLMModel(SimpleResponsesAPIModel):
             LOG.info("prefix supply: %d/%d calls supplied (%.0f%%)", supplied, total, 100.0 * supplied / total)
         return body_dict
 
+    def _check_the_prefix_was_applied(self, tokenize_body_dict: dict, tokens: list) -> None:
+        """Record whether the engine used the supplied prefix, not whether we asked it to.
+
+        Setting ``required_prefix_token_ids`` is a request. A backend that does not implement
+        the field drops it and answers normally, and no check downstream can tell: contiguity
+        and the parent digest are both satisfied by construction whenever the prefix *was*
+        applied, so they only ever confirm the case that already worked. This is the one place
+        the engine's own prompt is available to compare against what was sent.
+        """
+        supplied = tokenize_body_dict.get("required_prefix_token_ids")
+        if not supplied or list(tokens[: len(supplied)]) == list(supplied):
+            return
+        LOG.error(
+            "`%s` supplied a %d token prefix but the engine returned a prompt that does not start "
+            "with it, so the backend is ignoring required_prefix_token_ids. Recording this call as "
+            "not supplied.",
+            self.config.name,
+            len(supplied),
+        )
+        context = current_capture_context()
+        if context is not None:
+            context.prefix_supplied = False
+        self._prefix_supply_counts[0] -= 1
+
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
@@ -861,6 +885,9 @@ class VLLMModel(SimpleResponsesAPIModel):
 
                 # The adapter consumed this compatibility payload.
                 choice_dict.pop("logprobs", None)
+
+            prompt_token_ids = message_dict["prompt_token_ids"]
+            self._check_the_prefix_was_applied(body_dict, prompt_token_ids)
 
             # Top-level and choice-level token-ID fields are transport details.
             chat_completion_dict.pop("prompt_token_ids", None)
