@@ -159,7 +159,7 @@ jobs:
           # uv gives the extra index higher priority. Configure indexes only after
           # building so child server venvs select this same-version candidate wheel.
           echo "UV_INDEX_URL=https://pypi.org/simple/" >> "$GITHUB_ENV"
-          echo "UV_EXTRA_INDEX_URL=http://127.0.0.1:8888/" >> "$GITHUB_ENV"
+          echo "UV_EXTRA_INDEX_URL=http://127.0.0.1:8888/" >> "$GITHUB_ENV"  # DevSkim: ignore DS162092
 
       - name: Install wheel in fresh venv
         run: |
