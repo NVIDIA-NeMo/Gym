@@ -16,9 +16,10 @@ NEMO_GYM_GIT_REF=${NEMO_GYM_GIT_REF:-main}
 srun --nodes=1 --ntasks=1 \
     --container-image=$INPUT_CONTAINER \
     --container-mounts=$MOUNTS \
+    --no-container-mount-home \
     --container-save=$OUTPUT_CONTAINER \
     bash -s <<INNER_BUILD
-set -euo pipefail
+set -xeuo pipefail
 
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
@@ -44,6 +45,9 @@ git init
 git remote add origin $NEMO_GYM_GIT_URL
 git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
+
+# See the script for more information.
+python benchmarks/nemotron_3.5_super/downgrade_python.py
 
 uv sync --active
 uv pip install "\$ray_dependency"
