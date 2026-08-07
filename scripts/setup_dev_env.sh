@@ -15,9 +15,8 @@
 # limitations under the License.
 #
 # Usage:
-#   bash scripts/setup_dev_env.sh            # uses versions from repo config
-#   PYTHON_VERSION=3.13.14 bash scripts/setup_dev_env.sh  # override Python version
-#   UV_VERSION=0.11.29 bash scripts/setup_dev_env.sh      # override uv version
+#   bash scripts/setup_dev_env.sh                     # uses versions from repo config
+#   UV_VERSION=0.11.29 bash scripts/setup_dev_env.sh  # override uv version
 #
 # This script is safe to re-run. It:
 #   1. Updates uv to the version pinned in CI (or PYTHON_VERSION/UV_VERSION env vars)
@@ -34,23 +33,19 @@ cd "$REPO_ROOT"
 # 1. Resolve target versions from repo config, allow env var override
 # ---------------------------------------------------------------------------
 
-# Python: read from .python-version (the canonical source for this repo)
-TARGET_PYTHON="${PYTHON_VERSION:-}"
-if [[ -z "$TARGET_PYTHON" ]]; then
-    if [[ -f ".python-version" ]]; then
-        TARGET_PYTHON="$(tr -d '[:space:]' < .python-version)"
-    else
-        echo "ERROR: .python-version not found and PYTHON_VERSION not set." >&2
-        exit 1
-    fi
+# Python: .python-version is the sole source of truth
+if [[ ! -f ".python-version" ]]; then
+    echo "ERROR: .python-version not found." >&2
+    exit 1
 fi
+TARGET_PYTHON="$(tr -d '[:space:]' < .python-version)"
 
 # uv: parse version from CI's UV_INSTALL_URL (single source of truth for pinned uv)
 TARGET_UV="${UV_VERSION:-}"
 if [[ -z "$TARGET_UV" ]]; then
     CI_YAML=".github/workflows/unit-tests.yml"
     if [[ -f "$CI_YAML" ]]; then
-        TARGET_UV="$(grep -oP 'astral\.sh/uv/\K[0-9]+\.[0-9]+\.[0-9]+' "$CI_YAML" | head -1)"
+        TARGET_UV="$(grep -oE 'astral\.sh/uv/[0-9]+\.[0-9]+\.[0-9]+' "$CI_YAML" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
     fi
 fi
 
@@ -66,12 +61,12 @@ if ! command -v uv &>/dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-CURRENT_UV="$(uv --version 2>/dev/null | grep -oP '[\d]+\.[\d]+\.[\d]+' | head -1 || true)"
+CURRENT_UV="$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 echo "==> Current uv    : ${CURRENT_UV:-unknown}"
 
 if [[ -n "$TARGET_UV" && "$CURRENT_UV" != "$TARGET_UV" ]]; then
     echo "==> Updating uv to ${TARGET_UV}..."
-    uv self update "$TARGET_UV"
+    uv self update "$TARGET_UV" || echo "==> Warning: could not update uv (may be managed by system package manager); continuing with ${CURRENT_UV}"
 else
     echo "==> uv is up to date (${CURRENT_UV})"
 fi
