@@ -102,8 +102,11 @@ from nemo_gym.server_utils import (
 # Training-specific
 ########################################
 
-# Per-token routed expert indices with shape [tokens, num_moe_layers, topk].
-RoutedExperts: TypeAlias = List[List[List[int]]]
+# Per-token routed expert indices with shape [tokens, num_moe_layers, topk], either as
+# nested int lists or as an opaque string envelope produced by the training framework
+# (e.g. NeMo-RL's "nrlre1:<dtype>:<SxLxK>:<base64>"). Gym never inspects the value; the
+# string form keeps multi-MB payloads cheap to validate and re-serialize at every hop.
+RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
 
 
 class TokenIDLogProbMixin(BaseModel):
@@ -358,6 +361,26 @@ class NeMoGymResponseUsage(ResponseUsage):
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
 
+def accumulate_response_usage(
+    total: Optional[NeMoGymResponseUsage], additional: Optional[NeMoGymResponseUsage]
+) -> Optional[NeMoGymResponseUsage]:
+    """Accumulate top-level and detailed response token counts."""
+    if additional is None:
+        return total
+    if total is None:
+        return additional.model_copy(deep=True)
+
+    result = total.model_copy(deep=True)
+    result.input_tokens += additional.input_tokens
+    result.output_tokens += additional.output_tokens
+    result.total_tokens += additional.total_tokens
+    if result.input_tokens_details is not None and additional.input_tokens_details is not None:
+        result.input_tokens_details.cached_tokens += additional.input_tokens_details.cached_tokens
+    if result.output_tokens_details is not None and additional.output_tokens_details is not None:
+        result.output_tokens_details.reasoning_tokens += additional.output_tokens_details.reasoning_tokens
+    return result
+
+
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
@@ -594,6 +617,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def create_chat_completion(self, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
+
+    async def create_completion(self, **kwargs):
+        request_kwargs = dict(
+            url=f"{self.base_url}/completions",
             json=kwargs,
         )
         response = await self._request(method="POST", **request_kwargs)

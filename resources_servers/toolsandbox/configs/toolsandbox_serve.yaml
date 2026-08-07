@@ -1,0 +1,74 @@
+# ToolSandbox serve config: brings up both the resources server and the
+# toolsandbox_agent harness for external orchestration.
+#
+# Unlike the deterministic scorers (ragtruth/rolemrc reference), ToolSandbox is
+# multi-turn and agentic, so the gym side must launch BOTH the resources server
+# AND the toolsandbox_agent harness. An external orchestrator discovers the agent
+# via /server_instances, calls its /run per dataset row, and (with
+# trust_reward: true) uses the reward the agent gets back from /verify.
+#
+# The model-under-test is injected as `policy_model`; load a model server config
+# alongside this file in the gym service's server_cmd, e.g.:
+#
+#   gym env start \
+#     --config resources_servers/toolsandbox/configs/toolsandbox_serve.yaml \
+#     --model-type openai_model \
+#     ++policy_base_url=... ++policy_api_key=... ++policy_model_name=... \
+#     ++head_server.host=0.0.0.0 ++head_server.port=8001
+toolsandbox:
+  resources_servers:
+    toolsandbox:
+      entrypoint: app.py
+      host: 0.0.0.0
+      domain: agent
+      verified: false
+      description: ToolSandbox multi-turn tool-use benchmark; reward is the milestone similarity in [0, 1] (0 if a minefield is hit).
+      value: Improve stateful, multi-turn tool-calling and user-interaction capability.
+      # User simulator defaults to the model under test (self-play). To use a
+      # DIFFERENT user-sim model, also load
+      # `resources_servers/toolsandbox/configs/user_model.yaml` and override
+      # this ref to point at the `user_model` instance, e.g.:
+      #   ++toolsandbox.resources_servers.toolsandbox.user_model_server.name=user_model
+      #   +user_base_url=... +user_api_key=... +user_model_name=...
+      # (The openai_model server ignores per-request model overrides, so a
+      # distinct user model needs its own server instance — see user_model.yaml.)
+      user_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Leave user-sim sampling unset so it falls through to the provider
+      # defaults, matching the reference BYOB config
+      # (benchmarks/toolsandbox/configs/reference-gpt-4o_toolsandbox.yaml comments
+      # these out). Pinning temperature=0 / max_tokens made the gym user
+      # simulator behave differently from the reference and skewed scoring. Only
+      # set explicit values if you mirror them in the reference so the two runs
+      # stay comparable.
+#      user_temperature: 0.0
+#      user_top_p: 1.0
+#      user_max_tokens: 2048
+#      user_enable_thinking: false     # no-op for gpt-4o (OpenAI ignores chat_template_kwargs); set only for vLLM reasoning models
+      preferred_tool_backend: default
+      test_mode: false
+      # `additionalProperties` in seeded tool schemas. True (default) leaves it
+      # unset = matches upstream's bare Chat-Completions schemas; false injects
+      # `additionalProperties: False`.
+      tool_schema_additional_properties: true
+
+toolsandbox_agent:
+  responses_api_agents:
+    toolsandbox_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: toolsandbox
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Upstream ToolSandbox has no agent-turn cap; it runs to the scenario's
+      # message cap (scenario.max_messages, default 30 — which almost always
+      # binds first, ~15 agent turns). Keep max_steps above that so it never
+      # truncates a legitimately long scenario before the message cap does.
+      max_steps: 50
+      # Emit a single flat trajectory (list of output items), not per-step
+      # transition snapshots. response.output is consumed as a flat list;
+      # transitions (list-of-lists) break downstream text extraction.
+      return_transitions: false

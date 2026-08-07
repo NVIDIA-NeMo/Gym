@@ -163,6 +163,10 @@ class ConfigMissingValuesError(ConfigError, ValueError):
     """One or more required config values are still unset (OmegaConf '???') after merging."""
 
 
+class ConfigInterpolationError(ConfigError, ValueError):
+    """An `${...}` interpolation references a key that is not present in the merged config."""
+
+
 class ServerRefNotFoundError(ConfigError, ValueError):
     """A server cross-reference points to an instance that is not defined in the merged config."""
 
@@ -515,7 +519,7 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
-    prompt_config: Optional[Path]
+    prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
 
 

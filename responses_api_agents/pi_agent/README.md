@@ -42,11 +42,18 @@ models_config:
         reasoning: false
 ```
 
+Alternatively, set `model_server` to a Gym model server and set `model` to its served model id. The
+agent creates the Pi provider entry automatically. Without `model_server`, the existing provider
+configuration is unchanged.
+
 ## Config fields
 
 - `concurrency`: max simultaneous `run()` calls
 - `command`: the pi command, split on spaces so a multi-word launcher works
 - `model`: `<provider>/<model-id>` (see Model id)
+- `model_server`: optional Gym model server used to generate the provider entry
+- `context_window`: context limit for a generated model entry
+- `max_output_tokens`: output limit for a generated model entry
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `workspace_root`: where per-request HOMEs are created and deleted
 - `thinking`: passed to `--thinking` (off, minimal, low, medium, high, xhigh)

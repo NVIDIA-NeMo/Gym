@@ -22,7 +22,7 @@ from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import CACHE_DIR, WORKING_DIR
+from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
@@ -67,6 +67,7 @@ class TestGlobalConfig:
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
+            "model_endpoint_readiness_timeout_seconds": 600,
             "uv_cache_dir": str(CACHE_DIR / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
         }
@@ -978,7 +979,7 @@ class TestGlobalConfig:
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1266,7 +1267,9 @@ class TestGlobalConfig:
         cwd_dir = tmp_path / "cwd"
         cwd_dir.mkdir()
         monkeypatch.chdir(cwd_dir)
-        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent_dir)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", parent_dir)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", parent_dir)
 
         config_paths, extra_configs = parser.load_extra_config_paths(["my_config.yaml"])
         assert extra_configs[0]["my_key"] == "from_parent"
@@ -1280,7 +1283,9 @@ class TestGlobalConfig:
         monkeypatch.chdir(tmp_path)
         empty_parent = tmp_path / "empty_parent"
         empty_parent.mkdir()
-        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", empty_parent)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", empty_parent)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", empty_parent)
 
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))
@@ -1298,7 +1303,9 @@ class TestGlobalConfig:
         cwd_dir = tmp_path / "cwd"
         cwd_dir.mkdir()
         monkeypatch.chdir(cwd_dir)
-        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent_dir)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", parent_dir)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", parent_dir)
 
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse(GlobalConfigDictParserConfig(skip_load_from_cli=True))
@@ -1321,7 +1328,9 @@ class TestConfigLoadErrors:
         cwd.mkdir()
         parent.mkdir()
         monkeypatch.chdir(cwd)
-        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", parent)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", parent)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", parent)
 
         parser = GlobalConfigDictParser()
         with raises(ConfigPathNotFoundError) as exc_info:
@@ -1337,7 +1346,9 @@ class TestConfigLoadErrors:
         self, monkeypatch: MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(nemo_gym.global_config, "PARENT_DIR", tmp_path)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", tmp_path)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", tmp_path)
 
         parser = GlobalConfigDictParser()
         with raises(ConfigPathNotFoundError) as exc_info:

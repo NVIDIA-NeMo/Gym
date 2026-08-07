@@ -15,7 +15,7 @@
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
 import pytest
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -43,6 +43,7 @@ from nemo_gym.responses_converter import (
     ResponsesConverterState,
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,
+    _usage_detail,
     split_responses_input_output_items,
 )
 
@@ -72,6 +73,12 @@ def _fixed_uuid(monkeypatch: pytest.MonkeyPatch):
 def test_backwards_compatible_aliases():
     assert VLLMConverter is ResponsesConverter
     assert VLLMConverterResponsesToChatCompletionsState is ResponsesConverterState
+
+
+def test_usage_detail_ignores_ambiguous_top_level_names():
+    usage = {"cached_tokens": 99, "cached_input_tokens": 7, "reasoning_tokens": 88, "reasoning_output_tokens": 3}
+    assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 7
+    assert _usage_detail(usage, "completion_tokens_details", "reasoning_tokens", "reasoning_output_tokens") == 3
 
 
 # ===========================================================================
@@ -166,6 +173,44 @@ def test_responses_to_chat_completion_all_message_roles(converter: ResponsesConv
     roles = [m["role"] for m in params.messages]
     assert roles == ["system", "developer", "user", "user", "assistant"]
     assert params.messages[-1]["content"] == "assistant content"
+
+
+def test_responses_to_chat_completion_instructions_become_leading_system_message(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            instructions="you are a coding agent",
+            input=[NeMoGymEasyInputMessage(role="user", content="usr", type="message")],
+        )
+    )
+    # instructions are inserted before any input-derived messages (Responses API semantics)
+    assert params.messages[0] == {"role": "system", "content": "you are a coding agent"}
+    assert [m["role"] for m in params.messages] == ["system", "user"]
+
+
+def test_responses_to_chat_completion_instructions_fold_leading_system_and_developer(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            instructions="you are a coding agent",
+            input=[
+                NeMoGymEasyInputMessage(role="system", content="sys", type="message"),
+                NeMoGymEasyInputMessage(role="developer", content="dev", type="message"),
+                NeMoGymEasyInputMessage(role="user", content="usr", type="message"),
+            ],
+        )
+    )
+    # chat backends commonly admit a single system message at position 0, so the leading run of
+    # system/developer messages is folded into the instructions message
+    assert params.messages[0] == {"role": "system", "content": "you are a coding agent\n\nsys\n\ndev"}
+    assert [m["role"] for m in params.messages] == ["system", "user"]
+
+
+def test_responses_to_chat_completion_no_instructions_adds_no_message(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(role="user", content="usr", type="message")]
+        )
+    )
+    assert [m["role"] for m in params.messages] == ["user"]
 
 
 def test_responses_to_chat_completion_input_image_part(converter: ResponsesConverter):
@@ -466,7 +511,15 @@ def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: Re
 # ===========================================================================
 
 
-def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
+@pytest.mark.parametrize(
+    ("finish_reason", "status", "incomplete_details"),
+    [
+        ("tool_calls", "completed", None),
+        ("length", "incomplete", {"reason": "max_output_tokens"}),
+        ("content_filter", "incomplete", {"reason": "content_filter"}),
+    ],
+)
+def test_chat_completion_to_response_sanity(converter: ResponsesConverter, finish_reason, status, incomplete_details):
     actual_response = converter.chat_completion_to_response(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
             model="",
@@ -485,7 +538,7 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
             choices=[
                 NeMoGymChoice(
                     index=0,
-                    finish_reason="tool_calls",
+                    finish_reason=finish_reason,
                     message=NeMoGymChatCompletionMessage(
                         role="assistant",
                         content="hi",
@@ -494,9 +547,11 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
                 )
             ],
             usage=CompletionUsage(
-                prompt_tokens=1,
-                completion_tokens=2,
-                total_tokens=3,
+                prompt_tokens=11,
+                completion_tokens=5,
+                total_tokens=19,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=7),
+                completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
             ),
         ),
     )
@@ -516,12 +571,14 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
             )
         ],
         parallel_tool_calls=True,
+        status=status,
+        incomplete_details=incomplete_details,
         usage=NeMoGymResponseUsage(
-            input_tokens=1,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-            output_tokens=2,
-            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-            total_tokens=3,
+            input_tokens=11,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7),
+            output_tokens=5,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=3),
+            total_tokens=19,
         ),
         tool_choice="auto",
         tools=[],

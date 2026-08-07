@@ -24,9 +24,14 @@ from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseMcpApprovalRequest,
     NeMoGymResponseMcpCall,
     NeMoGymResponseMcpListTools,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
+    TokenIDLogProbMixin,
+    accumulate_response_usage,
 )
 
 
@@ -123,3 +128,61 @@ class TestNeMoGymResponseHostedMcpItems:
         assert issubclass(NeMoGymResponseMcpCall, McpCall)
         assert issubclass(NeMoGymResponseMcpListTools, McpListTools)
         assert issubclass(NeMoGymResponseMcpApprovalRequest, McpApprovalRequest)
+
+
+class TestRoutedExpertsWireFormats:
+    _BASE = {
+        "prompt_token_ids": [1, 2],
+        "generation_token_ids": [3],
+        "generation_log_probs": [-0.1],
+    }
+
+    def test_accepts_nested_int_lists(self) -> None:
+        mixin = TokenIDLogProbMixin.model_validate({**self._BASE, "routed_experts": [[[0, 1]], [[2, 3]]]})
+        assert mixin.routed_experts == [[[0, 1]], [[2, 3]]]
+
+    def test_accepts_opaque_string_envelope(self) -> None:
+        # Training frameworks may ship routes as a single opaque string (e.g. NeMo-RL's
+        # "nrlre1:<dtype>:<SxLxK>:<base64>") so multi-MB payloads validate in O(1).
+        envelope = "nrlre1:int16:2x1x2:AAABAAIAAwA="
+        mixin = TokenIDLogProbMixin.model_validate({**self._BASE, "routed_experts": envelope})
+        assert mixin.routed_experts == envelope
+
+    def test_rejects_non_list_non_string(self) -> None:
+        with pytest.raises(ValidationError):
+            TokenIDLogProbMixin.model_validate({**self._BASE, "routed_experts": 42})
+
+
+def _usage(*, cached_tokens: int, reasoning_tokens: int) -> NeMoGymResponseUsage:
+    return NeMoGymResponseUsage(
+        input_tokens=10,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+        output_tokens=5,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
+        total_tokens=15,
+    )
+
+
+def test_accumulate_response_usage_preserves_all_counts_and_missing_values() -> None:
+    first = _usage(cached_tokens=0, reasoning_tokens=1)
+    second = _usage(cached_tokens=7, reasoning_tokens=4)
+
+    assert accumulate_response_usage(None, first) == first
+    result = accumulate_response_usage(first, second)
+    assert result is not None
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (20, 10, 30)
+    assert (result.input_tokens_details.cached_tokens, result.output_tokens_details.reasoning_tokens) == (7, 5)
+    assert first.input_tokens_details.cached_tokens == 0
+    assert accumulate_response_usage(result, None) == result
+
+
+def test_accumulate_response_usage_tolerates_missing_detail_objects() -> None:
+    first = _usage(cached_tokens=0, reasoning_tokens=1).model_copy(update={"input_tokens_details": None})
+    second = _usage(cached_tokens=7, reasoning_tokens=4).model_copy(update={"output_tokens_details": None})
+
+    result = accumulate_response_usage(first, second)
+
+    assert result is not None
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (20, 10, 30)
+    assert result.input_tokens_details is None
+    assert result.output_tokens_details.reasoning_tokens == 1
