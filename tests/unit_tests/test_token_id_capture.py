@@ -408,6 +408,49 @@ def test_capture_failure_marks_the_rollout_incomplete(tmp_path, monkeypatch):
     assert store.is_incomplete("fail0-roll0")
 
 
+class _SilentModel(_CapturingModel):
+    """A model server that answers normally but returns no token ids."""
+
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        response = _training_response("hi with no tokens")
+        for field in ("prompt_token_ids", "generation_token_ids", "generation_log_probs"):
+            setattr(response.output[0], field, None)
+        return response
+
+
+def _silent_server(global_config_dict) -> SimpleResponsesAPIModel:
+    return _SilentModel(
+        config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="srv"),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict),
+    )
+
+
+def test_a_response_without_token_ids_marks_the_rollout_incomplete(tmp_path):
+    """A call that returns no token ids is a hole, not traffic to skip.
+
+    Skipping it quietly is the worse failure: the rollout still looks complete, and the
+    call's generated tokens end up inside the next call's prompt, where they are trained
+    as if the environment had written them.
+    """
+    client = TestClient(_silent_server(_both_enabled(tmp_path)).setup_webserver())
+    resp = client.post("/ng-rollout/silent0-roll0/v1/responses", json={"input": "hi"})
+    # The model call itself still succeeds; capture never breaks the harness's run.
+    assert resp.status_code == 200
+
+    store = TokenCaptureStore(tmp_path)
+    assert store.read_entries("silent0-roll0") == []
+    assert store.is_incomplete("silent0-roll0")
+
+
+def test_untagged_traffic_without_token_ids_marks_nothing(tmp_path):
+    """No rollout prefix means no sink, so there is no rollout to call incomplete."""
+    client = TestClient(_silent_server(_both_enabled(tmp_path)).setup_webserver())
+    assert client.post("/v1/responses", json={"input": "hi"}).status_code == 200
+    assert list(tmp_path.glob("**/*.incomplete")) == []
+
+
 def test_delete_removes_records_and_marker(tmp_path):
     store = TokenCaptureStore(tmp_path)
     store.append(

@@ -99,9 +99,11 @@ async def capture_tokens(response: Any) -> None:
         elif isinstance(response, dict):
             payload = response
         else:
+            _capture_missing(sink, f"the response is a {type(response).__name__}")
             return
         info = extract_token_fields(payload)
         if info is None:
+            _capture_missing(sink, "the response carries no token ids")
             return
         # Content only: the arrays live on the entry, not on the items as well.
         content_items, token_item_index = strip_token_fields(response_to_output_items(payload))
@@ -163,6 +165,24 @@ def _capture_failed(sink: CaptureContext, stage: str) -> None:
         sink.model_call_id,
         sink.rollout_id,
         exc_info=True,
+    )
+    _mark_incomplete(sink)
+
+
+def _capture_missing(sink: CaptureContext, reason: str) -> None:
+    """Mark the rollout when a call produced no record and nothing raised.
+
+    An active sink means this call belongs to a rollout being captured, so a response with no
+    token ids is a hole in the chain rather than traffic to skip. The builder reads the gap
+    between one call's tokens and the next call's prompt as tool output, so a skipped call's
+    generated tokens arrive inside the next prompt at mask 0, and tokens the policy sampled
+    train as if the environment had written them.
+    """
+    logger.warning(
+        "Training-token capture has no token ids for model call %s of rollout %s: %s.",
+        sink.model_call_id,
+        sink.rollout_id,
+        reason,
     )
     _mark_incomplete(sink)
 
