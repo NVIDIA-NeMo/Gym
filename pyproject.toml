@@ -84,9 +84,14 @@ dependencies = [
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
     # We specifically upper bound this OpenAI dependency since the version bumps so frequently.
-    # Updated Wed Feb 17, 2026 with openai<=2.7.2
+    # Floor 2.25.0: vllm>=0.25.0 imports NamespaceTool from openai.types.responses, which does not
+    # exist below 2.25.0. vllm only declares openai>=2.0.0, so a lower pin resolves cleanly and then
+    # fails at import time in vllm.entrypoints.openai.api_server.
+    # Ceiling <2.45.0: InputTokensDetails.cache_write_tokens becomes a required field there, and
+    # NeMoGymResponseInputTokensDetails subclasses it.
+    # Updated Fri Aug 07, 2026 with openai>=2.25.0,<2.45.0
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=2.7.2",
+    "openai>=2.25.0,<2.45.0",
 
     # Anthropic: We leverage the Anthropic Messages schemas (request/response Python types) for the
     # /v1/messages <-> Responses mapping in nemo_gym/anthropic_converter.py. Types only — we never

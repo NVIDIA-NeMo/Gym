@@ -272,9 +272,12 @@ class TestSanitizeStreamingBody:
 
 class TestValidateStreamingParams:
     def test_prunes_nested_extra_fields(self) -> None:
-        # Codex sends `reasoning.context`, which the pinned SDK's Reasoning model forbids.
+        # Nested fields the pinned SDK's Reasoning model does not define are dropped rather than
+        # raising. This used to send `reasoning.context`, which Codex sets, but openai 2.42.0 added
+        # that field to Reasoning: it is pruned below 2.42.0 and forwarded at or above it, so using
+        # a real field makes the assertion depend on where openai resolves in the supported range.
         params = validate_streaming_responses_params(
-            {"input": [], "reasoning": {"effort": "medium", "context": "all_turns"}}
+            {"input": [], "reasoning": {"effort": "medium", "not_a_reasoning_field": "all_turns"}}
         )
         assert params.reasoning == {"effort": "medium"}
 
