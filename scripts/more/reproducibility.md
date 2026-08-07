@@ -40,16 +40,19 @@ own section below.
 | HLE | Humanity's Last Exam — hard, broad knowledge | `./hle.sh` |
 | AA-LCR | Long-context reasoning | `./aa-lcr.sh` |
 | AA-Omniscience | Knowledge and hallucination | `./omniscience.sh` |
-| SciCode | Scientific coding, graded against numeric ground truth | `./scicode.sh` |
+| [SciCode](#scicode) | Scientific coding, graded against numeric ground truth | `./scicode.sh` |
 | BrowseComp | Web browsing agent | `./browsecomp/browsecomp.sh` |
 | Tau3 | Tool use against a simulated customer | `./tau3.sh` |
-| CritPt | Research-level physics | `./critpt.sh` |
-| GDPval | Real-world work products, judged | `./gdpval/gdpval.sh` |
-| PinchBench | The model as the brain of an OpenClaw agent | `./pinchbench.sh` |
-| Terminal-Bench 2.1 | Agentic terminal use | `nel eval run nel-next/terminal-bench-2.1.yaml` |
-| SWE-bench Verified | Agentic coding against a repo's tests | `nel eval run nel-next/swebench-verified.yaml` |
-| SWE-bench Multilingual | The same, across languages | `nel eval run nel-next/swebench-multilingual.yaml` |
-| Base suite | 21 pretraining benchmarks plus RULER | see [`base/`](./base/) |
+| [CritPt](#critpt) | Research-level physics | `./critpt.sh` |
+| [GDPval](#gdpval) | Real-world work products, judged | `./gdpval/gdpval.sh` |
+| [PinchBench](#pinchbench) | The model as the brain of an OpenClaw agent | `./pinchbench.sh` |
+| [Terminal-Bench 2.1](#terminal-bench-and-swe-bench-nel-next) | Agentic terminal use | `nel eval run nel-next/terminal-bench-2.1.yaml` |
+| [SWE-bench Verified](#terminal-bench-and-swe-bench-nel-next) | Agentic coding against a repo's tests | `nel eval run nel-next/swebench-verified.yaml` |
+| [SWE-bench Multilingual](#terminal-bench-and-swe-bench-nel-next) | The same, across languages | `nel eval run nel-next/swebench-multilingual.yaml` |
+| [Base suite](#base-pretraining-model) | 21 pretraining benchmarks plus RULER | see [`base/`](./base/) |
+
+A linked name needs setup beyond the prerequisites above — follow the link. The rest run
+as they are.
 
 ## Benchmarks needing extra setup
 
