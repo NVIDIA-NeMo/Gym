@@ -306,7 +306,10 @@ class RolloutLineage:
         on exactly the multi-turn tool-calling case this exists for.
         """
         if not node.context_digest:
-            return True
+            # Unreachable while ``record`` is the only way to build a node, and fails closed if
+            # that stops being true: without a digest there is nothing to check the request
+            # against, and an unchecked match is the one this guard exists to stop.
+            return False
         if len(messages) < node.context_len:
             return False
         return conversation_digest(messages[: node.context_len]) == node.context_digest

@@ -90,6 +90,70 @@ logger = logging.getLogger(__name__)
 _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
+def _request_messages(body: Any) -> list[dict]:
+    """The conversation a request carries, across the three dialects.
+
+    Used only to identify which recorded call this request continues (see
+    ``token_id_capture.lineage``): the assistant turns in it are the ones we
+    produced. Chat and Anthropic both use ``messages``; Responses carries
+    ``input``, which is a string for a first turn and a list of items after that.
+
+    The system prompt and tool schema are prepended as one pseudo-turn, because both shape
+    the prompt without being messages.
+    """
+    if body is None:
+        return []
+    getter = body.get if isinstance(body, dict) else lambda key, default=None: getattr(body, key, default)
+    messages = getter("messages", None)
+    if isinstance(messages, list):
+        turns = [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
+    else:
+        items = getter("input", None)
+        turns = (
+            [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
+            if isinstance(items, list)
+            else []
+        )
+    return _request_envelope(getter) + turns
+
+
+# Not a dialect role, so it cannot collide with a real turn, and not "assistant", so the
+# lookup fingerprint goes on ignoring it.
+_ENVELOPE_ROLE = "_ng_request_envelope"
+
+
+def _request_envelope(getter: Any) -> list[dict]:
+    """The parts of a request that shape the prompt without being turns.
+
+    Anthropic sends the system prompt as ``instructions`` and the tool schema as ``tools``,
+    both siblings of the message list, and the chat template renders both into the prompt.
+    Matching on messages alone would let a request be given a prefix built under a different
+    system prompt or a different set of tools, which is a conversation the harness never sent.
+    """
+    instructions = getter("instructions", None)
+    tools = getter("tools", None)
+    if not instructions and not tools:
+        return []
+    envelope = {"instructions": _plain(instructions), "tools": _plain(tools)}
+    return [{"role": _ENVELOPE_ROLE, "content": json.dumps(envelope, sort_keys=True, default=str)}]
+
+
+def _plain(value: Any) -> Any:
+    """Reduce a request field to plain data so equal schemas serialize equally.
+
+    Tools arrive as dicts on one call and as pydantic models on the next, depending on which
+    handler parsed the body. Serializing those as they come gives two strings for one schema,
+    which would break a chain that never changed.
+    """
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     pass
 

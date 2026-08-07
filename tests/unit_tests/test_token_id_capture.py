@@ -36,12 +36,13 @@ import orjson
 import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     CaptureStore,
     SimpleResponsesAPIModel,
+    _request_messages,
     read_model_call_records,
 )
 from nemo_gym.openai_utils import (
@@ -85,6 +86,8 @@ _ASSISTANT_TURN = {
     "content": "checking",
     "tool_calls": [{"function": {"name": "search", "arguments": '{"q":"alpha"}'}}],
 }
+
+_MSG_ARGS = {"model": "downstream-model", "max_tokens": 64}
 
 PTOKS = [1, 2, 3]
 GTOKS = [4, 5]
@@ -1074,6 +1077,73 @@ def test_served_calls_link_to_their_parent(tmp_path):
     entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
     assert len(entries) == 2
     assert entries[1].parent_call_id == entries[0].model_call_id
+
+
+def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
+    """The system prompt is rendered into the prompt but is not a message.
+
+    Anthropic sends it as ``system``, beside the message list, so a match on messages alone
+    would hand this call a prefix built under different instructions, which is a conversation
+    the harness never sent.
+    """
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    store = TokenCaptureStore(tmp_path)
+
+    def call(rollout, system, messages):
+        client.post(f"/ng-rollout/{rollout}/v1/messages", json={"system": system, "messages": messages, **_MSG_ARGS})
+
+    first = [{"role": "user", "content": "hello"}]
+    call("sys0", "SYSTEM ONE", first)
+    served = store.read_entries("sys0")[0]
+    content = served.output_items[0]["content"]
+    echoed = content if isinstance(content, str) else content[0]["text"]
+    second = first + [{"role": "assistant", "content": echoed}, {"role": "user", "content": "more"}]
+
+    # Same conversation, different instructions.
+    call("sys0", "SYSTEM TWO", second)
+    entries = store.read_entries("sys0")
+    assert len(entries) == 2
+    assert entries[1].parent_call_id is None
+
+    # Control: unchanged instructions still link, or this would break every real rollout.
+    call("sys1", "SYSTEM ONE", first)
+    call("sys1", "SYSTEM ONE", second)
+    linked = store.read_entries("sys1")
+    assert len(linked) == 2
+    assert linked[1].parent_call_id == linked[0].model_call_id
+
+
+def test_a_changed_tool_schema_breaks_the_link():
+    """Tools are rendered into the prompt too, and a harness can change them mid-rollout."""
+    turn = [{"role": "user", "content": "hi"}, _ASSISTANT_TURN]
+    with_search = _request_messages({"messages": turn, "tools": [{"name": "search"}]})
+    with_bash = _request_messages({"messages": turn, "tools": [{"name": "bash"}]})
+
+    lineage = RolloutLineage()
+    lineage.record("call-1", with_search, [1, 2, 3], "d1")
+    assert lineage.resolve(with_search + [{"role": "user", "content": "next"}]) is not None
+    assert lineage.resolve(with_bash + [{"role": "user", "content": "next"}]) is None
+
+
+def test_the_envelope_does_not_change_the_lookup_key():
+    """It is not an assistant turn, so the fingerprint the index keys on is unaffected."""
+    turn = [{"role": "user", "content": "hi"}, _ASSISTANT_TURN]
+    plain = _request_messages({"messages": turn})
+    enveloped = _request_messages({"messages": turn, "instructions": "be brief"})
+    assert len(enveloped) == len(plain) + 1
+    assert assistant_fingerprint(enveloped) == assistant_fingerprint(plain) != ""
+
+
+def test_the_envelope_is_stable_across_dict_and_model_tools():
+    """Tools reach the request as dicts on one call and as models on the next. Two strings for
+    one schema would break a chain that never changed."""
+
+    class _Tool(BaseModel):
+        name: str
+
+    as_dicts = _request_messages({"messages": [], "tools": [{"name": "search"}]})
+    as_models = _request_messages({"messages": [], "tools": [_Tool(name="search")]})
+    assert as_dicts == as_models
 
 
 def test_fingerprint_matches_across_openai_and_anthropic_tool_shapes():
