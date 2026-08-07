@@ -1,0 +1,35 @@
+# Serve-only: resources server + judge for the nemo-evaluator gym:// (native) flow.
+# No policy agent/model — the eval driver owns generation and calls /verify.
+# Supply judge credentials at launch: +judge_base_url +judge_api_key +judge_model_name
+
+agentif:
+  resources_servers:
+    agentif:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: AgentIF instruction-following benchmark (707 agentic scenarios) scored with CSR/ISR using an LLM judge for llm/llm_conditional_check constraints and code exec for code constraints.
+      value: Improve instruction-following in agentic scenarios across unconditional, conditional, and example-driven constraint dimensions.
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 1024
+        temperature: 0.0
+        top_p: 1.0
+      judge_endpoint_max_concurrency: 32
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides.
+# Recommended judge: gpt-4o-mini. Must stay at end of file for update_env_list.py.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null

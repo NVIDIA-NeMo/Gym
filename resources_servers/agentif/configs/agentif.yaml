@@ -1,0 +1,59 @@
+agentif:
+  resources_servers:
+    agentif:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      description: AgentIF instruction-following benchmark (707 agentic scenarios) scored with CSR/ISR using an LLM judge for llm/llm_conditional_check constraints and code exec for code constraints.
+      value: Improve instruction-following in agentic scenarios across unconditional, conditional, and example-driven constraint dimensions.
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 1024
+        temperature: 0.0
+        top_p: 1.0
+      judge_endpoint_max_concurrency: 32
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+agentif_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: agentif
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/agentif/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International
+      # Build with `python resources_servers/agentif/prepare_agentif.py`.
+      - name: test
+        type: validation
+        jsonl_fpath: resources_servers/agentif/data/train.jsonl
+        license: Creative Commons Attribution 4.0 International
+
+# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides.
+# Recommended judge: gpt-4o-mini. Must stay at end of file for update_env_list.py.
+#
+# NOTE: policy_* are intentionally NOT defaulted here. openai_model.yaml's
+# SimpleModelServerConfig requires str (not Optional), so a null policy_* would
+# crash the policy_model server at startup. agentif.yaml is only co-loaded with
+# openai_model.yaml for evaluator/rollout runs (ng_collect_rollouts), which
+# always supply real +policy_* values. Native-protocol runs use agentif_serve.yaml
+# (no policy_model), so there is nothing to default.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null
