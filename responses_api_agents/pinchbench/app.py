@@ -125,9 +125,10 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     # fallback workspace it never reads back. Refuse the run instead.
     max_agent_id_length: int = 64
     # Address the model server under `/ng-rollout/<rollout_id>` so model-call capture can
-    # attribute each call. Only valid when `model_base_url` is a Gym model server; a direct
-    # vLLM endpoint has no such route and would 404.
-    rollout_scoped_model_url: bool = False
+    # attribute each call. The prefix is applied only when observability is enabled, which is
+    # also the only time it is needed; set this to False for a model_base_url that is not a
+    # Gym model server, since a direct vLLM endpoint has no such route and would 404.
+    rollout_scoped_model_url: bool = True
 
     @model_validator(mode="after")
     def _reject_unresolvable_agent_id(self) -> "PinchBenchAgentConfig":
@@ -712,6 +713,12 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             raise ValueError("record is missing verifier_metadata.task_id")
 
         run_id = uuid.uuid4().hex
+        # The capture prefix must carry Gym's rollout id -- the task/rollout indices that key
+        # `<rollout_id>.capture.jsonl` and appear as `ng_model_call_capture.rollout_id` on the
+        # collected rollout. `run_id` is a fresh uuid that names this invocation's work and
+        # transcript directories; using it here would write capture files no rollout can be
+        # matched back to. Returns None when observability is off, which leaves the URL bare.
+        rollout_id = self.rollout_id_from_run(body)
         out_dir = Path(self.config.work_root) / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
         result = {"reward": 0.0, "grading_type": "unknown", "breakdown": {}, "notes": "", "status": "error"}
@@ -721,7 +728,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         archive_path = ""
         try:
             async with self._sem:
-                await self._run_in_sandbox(task_id, out_dir, run_id)  # one sandbox per task
+                await self._run_in_sandbox(task_id, out_dir, rollout_id)  # one sandbox per task
             result = self._parse_result(task_id, out_dir)
             response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
