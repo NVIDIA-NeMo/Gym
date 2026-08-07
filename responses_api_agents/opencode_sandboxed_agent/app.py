@@ -305,12 +305,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
         export_fname = "export.json"
-        export_result = await sandbox.exec(
-            command=f"""export PATH=$HOME/.opencode/bin:$PATH \
-        && session_id=$(opencode session list --format json | jq -r '.[0].id') \
-        && opencode export $session_id > {export_fname}"""
-        )
-        if self.config.debug:
+        try:
+            export_result = await sandbox.exec(
+                command=f"""export PATH=$HOME/.opencode/bin:$PATH \
+            && session_id=$(opencode session list --format json | jq -r '.[0].id') \
+            && opencode export $session_id > {export_fname}"""
+            )
+        except:
+            export_result = None
+            print("Failed to export results", file=sys.stderr)
+        if self.config.debug and export_result:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
