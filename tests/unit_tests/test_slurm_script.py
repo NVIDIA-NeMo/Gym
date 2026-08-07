@@ -15,7 +15,7 @@
 
 from pathlib import Path
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import SubmitConfig, _resolve_env_refs
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
@@ -25,7 +25,6 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _resolve_env,
     build_sbatch_script,
 )
-from nemo_gym.orchestration.api import _resolve_env_refs
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
 
 
@@ -337,7 +336,14 @@ def test_submit_config_resolves_int_field(monkeypatch):
     monkeypatch.setenv("TP", "2")
     config = SubmitConfig.model_validate(
         {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "tensor_parallel_size": "$TP"}},
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": "$TP",
+                }
+            },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
             "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
             "job": {"output_path": "/remote/jobs"},
@@ -419,7 +425,14 @@ def test_build_sbatch_script_resolved_tp_in_vllm_cmd(bench_dir, monkeypatch):
     monkeypatch.setenv("TP", "8")
     config = SubmitConfig.model_validate(
         {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "tensor_parallel_size": "$TP"}},
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": "$TP",
+                }
+            },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
             "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
             "job": {"output_path": "/remote/jobs"},
@@ -436,7 +449,14 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir, monkeypatc
     monkeypatch.setenv("DRV_TOKEN", "drv_val")
     config = SubmitConfig.model_validate(
         {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "env": {"SVC_KEY": "$SVC_TOKEN"}}},
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "env": {"SVC_KEY": "$SVC_TOKEN"},
+                }
+            },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
             "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "$DRV_TOKEN"}},
             "job": {"output_path": "/remote/jobs"},
@@ -459,8 +479,8 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir, monkeypatc
 def test_render_service_command_with_env():
     out = _render_service_command("svc", "img:latest", "cmd", {"FOO": "bar"})
     lines = out.splitlines()
-    export_idx = next(i for i, l in enumerate(lines) if "export FOO=bar" in l)
-    srun_idx = next(i for i, l in enumerate(lines) if "srun" in l)
+    export_idx = next(i for i, line in enumerate(lines) if "export FOO=bar" in line)
+    srun_idx = next(i for i, line in enumerate(lines) if "srun" in line)
     assert export_idx < srun_idx
 
 
@@ -473,7 +493,14 @@ def test_build_sbatch_script_service_env(bench_dir, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf_test")
     config = SubmitConfig.model_validate(
         {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "env": {"HF_TOKEN": "$HF_TOKEN", "LIT": "val"}}},
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "env": {"HF_TOKEN": "$HF_TOKEN", "LIT": "val"},
+                }
+            },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
             "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
             "job": {"output_path": "/remote/jobs"},
@@ -494,7 +521,11 @@ def test_build_sbatch_script_driver_env(bench_dir, monkeypatch):
         {
             "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"WANDB_API_KEY": "$WANDB_KEY"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {}},
+                "env": {"WANDB_API_KEY": "$WANDB_KEY"},
+            },
             "job": {"output_path": "/remote/jobs"},
         }
     )
