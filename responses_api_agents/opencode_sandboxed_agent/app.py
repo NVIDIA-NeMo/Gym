@@ -334,8 +334,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
             "opencode_results_fpath": str(results_local_fpath),
-            "opencode_run_stdout": result.stdout or "",
-            "opencode_run_stderr": result.stderr or "",
+            "opencode_run_stdout": (result.stdout if result else "") or "",
+            "opencode_run_stderr": (result.stderr if result else "") or "",
             "opencode_no_export_found": not bool(opencode_export),
         }
 
