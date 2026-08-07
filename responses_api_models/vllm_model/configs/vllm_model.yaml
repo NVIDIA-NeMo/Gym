@@ -10,4 +10,5 @@ policy_model:
       uses_interleaved_reasoning: true
       chat_template_kwargs: null
       extra_body: null
+      extra_body_override_keys: null
       default_headers: {}

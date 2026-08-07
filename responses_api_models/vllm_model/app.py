@@ -170,6 +170,15 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
+    # Keys of ``extra_body`` whose configured value takes precedence over a value set explicitly on
+    # the request. By default ``extra_body`` only supplies defaults and the request always wins.
+    #
+    # This exists for RL training, where generation must be on-policy: the sampling parameters used
+    # to generate have to match the training config exactly. An agent that hardcodes e.g.
+    # ``temperature`` on an internal/auxiliary call would otherwise silently produce off-policy
+    # rollouts. Set to e.g. ``["temperature", "top_p"]`` to make the server authoritative for those.
+    extra_body_override_keys: Optional[List[str]] = None
+
     default_headers: Dict[str, str] = Field(default_factory=dict)
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
@@ -284,6 +293,19 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return tokenizer
 
+    def _merge_extra_body(self, extra_body: Dict[str, Any], body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge ``extra_body`` under ``body_dict`` so the request wins, then re-apply override keys.
+
+        ``extra_body`` normally supplies defaults only: anything the request set explicitly takes
+        precedence. Keys listed in ``config.extra_body_override_keys`` invert that, so the server
+        value wins even against an explicit request value. See ``VLLMModelConfig`` for why.
+        """
+        body_dict = extra_body | body_dict
+        for key in self.config.extra_body_override_keys or ():
+            if key in extra_body:
+                body_dict[key] = extra_body[key]
+        return body_dict
+
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
@@ -321,7 +343,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
         if self.config.extra_body:
-            body_dict = self.config.extra_body | body_dict
+            body_dict = self._merge_extra_body(self.config.extra_body, body_dict)
 
         client = self._resolve_client(request)
         response_dict = await client.create_response(**body_dict)
@@ -483,7 +505,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict.pop("top_logprobs", None)
 
         if extra_body:
-            body_dict = extra_body | body_dict
+            body_dict = self._merge_extra_body(extra_body, body_dict)
 
         # Audio sidechannel: rows can carry audio on
         # ``responses_create_params.metadata`` via three mutually exclusive
@@ -989,10 +1011,10 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         # Operator-level extra_body merges in (e.g. return_tokens_as_token_ids).
         # Same precedence as the chat path: extra_body fields do NOT override
-        # request-level fields.
+        # request-level fields, except for keys listed in extra_body_override_keys.
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
-            out = extra_body | out
+            out = self._merge_extra_body(extra_body, out)
 
         if self.config.return_token_id_information:
             # Prefer vLLM's inline prompt and generation token IDs. Keep the

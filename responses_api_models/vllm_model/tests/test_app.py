@@ -4800,3 +4800,76 @@ class TestTopLogprobsHandling:
             )
         # The tokenize endpoint must not be reached once the contract check fails.
         mock_client.create_tokenize.assert_not_called()
+
+
+def _make_extra_body_model(extra_body_override_keys: list[str] | None = None) -> VLLMModel:
+    """A VLLMModel instance with the minimum config needed to exercise _merge_extra_body."""
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+        extra_body_override_keys=extra_body_override_keys,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestMergeExtraBody:
+    def test_request_wins_by_default(self) -> None:
+        """Without override keys, an explicit request value beats the configured default."""
+        model = _make_extra_body_model()
+        merged = model._merge_extra_body({"temperature": 1.0}, {"temperature": 0.3})
+        assert merged["temperature"] == 0.3
+
+    def test_extra_body_supplies_defaults(self) -> None:
+        """Keys absent from the request still come from extra_body."""
+        model = _make_extra_body_model()
+        merged = model._merge_extra_body({"temperature": 1.0, "top_p": 1.0}, {"model": "m"})
+        assert merged == {"temperature": 1.0, "top_p": 1.0, "model": "m"}
+
+    def test_override_key_wins_over_explicit_request_value(self) -> None:
+        """The RL case: a hardcoded request temperature must not override the training config."""
+        model = _make_extra_body_model(extra_body_override_keys=["temperature", "top_p"])
+        merged = model._merge_extra_body({"temperature": 1.0, "top_p": 1.0}, {"temperature": 0.3})
+        assert merged["temperature"] == 1.0
+        assert merged["top_p"] == 1.0
+
+    def test_override_only_applies_to_listed_keys(self) -> None:
+        """Keys not listed keep the normal request-wins behaviour."""
+        model = _make_extra_body_model(extra_body_override_keys=["temperature"])
+        merged = model._merge_extra_body({"temperature": 1.0, "top_p": 1.0}, {"temperature": 0.3, "top_p": 0.5})
+        assert merged["temperature"] == 1.0
+        assert merged["top_p"] == 0.5
+
+    def test_override_key_absent_from_extra_body_is_ignored(self) -> None:
+        """An override key the server did not configure must not inject a value."""
+        model = _make_extra_body_model(extra_body_override_keys=["temperature", "top_p"])
+        merged = model._merge_extra_body({"temperature": 1.0}, {"top_p": 0.5})
+        assert merged["temperature"] == 1.0
+        assert merged["top_p"] == 0.5
+
+    def test_does_not_mutate_configured_extra_body(self) -> None:
+        """The configured dict is shared across requests and must not be written through."""
+        model = _make_extra_body_model(extra_body_override_keys=["temperature"])
+        extra_body = {"temperature": 1.0}
+        model._merge_extra_body(extra_body, {"temperature": 0.3, "seed": 7})
+        assert extra_body == {"temperature": 1.0}
+
+    def test_completions_path_honours_override_keys(self) -> None:
+        """The /v1/completions body builder must apply overrides too.
+
+        It merges extra_body separately from the chat and Responses paths. If it kept the
+        plain request-wins merge, an operator who set extra_body_override_keys would get the
+        on-policy guarantee on two of the three paths and silently lose it on the third.
+        """
+        model = _make_extra_body_model(extra_body_override_keys=["temperature"])
+        model.config.extra_body = {"temperature": 1.0, "top_p": 0.95}
+        out = model._build_completion_body_from_chat_body({"temperature": 0.3, "top_p": 0.5}, prompt="x")
+        assert out["temperature"] == 1.0
+        assert out["top_p"] == 0.5
