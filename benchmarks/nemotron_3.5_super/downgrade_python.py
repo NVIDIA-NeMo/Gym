@@ -40,4 +40,11 @@ for path_to_fix in paths_to_fix:
 path = Path("pyproject.toml")
 content = path.read_text()
 content = content.replace("ray[default]>=2.56.1", "ray[default]==2.55.1")
+content = content.replace('"openshell>=0.0.92,<0.1",', "")
+path.write_text(content)
+
+# Need to also unfreeze audioop-lts
+path = Path("responses_api_agents/tau2/requirements.txt")
+content = path.read_text()
+content = content.replace("audioop-lts>=0.2.2", "")
 path.write_text(content)
