@@ -1,0 +1,15 @@
+haystack_agent:
+  responses_api_agents:
+    haystack_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Serialized Haystack pipeline (Agent + Haystack-side tools) to run as the rollout
+      # harness. Path is relative to this agent directory. Its Agent's chat_generator must
+      # be a NeMoGymResponsesChatGenerator; its server_name is overridden with model_server.name.
+      pipeline_yaml: configs/pipeline.yaml
+      agent_component_name: agent
