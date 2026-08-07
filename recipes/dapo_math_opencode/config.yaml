@@ -1,0 +1,81 @@
+# OpenCode CLI solving math inside an OpenSandbox box.
+#
+# model_transport: endpoint_bridge is set here because on some clusters the sandboxes have
+# no inbound route to the compute nodes (RFC1918; a listener on a compute node gets a TCP
+# timeout from a box). Model calls then ride a tiny in-box bridge that the outer agent
+# polls. If your boxes CAN reach compute, use `direct` instead -- it is simpler.
+# See README.md for how to verify which applies.
+sandbox_opencode_math:
+  responses_api_agents:
+    sandbox_agent:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: opencode CLI harness solving math tasks inside OpenSandbox, model calls via endpoint bridge.
+      value: Math agent capabilities on a cluster with no inbound route from sandboxes.
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 256
+      mode: agent_only_runner
+      model_transport: endpoint_bridge
+      model_bridge_port: 18080
+      empty_trajectory_retries: 3
+      agent_module: responses_api_agents.opencode_agent.app
+      agent_class: OpenCodeAgent
+      agent_config_class: OpenCodeAgentConfig
+      agent_config:
+        resources_server:
+          type: resources_servers
+          name: math_with_judge
+        concurrency: 1
+        command: opencode
+        model: nvinf/policy_model
+        thinking: false
+        timeout: 3600
+        opencode_version: 1.17.13
+        system_prompt: |
+          You are a precise math assistant with a bash tool. Run python3 to compute or verify numeric
+          results instead of doing them by hand, then state the final answer as \boxed{answer}.
+        opencode_config:
+          permission:
+            bash: allow
+            edit: allow
+            webfetch: allow
+          provider:
+            nvinf:
+              npm: "@ai-sdk/openai-compatible"
+              options:
+                baseURL: __SANDBOX_MODEL_URL__/v1
+                apiKey: gym
+              models:
+                policy_model:
+                  limit:
+                    context: 262144
+                    output: 262144
+      sandbox_provider:
+        opensandbox:
+          connection:
+            domain: ${oc.env:OPENSANDBOX_DOMAIN}
+            api_key: ${oc.env:OPENSANDBOX_API_KEY}
+            protocol: http
+            use_server_proxy: true
+            request_timeout_s: 1800
+      sandbox_image: node:22-bookworm-slim
+      sandbox_spec:
+        ttl_s: 7200
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 20
+      setup_commands:
+        - "npm install -g opencode-ai@1.17.13"
+        - "apt-get -qq update && apt-get -y -qq install python3 curl > /dev/null"
+        - "mkdir -p /deps && curl -fsSL https://github.com/astral-sh/python-build-standalone/releases/download/20241219/cpython-3.12.8+20241219-x86_64-unknown-linux-gnu-install_only.tar.gz | tar xz -C /deps --strip-components=1"
+        - "/deps/bin/python3 -m pip -q install nemo-gym"
+      sandbox_python: /deps/bin/python3
+      rollout_timeout: 4200
+      empty_rollout_retries: 2
