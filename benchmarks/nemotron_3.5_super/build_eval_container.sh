@@ -47,6 +47,7 @@ git checkout $NEMO_GYM_GIT_REF
 
 # Gym main has upgraded to Python 3.13.14, but vLLM still uses 3.12.13
 # Rather than entirely rebuild the vLLM container from scratch, we just manually downgrade the Gym python here.
+sed -i 's/requires-python = ">=3\.13\.14"/requires-python = ">=3.12.13"/' pyproject.toml
 uv python pin 3.12.13
 
 uv sync --active
