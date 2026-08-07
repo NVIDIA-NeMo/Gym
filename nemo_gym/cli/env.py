@@ -857,11 +857,13 @@ def test():  # pragma: no cover
 
     try:
         _validate_data_single(test_config)
-    except AssertionError:
-        print(f"Data validation failed for {test_config.entrypoint}. You can rerun just the data validation like:")
-        print("```bash")
-        print(f"gym env test +entrypoint={test_config.entrypoint} +should_validate_data=true")
-        print("```")
+    except AssertionError as e:
+        print(f"""{e}
+Data validation failed for {test_config.entrypoint}. You can rerun just the data validation like:
+```bash
+gym env test +entrypoint={test_config.entrypoint} +should_validate_data=true
+```
+""")
         exit(1)
 
 
