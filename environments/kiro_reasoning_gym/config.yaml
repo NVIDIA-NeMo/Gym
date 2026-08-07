@@ -1,0 +1,31 @@
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: agent
+      verified: true
+      description: Kiro agent harness with reasoning gym tasks
+      value: Evaluate reasoning capabilities with Kiro
+
+kiro_reasoning_gym_agent:
+  responses_api_agents:
+    kiro_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      concurrency: 8
+      command: kiro-cli
+      api_key: ${oc.env:KIRO_API_KEY,""}
+      model: ${oc.env:KIRO_MODEL,null}
+      timeout: 900
+      system_prompt: |
+        Reason carefully and use tools when helpful. Put only the final answer in \boxed{}.
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: environments/kiro_reasoning_gym/data/train.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: environments/kiro_reasoning_gym/data/example.jsonl

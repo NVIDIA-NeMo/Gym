@@ -1,0 +1,20 @@
+kiro_agent:
+  responses_api_agents:
+    kiro_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      concurrency: 8
+      command: kiro-cli
+      api_key: ${oc.env:KIRO_API_KEY,""}
+      model: ${oc.env:KIRO_MODEL,null}
+      effort: null
+      agent_engine: v2
+      trust_all_tools: true
+      trust_tools: null
+      env: {}
+      workspace_root: outputs/kiro_agent/workspaces
+      system_prompt: null
+      timeout: 900
+      extra_args: []
