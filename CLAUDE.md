@@ -30,6 +30,23 @@ BaseServer (Pydantic model with config + server_client)
 
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 
+### Public API — import from `nemo_gym`, not internal modules
+
+Import base classes and core types from the top-level `nemo_gym` package, which is the supported,
+stable surface:
+
+```python
+from nemo_gym import SimpleResourcesServer, BaseVerifyRequest, BaseVerifyResponse, NeMoGymResponse
+```
+
+Do **not** deep-import from internal module paths (`nemo_gym.base_resources_server`,
+`nemo_gym.openai_utils`, `nemo_gym.server_utils`, `nemo_gym.config_types`) in new code. The internal
+module layout is not a public contract and may be refactored; the top-level surface is what stays
+stable. These names are re-exported lazily (PEP 562 `__getattr__`), so `import nemo_gym` stays cheap
+and free of import cycles. The public surface is defined by `nemo_gym.__all__` / `_LAZY_EXPORTS` in
+`nemo_gym/__init__.py` and guarded by `tests/unit_tests/test_public_api.py`; add a symbol there when
+promoting something to the public API. The old deep paths still work for backward compatibility.
+
 ## Creating Environments
 
 The typical workflow is to create your own environments tailored to your evaluation or training task. An environment consists of:

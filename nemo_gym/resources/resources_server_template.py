@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym import (
     SimpleResourcesServer,
     BaseResourcesServerConfig,
     BaseVerifyRequest,
