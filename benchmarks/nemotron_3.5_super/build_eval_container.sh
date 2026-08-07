@@ -19,7 +19,7 @@ srun --nodes=1 --ntasks=1 \
     --no-container-mount-home \
     --container-save=$OUTPUT_CONTAINER \
     bash -s <<INNER_BUILD
-set -euo pipefail
+set -xeuo pipefail
 
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
@@ -49,6 +49,7 @@ git checkout $NEMO_GYM_GIT_REF
 # Gym main has upgraded to Python 3.13.14, but vLLM still uses 3.12.13
 # Rather than entirely rebuild the vLLM container from scratch, we just manually downgrade the Gym python here.
 sed -i 's/requires-python = ">=3\.13\.14"/requires-python = ">=3.12.13"/' pyproject.toml
+cat pyproject.toml
 
 uv sync --active
 uv pip install "\$ray_dependency"
