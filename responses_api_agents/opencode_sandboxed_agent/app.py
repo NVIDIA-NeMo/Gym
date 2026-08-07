@@ -138,7 +138,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
                         "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
-                        "apiKey": "dummy_key",
+                        "apiKey": "dummy_key",  # pragma: allowlist secret
                     },
                     "models": {
                         "dummy_model": {
