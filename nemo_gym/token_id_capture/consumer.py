@@ -121,6 +121,7 @@ def _assemble(
         "delivered_fraction": notes.delivered_fraction,
         "generated_tokens_captured": notes.generated_tokens_captured,
         "generated_tokens_delivered": notes.generated_tokens_delivered,
+        "parent_link_fallbacks": dict(notes.parent_link_fallbacks),
         # Calls the model returned with no generated tokens. They carry no training signal and are
         # kept out of the chain; a non-zero count usually means the output budget or a content
         # filter is cutting generations off.
