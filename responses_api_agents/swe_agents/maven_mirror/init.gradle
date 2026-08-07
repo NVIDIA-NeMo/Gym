@@ -7,11 +7,7 @@
 // build.gradle, in `dependencyResolutionManagement { }`, or by plugins
 // at any point during configuration are all rewritten.
 
-import org.gradle.api.artifacts.repositories.MavenArtifactRepository
-
 def MIRROR_URL = 'https://maven-central.storage-download.googleapis.com/maven2/'
-
-println ">>> Maven Central mirror init script loaded"
 
 def mavenCentralPrefixes = [
     'https://repo.maven.apache.org/maven2',
@@ -20,29 +16,7 @@ def mavenCentralPrefixes = [
     'http://repo1.maven.org/maven2',
 ]
 
-gradle.beforeSettings { settings ->
-    settings.pluginManagement.repositories {
-        maven {
-            name = 'GoogleMavenCentralMirror'
-            url = uri(MIRROR_URL)
-        }
-
-        // Still required for Gradle-specific plugin marker artifacts.
-        gradlePluginPortal()
-    }
-}
-
-def redirect = { repo ->
-  if (repo instanceof MavenArtifactRepository &&
-      repo.url.host == "repo.maven.apache.org") {
-    println ">>> Redirecting ${repo.url}"
-    repo.setUrl(MIRROR_URL)
-    println ">>> New repository URL: ${repo.url}"
-  }
-}
-
 def rewriteHandler = { repositoryHandler ->
-    println ">>> Hit in rewriteHandler"
     repositoryHandler.all { repo ->
         if (repo instanceof MavenArtifactRepository) {
             def existing = repo.url?.toString() ?: ''
@@ -62,17 +36,13 @@ def rewriteHandler = { repositoryHandler ->
 }
 
 allprojects {
-    println ">>> Hit in allprojects"
     buildscript {
         rewriteHandler(repositories)
     }
     rewriteHandler(repositories)
-    buildscript.repositories.all(redirect)
-    repositories.all(redirect)
 }
 
 settingsEvaluated { settings ->
-    println ">>> Hit in settingsEvaluated"
     rewriteHandler(settings.pluginManagement.repositories)
     try {
         rewriteHandler(settings.dependencyResolutionManagement.repositories)
@@ -81,54 +51,9 @@ settingsEvaluated { settings ->
     }
 }
 
-def isMavenCentral = { repo ->
-    if (!(repo instanceof MavenArtifactRepository)) {
-        return false
-    }
-
-    def url = repo.url?.toString()?.replaceAll('/+$', '')
-    return url in [
-        'https://repo.maven.apache.org/maven2',
-        'https://repo1.maven.org/maven2',
-        'http://repo.maven.apache.org/maven2',
-        'http://repo1.maven.org/maven2',
-    ]
-}
-
-def redirectRepositories = { repositories ->
-    repositories.configureEach { repo ->
-        if (isMavenCentral(repo)) {
-            println ">>> Redirecting ${repo.url} -> ${MIRROR_URL}"
-            repo.setUrl(MIRROR_URL)
-        }
-    }
-}
-
 gradle.beforeProject { project ->
     rewriteHandler(project.buildscript.repositories)
     rewriteHandler(project.repositories)
-
-    // Catch repositories added after the initial callbacks but before
-    // buildscript classpath resolution.
-    project.buildscript.configurations.configureEach { configuration ->
-        configuration.incoming.beforeResolve {
-            redirectRepositories(project.buildscript.repositories)
-
-            project.buildscript.repositories.each { repo ->
-                if (repo instanceof MavenArtifactRepository) {
-                    println(
-                        ">>> Buildscript repository before resolution: ${repo.url}"
-                    )
-                }
-            }
-        }
-    }
-
-    project.configurations.configureEach { configuration ->
-        configuration.incoming.beforeResolve {
-            redirectRepositories(project.repositories)
-        }
-    }
 }
 
 // Last-resort: also rewrite at afterProject in case some block adds
