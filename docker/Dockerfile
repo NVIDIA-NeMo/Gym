@@ -126,12 +126,9 @@ CMD ["--help"]
 
 FROM release AS test
 
-USER root
 RUN uv sync --link-mode copy --locked --reinstall --extra dev --extra sandbox --no-extra vllm && \
-    uv cache clean && \
-    chown -R nemo-gym:nemo-gym /home/nemo-gym /opt/nemo-gym /opt/nemo_gym_venv
+    uv cache clean
 
-USER nemo-gym
 RUN <<"EOF" bash -euxo pipefail
 test "$(id -u)" -ne 0
 PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
