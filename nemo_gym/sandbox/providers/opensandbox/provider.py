@@ -801,17 +801,13 @@ class OpenSandboxProvider:
                         f"{operation!r} (proxy 502: no TCP connection to execd); the sandbox "
                         f"is likely dead; sandbox_id={sandbox_id!r}"
                     ) from e
-                sleep_s = min(
-                    self._operations.retry_delay_s * (2 ** (attempt - 1)),
-                    self._operations.retry_max_delay_s,
-                )
+                # The execd bind window is short, so poll quickly with a small
+                # capped backoff rather than the per-operation delays (which are
+                # tuned for slow creates).
+                sleep_s = min(0.25 * 2 ** (attempt - 1), 2.0)
                 LOGGER.warning(
                     "Backend-connect 502 on %s; retrying submission %s/%s in %.1fs; sandbox_id=%s",
-                    operation,
-                    attempt,
-                    attempts,
-                    sleep_s,
-                    sandbox_id,
+                    operation, attempt, attempts, sleep_s, sandbox_id,
                 )
                 await asyncio.sleep(sleep_s)
 

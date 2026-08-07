@@ -1280,10 +1280,11 @@ async def test_exec_retries_backend_connect_502_despite_zero_command_retries(
         "_require_opensandbox_sdk",
         lambda: (object, object, FakeRunCommandOpts, object, object),
     )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5},
         probe={"command": None},
-        operations={"retries": 3, "retry_delay_s": 0.001, "retry_max_delay_s": 0.002},
+        operations={"retries": 3},
     )
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-flap", provider_name="opensandbox", raw=FakeRaw())
 
@@ -1322,10 +1323,11 @@ async def test_exec_persistent_502_raises_typed_backend_unreachable(
         "_require_opensandbox_sdk",
         lambda: (object, object, FakeRunCommandOpts, object, object),
     )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5},
         probe={"command": None},
-        operations={"retries": 2, "retry_delay_s": 0.001, "retry_max_delay_s": 0.002},
+        operations={"retries": 2},
     )
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-dead", provider_name="opensandbox", raw=FakeRaw())
 
