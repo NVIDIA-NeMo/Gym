@@ -29,6 +29,13 @@ def _python_path(venv: Path) -> Path:
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
+def _workspace_dir(package_dir: Path) -> Path:
+    for candidate in (package_dir, package_dir.parent):
+        if (candidate / "uv.lock").is_file():
+            return candidate
+    raise RuntimeError(f"Simple Strands Agent lockfile not found for {package_dir}")
+
+
 def ensure_ssa(source_root: str | None = None, python: str | None = None) -> Path:
     if python:
         path = Path(python).expanduser().resolve()
@@ -45,9 +52,11 @@ def ensure_ssa(source_root: str | None = None, python: str | None = None) -> Pat
             subprocess.run(["git", "checkout", SSA_REVISION], cwd=source, check=True)
 
         package_dir = _package_dir(source)
-        source_key = SSA_REVISION
+        workspace_dir = _workspace_dir(package_dir)
+        lock_digest = hashlib.sha256((workspace_dir / "uv.lock").read_bytes()).hexdigest()[:12]
+        source_key = f"{SSA_REVISION}-{lock_digest}"
         if source_root:
-            digest = hashlib.sha256(str(package_dir).encode()).hexdigest()[:12]
+            digest = hashlib.sha256(str(package_dir).encode() + lock_digest.encode()).hexdigest()[:12]
             source_key = f"local-{digest}"
         venv = cache_root / source_key / f"venv-{sys.version_info.major}.{sys.version_info.minor}"
         python_path = _python_path(venv)
@@ -59,10 +68,22 @@ def ensure_ssa(source_root: str | None = None, python: str | None = None) -> Pat
         if uv is None:
             raise RuntimeError("uv is required to install Simple Strands Agent")
         venv.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([uv, "venv", "--python", sys.executable, str(venv)], check=True)
+        env = os.environ | {"UV_PROJECT_ENVIRONMENT": str(venv)}
         subprocess.run(
-            [uv, "pip", "install", "--python", str(python_path), "-e", str(package_dir), "cryptography"],
+            [
+                uv,
+                "sync",
+                "--project",
+                str(workspace_dir),
+                "--package",
+                "simple-strands-agent",
+                "--locked",
+                "--no-dev",
+                "--python",
+                sys.executable,
+            ],
             check=True,
+            env=env,
         )
         subprocess.run(
             [str(python_path), "-c", "from ssa.agent import StrandsResolverAgent"],

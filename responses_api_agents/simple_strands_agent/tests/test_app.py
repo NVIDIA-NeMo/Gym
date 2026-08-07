@@ -13,7 +13,7 @@ from responses_api_agents.simple_strands_agent.app import (
     _extract_instruction,
     trajectory_to_output_items,
 )
-from responses_api_agents.simple_strands_agent.setup_ssa import _package_dir
+from responses_api_agents.simple_strands_agent.setup_ssa import _package_dir, _workspace_dir
 
 
 def test_extract_instruction() -> None:
@@ -83,3 +83,10 @@ def test_package_dir_accepts_monorepo_or_package(tmp_path: Path) -> None:
 def test_package_dir_rejects_missing_package(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="package not found"):
         _package_dir(tmp_path)
+
+
+def test_workspace_dir_finds_lockfile(tmp_path: Path) -> None:
+    package = tmp_path / "simple-strands-agent"
+    package.mkdir()
+    (tmp_path / "uv.lock").touch()
+    assert _workspace_dir(package) == tmp_path
