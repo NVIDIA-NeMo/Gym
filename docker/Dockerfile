@@ -38,6 +38,20 @@ apt-get install -y --no-install-recommends \
     less \
     vim
 
+apt-get purge -y \
+    ffmpeg \
+    libavcodec* \
+    libavformat* \
+    libavutil* \
+    libswscale* \
+    libswresample* \
+    libx264* \
+    libx265* \
+    libfdk-aac* \
+    libmp3lame* \
+    2>/dev/null || true
+
+apt-get autoremove -y
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
@@ -66,7 +80,14 @@ COPY --from=nemo-gym pyproject.toml uv.lock ./
 COPY --from=nemo-gym nemo_gym/__init__.py nemo_gym/package_info.py ./nemo_gym/
 
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --no-install-project && \
+    uv pip uninstall -y \
+        torchvision torchaudio \
+        opencv-python-headless opencv-python \
+        imageio-ffmpeg \
+        av decord2 \
+        ffmpeg-python pydub \
+        2>/dev/null || true
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 

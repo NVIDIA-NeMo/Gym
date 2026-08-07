@@ -334,6 +334,7 @@ constraint-dependencies = [
 override-dependencies = [
     # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
     "spacy>=3.8.13",
+
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Don't add a package any
