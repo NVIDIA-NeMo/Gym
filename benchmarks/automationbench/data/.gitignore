@@ -1,0 +1,13 @@
+*train.jsonl
+*validation.jsonl
+*train_prepare.jsonl
+*validation_prepare.jsonl
+*example_prepare.jsonl
+
+# The 600-task benchmark set is materialized by prepare.py, not committed.
+automationbench_benchmark.jsonl
+
+# benchmarks/.gitignore ignores *.jsonl repo-wide. Re-include the committed
+# example data so the benchmark ships a runnable 5-row sample.
+!example.jsonl
+!example_rollouts.jsonl

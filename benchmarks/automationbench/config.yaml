@@ -1,0 +1,34 @@
+automationbench_benchmark_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Zapier AutomationBench, multi-step business workflows over 47 simulated SaaS tools.
+      value: Improve multi-step tool use and business workflow execution.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: AutomationBench
+      vf_env_args:
+        domains: all
+        toolset: api
+        max_steps: 50
+        num_examples: -1
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 32768
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: benchmarks/automationbench/data/example.jsonl
+      - name: automationbench
+        type: benchmark
+        jsonl_fpath: benchmarks/automationbench/data/automationbench_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/automationbench/prepare.py
+        num_repeats: 1
