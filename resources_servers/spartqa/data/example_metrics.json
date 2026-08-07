@@ -1,0 +1,48 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/spartqa/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": "mteb/SpartQA",
+    "license": "CC-BY-SA-4.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 179.4,
+        "Min": 171.0,
+        "Max": 184.0,
+        "Standard deviation": 5.367
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Number of candidate answers": {
+        "Total # non-null values": 5,
+        "Average": 4.0,
+        "Min": 4.0,
+        "Max": 4.0,
+        "Standard deviation": 0.0
+    },
+    "Number of 'both of them' golds": 2,
+    "Number of 'none of them' golds": 1
+}

@@ -1,0 +1,19 @@
+# Serve ONLY the spartqa resources server (the /verify scorer), for driving
+# from nemo-evaluator via the gym:// environment adapter:
+#
+#   ng_run "+config_paths=[resources_servers/spartqa/configs/spartqa_serve.yaml]"
+#
+# SpartQA needs no model server — verify() extracts the model's final answer
+# locally and scores the exact-or-contains match deterministically.
+# nemo-evaluator owns the policy model and generation; it POSTs the model's
+# answer to this server's /verify. See README.md.
+spartqa:
+  resources_servers:
+    spartqa:
+      entrypoint: app.py
+      host: 0.0.0.0
+      port: 8001
+      domain: other
+      verified: false
+      description: SpartQA spatial-reasoning answer generation; reward = 1 on an exact-or-answer-containing match against any accepted answer phrase.
+      value: Improve spatial and relational reasoning over described scenes.
