@@ -349,6 +349,21 @@ def _duration_ms_between(started_at: Any, finished_at: Any) -> float | None:
         return (finished_at - started_at).total_seconds() * 1000.0
     except (AttributeError, TypeError):
         return None
+def _to_network_policy(policy: Mapping[str, Any]) -> Any:
+    """Build the SDK NetworkPolicy model from a plain mapping.
+
+    Imported here rather than through ``_require_opensandbox_sdk`` so that helper's
+    return arity stays fixed -- every existing call site unpacks it positionally.
+    The guard call preserves the friendly missing-SDK message.
+
+    ``model_validate`` rather than ``NetworkPolicy(**policy)``: the model field is
+    ``default_action`` while the API spells it ``defaultAction``, and callers copy the
+    API spelling. Validating by alias accepts both.
+    """
+    _require_opensandbox_sdk()
+    from opensandbox.models.sandboxes import NetworkPolicy
+
+    return NetworkPolicy.model_validate(dict(policy))
 
 
 def _to_sandbox_status(state: Any) -> SandboxStatus:
@@ -538,6 +553,12 @@ class OpenSandboxProviderOptions:
     # Scheduling requests (same keys as SandboxSpec.resources, which become the
     # limits). Unset, the server applies the single resources map as both.
     resource_requests: Mapping[str, Any] | None = None
+    # Passing a policy is what makes the server attach the egress sidecar at all
+    # (apply_egress_to_spec returns early without one), so this gates every egress
+    # feature -- filtering, the credential proxy, transparent MITM -- not just
+    # blocking traffic. {"defaultAction": "allow", "egress": []} attaches the
+    # sidecar while allowing everything through.
+    network_policy: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any] | None) -> "OpenSandboxProviderOptions":
@@ -575,6 +596,9 @@ class OpenSandboxProviderOptions:
         resource_requests = options.get("resource_requests")
         if resource_requests is not None and not isinstance(resource_requests, Mapping):
             raise TypeError("OpenSandbox provider option 'resource_requests' must be a mapping")
+        network_policy = options.get("network_policy")
+        if network_policy is not None and not isinstance(network_policy, Mapping):
+            raise TypeError("OpenSandbox provider option 'network_policy' must be a mapping")
 
         return cls(
             image_auth=dict(image_auth) if image_auth is not None else None,
@@ -584,6 +608,7 @@ class OpenSandboxProviderOptions:
             skip_health_check=skip_health_check,
             extensions=_string_map(dict(extensions)),
             resource_requests=dict(resource_requests) if resource_requests is not None else None,
+            network_policy=dict(network_policy) if network_policy is not None else None,
         )
 
 
@@ -937,6 +962,8 @@ class OpenSandboxProvider:
             kwargs["entrypoint"] = spec.entrypoint
         if options.platform is not None:
             kwargs["platform"] = _to_platform_spec(options.platform)
+        if options.network_policy is not None:
+            kwargs["network_policy"] = _to_network_policy(options.network_policy)
         if options.volumes:
             kwargs["volumes"] = _to_volumes(list(options.volumes))
         if self._create.skip_health_check:
