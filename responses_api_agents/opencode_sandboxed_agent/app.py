@@ -275,30 +275,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
-        # TODO @bxyu-nvidia: This is a dirty hack to retry this first exec after the connect
-        # Eventually as things stabilize we can remove this.
-        tries = 0
-        MAX_TRIES = 10
-        result = None
-        while tries < MAX_TRIES:
-            try:
-                result = await sandbox.exec(
-                    command=command,
-                    timeout_s=self.config.sandbox_timeout,
-                    env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
-                )
-                break
-            except Exception as e:
-                if (
-                    "POD_IP_NOT_AVAILABLE" in str(e)
-                    or "command not found" in str(e)
-                    or "Get command status failed" in str(e)
-                    or "Failed to run command" in str(e)
-                ):
-                    print(f"Exec try #{tries} hit error.", format_exc(), file=sys.stderr)
-                    tries += 1
-                    continue
-                raise e
+        try:
+            result = await sandbox.exec(
+                command=command,
+                timeout_s=self.config.sandbox_timeout,
+                env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
+            )
+        except:
+            result = None
+            print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -313,7 +298,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
         except:
             export_result = None
-            print("Failed to export results", file=sys.stderr)
+            print("Failed to export results", format_exc(), file=sys.stderr)
         if self.config.debug and export_result:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
@@ -322,7 +307,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             pwd_result = await sandbox.exec(command="pwd")
             results_remote_fpath = Path(pwd_result.stdout) / export_fname
         except:
-            print("Failed to get current working directory", file=sys.stderr)
+            print("Failed to get current working directory", format_exc(), file=sys.stderr)
             results_remote_fpath = None
 
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
@@ -334,7 +319,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             try:
                 await sandbox.download(str(results_remote_fpath), results_local_fpath)
             except:
-                print(f"Failed to download export results to {results_local_fpath}", file=sys.stderr)
+                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
 
         opencode_export = dict()
         if results_local_fpath.exists():
