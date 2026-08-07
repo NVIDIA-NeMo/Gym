@@ -20,7 +20,7 @@ from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROMPTS_DIR = PACKAGE_DIR / "prompts"
-PROMPT_FILENAMES = ("domain_followup.txt", "domain_generation.txt")
+PROMPT_FILENAMES = ("domain_generation.txt",)
 PREPARE_COMMAND = "python -m resources_servers.conversational_tool_use_simulation.prepare"
 
 
@@ -35,7 +35,3 @@ def _read_prompt(filename: str) -> str:
 
 def load_domain_prompt() -> str:
     return _read_prompt("domain_generation.txt")
-
-
-def load_followup_instruction() -> str:
-    return _read_prompt("domain_followup.txt")

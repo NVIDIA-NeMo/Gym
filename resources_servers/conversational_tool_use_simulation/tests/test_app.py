@@ -112,6 +112,12 @@ def test_simulator_sampling_is_owned_by_the_model_servers() -> None:
         assert params.max_output_tokens is None
 
 
+def test_seed_session_accepts_training_rows_without_profile() -> None:
+    request = ConversationalToolUseSeedSessionRequest(policy="policy")
+
+    assert request.profile is None
+
+
 def make_judge_response(text: str) -> NeMoGymResponse:
     return NeMoGymResponse.model_validate(
         {

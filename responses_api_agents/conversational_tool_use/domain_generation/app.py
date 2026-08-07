@@ -35,11 +35,11 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.conversational_tool_use.domain_generation.assets import load_followup_instruction
 
 
 PROTOCOL_VERSION = "domain-generation/v1"
 VARIABLE_FOLLOWUP_PROTOCOL_VERSION = "domain-generation/v2"
+FOLLOWUP_INSTRUCTION = "Do not repeat these domains. Try looking for other domains or find specific sub-domains."
 
 
 class DomainGenerationAgentConfig(BaseResponsesAPIAgentConfig):
@@ -91,9 +91,7 @@ def parse_domain_response(response: NeMoGymChatCompletion) -> tuple[Any, str | N
 
 
 def followup_prompt(initial_prompt: str, known_domain_names: list[Any]) -> str:
-    return (
-        initial_prompt + f"\n\nPreviously brainstormed domains: {known_domain_names}.\n" + load_followup_instruction()
-    )
+    return initial_prompt + f"\n\nPreviously brainstormed domains: {known_domain_names}.\n" + FOLLOWUP_INSTRUCTION
 
 
 def _initial_prompt(body: DomainGenerationRunRequest) -> str:

@@ -13,5 +13,4 @@ def prepared_domain_prompts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     prompts_dir = tmp_path / "domain_prompts"
     prompts_dir.mkdir()
     (prompts_dir / "domain_generation.txt").write_text("Generate domains.", encoding="utf-8")
-    (prompts_dir / "domain_followup.txt").write_text("Do not repeat domains.", encoding="utf-8")
     monkeypatch.setattr(assets, "PROMPTS_DIR", prompts_dir)

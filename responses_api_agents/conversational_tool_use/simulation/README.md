@@ -10,18 +10,6 @@ The complete workflow and shared design documents live with the simulation resou
 - [Scenario generation](../scenario_generation/README.md)
 - [Rollout behavior](../../../resources_servers/conversational_tool_use_simulation/docs/rollout.md)
 
-## Prepare Assets
-
-Prepare the shared assets before running this agent:
-
-```bash
-python -m resources_servers.conversational_tool_use_simulation.prepare
-```
-
-This downloads all runtime prompts and policy/tool golden references from
-[`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets).
-Add `--include-prompt-history` for the optional prompt history. JSON schemas and example JSONL files remain in Git.
-
 ## Configuration
 
 [`configs/conversational_tool_use_simulation.yaml`](configs/conversational_tool_use_simulation.yaml) registers the

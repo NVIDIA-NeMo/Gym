@@ -223,6 +223,16 @@ def materialized_run_request(**kwargs) -> ConversationalToolUseAgentRunRequest:
     )
 
 
+def test_run_request_accepts_training_rows_without_profile() -> None:
+    request = ConversationalToolUseAgentRunRequest(
+        responses_create_params=materialized_params(),
+        policy=POLICY,
+        tools=TOP_LEVEL_TOOLS,
+    )
+
+    assert request.profile is None
+
+
 def typed_trajectory_result() -> dict:
     return {
         "profile": "general",

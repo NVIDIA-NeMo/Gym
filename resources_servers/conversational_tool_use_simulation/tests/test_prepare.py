@@ -18,11 +18,9 @@ from pathlib import Path
 import pytest
 
 from resources_servers.conversational_tool_use_simulation import prepare as prepare_module
-from resources_servers.conversational_tool_use_simulation import prompt as resource_prompt
 from responses_api_agents.conversational_tool_use.domain_generation import assets as domain_assets
 from responses_api_agents.conversational_tool_use.policy_tool_generation import assets as policy_tool_assets
 from responses_api_agents.conversational_tool_use.scenario_generation import assets as scenario_assets
-from responses_api_agents.conversational_tool_use.simulation import prompt as agent_prompt
 
 
 def _write_flat_directory(directory: Path, files: dict[str, str]) -> None:
@@ -57,13 +55,7 @@ def test_runtime_bundle_filenames_match_component_loaders(tmp_path: Path) -> Non
         bundles["conversational_tool_use_policy_tool_generation/prompts"].filenames
         == policy_tool_assets.PROMPT_FILENAMES
     )
-    assert (
-        bundles["conversational_tool_use_policy_tool_generation/golden_policies"].filenames
-        == policy_tool_assets.GOLDEN_FILENAMES
-    )
     assert bundles["conversational_tool_use_scenario_generation/prompts"].filenames == scenario_assets.PROMPT_FILENAMES
-    assert bundles["conversational_tool_use_agent/prompts"].filenames == agent_prompt.PROMPT_FILENAMES
-    assert bundles["conversational_tool_use_simulation/prompts"].filenames == resource_prompt.PROMPT_FILENAMES
 
 
 def test_prepare_downloads_all_runtime_assets_and_optional_history(

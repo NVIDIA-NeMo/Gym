@@ -29,16 +29,17 @@ Each generation agent README documents its input, output, and materializer. See
 
 ## Prepare Assets
 
-Prepare the shared assets once per checkout before starting any generation or simulation component:
+Prepare the standalone generation prompts before running the generation pipeline:
 
 ```bash
 python -m resources_servers.conversational_tool_use_simulation.prepare
 ```
 
-This downloads all runtime prompts and policy/tool golden references from
+This downloads the `.txt` prompt assets from
 [`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets).
-Add `--include-prompt-history` to materialize the optional prompt history. JSON schemas and example JSONL files remain
-in Git.
+Add `--include-prompt-history` to materialize the optional prompt history. Prompts implemented directly in the rollout
+server or policy agent remain in Python and require no preparation. Policy/tool references, JSON schemas, and example
+JSONL files remain in Git.
 
 ## Rollout Resource Server
 

@@ -28,6 +28,7 @@ from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.conversational_tool_use.domain_generation.app import (
+    FOLLOWUP_INSTRUCTION,
     DomainGenerationAgent,
     DomainGenerationAgentConfig,
     DomainGenerationRunRequest,
@@ -35,7 +36,6 @@ from responses_api_agents.conversational_tool_use.domain_generation.app import (
 from responses_api_agents.conversational_tool_use.domain_generation.assets import (
     PROMPT_FILENAMES,
     load_domain_prompt,
-    load_followup_instruction,
 )
 
 
@@ -177,7 +177,7 @@ async def test_run_makes_exactly_two_message_only_chat_completions() -> None:
     second_request = calls[1].kwargs["json"]
     assert first_request.model_dump(exclude_unset=True) == {"messages": [{"role": "user", "content": INITIAL_PROMPT}]}
     expected_followup = (
-        INITIAL_PROMPT + "\n\nPreviously brainstormed domains: ['Home Services'].\n" + load_followup_instruction()
+        INITIAL_PROMPT + "\n\nPreviously brainstormed domains: ['Home Services'].\n" + FOLLOWUP_INSTRUCTION
     )
     assert second_request.model_dump(exclude_unset=True) == {
         "messages": [{"role": "user", "content": expected_followup}]
@@ -289,10 +289,9 @@ def test_checked_in_config_exposes_default_followup_count() -> None:
 
 
 def test_prompt_assets_are_complete_and_whitespace_free() -> None:
-    assert PROMPT_FILENAMES == ("domain_followup.txt", "domain_generation.txt")
+    assert PROMPT_FILENAMES == ("domain_generation.txt",)
     assert all(not any(character.isspace() for character in filename) for filename in PROMPT_FILENAMES)
     assert load_domain_prompt() == "Generate domains."
-    assert load_followup_instruction() == "Do not repeat domains."
 
 
 def test_run_request_requires_one_string_user_message() -> None:

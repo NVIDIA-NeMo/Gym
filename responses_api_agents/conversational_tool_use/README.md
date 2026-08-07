@@ -15,12 +15,13 @@ resource-server configs live in
 
 ## Prepare Assets
 
-Prepare all runtime prompts and policy/tool golden references before running any stage:
+Prepare the standalone `.txt` prompts before running the three generation stages:
 
 ```bash
 python -m resources_servers.conversational_tool_use_simulation.prepare
 ```
 
-The command downloads the assets from
+The command downloads the prompt assets from
 [`nvidia/NeMo-Gym-Conversational-Tool-Use-Assets`](https://huggingface.co/datasets/nvidia/NeMo-Gym-Conversational-Tool-Use-Assets).
-Add `--include-prompt-history` for the optional prompt history. JSON schemas and example JSONL files remain in Git.
+Add `--include-prompt-history` for the optional prompt history. The simulation agent's prompt templates remain in Python
+and require no preparation. Policy/tool references, JSON schemas, and example JSONL files remain in Git.

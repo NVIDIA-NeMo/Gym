@@ -42,7 +42,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
-from resources_servers.conversational_tool_use_simulation import prompt as prompt_assets
 
 
 TRAJECTORY_COMPLETE_INDICATOR = "###STOP###"
@@ -248,7 +247,7 @@ class ConversationMessage(BaseModel):
 
 class ConversationSessionState(BaseModel):
     domain_name: str
-    profile: Literal["general", "proactive"]
+    profile: Optional[Literal["general", "proactive"]] = None
     policy: str
     tool_signatures: List[ToolSignature]
     customer_scenario: CustomerScenario
@@ -293,7 +292,7 @@ class ConversationTrajectoryResult(BaseModel):
 class ConversationalToolUseResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    profile: Literal["general", "proactive"]
+    profile: Optional[Literal["general", "proactive"]] = None
     source_artifacts: Dict[str, Any] = Field(default_factory=dict)
     trajectory: ConversationTrajectoryResult
 
@@ -302,7 +301,7 @@ class ConversationalToolUseSeedSessionRequest(BaseSeedSessionRequest):
     model_config = ConfigDict(extra="allow")
 
     domain_name: str = ""
-    profile: Literal["general", "proactive"]
+    profile: Optional[Literal["general", "proactive"]] = None
     policy: str
     tools: List[ToolSignature] = Field(default_factory=list)
     customer_scenario: CustomerScenario = Field(default_factory=CustomerScenario)
@@ -458,47 +457,238 @@ class ConversationalToolUseVerifyResponse(BaseVerifyResponse):
 class ConversationalToolUseSimulationServer(SimpleResourcesServer):
     USER_RESPONSE_PREFIX_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^\s*Customer:\s*", flags=re.IGNORECASE)
 
-    USER_SIMULATOR_SYSTEM_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.USER_SIMULATOR_SYSTEM_MESSAGE_TEMPLATE
+    USER_SIMULATOR_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = """# Instructions
+- You are playing the role of a customer contacting a customer service representative.
+- The scenario that describes the customer that you are acting as and the tasks that are to be completed is included below between the <scenario> and </scenario> tags.
+- Strictly follow the instructions in the scenario description.
+- To start a conversation, please make a request to the customer service representative in order to complete the tasks described in the scenario.
+- Generate one message at a time, maintaining natural conversation flow.
+- Each message should be a message from a customer to the representative.
+- The goal is to continue the conversation until the tasks are complete.
+- If the tasks have been completed during the previous messages in the interaction with the customer service representative, then instead of generating a message, output just '{complete_indicator}' to indicate that the conversation should end.
+- If you are transferred to another agent by the customer service representative in a previous message in the conversation, then instead of generating a message, output just '{transfer_indicator}' to indicate the transfer.
+
+<scenario>
+{customer_scenario}
+</scenario>
+
+Remember: The goal is to create realistic, natural conversations while strictly adhering to the provided instructions and maintaining character consistency."""
+
+    ENVIRONMENT_SIMULATOR_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = """# Instructions
+- Your task is to generate the result of executing a tool.
+- The tool is executed by a customer service representative in the context of a conversation with a customer to retrieve information or accomplish a task.
+- The conversation between the customer and the representative is shown between <conversation> and </conversation> tags, with each message sent by the customer appearing between <customer> and </customer> tags, and each message sent by the customer service representative appearing between <representative> and </representative> tags.
+- The way that the representative handles customer requests is described below between the <policy> and </policy> tags.
+- The scenario that describes the customer and the tasks that they are trying to complete is shown below between the <scenario> and </scenario> tags.
+- The definitions of the available tools are provided below between the <tools> and </tools> tags, with each tool definition appearing between <tool> and </tool> tags.
+
+<policy>
+{domain_policy}
+</policy>
+
+<scenario>
+{customer_scenario}
+</scenario>
+
+<tools>
+{tool_definitions}
+</tools>
+
+Please make sure that the tool execution result that you generate is consistent with the definition of the tool being executed, the information about the customer in the scenario, and the previous conversation between the customer and the representative.  Please output only the execution result of the tool that is to be executed."""
+
+    ENVIRONMENT_CONVERSATION_MESSAGE_TEMPLATE: ClassVar[str] = """<{sender}>
+{message}
+</{sender}>"""
+
+    ENVIRONMENT_CONVERSATION_TEMPLATE: ClassVar[str] = """<conversation>
+{conversation}
+</conversation>
+
+"""
+
+    ENVIRONMENT_USER_MODEL_MESSAGE_TEMPLATE: ClassVar[str] = """{conversation}Tool to execute: {tool_name}
+Arguments for tool execution: {arguments}"""
+
+    MESSAGE_SYSTEM_MESSAGE_PREFIX: ClassVar[str] = """# Instructions
+- Your task is to evaluate one step in an interaction between a customer and a customer service representative.
+- The previous steps in the interaction are shown in order between the <previous_steps> and </previous_steps> tags.
+- The step that you are to evaluate is the current step, which is shown between the <current_step> and </current_step> tags.
+- Each step in the interaction is either a message from the customer to the representative, a message from the representative to the customer, the execution of a tool, or the result of executing a tool.
+- A message from the customer to the representative or from the representative to the customer is shown between <message> and </message> tags.
+- An execution of a tool can be requested by the representative, and is shown between <execute_tool> and </execute_tool> tags.
+- When the representative requests the execution of a tool, the next step in the interaction should be the result of executing the tool, which is shown between <tool_result> and </tool_result> tags.
+- The way that the representative handles customer requests is described below between the <policy> and </policy> tags.
+
+<policy>
+{policy}
+</policy>
+
+"""
+
+    USER_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = (
+        MESSAGE_SYSTEM_MESSAGE_PREFIX
+        + """- The scenario that describes the customer and the tasks they are trying to complete is shown below between the <scenario> and </scenario> tags.
+
+<scenario>
+{customer_scenario}
+</scenario>
+
+- The current step that you are to evaluate is a message from the customer to the representative.
+- The current step should be considered a success if the message from the customer to the representative follows naturally from the previous steps in the interaction and is consistent with the information about the customer in the scenario.
+- If the message from the customer to the representative in the current step does not advance the interaction, is not consistent with the scenario, or is not consistent with the previous steps in the interaction, then the current step should be considered a failure.
+- If the current step is the first step in the interaction, then it should be considered a success if it is consistent with the scenario, and it should be considered a failure if it is not consistent with the scenario.  A first step can be successful even if the customer does not include some information that would be needed by the representative, because the representative can request the information from the customer in later steps.
+- The customer will send the message '{complete_indicator}' to indicate that they would like to end the interaction with the representative.  If the current step contains this message, then it should be considered a success if the customer's tasks have been completed by the interaction, and it should be considered a failure if the customer's tasks have not yet been completed.
+- The customer will send the message '{transfer_indicator}' to indicate that they have been transferred to another agent by the representative.  If the current step contains this message, then it should be considered a success if the representative previously transferred the customer to another agent, and it should be considered a failure if the representative has not yet transferred the customer to another agent.
+
+Please output the evaluation of the current step and an explanation for the evaluation using the following JSON schema:
+{evaluation_schema}"""
     )
-    ENVIRONMENT_SIMULATOR_SYSTEM_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.ENVIRONMENT_SIMULATOR_SYSTEM_MESSAGE_TEMPLATE
+
+    AGENT_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = (
+        MESSAGE_SYSTEM_MESSAGE_PREFIX
+        + """- The definitions of the tools that are available to the representative for execution are provided below between the <tools> and </tools> tags, with each tool definition appearing between <tool> and </tool> tags.
+
+<tools>
+{tool_definitions}
+</tools>
+
+- The current step that you are to evaluate is an action by the representative.
+- The representative can either send a message to the customer, or execute a tool.
+- The current step should be considered a success if the action taken by the representative is helpful in addressing the request from the customer.
+- The current step should be considered a failure if the action taken by the representative does not help to handle the customer's request, or is not consistent with the previous steps in the interaction or the policy for handling customer requests.
+- If the current step is the execution of a tool, then the current step should be considered a success if the tool to be executed helps to address the customer's request, the arguments for the tool execution conform to the tool definition, and the arguments are consistent with the previous steps in the conversation.  Otherwise, the current step should be considered a failure.
+
+Please output the evaluation of the current step and an explanation for the evaluation using the following JSON schema:
+{evaluation_schema}"""
     )
-    ENVIRONMENT_CONVERSATION_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.ENVIRONMENT_CONVERSATION_MESSAGE_TEMPLATE
+
+    ENVIRONMENT_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = (
+        MESSAGE_SYSTEM_MESSAGE_PREFIX
+        + """- The scenario that describes the customer and the tasks they are trying to complete is shown below between the <scenario> and </scenario> tags.
+- The definitions of the tools that are available for execution are provided below between the <tools> and </tools> tags, with each tool definition appearing between <tool> and </tool> tags.
+
+<scenario>
+{customer_scenario}
+</scenario>
+
+<tools>
+{tool_definitions}
+</tools>
+
+- The current step that you are to evaluate is the result of executing a tool.
+- The previous step in the interaction should specify the tool to be executed and the arguments for execution.
+- The current step should be considered a success if the tool execution result conforms to the definition of the tool being executed, and is consistent with the information about the customer in the scenario and the previous steps in the interaction.
+- The current step should be considered a failure if the tool execution result is not consistent with the definition of the tool being executed, the information about the customer in the scenario, or the previous steps in the interaction.
+
+Please output the evaluation of the current step and an explanation for the evaluation using the following JSON schema:
+{evaluation_schema}"""
     )
-    ENVIRONMENT_CONVERSATION_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.ENVIRONMENT_CONVERSATION_TEMPLATE
-    )
-    ENVIRONMENT_USER_MODEL_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.ENVIRONMENT_USER_MODEL_MESSAGE_TEMPLATE
-    )
-    MESSAGE_SYSTEM_MESSAGE_PREFIX: ClassVar[prompt_assets.PromptTemplate] = prompt_assets.MESSAGE_SYSTEM_MESSAGE_PREFIX
-    USER_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.USER_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE
-    )
-    AGENT_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.AGENT_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE
-    )
-    ENVIRONMENT_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.ENVIRONMENT_MESSAGE_EVALUATION_SYSTEM_MESSAGE_TEMPLATE
-    )
-    AGENT_CONVERSATION_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.AGENT_CONVERSATION_EVALUATION_SYSTEM_MESSAGE_TEMPLATE
-    )
-    USER_AGENT_ENVIRONMENT_CONVERSATION_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.USER_AGENT_ENVIRONMENT_CONVERSATION_EVALUATION_SYSTEM_MESSAGE_TEMPLATE
-    )
-    MESSAGE_CONVERSATION_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = prompt_assets.MESSAGE_CONVERSATION_TEMPLATE
-    COMPLETE_CONVERSATION_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.COMPLETE_CONVERSATION_TEMPLATE
-    )
-    TEXT_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = prompt_assets.TEXT_MESSAGE_TEMPLATE
-    TOOL_CALL_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = prompt_assets.TOOL_CALL_MESSAGE_TEMPLATE
-    TOOL_EXECUTION_MESSAGE_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = (
-        prompt_assets.TOOL_EXECUTION_MESSAGE_TEMPLATE
-    )
-    TOOL_DEFINITION_TEMPLATE: ClassVar[prompt_assets.PromptTemplate] = prompt_assets.TOOL_DEFINITION_TEMPLATE
+
+    AGENT_CONVERSATION_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = """# Instructions
+- Your task is to evaluate the actions taken by a customer service representative in an interaction between a customer and the representative.
+- The steps in the interaction are shown in order between the <steps> and </steps> tags.
+- Each step in the interaction is either a message from the customer to the representative, a message from the representative to the customer, the execution of a tool, or the result of executing a tool.
+- A message from the customer to the representative or from the representative to the customer is shown between <message> and </message> tags.
+- An execution of a tool can be requested by the representative, and is shown between <execute_tool> and </execute_tool> tags.
+- When the representative requests the execution of a tool, the next step in the interaction should be the result of executing the tool, which is shown between <tool_result> and </tool_result> tags.
+- The way that the representative handles customer requests is described below between the <policy> and </policy> tags.
+- The definitions of the tools that are available to the representative for execution are provided below between the <tools> and </tools> tags, with each tool definition appearing between <tool> and </tool> tags.
+- Whenever the representative takes an action, the representative can either send a message to the customer, or execute a tool.
+- The actions of the representative should be considered a success if they are helpful in addressing the request from the customer.
+- The actions of the representative should be considered a failure if they do not help to handle the customer's request, or are not consistent with the steps in the interaction that precede them or the policy for handling customer requests.
+
+<policy>
+{policy}
+</policy>
+
+<tools>
+{tool_definitions}
+</tools>
+
+- The representative can transfer the customer to another agent.  This should be done if the customer's request cannot be handled by the representative according to the policy, but should not be done if the representative can handle the request under the policy.
+- In this interaction, the representative should {transfer_instruction}transfer the customer to another agent.
+- The actions of the representative should be considered a failure if the representative transfers the customer to another agent when they should not transfer the customer, or if the representative does not transfer the customer to another agent when they should transfer the customer.
+
+Please output the evaluation of the actions taken by the customer service representative and an explanation for the evaluation using the following JSON schema:
+{evaluation_schema}"""
+
+    USER_AGENT_ENVIRONMENT_CONVERSATION_EVALUATION_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = """# Instructions
+- Your task is to evaluate an interaction between a customer and a customer service representative.
+- Please evaluate separately the actions of the customer, the actions of the representative, and the tool results in the interaction.
+- The steps in the interaction are shown in order between the <steps> and </steps> tags.
+- Each step in the interaction is either a message from the customer to the representative, a message from the representative to the customer, the execution of a tool, or the result of executing a tool.
+- A message from the customer to the representative or from the representative to the customer is shown between <message> and </message> tags.
+- An execution of a tool can be requested by the representative, and is shown between <execute_tool> and </execute_tool> tags.
+- When the representative requests the execution of a tool, the next step in the interaction should be the result of executing the tool, which is shown between <tool_result> and </tool_result> tags.
+- The way that the representative handles customer requests is described below between the <policy> and </policy> tags.
+- The definitions of the tools that are available to the representative for execution are provided below between the <tools> and </tools> tags, with each tool definition appearing between <tool> and </tool> tags.
+- The scenario that describes the customer and the tasks they are trying to complete is shown below between the <scenario> and </scenario> tags.
+
+<policy>
+{policy}
+</policy>
+
+<tools>
+{tool_definitions}
+</tools>
+
+<scenario>
+{customer_scenario}
+</scenario>
+
+- The goal of the customer is to complete the tasks described in the scenario by communicating with the representative, while maintaining consistency with the information about the customer in the scenario.
+- The actions of the customer should be considered a success if they follow naturally from the interaction with the representative and are consistent with the scenario.
+- The actions of the customer should be considered a failure if they do not advance the interaction or are not consistent with the scenario.
+- The customer should send the message '{complete_indicator}' to end the interaction with the representative when their tasks have been completed.
+- The customer should send the message '{transfer_indicator}' when they have been transferred to another agent by the representative.
+- The actions of the customer should be considered a failure if the customer ends the interaction when their tasks have not yet been completed, or sends the message '{transfer_indicator}' when they have not yet been transferred to another agent by the representative.
+- Whenever the representative takes an action, the representative can either send a message to the customer, or execute a tool.
+- The actions of the representative should be considered a success if they are helpful in addressing the request from the customer.
+- The actions of the representative should be considered a failure if they do not help to handle the customer's request, or are not consistent with the steps in the interaction that precede them or the policy for handling customer requests.
+- The representative can transfer the customer to another agent.  This should be done if the customer's request cannot be handled by the representative according to the policy, but should not be done if the representative can handle the request under the policy.
+- In this interaction, the representative should {transfer_instruction}transfer the customer to another agent.
+- The actions of the representative should be considered a failure if the representative transfers the customer to another agent when they should not transfer the customer, or if the representative does not transfer the customer to another agent when they should transfer the customer.
+- When the representative executes a tool, the tool execution step should specify the tool to be executed and the arguments for execution, and the next step should be the result of executing the tool.
+- The tool results in the interaction should be considered a success if they conform to the definitions of the tools being executed, and are consistent with the arguments for execution, the information about the customer in the scenario, the interaction between the customer and the representative, and each other.
+- The tool results in the interaction should be considered a failure if they are not consistent with the definitions of the tools being executed, the arguments for execution, the information about the customer in the scenario, the interaction between the customer and the representative, or each other.
+
+Please output the evaluation of the actions taken by the customer, the evaluation of the actions taken by the customer service representative, the evaluation of the tool results in the interaction, and explanations for the evaluations using the following JSON schema:
+{evaluation_schema}"""
+
+    MESSAGE_CONVERSATION_TEMPLATE: ClassVar[str] = """<previous_steps>
+{previous_steps}
+</previous_steps>
+
+<current_step>
+{current_step}
+</current_step>"""
+
+    COMPLETE_CONVERSATION_TEMPLATE: ClassVar[str] = """<steps>
+{steps}
+</steps>"""
+
+    TEXT_MESSAGE_TEMPLATE: ClassVar[str] = """<message>
+Sender: {sender}
+Content: {content}
+</message>"""
+
+    TOOL_CALL_MESSAGE_TEMPLATE: ClassVar[str] = """<execute_tool>
+Execution ID: {execution_id}
+Tool name: {tool_name}
+Arguments for execution: {arguments}
+</execute_tool>"""
+
+    TOOL_EXECUTION_MESSAGE_TEMPLATE: ClassVar[str] = """<tool_result>
+Execution ID: {execution_id}
+Execution result: {execution_result}
+</tool_result>"""
+
+    TOOL_DEFINITION_TEMPLATE: ClassVar[str] = """<tool>
+Name: {name}
+Documentation: {documentation}
+Parameters in JSON Schema format: {parameters}
+Return type in JSON Schema format: {return_type}
+</tool>"""
 
     config: ConversationalToolUseSimulationConfig
     session_id_to_state: Dict[str, ConversationSessionState] = Field(default_factory=dict)

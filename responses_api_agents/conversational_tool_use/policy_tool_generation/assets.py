@@ -40,7 +40,6 @@ PROMPT_FILENAMES = (
 GOLDEN_FILENAMES = tuple(
     filename for index in range(1, 9) for filename in (f"policy-{index}.md", f"tools_{index}.jsonl")
 )
-GOLDEN_TREE_SHA256 = "c1c621e88f763dab8fa23e6721180376d65b1386b99e662d32c652dcf28e1cd6"  # pragma: allowlist secret
 PREPARE_COMMAND = "python -m resources_servers.conversational_tool_use_simulation.prepare"
 
 
@@ -76,9 +75,8 @@ def _require_reference_assets() -> None:
     missing = [filename for filename in GOLDEN_FILENAMES if not (GOLDENS_DIR / filename).is_file()]
     if missing:
         raise FileNotFoundError(
-            "Conversational tool-use policy references are not prepared. "
-            f"Run `{PREPARE_COMMAND}` before starting policy/tool generation. "
-            f"Missing {len(missing)} file(s), including {missing[0]!r}."
+            "Conversational tool-use policy references are missing from the package. "
+            f"Expected {len(GOLDEN_FILENAMES)} checked-in file(s); missing {len(missing)}, including {missing[0]!r}."
         )
 
 
