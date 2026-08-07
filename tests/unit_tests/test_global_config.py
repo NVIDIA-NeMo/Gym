@@ -67,6 +67,7 @@ class TestGlobalConfig:
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
+            "model_endpoint_readiness_timeout_seconds": 600,
             "uv_cache_dir": str(CACHE_DIR / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
         }
@@ -978,7 +979,7 @@ class TestGlobalConfig:
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 

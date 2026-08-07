@@ -18,7 +18,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 
 class SandboxStatus(str, Enum):
@@ -29,6 +30,35 @@ class SandboxStatus(str, Enum):
     STOPPED = "stopped"
     ERROR = "error"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class SandboxEndpoint:
+    """Provider-neutral route to a long-lived service inside a sandbox.
+
+    ``endpoint`` is an absolute URL. ``headers`` carries provider-required
+    authentication or routing headers without exposing the provider's opaque
+    handle to callers.
+    """
+
+    endpoint: str
+    headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.endpoint, str) or not self.endpoint.strip():
+            raise ValueError("Sandbox endpoint must be a non-empty absolute URL")
+        endpoint = self.endpoint.strip()
+        parsed = urlsplit(endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("Sandbox endpoint must be a non-empty absolute URL")
+        if not isinstance(self.headers, Mapping):
+            raise TypeError("Sandbox endpoint headers must be a mapping")
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(
+            self,
+            "headers",
+            {str(key): str(value) for key, value in self.headers.items()},
+        )
 
 
 @dataclass(frozen=True)
@@ -74,10 +104,29 @@ class SandboxSpec:
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
+    ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if not isinstance(self.ports, (list, tuple)):
+            raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
+        normalized_ports: list[int] = []
+        for raw_port in self.ports:
+            if isinstance(raw_port, bool):
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
+            if not isinstance(raw_port, (int, str)):
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
+            try:
+                port = int(raw_port)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}") from exc
+            if port < 1 or port > 65535:
+                raise ValueError(f"Sandbox TCP port must be between 1 and 65535, got {port}")
+            if port in normalized_ports:
+                raise ValueError(f"Duplicate sandbox TCP port: {port}")
+            normalized_ports.append(port)
+        object.__setattr__(self, "ports", tuple(normalized_ports))
 
 
 @dataclass
@@ -167,4 +216,35 @@ class SandboxProvider(Protocol):
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxEndpoint(Protocol):
+    """Optional provider capability for resolving declared service ports."""
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a declared service port to a caller-reachable endpoint."""
+        ...
+
+
+@runtime_checkable
+class ConnectableProvider(Protocol):
+    """Optional capability: rebuild a handle in another process from a descriptor.
+
+    Providers whose sandboxes are reachable by id (external control plane, e.g.
+    OpenSandbox and Fargate, and the sandbox server's remote provider) implement
+    this. A provider that does not implement it can only be shared by fronting it
+    with a sandbox server. Membership is checked with ``isinstance`` because the
+    protocol is ``runtime_checkable``.
+    """
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a JSON-serializable descriptor that ``connect`` can rebuild a
+        handle from. ``scope`` is honored by providers that mint leases (the
+        remote provider) and ignored by the rest."""
+        ...
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Rebuild a live handle in this process from a descriptor."""
         ...

@@ -15,15 +15,18 @@
 """Sandbox provider registry."""
 
 from nemo_gym.sandbox.providers.base import (
+    ConnectableProvider,
     ExecResult,
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxEndpoint,
 )
 from nemo_gym.sandbox.providers.registry import (
     create_provider,
@@ -34,15 +37,18 @@ from nemo_gym.sandbox.providers.registry import (
 
 
 __all__ = [
+    "ConnectableProvider",
     "ExecResult",
     "SandboxCreateError",
     "SandboxCreateVerificationError",
+    "SandboxEndpoint",
     "SandboxExecResult",
     "SandboxHandle",
     "SandboxProvider",
     "SandboxResources",
     "SandboxSpec",
     "SandboxStatus",
+    "SupportsSandboxEndpoint",
     "create_provider",
     "get_provider_class",
     "list_providers",
