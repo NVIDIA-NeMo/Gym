@@ -157,11 +157,11 @@ class DockerContainer(BaseModel):
             data = src.read_text()
 
             # This init.d is necessary for some Java tests to properly pull from the maven mirror
-            # See `_apply_sandbox_patches`
+            # e.g. apache__lucene and apache__druid
             data = data.replace(
                 "./gradlew test", "./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"
             )
-            # Run Maven tests without the daemon.
+            # Run Maven tests without the daemon which causes issues with gson tests.
             data = data.replace("mvnd test", "mvn test")
             src.write_text(data)
 
