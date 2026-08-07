@@ -1,9 +1,14 @@
 ---
 title: "Configure Agents"
-description: ""
+description: "The Agent server holds the agent harness. Use an agent server NeMo Gym ships, whether its implementation is Gym-native or a third-party harness, or drive an agent you host yourself."
 position: 1
 ---
-The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.
+
+An environment integrates four independent components: a dataset, an agent harness, a verifier, and per-task state. The Agent server is where the harness lives.
+
+A harness controls how the model interacts with the environment: the number of turns, the system prompt, which tools are available, how tool results are fed back, the stopping condition, and any scaffolding such as planning, compaction, or sub-agents. The Agent server does not run an LLM itself. It is orchestration code that delegates text generation to the Model server and tool execution, state, and scoring to the Resources server.
+
+An Agent server references a Resources server and a Model server by name, so which harness an environment runs is a config change. See [Agent Server Fields](/reference/configuration#agent-server-fields) for the syntax.
 
 ## Rollout Lifecycle
 
@@ -44,12 +49,30 @@ class Agent:
         return conversation
 ```
 
-## Existing Agents
+In an Agent server built on an external harness, the harness supplies the interaction loop with the policy model. The three phases around it are the same: initialize the episode, produce a trajectory, score it.
 
-See [Integrate Existing Agents](/agent-server/integrate-existing-agents) to use a built-in NeMo Gym agent, wrap an external agent harness, or decide when tool logic belongs in the Agent server versus the Resources server.
+## Choosing an Agent Server to Implement Your Agent
 
-## Server Configuration
-<Note>
-[Agent Server Fields](/reference/configuration#agent-server-fields) for server configuration syntax and fields.
+There are three options. The first two differ by who implements the agent, not by where the code lives — both ship in the NeMo Gym repo.
 
-</Note>
+Use an agent server with a Gym-native implementation, such as `simple_agent` for multi-step tool calling. Use an agent server that runs a third-party harness — a coding CLI, an agent framework, or a benchmark's own scaffold — where the harness owns the loop and the agent server translates its output. Both take configuration, not code. Third, use `remote_agent`: keep the agent in your own repo, expose an endpoint that follows the OpenAI Responses contract, and NeMo Gym drives the loop against that endpoint.
+
+<Cards>
+
+<Card title="Integrate Existing Agents" href="/agent-server/integrate-existing-agents">
+The agent servers NeMo Gym ships, how each third-party harness is wrapped, and what a wrapper needs to support training.
+</Card>
+
+<Card title="Drive a Remote Agent" href="/agent-server/remote-agent">
+The `remote_agent` contract, an end-to-end quickstart, configuration fields, and failure handling.
+</Card>
+
+<Card title="Agent Skills" href="/agent-server/agent-skills">
+Set [Agent Skills](https://agentskills.io/specification) per run, separately from the dataset.
+</Card>
+
+<Card title="Agent Server Fields" href="/reference/configuration#agent-server-fields">
+Configuration syntax for wiring an agent server to a compatible Resources server and Model server.
+</Card>
+
+</Cards>
