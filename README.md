@@ -50,15 +50,13 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
 
 ## 📣 News
 
-* **[08/06/2026]** [Release v0.5.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.5.0):
-  * **Seven sandbox providers**: Docker, Daytona, ECS Fargate, Enroot, and OpenShell join existing OpenSandbox and Apptainer
-  * **Four new agent harnesses**: Codex CLI, KiloCode, RemoteAgent, and anyswe_agent (20 total)
-  * **21 new benchmarks** spanning agentic, knowledge, long-context, science, translation, and reasoning domains
-  * **Per-rollout model-call capture**: records requests, responses, token usage, and latency at the model server boundary
-  * **`gym eval reverify`**: recompute rewards from stored rollouts without re-running the agent
-  * **Extended CLI**: `gym list`/`gym search` now covers models, resource-servers, and agents; external plugin discovery via `--search-dir`
-
-  See the [full release notes](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.5.0) for the complete changelog.
+* **[08/06/2026]** [Release v0.5.0](https://github.com/NVIDIA-NeMo/Gym/releases#release-v0.5.0):
+  Highlights:
+  - Seven sandbox providers: Docker, Daytona, ECS Fargate, Enroot, and OpenShell join OpenSandbox and Apptainer; large-scale OpenSandbox reliability significantly improved
+  - Four new agent harnesses: Codex CLI, KiloCode, RemoteAgent, and anyswe_agent
+  - Recompute rewards from stored rollouts without re-running inference with `gym eval reverify`
+  - Rollout observability joined end-to-end: model-call capture, agent observations, and a standardized `ng_trajectory` schema
+  - 21 new environments across six domains: Agentic, Knowledge and instruction following, Long context, Science and coding, Translation and multilingual, and Reasoning
 
 <details>
 <summary>Previous News</summary>
