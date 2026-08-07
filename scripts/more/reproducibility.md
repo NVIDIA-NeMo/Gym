@@ -1,6 +1,22 @@
 # Reproducing the published evaluation results
 
-## What these are
+Each recipe here reproduces one published benchmark result. A recipe is a small script
+that wraps `gym eval run` with the settings the published run used — sampling, judges,
+repeats and the per-benchmark overrides — so the parts that decide a score are not left
+to defaults.
+
+Copy the two templates, fill them in, then run a recipe from the Gym repo root:
+
+```bash
+cp env.yaml.example env.yaml     # policy endpoint, judges
+cp .env.example .env             # keys and paths
+set -a; source .env; set +a
+./gpqa.sh
+```
+
+`env.yaml` holds endpoints and model ids; `.env` holds keys and machine-specific paths.
+Every recipe takes `LIMIT` for a quick smoke, `OUT` for the output directory and
+`PARALLEL` for concurrency; results land in `./results/<benchmark>`.
 
 ## Prerequisites
 
@@ -8,7 +24,25 @@
 - **`uv` on your `PATH`.** Some benchmarks shell out to scripts that call it and
   fail with a bare `exit 127` without it.
 
-## Running a recipe
+## Overview
+
+| Benchmark | What it measures | Run |
+|---|---|---|
+| GPQA Diamond | Graduate-level science questions | `./gpqa.sh` |
+| HLE | Humanity's Last Exam — hard, broad knowledge | `./hle.sh` |
+| AA-LCR | Long-context reasoning | `./aa-lcr.sh` |
+| AA-Omniscience | Knowledge and hallucination | `./omniscience.sh` |
+| SciCode | Scientific coding, graded against numeric ground truth | `./scicode.sh` |
+| BrowseComp | Web browsing agent | `./browsecomp/browsecomp.sh` |
+| Tau3 | Tool use against a simulated customer | `./tau3.sh` |
+| CritPt | Research-level physics | `./critpt.sh` |
+| GDPval | Real-world work products, judged | `./gdpval/gdpval.sh` |
+| PinchBench | The model as the brain of an OpenClaw agent | `./pinchbench.sh` |
+| Terminal-Bench 2.1 | Agentic terminal use | `nel eval run nel-next/…` |
+| SWE-bench Verified / Multilingual | Agentic coding against a repo's tests | `nel eval run nel-next/…` |
+| Base suite | 21 pretraining benchmarks plus RULER | see [`base/`](./base/) |
+
+The last three rows are not Gym recipes — see their sections below.
 
 ## Benchmarks needing extra setup
 
@@ -159,7 +193,28 @@ because OpenClaw calls it itself: set `PINCHBENCH_MODEL_BASE_URL`,
 `PINCHBENCH_MODEL_API_KEY` and `PINCHBENCH_MODEL_NAME` alongside the judge and search
 keys — all listed in `.env.example`.
 
-### Terminal-Bench and SWE-bench (`nel-next/`)
+### CritPt
+
+Scoring goes through the Artificial Analysis API, which grades **all 70 problems in one
+call**. Two consequences:
+
+- A `LIMIT` below 70 produces rollouts that cannot be scored. `LIMIT` counts problems,
+  not rollouts.
+- Each key allows a limited number of scorings per day and a full run needs one per
+  repeat, so pass several keys to spread the quota:
+  `ARTIFICIAL_ANALYSIS_API_KEY='[key-1,key-2]'`.
+
+Run with concurrency comfortably above 70 — `PARALLEL=140`. A rollout waiting for its
+batch holds its slot, so at exactly 70 a single failure wedges the run permanently.
+
+Every submission and grader response is cached under `<OUT>/critpt_cache`. If a run dies
+on quota, re-score it once the quota resets without repeating any inference:
+
+```bash
+python -m resources_servers.critpt.replay --cache-dir <OUT>/critpt_cache
+```
+
+## Terminal-Bench and SWE-bench (`nel-next/`)
 
 Terminal-Bench 2.1, SWE-bench Verified and SWE-bench Multilingual are still being migrated
 to Gym and for now still belong to
@@ -193,10 +248,6 @@ Then run whichever config you want:
 nel eval run nel-next/terminal-bench-2.1.yaml
 ```
 
-## Results
-
-## Comparing your numbers
-
 ## Base (pretraining) model
 
 The recipes in this directory cover the **instruct** model. Recipes for the **base**
@@ -208,3 +259,7 @@ They work differently: they are `nemo-evaluator-launcher` configs run with
 `lm-evaluation-harness` and `nemo-skills` tasks rather than Gym environments. See
 [`base/README.md`](./base/README.md) for their prerequisites, which differ from the ones
 above.
+
+## License
+
+Apache 2.0 — see the repository `LICENSE`.
