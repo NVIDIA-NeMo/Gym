@@ -63,8 +63,11 @@ Run as root, or in a container where you are.
 
 **3. A judge endpoint serving all three panel models.** Deliverables are graded by a
 panel — GPT-5.5, Gemini 3.1 Pro and Claude Opus 4.8, one sampled per call — all routed
-through the `gdpval_judge_model` block in `env.yaml`. `JUDGE_API_KEY` must be an `sk-`
-key: `nvapi-` keys return 401 on the multimodal payloads this benchmark sends.
+through the `gdpval_judge_model` block in `env.yaml`, so one endpoint has to serve all
+three.
+
+For a full run give `TAVILY_API_KEY` several keys — `'[tvly-1,tvly-2]'` — since a single
+key rate-limits and the agent then cannot search.
 
 #### Rubric mode (default)
 
@@ -99,9 +102,10 @@ Then score your model against whatever you collected:
 GDPVAL_REWARD_MODE=comparison GDPVAL_REFS=./refs ./gdpval.sh
 ```
 
-The recipe recognises these names and anchors each at its rating from the
-[Artificial Analysis GDPval-AA v2 board](https://artificialanalysis.ai/evaluations/gdpval-aa),
-snapshot 2026-07-04:
+The recipe recognises these names and anchors each at the
+[Artificial Analysis GDPval-AA v2](https://artificialanalysis.ai/evaluations/gdpval-aa)
+rating the published figures were fitted against. The live board has moved since, so
+these deliberately no longer match it:
 
 | Reference | ELO | | Reference | ELO |
 |---|---|---|---|---|
@@ -115,29 +119,24 @@ Supply **two or more** and the run switches to the two-stage fit used for the pu
 numbers: a 45-task pass over all of them to place the model, then the full task set
 against the four nearest. Supply all nine and the method matches the reference run.
 
-Those values are pinned to that snapshot rather than tracking the live board, because
-the anchors define the scale a score sits on. The board moves as models are added and
-re-run, and Artificial Analysis publishes more than one ELO scale, so a rating only
-means something alongside the scale and date it came from.
-
-A directory with no recognised names is treated as a single unrated baseline, anchored
-at `GDPVAL_REFERENCE_ELO` (default 1290).
-
 `JUDGE_ONLY=true` re-scores deliverables you already have, and needs neither the
 sandbox nor a search key.
 
-#### What the numbers mean
+#### Reproducing our numbers
 
-With several rated references your score is fitted on the published scale, so it is
-comparable **in kind** to published GDPval figures — though not identical to ours,
-since your reference deliverables are your own rather than the ones our run used.
+We ran comparison mode: deliverables judged against all nine reference models above,
+fitted in two stages, graded by the three-judge panel. The scale is Artificial Analysis'
+GDPval-AA v2 ELO, anchored to a human baseline of 1000 — so roughly 1000 is human-level
+on these tasks.
 
-With a single reference, or an unrated baseline, the anchor only shifts the scale and
-the informative output is `comparison/win_rate` rather than the ELO. Rubric mode is a
-self-contained score.
+The closest you can get is to generate those nine reference sets yourself and run the
+same way: same method, same anchors, same scale. It will land near our number rather
+than on it — a gap of tens of points is noise here, not a regression.
 
-For a full run, give `TAVILY_API_KEY` several keys — `'[tvly-1,tvly-2]'` — since a
-single key rate-limits and the agent then cannot search.
+That is also the expensive path: nine reference sets means nine full 220-task agentic
+runs before you score your own. Rubric mode is one run and no references. It gives a
+self-contained score rather than an ELO, which is enough if you are comparing your own
+runs rather than positioning against published models.
 
 ### Terminal-Bench and SWE-bench (`nel-next/`)
 
