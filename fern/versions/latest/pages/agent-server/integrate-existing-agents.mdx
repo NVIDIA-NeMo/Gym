@@ -52,7 +52,7 @@ Python agent and environment frameworks that the Agent server imports and drives
 | [`hermes_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/hermes_agent) | [hermes-agent](https://github.com/NousResearch/hermes-agent) (Nous Research) | Training-capable. Pinned to a fork with token-ID tracking, chat-template, and sampling-parameter patches. Brings its own toolset, so only the Resources server's task data and `verify` are used. |
 | [`aviary_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/aviary_agent) | [Aviary](https://github.com/Future-House/aviary) (FutureHouse) | Pairs with the `resources_servers/aviary` environments and datasets. |
 | [`verifiers_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent) | [Verifiers](https://github.com/PrimeIntellect-ai/verifiers) (Prime Intellect) | Runs environments from Prime Intellect's Environments Hub. Token-ID support is upstreamed into the framework's `NeMoRLChatCompletionsClient`. |
-| [`harbor_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) | [Harbor](https://github.com/laude-institute/harbor) (Laude Institute) | Runs Harbor agents such as `terminus-2` in Harbor-managed environments. Trials can execute in a Singularity environment for HPC training, or in any NeMo Gym sandbox provider, selected by config. |
+| [`harbor_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) | [Harbor](https://github.com/laude-institute/harbor) (Laude Institute) | Runs a Harbor agent such as `terminus-2` in a Harbor-managed environment. Trials can execute in a Singularity environment for HPC training, or in any NeMo Gym sandbox provider, selected by config. |
 | [`stirrup_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/stirrup_agent) | [Stirrup](https://github.com/ArtificialAnalysis/Stirrup) (Artificial Analysis) | Ships the GDPVal strategy; new benchmarks can be added in a single file. |
 
 ### Benchmark-Native Harnesses
@@ -87,7 +87,7 @@ Match the agent server to the interaction pattern the environment needs.
 - Tool calling, or no tools: `simple_agent`.
 - One model call with no tool execution: `non_executing_simple_agent`, or `tool_simulation_agent` if the dataset supplies simulated tool results. The two behave almost identically, so follow whichever the environment's existing configs use.
 - A `reset`/`step` environment: `gymnasium_agent`.
-- SWE-bench-style coding: `swe_agents` for OpenHands or opencode, `mini_swe_agent_2` for mini-swe-agent on the sandbox API, or `anyswe_agent` to run several Gym agent servers through one execution and grading path. `mini_swe_agent` uses the older Docker workflow.
+- SWE-bench-style coding: `swe_agents` for OpenHands or opencode, `mini_swe_agent_2` for mini-swe-agent on the sandbox API, or `anyswe_agent` to put a choice of Gym agent server behind one execution and grading path, one per rollout. `mini_swe_agent` uses the older Docker workflow.
 - Terminal-Bench tasks: `anyterminal_agent`, which runs the agent and the task's tests in the same container.
 - Coding through an external CLI: `claude_code_agent`, `codex_agent`, `kilocode_agent`, `opencode_agent`, `openclaw_agent`, or `pi_agent`. All are evaluation-only; check the README before training on their rollouts.
 - Multi-step tool use for training: `hermes_agent`, pinned to a fork with the token-ID and sampling-parameter patches training requires.
