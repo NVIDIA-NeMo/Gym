@@ -138,6 +138,27 @@ runs before you score your own. Rubric mode is one run and no references. It giv
 self-contained score rather than an ELO, which is enough if you are comparing your own
 runs rather than positioning against published models.
 
+### PinchBench
+
+Each task runs in its own sandbox, built from the image definition that ships with Gym.
+Build it once — this needs **Docker**, because the Apptainer path converts a Docker
+image rather than building directly:
+
+```bash
+export PINCHBENCH_SIF=/abs/path/pinchbench.sif
+bash responses_api_agents/pinchbench/setup_scripts/build_image.sh --apptainer
+```
+
+The build script writes to `PINCHBENCH_SIF` when it is set, so exporting it first points
+both the build and the recipe at the same file.
+
+On a host without Docker, build the image elsewhere and copy the `.sif` across.
+
+The policy endpoint is given to the recipe directly rather than through `env.yaml`,
+because OpenClaw calls it itself: set `PINCHBENCH_MODEL_BASE_URL`,
+`PINCHBENCH_MODEL_API_KEY` and `PINCHBENCH_MODEL_NAME` alongside the judge and search
+keys — all listed in `.env.example`.
+
 ### Terminal-Bench and SWE-bench (`nel-next/`)
 
 Terminal-Bench 2.1, SWE-bench Verified and SWE-bench Multilingual are still being migrated
