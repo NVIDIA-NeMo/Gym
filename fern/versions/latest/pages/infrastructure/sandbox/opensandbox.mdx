@@ -210,8 +210,23 @@ The provider creates one OpenSandbox sandbox per Gym sandbox:
 | Exec | `handle.raw.commands.run(...)` with command options derived from `exec()` arguments. |
 | Status | `handle.raw.get_info()` mapped onto `SandboxStatus`. |
 | Close | `handle.raw.kill()` followed by local SDK handle cleanup. |
+| Renew | `handle.raw.renew(...)` — moves the expiry to `ttl_s` seconds from now. |
+| Connect | `opensandbox.Sandbox.connect(...)` — reattaches to a sandbox by id from any process. |
 
 If `create.skip_health_check` is enabled, the provider reconnects to the sandbox before running the NeMo Gym readiness probe so follow-up operations use a fresh SDK handle.
+
+### Lifetime
+
+`SandboxSpec.ttl_s` becomes the sandbox's `timeout`, and the server expires the sandbox that
+long after creation. OpenSandbox requires **at least 60 seconds**, and rejects shorter values.
+
+Omitting `ttl_s` omits `timeout` entirely, which OpenSandbox treats as *never auto-terminate*:
+the sandbox lives until something deletes it. Set a TTL on any path that might not reach its
+cleanup.
+
+This provider implements both `RenewableProvider` and `ConnectableProvider`, so a short TTL
+plus renewal is the recommended pattern — see
+[Sandbox Lifetime and Renewal](/infrastructure/sandbox/index#sandbox-lifetime-and-renewal).
 
 ## File Transfer
 

@@ -51,6 +51,11 @@ gym eval aggregate            # merge sharded rollout results
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
 
+# Sandboxes
+gym sandbox debug             # boot a task's sandbox and run a command in it
+gym sandbox exec              # run a command in an already-running sandbox
+gym sandbox rm                # delete a running sandbox
+
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
 ```
@@ -741,6 +746,84 @@ gym eval reverify \
 ```
 
 See [Reverify Rollouts](/tutorials/evaluation-tutorials/reverify-rollouts) for a full walkthrough.
+
+---
+
+## Sandboxes
+
+Inspect and poke at the sandbox a task would run in, without starting the model server,
+Ray, and the agent. See [Debugging sandboxes](/infrastructure/sandbox/debugging) for how a
+server opts in.
+
+### `gym sandbox debug`
+
+Boot the sandbox a server would create — same provider, image, and spec a rollout gets — and
+run a command or an uploaded script inside it. With no `-i/--input` it boots the server's
+configured sandbox; with one it binds a dataset row first.
+
+| Option | Description |
+| --- | --- |
+| `--server` | Server whose sandbox to use. Inferred when only one is configured. |
+| `--sandbox` | Override the server's `sandbox_provider` reference. |
+| `-i`, `--input` | Task rows JSONL. Defaults to the server's committed `data/example.jsonl`, which is a small fixture rather than the full benchmark. |
+| `--task` | Select a row by task id; repeatable. |
+| `--limit`, `--shuffle` | Cap and shuffle (fixed seed) the selected rows. |
+| `--command` | Command to run inside the sandbox. |
+| `--script-path` | Local script to upload and run. |
+| `--dry-run` | Print the resolved sandbox and exit without provisioning. |
+| `--list-tasks` | List the task ids available to `--task` and exit. Reads only the dataset — no provider or credentials needed. |
+| `--image` | Override the resolved container image. |
+| `--bare` | Skip the server's `exec_wrapper` and run the command as typed. |
+| `--cwd`, `--user`, `--env` | Override the exec context. `--env` takes `KEY=VALUE`, repeatable. |
+| `--concurrency` | Maximum sandboxes in flight (default 4). |
+| `--timeout-setup`, `--timeout-total` | Seconds allowed for boot/upload and for the command. |
+| `--ttl` | Sandbox lifetime in seconds. Defaults to 15 minutes, capping whatever the server's `ttl_s` asks for. Warns above 1 hour. |
+| `--keep` | Leave sandboxes running and print their ids. |
+| `-o`, `--output-dir` | Where to write `config.yaml` and `traces.jsonl`. |
+| `--quiet` | Suppress command output; keep the summary line. |
+| `--exit-zero` | Always exit 0, even when the command failed. |
+
+```bash
+# Inspect a task without provisioning anything
+gym sandbox debug --config <agent-config> --config <provider-config> \
+    --task <task-id> --dry-run
+
+# Run a command in that task's sandbox
+gym sandbox debug --config <agent-config> --config <provider-config> \
+    --task <task-id> --command "python -m pytest -x"
+
+# Upload a script and leave the sandbox up afterwards
+gym sandbox debug --config <config> --script-path ./poke.sh --keep
+```
+
+Exits non-zero when any command failed, so it is usable as a check. Each run writes
+`outputs/<server>--debug/<uuid>/` containing `traces.jsonl` (one record per task: resolved
+spec, image, sandbox id, exit code, output, per-stage timings) and a `config.yaml` you can
+feed back via `--config` to reproduce the run.
+
+### `gym sandbox exec`
+
+Run a command in a sandbox left running by `--keep`. Requires a provider that can reattach
+by id.
+
+| Option | Description |
+| --- | --- |
+| `--sandbox-id` | Id of the running sandbox. |
+| `--command` | Command to run. |
+| `--bare`, `--cwd`, `--user` | As for `gym sandbox debug`. |
+| `--ttl` | Seconds to extend the sandbox's expiry by before running (default 15 minutes). |
+
+```bash
+gym sandbox exec --config <config> --sandbox-id <id> --command "git log -1"
+```
+
+### `gym sandbox rm`
+
+Delete a running sandbox.
+
+```bash
+gym sandbox rm --config <config> --sandbox-id <id>
+```
 
 ---
 

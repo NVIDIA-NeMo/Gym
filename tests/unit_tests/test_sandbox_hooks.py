@@ -19,7 +19,6 @@ These cover `nemo_gym.sandbox.hooks` on its own, without the CLI that consumes i
 """
 
 import json
-from typing import Any
 
 import pytest
 
@@ -28,7 +27,6 @@ from nemo_gym.sandbox.hooks import (
     SandboxHookError,
     load_hook,
     resolve_spec,
-    spec_from_mapping,
     task_id_for_row,
     wrap_command,
 )
@@ -148,5 +146,3 @@ def test_wrap_command_without_wrapper_is_identity() -> None:
 ########################################
 # Server discovery
 ########################################
-
-

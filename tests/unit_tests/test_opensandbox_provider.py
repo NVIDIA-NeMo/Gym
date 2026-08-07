@@ -1310,6 +1310,8 @@ def test_duration_ms_between_handles_missing_and_odd_timestamps() -> None:
     assert opensandbox_provider._duration_ms_between(started, None) is None
     # A string timestamp (a plausible SDK change) must degrade, not explode.
     assert opensandbox_provider._duration_ms_between("2026-08-01T12:00:00Z", started) is None
+
+
 async def test_renew_pushes_the_expiry_out() -> None:
     """Renewal is what lets a sandbox be short-lived *and* long-held.
 
