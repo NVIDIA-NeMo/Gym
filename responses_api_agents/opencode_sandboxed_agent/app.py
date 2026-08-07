@@ -318,18 +318,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        pwd_result = await sandbox.exec(command="pwd")
-        results_remote_fpath = Path(pwd_result.stdout) / export_fname
-
-        results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
-        results_dir.mkdir(parents=True, exist_ok=True)
-        results_local_fpath = results_dir / export_fname
-        if self.config.debug:
-            print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
         try:
-            await sandbox.download(str(results_remote_fpath), results_local_fpath)
+            pwd_result = await sandbox.exec(command="pwd")
+            results_remote_fpath = Path(pwd_result.stdout) / export_fname
         except:
-            print(f"Failed to download export results to {results_local_fpath}", file=sys.stderr)
+            print("Failed to get current working directory", file=sys.stderr)
+            results_remote_fpath = None
+
+        if results_remote_fpath:
+            results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
+            results_dir.mkdir(parents=True, exist_ok=True)
+            results_local_fpath = results_dir / export_fname
+            if self.config.debug:
+                print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+            try:
+                await sandbox.download(str(results_remote_fpath), results_local_fpath)
+            except:
+                print(f"Failed to download export results to {results_local_fpath}", file=sys.stderr)
 
         opencode_export = dict()
         if results_local_fpath.exists():
