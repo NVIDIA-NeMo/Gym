@@ -564,6 +564,35 @@ class Domain(str, Enum):
     OTHER = "other"
 
 
+class SandboxTaskConfig(BaseModel):
+    """How tooling reconstructs the sandbox a sandbox-backed server would create.
+
+    Servers agree on `sandbox_provider` but not on how they reach a `SandboxSpec`:
+    some declare it entirely in `sandbox_spec`, others compute it from the task
+    row. This block lets a server that computes it hand the recipe to tooling —
+    notably `gym sandbox debug` — without that tooling importing the server.
+
+    Every field is optional; with none set, the spec comes from `sandbox_spec`
+    alone. Hook references are `"module.path:attribute"` and must be importable
+    from the environment running them, so point them at a dependency-light module
+    rather than an `app.py` that imports Ray or a benchmark harness at import time.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    image_from_row: Optional[str] = None
+    """Row field holding the container image. Dotted paths allowed."""
+
+    id_from_row: Optional[str] = None
+    """Row field naming the task. Defaults to instance_id/task_id/uuid/id."""
+
+    spec_resolver: Optional[str] = None
+    """`(row, server_config) -> SandboxSpec | Mapping`. Wins over `sandbox_spec`."""
+
+    exec_wrapper: Optional[str] = None
+    """`(command, **exec_kwargs) -> str`, applied so a command runs as the server runs it."""
+
+
 class BaseServerConfig(BaseModel):
     host: str
     port: int
@@ -577,6 +606,9 @@ class BaseRunServerConfig(BaseServerConfig):
 
 class BaseRunServerInstanceConfig(BaseRunServerConfig):
     name: str  # This name is unique at runtime.
+    # Read by tooling (`gym sandbox`), not by the server itself; see SandboxTaskConfig.
+    # Declared on the instance config so both agents and resources servers inherit it.
+    sandbox_task: Optional[SandboxTaskConfig] = None
 
 
 ########################################

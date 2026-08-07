@@ -16,6 +16,14 @@
 
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.hooks import (
+    SandboxHookError,
+    load_hook,
+    resolve_spec,
+    spec_from_mapping,
+    task_id_for_row,
+    wrap_command,
+)
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     ExecResult,
@@ -49,6 +57,7 @@ __all__ = [
     "SandboxEndpoint",
     "SandboxExecResult",
     "SandboxHandle",
+    "SandboxHookError",
     "SandboxProvider",
     "SandboxResources",
     "SandboxSpec",
@@ -57,8 +66,13 @@ __all__ = [
     "create_provider",
     "get_provider_class",
     "list_providers",
+    "load_hook",
     "register_provider",
     "resolve_provider_config",
     "resolve_provider_metadata",
+    "resolve_spec",
     "rewrite_image",
+    "spec_from_mapping",
+    "task_id_for_row",
+    "wrap_command",
 ]
