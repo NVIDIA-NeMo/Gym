@@ -7,7 +7,7 @@ math_with_judge:
         name: policy_model
       judge_responses_create_params: {input: []}
       should_use_judge: false
-      domain: math
+      domain: agent
       verified: false
       description: Prime Agent harness with math tasks
       value: Improve math capabilities with Prime Agent

@@ -164,7 +164,7 @@ class PrimeAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
     command: str = "prime-agent"
-    model: str = "nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct"
+    model: str = "policy/model"
     env: dict[str, str] = Field(default_factory=dict)
     workspace_root: str = "outputs/prime_agent/workspaces"
     kernel_venv: Optional[str] = "outputs/prime_agent/kernel-venv"

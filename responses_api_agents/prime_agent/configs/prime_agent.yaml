@@ -7,7 +7,7 @@ prime_agent:
         name: ???
       concurrency: 8
       command: prime-agent
-      model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+      model: policy/...
       env: {}
       workspace_root: outputs/prime_agent/workspaces
       kernel_venv: outputs/prime_agent/kernel-venv
@@ -17,14 +17,14 @@ prime_agent:
       extra_args: []
       models_config:
         providers:
-          nvinf:
-            baseUrl: https://integrate.api.nvidia.com/v1
+          policy:
+            baseUrl: ...
             api: openai-completions
-            apiKey: ${nvidia_api_key}
+            apiKey: ...
             compat:
               supportsDeveloperRole: false
               supportsReasoningEffort: false
             models:
-            - id: nvidia/qwen/qwen3-next-80b-a3b-instruct
+            - id: ...
               reasoning: false
       prime_agent_version: 0.7.0

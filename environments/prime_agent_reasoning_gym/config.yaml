@@ -2,9 +2,9 @@ reasoning_gym:
   resources_servers:
     reasoning_gym:
       entrypoint: app.py
-      domain: knowledge
+      domain: agent
       verified: true
-      description: Prime Agent harness for reasoning gym tasks
+      description: Prime Agent harness with reasoning gym tasks
       value: Improve reasoning capabilities with Prime Agent
 
 prime_agent_reasoning_gym_agent:

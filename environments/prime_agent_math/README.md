@@ -12,9 +12,6 @@ gym eval run --no-serve \
   --limit 5
 ```
 
-`data/example_rollouts.jsonl` contains five Prime Agent 0.7.0 rollouts generated with a deterministic
-local policy and real IPython execution.
-
 ```bash
 python environments/prime_agent_math/prepare.py --split train
 ```
