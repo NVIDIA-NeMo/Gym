@@ -98,6 +98,13 @@ uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync
 ```
 
+> **Migrating or resetting your dev environment?** Use the setup script — it auto-reads the pinned Python and uv versions from the repo and handles venv cleanup for you:
+> ```bash
+> bash scripts/setup_dev_env.sh
+> source .venv/bin/activate
+> ```
+> Useful after a Python version bump, a `uv` upgrade, or starting fresh.
+
 **Configure your model:**
 
 This quickstart uses OpenAI. NeMo Gym supports local and hosted inference — see [Configure Model](https://docs.nvidia.com/nemo/gym/main/model-server) for vLLM, Fireworks, OpenRouter, and others.
