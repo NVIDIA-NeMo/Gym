@@ -1,0 +1,156 @@
+---
+title: "Eval-first environment onboarding"
+description: "Prove task, verifier, and environment quality before deciding whether to train."
+position: 1
+---
+
+The first quality bar for a NeMo Gym environment is a trustworthy evaluation, not a training curve. Contributors must provide a representative held-out task set, baseline rollouts, and targeted manual review before training is requested or used as evidence of environment quality.
+
+This ordering separates three questions:
+
+1. **Does the environment work?** Tasks reset, actions execute, rewards are reproducible, and infrastructure is reliable.
+2. **Does the eval measure the intended capability?** The task set represents the use case, the verifier measures real success, and scores distinguish model capability.
+3. **Would training be useful?** There is learnable signal and headroom after environment and eval defects have been ruled out.
+
+Training is optional until the first two questions have evidence-backed answers. A successful training run cannot repair an unrepresentative task set or certify a gameable verifier.
+
+## Smoke data is not eval data
+
+Every environment keeps `data/example.jsonl` with five rows for fast smoke testing. Those rows show that the integration runs; they are not normally enough to establish model quality. A representative eval is a separate, versioned artifact, normally declared as a `validation` dataset in the environment config. Large sets may live in a dataset registry rather than Git.
+
+| Artifact | Purpose | Suggested starting evidence |
+| --- | --- | --- |
+| Smoke set | Catch wiring, schema, startup, and obvious reward failures | Five examples, example rollouts, unit tests |
+| Design eval | Iterate on coverage and verifier behavior | Usually 30–50 stratified tasks, three repeats |
+| Acceptance eval | Support a contribution-quality model claim | Usually 100–200 tasks and five repeats |
+
+These sizes are starting points, not universal thresholds. Expensive environments may justify fewer tasks with stronger coverage evidence. Noisy or broad environments may need 500 or more. State the tradeoff rather than silently substituting five examples for an eval.
+
+## What makes a good eval dataset
+
+### Start from the use case
+
+Write one sentence naming the user, workflow, and success event. Define the independently scored unit: a question, episode, repository task, tool workflow, game, or another task. Build a coverage matrix across dimensions that can change behavior:
+
+- task family or workflow stage;
+- difficulty and required horizon;
+- input length, tool count, or state complexity;
+- common cases from the source distribution;
+- rare but costly edge cases;
+- ambiguity, malformed inputs, recovery, and adversarial or reward-hacking cases;
+- demographic, language, product, or safety slices when relevant.
+
+Weight the suite toward realistic frequency, then reserve enough rows for priority and edge slices to estimate their behavior.
+
+### Make every row auditable
+
+Each task needs a stable ID, source and version, split provenance, license, and the slice labels used in reporting. Include a difficulty rationale or measurable proxy such as oracle steps, dependency count, context length, or state transitions. Pin generators, seeds, upstream revisions, and judge configurations.
+
+Held-out means more than a field named `test`. Document how task, template, asset, repository, or game overlap with training data was checked. When upstream frameworks have different split semantics, preserve those semantics explicitly.
+
+### Calibrate the verifier before models
+
+For every priority slice, test a known-good solution, an empty or degenerate solution, plausible partial solutions, and ambiguous cases. Seed reward-hacking attempts when appropriate. Replay identical inputs and actions to check determinism.
+
+Track task success separately from partial reward, self-checks, and episode termination. If task families use different reward scales, report normalized or family-native metrics and macro averages; do not average incompatible raw rewards.
+
+### Require useful difficulty, not a preferred score
+
+Run a weaker reference model, the target Nemotron model, and a stronger available reference on the same frozen tasks. A useful design eval normally has reachable tasks, unsolved tasks and headroom, model separation larger than run-to-run noise, no unexplained floor or ceiling slices, and stable results across repeats.
+
+An all-zero slice may contain valuable hard tasks or a broken environment; trajectory evidence decides which.
+
+## Contributor workflow
+
+### 1. Define the eval contract
+
+Document the use case, success metric, coverage matrix, priority slices, data source, license, held-out strategy, and expected failure modes before collecting a large run.
+
+### 2. Pass smoke and oracle checks
+
+Run unit tests and the five-row example. Then replay known-good and known-bad solutions on proposed eval tasks. Infrastructure, schema, split, or verifier failures block model conclusions.
+
+### 3. Check the task set offline
+
+Create an eval manifest and run:
+
+```bash
+gym dataset validate-eval --manifest resources_servers/<name>/eval/eval_readiness.yaml
+```
+
+The validator checks JSONL shape, unique task identities, held-out split declarations, coverage counts, and edge-case tags. It does not certify semantics, contamination safety, verifier quality, or true representativeness.
+
+```yaml
+schema_version: 1
+name: my-environment-eval-v0
+use_case: Evaluate agents that complete a multi-step domain workflow.
+dataset:
+  path: data/eval.jsonl
+  task_id_fields: [task_id, seed]
+split:
+  field: split
+  allowed: [test]
+quality:
+  min_tasks: 30
+  coverage:
+    - field: task_family
+      required_values: [lookup, update, recovery]
+      min_count_per_value: 5
+    - field: difficulty
+      min_distinct: 3
+  edge_cases:
+    tag_field: eval_tags
+    required: [invalid_input, recovery]
+```
+
+### 4. Collect repeated baselines
+
+```bash
+gym env start --config <model.yaml> --config <environment.yaml>
+
+gym eval run --no-serve \
+  --agent <agent> \
+  --input <eval.jsonl> \
+  --output results/<model>_rollouts.jsonl \
+  --num-repeats 3
+
+gym eval profile \
+  --inputs results/<model>_rollouts_materialized_inputs.jsonl \
+  --rollouts results/<model>_rollouts.jsonl
+```
+
+Report coverage, success or pass@1, pass@k, consistency, retry value, truncation/error rates, and per-slice results with denominators. Keep task and rollout IDs in diagnostic tables.
+
+The repository's `nemo-gym-reward-profiling` agent skill can guide rollout collection and profile inspection. Once repeated rollout evidence exists, `nemo-gym-blade-analysis` can bucket outcomes, compare sometimes-pass trajectories, and draft an evidence-linked failure analysis. Skills accelerate the workflow; their conclusions remain subject to the same task-level evidence and manual acceptance rules.
+
+### 5. Perform priority manual review
+
+Automation reduces review volume; it does not remove expert judgment. Predeclare priority slices and review:
+
+- every infrastructure, oracle, verifier, or reward/success disagreement;
+- every missing rollout, negative terminal, or suspiciously easy pass;
+- passing and failing repeats of sometimes-pass tasks;
+- at least one pass and one fail from every priority slice;
+- a stratified sample of ordinary passes and failures.
+
+Classify the primary cause as model knowledge, unreliable knowledge, agent behavior, task/verifier issue, infrastructure reliability, or data artifact. Record reviewed task and rollout IDs.
+
+### 6. Decide the next intervention
+
+Move to training only when the environment is reliable, the verifier is calibrated, the suite has useful headroom, and failures plausibly reflect improvable model behavior. Otherwise fix the task set, prompts, agent loop, verifier, or infrastructure and rerun the frozen baseline first.
+
+## Environment PR evidence
+
+Include the eval use case and version; provenance, license, and held-out method; coverage matrix; verifier calibration; exact model and sampling configuration; aggregate and per-slice results; representative task and rollout IDs; manual-review scope; known gaps; and an explicit decision: eval-ready, needs repair, or ready for a training experiment.
+
+This follows the useful boundary in OpenEnv's environment auto-validation RFC: automated checks can certify that an environment is well-formed and runnable, but they do not replace human review or establish research value. See [OpenEnv RFC 008](https://github.com/meta-pytorch/OpenEnv/issues/778).
+
+## Worked gap analysis: Tales
+
+The checked-in Tales example covers all five frameworks, so it is a good smoke set. It is not representative eval evidence: it has five rows, all use `task_no: 0` and `split: train`, and the saved results contain one rollout per task. Three of five rollouts truncate, there are no wins, and one positive partial reward occurs on a lost episode.
+
+Tales mixes framework reward scales, so its raw cross-framework mean is not interpretable. Use success rate first, plus normalized score, truncation, invalid-action rate, steps, and tokens; report macro results by framework and task family.
+
+Before creating a held-out Tales eval, repair and test the split contract. The current adapter falls back to each framework's `environments` catalog when `train_environments` is absent and forwards the row-level split only to ScienceWorld. A field named `test` does not prove held-out selection for TextWorld, TextWorld Express, ALFWorld, or Jericho.
+
+The manifest at `resources_servers/tales/eval/eval_readiness.yaml` applies a proposed 40-task bar to the smoke set. It intentionally fails and produces a reproducible gap list. A suitable eval-v0 would use roughly 6–12 held-out tasks per framework, task-family and horizon/parser coverage, three repeats, stable upstream task names instead of positional indices as canonical IDs, and manual review of parser loops and reward/success disagreements.
