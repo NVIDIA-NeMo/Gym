@@ -1,0 +1,282 @@
+[
+  {
+    "agent_ref": {
+      "name": "finance_agent"
+    },
+    "agent_metrics": {
+      "mean/reward": 0.4,
+      "mean/judge_rating": 1.5,
+      "mean/input_tokens": 570743.0,
+      "mean/output_tokens": 22412.2,
+      "mean/total_tokens": 593155.2,
+      "max/reward": 1.0,
+      "max/judge_rating": 2.0,
+      "max/input_tokens": 1538852.0,
+      "max/output_tokens": 65493.0,
+      "max/total_tokens": 1563162.0,
+      "min/reward": 0.0,
+      "min/judge_rating": 1.0,
+      "min/input_tokens": 28681.0,
+      "min/output_tokens": 2601.0,
+      "min/total_tokens": 31282.0,
+      "median/reward": 0.0,
+      "median/judge_rating": 1.5,
+      "median/input_tokens": 488536.0,
+      "median/output_tokens": 14319.0,
+      "median/total_tokens": 554029.0,
+      "std/reward": 0.5477225575051662,
+      "std/judge_rating": 0.5773502691896257,
+      "std/input_tokens": 601897.989649409,
+      "std/output_tokens": 25539.52236632471,
+      "std/total_tokens": 608976.9060323224
+    },
+    "key_metrics": {
+      "mean/reward": 0.4,
+      "mean/judge_rating": 1.5,
+      "mean/input_tokens": 570743.0,
+      "mean/output_tokens": 22412.2,
+      "mean/total_tokens": 593155.2
+    },
+    "group_level_metrics": [
+      {
+        "_ng_task_index": 0,
+        "mean/reward": 0.0,
+        "mean/judge_rating": 1.0,
+        "mean/input_tokens": 122972.0,
+        "mean/output_tokens": 5338.0,
+        "mean/total_tokens": 128310.0,
+        "max/reward": 0.0,
+        "max/judge_rating": 1.0,
+        "max/input_tokens": 122972.0,
+        "max/output_tokens": 5338.0,
+        "max/total_tokens": 128310.0,
+        "min/reward": 0.0,
+        "min/judge_rating": 1.0,
+        "min/input_tokens": 122972.0,
+        "min/output_tokens": 5338.0,
+        "min/total_tokens": 128310.0,
+        "median/reward": 0.0,
+        "median/judge_rating": 1.0,
+        "median/input_tokens": 122972.0,
+        "median/output_tokens": 5338.0,
+        "median/total_tokens": 128310.0,
+        "std/reward": 0.0,
+        "std/judge_rating": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "num_rollouts": 1,
+        "expected_num_rollouts": 1,
+        "missing_num_rollouts": 0,
+        "reward_profile_completion_pct": 100.0,
+        "rollout_infos": [
+          {
+            "rollout_id": "0:0",
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "reward": 0.0,
+            "input_tokens": 122972,
+            "output_tokens": 5338,
+            "total_tokens": 128310,
+            "judge_rating": 1
+          }
+        ]
+      },
+      {
+        "_ng_task_index": 1,
+        "mean/reward": 0.0,
+        "mean/input_tokens": 1538852.0,
+        "mean/output_tokens": 24310.0,
+        "mean/total_tokens": 1563162.0,
+        "max/reward": 0.0,
+        "max/input_tokens": 1538852.0,
+        "max/output_tokens": 24310.0,
+        "max/total_tokens": 1563162.0,
+        "min/reward": 0.0,
+        "min/input_tokens": 1538852.0,
+        "min/output_tokens": 24310.0,
+        "min/total_tokens": 1563162.0,
+        "median/reward": 0.0,
+        "median/input_tokens": 1538852.0,
+        "median/output_tokens": 24310.0,
+        "median/total_tokens": 1563162.0,
+        "std/reward": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "num_rollouts": 1,
+        "expected_num_rollouts": 1,
+        "missing_num_rollouts": 0,
+        "reward_profile_completion_pct": 100.0,
+        "rollout_infos": [
+          {
+            "rollout_id": "1:0",
+            "_ng_task_index": 1,
+            "_ng_rollout_index": 0,
+            "reward": 0.0,
+            "input_tokens": 1538852,
+            "output_tokens": 24310,
+            "total_tokens": 1563162
+          }
+        ]
+      },
+      {
+        "_ng_task_index": 2,
+        "mean/reward": 1.0,
+        "mean/judge_rating": 2.0,
+        "mean/input_tokens": 28681.0,
+        "mean/output_tokens": 2601.0,
+        "mean/total_tokens": 31282.0,
+        "max/reward": 1.0,
+        "max/judge_rating": 2.0,
+        "max/input_tokens": 28681.0,
+        "max/output_tokens": 2601.0,
+        "max/total_tokens": 31282.0,
+        "min/reward": 1.0,
+        "min/judge_rating": 2.0,
+        "min/input_tokens": 28681.0,
+        "min/output_tokens": 2601.0,
+        "min/total_tokens": 31282.0,
+        "median/reward": 1.0,
+        "median/judge_rating": 2.0,
+        "median/input_tokens": 28681.0,
+        "median/output_tokens": 2601.0,
+        "median/total_tokens": 31282.0,
+        "std/reward": 0.0,
+        "std/judge_rating": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "num_rollouts": 1,
+        "expected_num_rollouts": 1,
+        "missing_num_rollouts": 0,
+        "reward_profile_completion_pct": 100.0,
+        "rollout_infos": [
+          {
+            "rollout_id": "2:0",
+            "_ng_task_index": 2,
+            "_ng_rollout_index": 0,
+            "reward": 1.0,
+            "input_tokens": 28681,
+            "output_tokens": 2601,
+            "total_tokens": 31282,
+            "judge_rating": 2
+          }
+        ]
+      },
+      {
+        "_ng_task_index": 3,
+        "mean/reward": 1.0,
+        "mean/judge_rating": 2.0,
+        "mean/input_tokens": 674674.0,
+        "mean/output_tokens": 14319.0,
+        "mean/total_tokens": 688993.0,
+        "max/reward": 1.0,
+        "max/judge_rating": 2.0,
+        "max/input_tokens": 674674.0,
+        "max/output_tokens": 14319.0,
+        "max/total_tokens": 688993.0,
+        "min/reward": 1.0,
+        "min/judge_rating": 2.0,
+        "min/input_tokens": 674674.0,
+        "min/output_tokens": 14319.0,
+        "min/total_tokens": 688993.0,
+        "median/reward": 1.0,
+        "median/judge_rating": 2.0,
+        "median/input_tokens": 674674.0,
+        "median/output_tokens": 14319.0,
+        "median/total_tokens": 688993.0,
+        "std/reward": 0.0,
+        "std/judge_rating": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "num_rollouts": 1,
+        "expected_num_rollouts": 1,
+        "missing_num_rollouts": 0,
+        "reward_profile_completion_pct": 100.0,
+        "rollout_infos": [
+          {
+            "rollout_id": "3:0",
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 0,
+            "reward": 1.0,
+            "input_tokens": 674674,
+            "output_tokens": 14319,
+            "total_tokens": 688993,
+            "judge_rating": 2
+          }
+        ]
+      },
+      {
+        "_ng_task_index": 4,
+        "mean/reward": 0.0,
+        "mean/judge_rating": 1.0,
+        "mean/input_tokens": 488536.0,
+        "mean/output_tokens": 65493.0,
+        "mean/total_tokens": 554029.0,
+        "max/reward": 0.0,
+        "max/judge_rating": 1.0,
+        "max/input_tokens": 488536.0,
+        "max/output_tokens": 65493.0,
+        "max/total_tokens": 554029.0,
+        "min/reward": 0.0,
+        "min/judge_rating": 1.0,
+        "min/input_tokens": 488536.0,
+        "min/output_tokens": 65493.0,
+        "min/total_tokens": 554029.0,
+        "median/reward": 0.0,
+        "median/judge_rating": 1.0,
+        "median/input_tokens": 488536.0,
+        "median/output_tokens": 65493.0,
+        "median/total_tokens": 554029.0,
+        "std/reward": 0.0,
+        "std/judge_rating": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "num_rollouts": 1,
+        "expected_num_rollouts": 1,
+        "missing_num_rollouts": 0,
+        "reward_profile_completion_pct": 100.0,
+        "rollout_infos": [
+          {
+            "rollout_id": "4:0",
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 0,
+            "reward": 0.0,
+            "input_tokens": 488536,
+            "output_tokens": 65493,
+            "total_tokens": 554029,
+            "judge_rating": 1
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,19 @@
+# Finance Agent v2 (FABv2) Resource Server Dependencies
+#
+# tools-only reuse of Vals's official finance-agent-v2 codebase. We import the
+# upstream Tool classes directly (no reimplementation). `model-library` is NOT on
+# PyPI, so it must be installed from git; finance-agent pins `model-library==0.1.25`,
+# which corresponds to the `v0.1.25` tag below. Both upstream pins are exact so the
+# benchmark is reproducible (bump deliberately).
+-e nemo-gym[dev] @ ../../
+
+# Vals model-library (provides model_library.agent.Tool / ToolOutput / base.LLM).
+# NVIDIA fork of vals-ai/model-library@v0.1.25 with the openai floor dropped
+# (>=2.28.0 -> <3.0) and a static version = "0.1.25", so it resolves against Gym's
+# head-broadcast openai (2.7.2, vllm-compatible) while still satisfying
+# finance-agent's `model-library==0.1.25` pin. No core openai/vllm bump needed.
+model-library @ git+https://gitlab-master.nvidia.com/swdl-nemollm-mlops/alignment-data/model-library.git@d80375ac4c8724c4c6b7824c7335210c0db05011
+
+# Vals finance-agent-v2 (provides finance_agent.tools.* and finance_agent.prompt).
+# No upstream tags exist; pinned to the HEAD commit at integration time.
+finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@22a5ed49aceea6adcd1160ea9f8c0cc1cc7e4d78

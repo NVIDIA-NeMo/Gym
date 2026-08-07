@@ -1,0 +1,79 @@
+# Finance Agent v2 (FABv2): tools-only reuse of Vals's finance-agent-v2 codebase.
+# Tools are imported from the upstream `finance_agent` package; scoring uses our
+# own judge (path A). Self-contained Gym environment: run this config together
+# with a model config (openai_model.yaml or vllm_model.yaml). Tool API keys
+# (Tavily / sec-api.io / Tiingo) are read from the shell env; model endpoints
+# (policy_*, search_judge_model_*) come from env.yaml.
+#
+# PUBLIC dataset: the public FABv2 release ships no official grader, so scoring
+# uses OUR OWN approximation — the legacy [[0]]/[[1]]/[[2]] judge (same as
+# resources_servers/finance_sec_search), grading each answer against a GOLD
+# reference synthesized from the public rubric criteria (see scripts/convert_questions.py).
+# The dataset's `rubric` field is propagated for reference only; it is not used for
+# reward. (Vals's private per-check rubric grader is licensed and not reproduced here.)
+finance_agent_v2_resources_server:
+  resources_servers:
+    finance_agent_v2:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Vals finance-agent-v2 tools (web/EDGAR/price/calculator) for financial research questions
+      value: Run the official Vals FABv2 agent tools at scale in NeMo Gym
+      # External tool API keys, read from the shell environment (export these in
+      # your bashrc). Unset -> that tool registers as unavailable (null fallback,
+      # so a missing key never crashes startup).
+      tavily_api_key: ${oc.env:TAVILY_API_KEY,null}        # web_search (Tavily)
+      sec_api_key: ${oc.env:SEC_API_KEY,null}              # edgar_search (sec-api.io)
+      pricing_data_api_key: ${oc.env:TIINGO_API_KEY,null}  # price_history (Tiingo)
+      retrieval_model_server:
+        type: responses_api_models
+        name: policy_model
+      retrieval_responses_create_params:
+        input: []
+      retrieval_max_output_tokens: 8192
+      retrieval_system_prompt_fpath: prompt_templates/finance_agent_v2_retrieval.yaml
+      judge_model_server:
+        type: responses_api_models
+        name: search_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 8192
+        reasoning:
+          effort: high
+      judge_prompt_template_fpath: prompt_templates/finance_agent_v2_judge.yaml
+      judge_call_timeout: 60.0
+      # Our own judge: only [[2]] -> reward 1.0 ('binary'); use 'scaled' to also
+      # give partial credit for [[1]].
+      reward_mode: binary
+      # Soft per-rollout wall-clock budget: once exceeded, tool calls return an
+      # error asking the model to submit_final_result immediately. null disables.
+      max_rollout_time_seconds: 1200
+      max_end_date: "2026-03-01"
+
+# Judge model server (OpenAI-compatible or local vLLM — configured via env.yaml)
+search_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${search_judge_model_base_url}
+      openai_api_key: ${search_judge_model_api_key}
+      openai_model: ${search_judge_model_name}
+
+# Reuse the existing generic finance_agent loop (no v2-specific changes).
+finance_agent:
+  responses_api_agents:
+    finance_agent:
+      entrypoint: app.py
+      max_steps: 50
+      truncate_on_overflow: true
+      tool_call_timeout: 300
+      resources_server:
+        type: resources_servers
+        name: finance_agent_v2_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/finance_agent_v2/data/example.jsonl
