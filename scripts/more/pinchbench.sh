@@ -90,4 +90,4 @@ gym eval run \
   "++$PB.transcripts_dir=$OUTDIR/pinchbench_transcripts" \
   "++overwrite_metrics_conflicts=true" \
   ${LIMIT:+--limit "$LIMIT"} \
-  ${PARALLEL:+--concurrency "$PARALLEL"}
+  --concurrency "${PARALLEL:-16}"
