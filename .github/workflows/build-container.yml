@@ -43,5 +43,5 @@ jobs:
           context: .
           file: docker/Dockerfile
           build-contexts: nemo-gym=.
-          target: release
+          target: test
           push: false
