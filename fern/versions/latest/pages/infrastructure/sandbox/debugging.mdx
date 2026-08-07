@@ -110,7 +110,7 @@ sandbox   opensandbox
 task      django__django-10973  (index 0 of 1, from .../data/example.jsonl)
 image     docker.io/swebench/sweb.eval.x86_64.django_1776_django-10973:latest
           via spec_resolver (responses_api_agents.mini_swe_agent_2.sandbox_hooks:spec_for_row)
-spec      ttl_s=18000  ready_timeout_s=1200  cpu=2.0  memory_mib=8192  disk_gib=30  workdir=/testbed
+spec      ttl_s=900.0  ready_timeout_s=1200  cpu=2.0  memory_mib=8192  disk_gib=30  workdir=/testbed
 exec      activate_conda=True conda_env=testbed cwd=/testbed user=root
 wrapper   responses_api_agents.mini_swe_agent_2.sandbox_hooks:conda_activate_wrap
 ```
@@ -144,7 +144,7 @@ gym sandbox debug --config $AGENT --config $PROVIDER \
 ```
 
 ```
-✓ django__django-10973  reason=pass exit=0  61.4s (command 52.8s + overhead 1.5s, boot 7.1s)
+✓ django__django-10973  reason=pass exit=0  67.1s (command 21.0s + overhead 1.3s, boot 44.8s)
 ```
 
 `command` is measured by execd *inside* the sandbox; `overhead` is what the round trip added.
@@ -161,13 +161,14 @@ gym sandbox debug --config $AGENT --config $PROVIDER \
 ```
 
 ```json
-{"boot": 7.104, "setup": 0.0, "exec": 54.312, "command": 52.800, "overhead": 1.512, "total": 61.416}
+{"boot": 44.812, "setup": 0.0, "exec": 22.303, "command": 21.024, "overhead": 1.279, "total": 67.115}
 ```
 
 <Note>
-`pip install torch` pulls roughly 2.7 GB. Run it against a package cache if your cluster has
-one — a repeated install that stays at the same `command` time while `boot` moves is telling
-you the install is not what changed.
+Note *which* torch: this image's `testbed` env is Python 3.6, so pip resolves to torch 1.10.2 —
+the last release with `cp36` wheels — at about 880 MB, not a multi-GB modern build. Run it
+against a package cache if your cluster has one; a repeated install that holds the same
+`command` time while `boot` moves is telling you the install is not what changed.
 </Note>
 
 ### Pointing at a real OpenSandbox server
@@ -191,6 +192,22 @@ Reaching a cluster-internal server usually means a port-forward, in which case
 kubectl port-forward -n <namespace> svc/<opensandbox-service> 18080:80
 export OPENSANDBOX_DOMAIN=127.0.0.1:18080
 ```
+
+<Warning>
+If the sandbox's egress sidecar is intercepting TLS, a **conda-based image will not trust the
+proxy's CA** and `pip` fails with `CERTIFICATE_VERIFY_FAILED`. The CA is installed into the system
+trust store, but conda ships and consults its own at
+`/opt/miniconda3/envs/<env>/ssl/cert.pem`. Every SWE-bench image is conda-based, so this is the
+common case rather than an edge one. Point the standard variables at the CA that is already
+delivered to the container:
+
+```bash
+--env SSL_CERT_FILE=/opt/opensandbox/mitmproxy-ca-cert.pem \
+--env REQUESTS_CA_BUNDLE=/opt/opensandbox/mitmproxy-ca-cert.pem
+```
+
+Debian-style images (`python:3.12-slim`) read the system store and need none of this.
+</Warning>
 
 ### With and without the wrapper
 
