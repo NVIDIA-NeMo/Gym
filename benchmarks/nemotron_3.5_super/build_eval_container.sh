@@ -24,7 +24,7 @@ set -euo pipefail
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-ray_dependency="ray[default]==2.55.1"
+ray_dependency="ray[default]==2.56.1"
 uv pip install --system "\$ray_dependency"
 
 apt-get update
