@@ -10,11 +10,13 @@ source "$SCRIPT_DIR/_portable_python.sh"
 : "${NEMO_GYM_ROOT:?NEMO_GYM_ROOT must be set}"
 NODE_VERSION="${NODE_VERSION:-22.15.0}"
 OPENCODE_SPEC="${OPENCODE_SPEC:-opencode-ai@1.17.11}"
-case "$(uname -m)" in
-    x86_64) NODE_ARCH="linux-x64" ;;
-    aarch64 | arm64) NODE_ARCH="linux-arm64" ;;
-    *) echo "unsupported node architecture: $(uname -m)" >&2; exit 1 ;;
-esac
+if [ -z "${NODE_ARCH:-}" ]; then
+    case "$(uname -m)" in
+        x86_64) NODE_ARCH="linux-x64" ;;
+        aarch64 | arm64) NODE_ARCH="linux-arm64" ;;
+        *) echo "unsupported node architecture: $(uname -m)" >&2; exit 1 ;;
+    esac
+fi
 
 install_portable_python
 install_nemo_gym_deps

@@ -28,6 +28,11 @@ install_portable_python() {
 }
 
 install_nemo_gym_deps() {
-    echo "Installing NeMo-Gym deps from $NEMO_GYM_ROOT"
-    "$DEPS_DIR/bin/python3" -m pip install "$NEMO_GYM_ROOT"
+    if [ -n "${NEMO_GYM_WHEEL:-}" ]; then
+        echo "Installing NeMo-Gym deps from wheel $NEMO_GYM_WHEEL"
+        "$DEPS_DIR/bin/python3" -m pip install "$NEMO_GYM_WHEEL"
+    else
+        echo "Installing NeMo-Gym deps from $NEMO_GYM_ROOT"
+        "$DEPS_DIR/bin/python3" -m pip install "$NEMO_GYM_ROOT"
+    fi
 }

@@ -23,6 +23,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -66,6 +67,15 @@ _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**
 
 _RUNNER_SOURCE_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
 
+_ARCHES = {
+    "amd64": ("amd64", "x86_64-unknown-linux-gnu", "linux-x64"),
+    "x64": ("amd64", "x86_64-unknown-linux-gnu", "linux-x64"),
+    "x86-64": ("amd64", "x86_64-unknown-linux-gnu", "linux-x64"),
+    "x86_64": ("amd64", "x86_64-unknown-linux-gnu", "linux-x64"),
+    "arm64": ("arm64", "aarch64-unknown-linux-gnu", "linux-arm64"),
+    "aarch64": ("arm64", "aarch64-unknown-linux-gnu", "linux-arm64"),
+}
+
 
 def agent_key(agent_server_module: str) -> str:
     """responses_api_agents.hermes_agent.app maps to hermes_agent, the deps-script key."""
@@ -78,13 +88,29 @@ def load_runner_source() -> str:
     return _RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
 
 
-def deps_recipe_key(*paths: Path) -> str:
+def normalize_deps_arch(arch: str) -> tuple[str, str, str]:
+    """Return cache label, python-build-standalone arch, and Node arch."""
+    key = arch.lower().replace("_", "-")
+    if "/" in key:
+        key = key.rsplit("/", 1)[-1]
+    if key not in _ARCHES:
+        raise ValueError(f"unsupported sandbox target architecture for agent deps: {arch!r}")
+    return _ARCHES[key]
+
+
+def host_deps_arch_label() -> str:
+    return normalize_deps_arch(os.uname().machine)[0]
+
+
+def deps_recipe_key(*paths: Path, values: tuple[str, ...] = ()) -> str:
     """stable hash of the deps-install inputs so a prefix is reused until its recipe changes."""
     blob = b"".join(p.read_bytes() for p in paths if p.exists()) or b"no-script"
+    if values:
+        blob += b"\0" + b"\0".join(value.encode("utf-8") for value in values)
     return hashlib.sha256(blob).hexdigest()
 
 
-def deps_build_env(deps_dir: Path) -> dict[str, str]:
+def deps_build_env(deps_dir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Give dependency installers private state outside the archived runtime."""
     build_dir = deps_dir.parent / f".{deps_dir.name}-build"
     cache_dir = build_dir / "cache"
@@ -107,6 +133,8 @@ def deps_build_env(deps_dir: Path) -> dict[str, str]:
             "TMPDIR": str(temp_dir),
         }
     )
+    if extra:
+        env.update(extra)
     return env
 
 
@@ -392,20 +420,140 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         """Install the configured agent's portable dependency prefix once."""
         key = agent_key(self.config.agent_server_module)
         scripts_dir = Path(__file__).parent / "setup_scripts"
-        deps_dir = Path(__file__).parent / "deps" / key
+        target, python_arch, node_arch = self._deps_target_arch()
+        deps_dir = Path(__file__).parent / "deps" / f"{key}-{target}"
         script = scripts_dir / f"{key}_deps.sh"
         sentinel = deps_dir / ".installed"
         # fingerprint the per-harness script AND the shared helper it sources, so editing
         # either one invalidates cached prefixes and forces a rebuild.
-        recipe = deps_recipe_key(script, scripts_dir / "_portable_python.sh")
+        arch_env = {"ARCH": python_arch, "NODE_ARCH": node_arch}
+        recipe = deps_recipe_key(
+            script,
+            scripts_dir / "_portable_python.sh",
+            values=tuple(f"{name}={value}" for name, value in sorted(arch_env.items())),
+        )
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             return deps_dir
         if not script.exists():
             raise RuntimeError(f"no setup script for {key!r} at {script}")
         deps_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["bash", str(script)], env=deps_build_env(deps_dir), check=True)
+        subprocess.run(["bash", str(script)], env=deps_build_env(deps_dir, arch_env), check=True)
         sentinel.write_text(recipe)
         return deps_dir
+
+    def _deps_target_arch(self) -> tuple[str, str, str]:
+        """Return the runtime arch for the sandbox where the deps archive executes."""
+        provider_options = self.config.sandbox_spec.get("provider_options", {}) or {}
+        platform = provider_options.get("platform", {}) if isinstance(provider_options, dict) else {}
+        arch = platform.get("arch") if isinstance(platform, dict) else None
+        if arch is None and isinstance(self._sandbox_provider, dict) and "opensandbox" in self._sandbox_provider:
+            # OpenSandbox defaults to linux/amd64 for these OCI images, even when the
+            # scheduler host launching Gym is arm64.
+            arch = "amd64"
+        if arch is None:
+            arch = os.uname().machine
+        return normalize_deps_arch(str(arch))
+
+    def _deps_needs_sandbox_build(self) -> bool:
+        target, _python_arch, _node_arch = self._deps_target_arch()
+        return isinstance(self._sandbox_provider, dict) and "opensandbox" in self._sandbox_provider and target != host_deps_arch_label()
+
+    def _deps_recipe(self, key: str) -> tuple[Path, str]:
+        scripts_dir = Path(__file__).parent / "setup_scripts"
+        script = scripts_dir / f"{key}_deps.sh"
+        if not script.exists():
+            raise RuntimeError(f"no setup script for {key!r} at {script}")
+        target, python_arch, node_arch = self._deps_target_arch()
+        recipe = deps_recipe_key(
+            script,
+            scripts_dir / "_portable_python.sh",
+            values=(f"target={target}", f"ARCH={python_arch}", f"NODE_ARCH={node_arch}"),
+        )
+        return script, recipe
+
+    def _build_nemo_gym_wheel(self, recipe: str) -> Path:
+        wheel_dir = Path(__file__).parent / "deps" / f".nemo-gym-wheel-{recipe[:16]}"
+        wheel_dir.mkdir(parents=True, exist_ok=True)
+        wheels = sorted(wheel_dir.glob("nemo_gym-*.whl"))
+        if wheels:
+            return wheels[-1]
+        subprocess.run(
+            [sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", str(wheel_dir), str(PARENT_DIR)],
+            check=True,
+        )
+        wheels = sorted(wheel_dir.glob("nemo_gym-*.whl"))
+        if not wheels:
+            raise RuntimeError(f"building nemo-gym wheel produced no wheel in {wheel_dir}")
+        return wheels[-1]
+
+    def _deps_build_spec(self, image: str) -> SandboxSpec:
+        extra = dict(self.config.sandbox_spec)
+        provider_options = dict(extra.pop("provider_options", {}) or {})
+        metadata = dict(self._sandbox_metadata)
+        metadata.update(extra.pop("metadata", {}) or {})
+        return SandboxSpec(
+            image=image,
+            workdir="/tmp",
+            metadata=metadata,
+            provider_options=provider_options,
+            **extra,
+        )
+
+    async def _provision_deps_in_sandbox(self, image: str) -> Path:
+        """Build the portable runtime inside OpenSandbox when host and sandbox arch differ."""
+        key = agent_key(self.config.agent_server_module)
+        script, recipe = self._deps_recipe(key)
+        target, _python_arch, _node_arch = self._deps_target_arch()
+        deps_root = Path(__file__).parent / "deps"
+        deps_root.mkdir(parents=True, exist_ok=True)
+        archive = deps_root / f".{key}-{target}-{recipe[:16]}.tar.gz"
+        if archive.exists():
+            return archive
+
+        wheel = await asyncio.to_thread(self._build_nemo_gym_wheel, recipe)
+        scripts_dir = script.parent
+        remote_root = "/tmp/nemo-gym-agent-deps-build"
+        remote_deps = "/tmp/nemo-gym-agent-deps"
+        remote_archive = f"{remote_root}/agent-deps.tar.gz"
+        spec = self._deps_build_spec(image)
+        temporary = archive.with_suffix(".tmp")
+
+        async with AsyncSandbox(self._sandbox_provider, spec) as box:
+            await box.start()
+            await box.exec(
+                f"rm -rf {shlex.quote(remote_root)} {shlex.quote(remote_deps)} "
+                f"&& mkdir -p {shlex.quote(remote_root)}/setup_scripts {shlex.quote(remote_deps)}",
+                timeout_s=60,
+            )
+            await box.upload(scripts_dir / "_portable_python.sh", f"{remote_root}/setup_scripts/_portable_python.sh")
+            await box.upload(script, f"{remote_root}/setup_scripts/{script.name}")
+            await box.upload(wheel, f"{remote_root}/{wheel.name}")
+            install = await box.exec(
+                " ".join(
+                    [
+                        f"DEPS_DIR={shlex.quote(remote_deps)}",
+                        "NEMO_GYM_ROOT=/tmp",
+                        f"NEMO_GYM_WHEEL={shlex.quote(f'{remote_root}/{wheel.name}')}",
+                        "bash",
+                        shlex.quote(f"{remote_root}/setup_scripts/{script.name}"),
+                    ]
+                ),
+                cwd="/tmp",
+                timeout_s=max(self.config.timeout, 1800),
+            )
+            if install.return_code != 0:
+                details = (install.stderr or install.stdout or "")[-2000:]
+                raise RuntimeError(f"sandbox agent deps build failed with code {install.return_code}: {details}")
+            pack = await box.exec(
+                f"tar -czf {shlex.quote(remote_archive)} -C {shlex.quote(remote_deps)} .",
+                timeout_s=600,
+            )
+            if pack.return_code != 0:
+                details = (pack.stderr or pack.stdout or "")[-1000:]
+                raise RuntimeError(f"sandbox agent deps archive failed with code {pack.return_code}: {details}")
+            await box.download(remote_archive, temporary)
+        temporary.replace(archive)
+        return archive
 
     def _resolve_image(self) -> str:
         """Validate and normalize the configured image reference."""
@@ -568,12 +716,14 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
         async with self.sem:
             async with self._setup_lock:
-                if self.config.deps_provision == "archive" and self._deps_dir is None:
-                    self._deps_dir = await asyncio.to_thread(self._provision_deps)
-                if self.config.deps_provision == "archive" and self._deps_archive is None:
-                    self._deps_archive = await asyncio.to_thread(self._archive_deps, self._deps_dir)
                 if self._image is None:
                     self._image = await asyncio.to_thread(self._resolve_image)
+                if self.config.deps_provision == "archive" and self._deps_archive is None:
+                    if self._deps_needs_sandbox_build():
+                        self._deps_archive = await self._provision_deps_in_sandbox(self._image)
+                    else:
+                        self._deps_dir = await asyncio.to_thread(self._provision_deps)
+                        self._deps_archive = await asyncio.to_thread(self._archive_deps, self._deps_dir)
             deps_archive = self._deps_archive
             image = self._image
             seeded = self._seed_files(wd, context_files, meta.get("harness_files"))

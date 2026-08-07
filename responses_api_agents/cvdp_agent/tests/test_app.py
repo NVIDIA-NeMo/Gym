@@ -288,7 +288,7 @@ class TestAgenticSandboxSpec:
     def test_deps_build_uses_private_host_state(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setenv("HOME", "/full-home")
         deps = tmp_path / "deps" / "claude_code_agent"
-        env = deps_build_env(deps)
+        env = deps_build_env(deps, {"ARCH": "x86_64-unknown-linux-gnu", "NODE_ARCH": "linux-x64"})
 
         build_root = deps.parent / ".claude_code_agent-build"
         assert env["HOME"] == str(build_root / "home")
@@ -296,7 +296,26 @@ class TestAgenticSandboxSpec:
         assert env["NPM_CONFIG_CACHE"] == str(build_root / "cache" / "npm")
         assert env["TMPDIR"] == str(build_root / "tmp")
         assert env["PYTHONPATH"] == ""
+        assert env["ARCH"] == "x86_64-unknown-linux-gnu"
+        assert env["NODE_ARCH"] == "linux-x64"
         assert Path(env["TMPDIR"]).is_dir()
+
+    def test_opensandbox_deps_default_to_amd64_even_on_arm_host(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr("responses_api_agents.cvdp_agent.app.os.uname", lambda: SimpleNamespace(machine="aarch64"))
+        agent = self._agent(sandbox_provider={"opensandbox": {}})
+
+        assert agent._deps_target_arch() == ("amd64", "x86_64-unknown-linux-gnu", "linux-x64")
+        assert agent._deps_needs_sandbox_build() is True
+
+    def test_opensandbox_deps_honor_explicit_arm64_platform(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr("responses_api_agents.cvdp_agent.app.os.uname", lambda: SimpleNamespace(machine="aarch64"))
+        agent = self._agent(
+            sandbox_provider={"opensandbox": {}},
+            sandbox_spec={"provider_options": {"platform": {"os": "linux", "arch": "arm64"}}},
+        )
+
+        assert agent._deps_target_arch() == ("arm64", "aarch64-unknown-linux-gnu", "linux-arm64")
+        assert agent._deps_needs_sandbox_build() is False
 
     def test_named_provider_config_is_resolved(self) -> None:
         config = CVDPAgentConfig(
