@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Mapping
 
 import yaml
+from packaging.licenses import LICENSES
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -34,11 +36,10 @@ SEMVER_PATTERN = (
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 NAME_PATTERN = r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$"
-LICENSE_PATTERN = (
-    r"^(?:internal|proprietary|unknown|[A-Za-z0-9][A-Za-z0-9.-]*|"
-    r"LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*|"
-    r"DocumentRef-[A-Za-z0-9][A-Za-z0-9.-]*:LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*)$"
+_SPDX_LICENSE_PATTERN = "|".join(
+    re.escape(identifier) for identifier in sorted(entry["id"] for entry in LICENSES.values())
 )
+LICENSE_PATTERN = rf"^(?:internal|proprietary|unknown|{_SPDX_LICENSE_PATTERN}|LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*|DocumentRef-[A-Za-z0-9][A-Za-z0-9.-]*:LicenseRef-[A-Za-z0-9][A-Za-z0-9.-]*)$"
 SOURCE_PATTERN = r"^(?:(?:https?|ssh|git|file)://\S+|[^@\s]+@[^:\s]+:\S+)$"
 CALLABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
 
@@ -92,10 +93,10 @@ class DatasetKind(str, Enum):
 
 
 _PROFILE_REQUIRED_FIELDS = {
-    IntegrationProfile.STOCK_LOOP: ("resources_server", "agent_server", "model_server", "datasets"),
-    IntegrationProfile.MEASURED_LOOP: ("resources_server", "agent_server", "model_server", "datasets"),
-    IntegrationProfile.EXTERNAL_LOOP: ("resources_server", "agent_server", "datasets"),
-    IntegrationProfile.CUSTOM_DRIVER: ("resources_server", "datasets", "rollout_driver"),
+    IntegrationProfile.STOCK_LOOP: ("model_server",),
+    IntegrationProfile.MEASURED_LOOP: ("model_server",),
+    IntegrationProfile.EXTERNAL_LOOP: (),
+    IntegrationProfile.CUSTOM_DRIVER: ("rollout_driver",),
 }
 _BENCHMARK_REQUIRED_FIELDS = ("canonical_split", "standard_prompt_config")
 
@@ -125,8 +126,11 @@ class ManifestDataset(_ManifestModel):
                 {
                     "if": {"properties": {"type": {"const": "benchmark"}}, "required": ["type"]},
                     "then": {
-                        "properties": {"prepare_script": {"minLength": 1, "type": "string"}},
-                        "required": ["prepare_script"],
+                        "properties": {
+                            "prepare_script": {"minLength": 1, "type": "string"},
+                            "prompt_config": {"minLength": 1, "type": "string"},
+                        },
+                        "required": ["prepare_script", "prompt_config"],
                     },
                 }
             ]
@@ -142,8 +146,10 @@ class ManifestDataset(_ManifestModel):
 
     @model_validator(mode="after")
     def validate_benchmark_dataset(self) -> "ManifestDataset":
-        if self.type == DatasetKind.BENCHMARK and self.prepare_script is None:
-            raise ValueError("a benchmark dataset requires prepare_script")
+        if self.type == DatasetKind.BENCHMARK:
+            missing = [field for field in ("prepare_script", "prompt_config") if getattr(self, field) is None]
+            if missing:
+                raise ValueError("a benchmark dataset requires: " + ", ".join(missing))
         return self
 
 
@@ -158,13 +164,12 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
     nonempty_datasets = {"minItems": 1, "type": "array"}
 
     def requires(profile: IntegrationProfile, fields: tuple[str, ...]) -> dict[str, Any]:
-        properties = {field: nonempty_datasets if field == "datasets" else nonempty_string for field in fields}
         return {
             "if": {
                 "properties": {"integration_profile": {"const": profile.value}},
                 "required": ["integration_profile"],
             },
-            "then": {"properties": properties, "required": list(fields)},
+            "then": {"properties": {field: nonempty_string for field in fields}, "required": list(fields)},
         }
 
     return [
@@ -185,7 +190,7 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
                 "required": list(_BENCHMARK_REQUIRED_FIELDS),
             },
         },
-        *(requires(profile, fields) for profile, fields in _PROFILE_REQUIRED_FIELDS.items()),
+        *(requires(profile, fields) for profile, fields in _PROFILE_REQUIRED_FIELDS.items() if fields),
         {
             "if": {
                 "properties": {"integration_profile": {"const": IntegrationProfile.CUSTOM_DRIVER.value}},
@@ -219,10 +224,10 @@ class EnvironmentManifest(_ManifestModel):
     reward: Reward
     determinism: Determinism = Determinism.UNKNOWN
 
-    resources_server: NonEmptyString | None = None
-    agent_server: NonEmptyString | None = None
+    resources_server: NonEmptyString
+    agent_server: NonEmptyString
+    datasets: list[ManifestDataset] = Field(min_length=1)
     model_server: NonEmptyString | None = None
-    datasets: list[ManifestDataset] | None = Field(default=None, min_length=1)
     rollout_driver: PythonCallable | None = None
     grading_mode: NonEmptyString | None = None
 
@@ -252,14 +257,13 @@ class EnvironmentManifest(_ManifestModel):
             raise ValueError("manifest requires: " + ", ".join(dict.fromkeys(missing)))
         if self.integration_profile != IntegrationProfile.CUSTOM_DRIVER and self.rollout_driver is not None:
             raise ValueError("rollout_driver is only valid for the custom-driver profile")
-        if self.datasets is not None:
-            names = [dataset.name for dataset in self.datasets]
-            if len(names) != len(set(names)):
-                raise ValueError("dataset names must be unique")
-            if self.kind == EnvironmentKind.BENCHMARK and not any(
-                dataset.type == DatasetKind.BENCHMARK for dataset in self.datasets
-            ):
-                raise ValueError("a benchmark manifest requires a benchmark dataset")
+        names = [dataset.name for dataset in self.datasets]
+        if len(names) != len(set(names)):
+            raise ValueError("dataset names must be unique")
+        if self.kind == EnvironmentKind.BENCHMARK and not any(
+            dataset.type == DatasetKind.BENCHMARK for dataset in self.datasets
+        ):
+            raise ValueError("a benchmark manifest requires a benchmark dataset")
         return self
 
 

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from nemo_gym.config_types import ConfigError, Domain
@@ -51,10 +52,11 @@ def _manifest(*, profile: str = "stock-loop", kind: str = "environment") -> dict
         manifest["standard_prompt_config"] = "prompts/standard.yaml"
         manifest["datasets"][0]["type"] = "benchmark"
         manifest["datasets"][0]["prepare_script"] = "prepare.py"
+        manifest["datasets"][0]["prompt_config"] = "prompts/standard.yaml"
     return manifest
 
 
-def test_environment_manifest_parses_and_uses_honest_defaults() -> None:
+def test_environment_manifest_parses_and_uses_declared_defaults() -> None:
     raw = _manifest()
     raw.pop("licensing")
     raw.pop("determinism")
@@ -74,6 +76,8 @@ def test_environment_manifest_parses_and_uses_honest_defaults() -> None:
         ("measured-loop", "agent_server"),
         ("external-loop", "resources_server"),
         ("custom-driver", "rollout_driver"),
+        ("custom-driver", "agent_server"),
+        ("stock-loop", "datasets"),
     ],
 )
 def test_profiles_require_their_composition(profile: str, missing_field: str) -> None:
@@ -92,7 +96,7 @@ def test_rollout_driver_is_custom_profile_only() -> None:
 
     custom = _manifest(profile="custom-driver")
     custom["rollout_driver"] = "not a callable"
-    with pytest.raises(ValidationError, match="string_pattern_mismatch"):
+    with pytest.raises(ValidationError, match="rollout_driver"):
         EnvironmentManifest.model_validate(custom)
 
 
@@ -112,10 +116,11 @@ def test_benchmark_requires_a_benchmark_dataset() -> None:
     with pytest.raises(ValidationError, match="benchmark dataset"):
         EnvironmentManifest.model_validate(raw)
 
-    raw["datasets"][0]["type"] = "benchmark"
-    raw["datasets"][0].pop("prepare_script", None)
-    with pytest.raises(ValidationError, match="requires prepare_script"):
-        EnvironmentManifest.model_validate(raw)
+    for field in ("prepare_script", "prompt_config"):
+        raw = _manifest(kind="benchmark")
+        raw["datasets"][0].pop(field)
+        with pytest.raises(ValidationError, match=field):
+            EnvironmentManifest.model_validate(raw)
 
 
 @pytest.mark.parametrize(
@@ -125,6 +130,7 @@ def test_benchmark_requires_a_benchmark_dataset() -> None:
         ("version", "1.0"),
         ("integration_profile", "invented-loop"),
         ("licensing", "not an SPDX id"),
+        ("licensing", "FooBar"),
     ],
 )
 def test_manifest_rejects_invalid_scalar_contracts(field: str, value: str) -> None:
@@ -135,7 +141,15 @@ def test_manifest_rejects_invalid_scalar_contracts(field: str, value: str) -> No
         EnvironmentManifest.model_validate(raw)
 
 
-def test_manifest_rejects_bad_reward_duplicates_and_unknown_fields() -> None:
+@pytest.mark.parametrize("licensing", ["MIT", "LicenseRef-Internal-Evaluation", "internal", "proprietary", "unknown"])
+def test_manifest_accepts_spdx_and_private_license_values(licensing: str) -> None:
+    raw = _manifest()
+    raw["licensing"] = licensing
+
+    assert EnvironmentManifest.model_validate(raw).licensing == licensing
+
+
+def test_manifest_rejects_bad_reward_duplicate_authors_and_unknown_fields() -> None:
     raw = _manifest()
     raw["reward"]["range"] = [1, 1]
     raw["authors"] = ["alice", "alice"]
@@ -149,7 +163,15 @@ def test_manifest_rejects_bad_reward_duplicates_and_unknown_fields() -> None:
     assert "Extra inputs are not permitted" in message
 
 
-def test_adopted_from_is_structural_and_offline() -> None:
+def test_manifest_rejects_duplicate_dataset_names() -> None:
+    raw = _manifest()
+    raw["datasets"].append(dict(raw["datasets"][0]))
+
+    with pytest.raises(ValidationError, match="dataset names must be unique"):
+        EnvironmentManifest.model_validate(raw)
+
+
+def test_adopted_from_validates_source_format() -> None:
     raw = _manifest()
     raw["adopted_from"] = {
         "source": "https://github.com/example/project.git",
@@ -168,19 +190,39 @@ def test_load_dump_round_trip_and_errors(tmp_path: Path) -> None:
     path.write_text(dump_manifest(_manifest()))
     assert load_manifest(path).name == "my_eval"
 
+    with pytest.raises(ManifestError, match="was not found"):
+        load_manifest(tmp_path / "missing.yaml")
+
     path.write_text("name: [broken\n")
     with pytest.raises(ManifestError, match="Malformed YAML"):
+        load_manifest(path)
+
+    path.write_text("- not\n- a\n- mapping\n")
+    with pytest.raises(ManifestError, match="expected a YAML mapping"):
         load_manifest(path)
 
     path.write_text("version: nope\n")
     with pytest.raises(ConfigError, match=r"name.*Field required"):
         load_manifest(path)
 
+    with pytest.raises(ManifestError, match="<memory>"):
+        dump_manifest({"name": "incomplete"})
 
-def test_checked_in_schema_matches_model_and_gym_domain_enum() -> None:
+
+def test_checked_in_schema_matches_model_and_external_validation_contract() -> None:
     schema = manifest_json_schema()
     checked_in = json.loads((REPO_ROOT / "schemas/environment-manifest.schema.json").read_text())
 
     assert checked_in == schema
     assert schema["$defs"]["Domain"]["enum"] == [domain.value for domain in Domain]
-    assert len(schema["allOf"]) == 6
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+    assert not list(validator.iter_errors(_manifest()))
+
+    invalid = _manifest()
+    invalid["licensing"] = "FooBar"
+    assert list(validator.iter_errors(invalid))
+
+    invalid = _manifest(profile="custom-driver")
+    invalid.pop("rollout_driver")
+    assert list(validator.iter_errors(invalid))

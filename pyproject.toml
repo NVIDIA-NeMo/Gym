@@ -111,6 +111,11 @@ dependencies = [
     "pydantic_core",
     "devtools",
 
+    # packaging: Validates SPDX license identifiers in environment manifests.
+    # Updated: Fri Aug 07, 2026 with packaging==25.0
+    # License: Apache 2.0 or BSD 2-Clause https://github.com/pypa/packaging/blob/25.0/LICENSE
+    "packaging>=24.2",
+
     # FastAPI: Used for server infrastructure
     # Updated Thu Mar 26, 2026 with fastapi==0.135.2
     # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE

@@ -36,6 +36,7 @@ from nemo_gym.cli.env import (
     TestConfig,
     _resolve_server_dir,
     _select_shard,
+    _validate_data_single,
     dump_config,
     init_resources_server,
     list_environments,
@@ -46,6 +47,7 @@ from nemo_gym.cli.env import (
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.environment_scaffold import scaffold_environment
 from nemo_gym.registry import EnvironmentEntry
 
 
@@ -387,6 +389,21 @@ class TestValidate:
         assert exc_info.value.code == 1
 
 
+def test_generated_verifier_fixture_replaces_legacy_example_requirement(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    scaffold_environment(root=tmp_path, kind="environment", name="arithmetic")
+    monkeypatch.chdir(tmp_path)
+
+    _validate_data_single(
+        TestConfig(
+            entrypoint="resources_servers/arithmetic",
+            should_validate_data=True,
+        )
+    )
+
+
 class TestListEnvironments:
     _ALPHA = EnvironmentEntry(
         name="alpha",
@@ -398,7 +415,7 @@ class TestListEnvironments:
 
     def test_lists_discovered_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda *a, **k: (self._ALPHA,))
 
         list_environments()
 
@@ -408,21 +425,61 @@ class TestListEnvironments:
 
     def test_no_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {})
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda *a, **k: ())
 
         list_environments()
 
-        assert "No environments found" in capsys.readouterr().out
+        assert "No environment catalog entries found" in capsys.readouterr().out
 
     def test_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"json": True}))
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda *a, **k: (self._ALPHA,))
 
         list_environments()
 
         assert json.loads(capsys.readouterr().out) == [
-            {"name": "alpha", "domain": "agent", "description": "Alpha env"}
+            {
+                "name": "alpha",
+                "kind": "environment",
+                "version": None,
+                "integration_profile": None,
+                "domain": "agent",
+                "description": "Alpha env",
+                "modality": None,
+                "licensing": None,
+                "status": "no-manifest",
+                "lifecycle": None,
+                "config": str(self._ALPHA.config_path.resolve()),
+                "manifest": None,
+            }
         ]
+
+    def test_metadata_filters_report_unclassified_legacy_entries(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        manifested = EnvironmentEntry(
+            name="vision",
+            config_path=Path("environments/vision/config.yaml"),
+            path=Path("environments/vision"),
+            modality="image",
+            status="experimental",
+            manifest_path=Path("environments/vision/manifest.yaml"),
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "get_global_config_dict",
+            lambda **k: OmegaConf.create({"catalog_modality": "image"}),
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "discover_environment_catalog",
+            lambda *a, **k: (self._ALPHA, manifested),
+        )
+
+        list_environments()
+
+        captured = capsys.readouterr()
+        assert "vision" in captured.out and "alpha" not in captured.out
+        assert "Manifest coverage: 1/2" in captured.out
+        assert "metadata is unavailable: modality=1" in captured.err
 
     def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
         # `gym search environments <query>` reuses this command via the `query` config key
@@ -437,14 +494,12 @@ class TestListEnvironments:
         monkeypatch.setattr(
             nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "alpha"})
         )
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "beta": beta}
-        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda *a, **k: (self._ALPHA, beta))
 
         list_environments()
 
         out = capsys.readouterr().out
-        assert "Environments matching 'alpha'" in out
+        assert "Environment catalog matching 'alpha'" in out
         assert "agent" in out  # alpha's domain -> its row was rendered
         assert "beta" not in out and "math" not in out  # beta and its domain filtered out
 
@@ -460,9 +515,7 @@ class TestListEnvironments:
         monkeypatch.setattr(
             nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "Robotics"})
         )
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "gamma": gamma}
-        )
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda *a, **k: (self._ALPHA, gamma))
 
         monkeypatch.setattr(
             nemo_gym.cli.env,
@@ -488,7 +541,7 @@ class TestListEnvironments:
         monkeypatch.setattr(
             nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"component_name": "alpha"})
         )
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda *a, **k: (self._ALPHA,))
         monkeypatch.setattr(
             nemo_gym.cli.env,
             "read_environment_details",
@@ -518,7 +571,7 @@ class TestListEnvironments:
             "get_global_config_dict",
             lambda **k: OmegaConf.create({"component_name": "alpha", **config}),
         )
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda *a, **k: (self._ALPHA,))
         monkeypatch.setattr(
             nemo_gym.cli.env,
             "read_environment_details",
@@ -552,7 +605,11 @@ class TestListEnvironments:
             "type": "environment",
             "domain": "agent",
             "description": "Alpha env\nValue: Some value",
-            "details": {"config": str(self._ALPHA.config_path.resolve())},
+            "details": {
+                "kind": "environment",
+                "status": "no-manifest",
+                "config": str(self._ALPHA.config_path.resolve()),
+            },
             "usage_example": "gym env start --environment alpha --model-type vllm_model",
         }
 
@@ -560,7 +617,7 @@ class TestListEnvironments:
         monkeypatch.setattr(
             nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"component_name": "alfa"})
         )
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        monkeypatch.setattr(nemo_gym.cli.env, "discover_environment_catalog", lambda *a, **k: (self._ALPHA,))
 
         with raises(SystemExit):
             list_environments()

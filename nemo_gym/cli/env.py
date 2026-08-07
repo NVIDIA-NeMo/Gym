@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import shlex
+import sys
 from glob import glob
 from os import makedirs
 from os.path import exists
@@ -61,7 +62,11 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.registry import discover_environments, read_environment_details
+from nemo_gym.registry import (
+    discover_environment_catalog,
+    read_environment_details,
+    resolve_catalog_entry,
+)
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -766,6 +771,8 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     # Check that the required examples and example metrics are present. Read from the resolved dir
     # (built-ins live under the install root) while messages reference the relative entrypoint.
     example_fpath = test_config.resolved_dir_path / "data/example.jsonl"
+    if not example_fpath.exists() and _uses_verifier_fixture(test_config):
+        return
     assert example_fpath.exists(), (
         f"A jsonl file containing 5 examples is required for the {test_config.dir_path} resources server. The file must be found at {example_fpath}. Usually this example data is just the first 5 examples of your train dataset."
     )
@@ -833,6 +840,19 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
     assert count == 5, f"Expected 5 example rollouts in {example_rollouts_fpath}, but got {count}"
 
     print(f"The data for {test_config.dir_path} has been successfully validated!")
+
+
+def _uses_verifier_fixture(test_config: TestConfig) -> bool:
+    """Whether this server declares the verifier-fixture contract."""
+    from nemo_gym.verifier_fixture import VerifierFixtureError, load_verifier_fixture
+
+    server_dir = test_config.resolved_dir_path.resolve()
+    fixture_path = server_dir / "tests/verifier_cases.jsonl"
+    try:
+        cases = load_verifier_fixture(fixture_path)
+    except VerifierFixtureError:
+        return False
+    return {"full_reward", "zero_reward", "malformed"}.issubset(case.kind for case in cases)
 
 
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
@@ -1169,6 +1189,103 @@ Dependencies
 
 
 @exit_cleanly_on_config_error
+def init_catalog_entry(
+    name: str,
+    *,
+    kind: str,
+    profile: str,
+    reuse_verifier: str | None = None,
+) -> None:
+    """Scaffold one manifest-backed environment or benchmark in the current project."""
+    from nemo_gym.environment_scaffold import scaffold_environment
+
+    result = scaffold_environment(
+        root=Path.cwd(),
+        name=name,
+        kind=kind,
+        profile=profile,
+        reuse_verifier=reuse_verifier,
+    )
+    if result.created:
+        print(f"Created {kind} '{name}' ({profile}) at {result.asset_dir}")
+        print(f"  {len(result.created)} file(s) created")
+    else:
+        print(f"{result.asset_dir} already matches the requested scaffold; nothing changed.")
+    print(f"Next: gym env validate {name} --kind {kind}")
+
+
+def _print_validation_report(report) -> None:
+    rich.print(
+        f"[green]✓[/green] Manifest: {report.name} v{report.version}  "
+        f"kind={report.kind}  profile={report.integration_profile}"
+    )
+    for dataset in report.datasets:
+        rich.print(f"[green]✓[/green] Dataset: {dataset.name} ({dataset.rows} row(s), type={dataset.type})")
+    rich.print("[green]✓[/green] Components resolved:")
+    for component in report.components:
+        rich.print(f"    {component.role}: {component.implementation} (instance={component.name})")
+    if report.synchronized_fields:
+        rich.print("[green]✓[/green] Synchronized: " + ", ".join(report.synchronized_fields))
+
+
+@exit_cleanly_on_config_error
+def validate_catalog_entry(
+    name: str,
+    *,
+    kind: str | None = None,
+    sync: bool = False,
+    json_output: bool = False,
+) -> None:
+    """Validate a named manifest-backed catalog entry without starting services."""
+    from nemo_gym.environment_validation import validate_environment
+
+    report = validate_environment(resolve_catalog_entry(name, kind), sync=sync)
+    if json_output:
+        print(json.dumps(report.to_dict()))
+    else:
+        _print_validation_report(report)
+
+
+@exit_cleanly_on_config_error
+def test_catalog_entry(
+    name: str,
+    *,
+    kind: str | None = None,
+    update_expected: bool = False,
+) -> None:
+    """Run a named catalog entry's verifier fixture directly."""
+    from nemo_gym.environment_onboarding import test_environment
+
+    report = test_environment(resolve_catalog_entry(name, kind), update_expected=update_expected)
+    rich.print(
+        f"[green]✓[/green] Verifier: {report.resources_server} "
+        f"({len(report.cases)} fixture cases, no services started)"
+    )
+    if update_expected:
+        rich.print(f"[green]✓[/green] Updated expected rewards in {report.fixture_path}")
+
+
+@exit_cleanly_on_config_error
+def publish_catalog_entry(
+    name: str,
+    *,
+    kind: str | None = None,
+    json_output: bool = False,
+) -> None:
+    """Run the local publication-readiness gate for a named catalog entry."""
+    from nemo_gym.environment_onboarding import publish_environment
+
+    report = publish_environment(resolve_catalog_entry(name, kind))
+    if json_output:
+        print(json.dumps(report.to_dict()))
+    else:
+        rich.print(
+            f"[green]✓[/green] Publication checks passed: {report.kind}/{report.name} "
+            f"v{report.version}  status={report.status}"
+        )
+
+
+@exit_cleanly_on_config_error
 def dump_config():  # pragma: no cover
     """
     Display the resolved Hydra configuration for debugging purposes.
@@ -1217,6 +1334,7 @@ def validate():
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            offline=True,
         ),
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
@@ -1224,41 +1342,69 @@ def validate():
     rich.print("[green]✓[/green] Config is valid.")
 
 
-def _inspect_environment(name: str, environments: dict, global_config_dict) -> None:
-    """Render the ``gym list environments <name>`` inspect view for one environment."""
-    entry = environments.get(name)
-    if entry is None:
-        exit_unknown_component(name, environments, "environment")
-        return
+def _inspect_environment(name: str, entries: tuple, global_config_dict) -> None:
+    """Render one environment-catalog entry, including legacy details where available."""
+    kind = global_config_dict.get("catalog_kind")
+    try:
+        entry = resolve_catalog_entry(name, kind, entries=entries)
+    except ConfigError:
+        candidates = {item.name: item for item in entries}
+        if name not in candidates:
+            exit_unknown_component(name, candidates, "environment")
+        raise
 
-    parsed = read_environment_details(entry.config_path)
-    details = {"config": str(entry.config_path.resolve())}
-    if parsed["resources_servers"]:
-        details["resources servers"] = ", ".join(parsed["resources_servers"])
-    if parsed["agent"]:
-        details["agent"] = parsed["agent"]
-    if parsed["datasets"]:
-        details["datasets"] = ", ".join(parsed["datasets"])
+    details = {
+        "kind": entry.kind,
+        "status": entry.status,
+        "config": str(entry.config_path.resolve()),
+    }
+    details.update(
+        {
+            label: value
+            for label, value in (
+                ("version", entry.version),
+                ("integration profile", entry.integration_profile),
+                ("modality", entry.modality),
+                ("licensing", entry.licensing),
+            )
+            if value
+        }
+    )
+    if entry.manifest_path:
+        details["manifest"] = str(entry.manifest_path.resolve())
 
-    description = parsed["description"]
-    if parsed["value"]:  # surface `value` as a trailing line of the description
-        description = f"{description}\nValue: {parsed['value']}" if description else f"Value: {parsed['value']}"
+    description = entry.description
+    if entry.status == "no-manifest" and entry.kind == "environment":
+        parsed = read_environment_details(entry.config_path)
+        details.update(
+            {
+                label: value
+                for label, value in (
+                    ("resources servers", ", ".join(parsed["resources_servers"])),
+                    ("agent", parsed["agent"]),
+                    ("datasets", ", ".join(parsed["datasets"])),
+                )
+                if value
+            }
+        )
+        if parsed["value"]:
+            description = f"{description}\nValue: {parsed['value']}" if description else f"Value: {parsed['value']}"
 
+    selector = "benchmark" if entry.kind == "benchmark" else "environment"
     render_component_inspection(
         json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
         name=name,
-        type_noun="environment",
-        domain=parsed["domain"],
+        type_noun=entry.kind,
+        domain=entry.domain,
         description=description,
         details=details,
-        usage=f"gym env start --environment {name} --model-type vllm_model",
+        usage=f"gym env start --{selector} {name} --model-type vllm_model",
     )
 
 
+@exit_cleanly_on_config_error
 def list_environments() -> None:
-    """List the environments under environments/, or inspect one by name (``gym list environments <name>``).
-    Optionally filtered by a `query` (the `gym search environments` entry point). ``--search-dir`` adds extra
-    roots on top of the cwd and built-ins.
+    """List the local environment and benchmark catalog, including legacy entries.
 
     Examples:
 
@@ -1272,55 +1418,92 @@ def list_environments() -> None:
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            offline=True,
         )
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    environments = discover_environments()
+    catalog = discover_environment_catalog()
 
     name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
     if name:
-        _inspect_environment(name, environments, global_config_dict)
+        _inspect_environment(name, catalog, global_config_dict)
         return
 
-    # `gym search environments <query>` reuses this command, narrowing to fuzzy matches on
-    # name + domain + description.
     query = global_config_dict.get(QUERY_KEY_NAME)
-    if query:
-        environments = {
-            name: env
-            for name, env in environments.items()
-            if fuzzy_matches(query, name, env.domain or "", env.description or "")
-        }
+    filters = {
+        field: global_config_dict.get(f"catalog_{field}")
+        for field in ("kind", "domain", "modality", "licensing", "status")
+    }
+    unknown = {
+        field: sum(getattr(entry, field) is None for entry in catalog) for field, value in filters.items() if value
+    }
+    if any(unknown.values()):
+        unavailable = ", ".join(f"{field}={count}" for field, count in unknown.items() if count)
+        print(f"Legacy entries omitted because metadata is unavailable: {unavailable}", file=sys.stderr)
+
+    entries = tuple(
+        entry
+        for entry in catalog
+        if all(not value or getattr(entry, field) == value for field, value in filters.items())
+        and (not query or fuzzy_matches(query, entry.name, entry.domain or "", entry.description or ""))
+    )
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(
             json.dumps(
                 [
-                    {"name": name, "domain": env.domain, "description": env.description}
-                    for name, env in environments.items()
+                    {
+                        "name": entry.name,
+                        "kind": entry.kind,
+                        "version": entry.version,
+                        "integration_profile": entry.integration_profile,
+                        "domain": entry.domain,
+                        "description": entry.description,
+                        "modality": entry.modality,
+                        "licensing": entry.licensing,
+                        "status": entry.status,
+                        "lifecycle": entry.lifecycle,
+                        "config": str(entry.config_path.resolve()),
+                        "manifest": str(entry.manifest_path.resolve()) if entry.manifest_path else None,
+                    }
+                    for entry in entries
                 ]
             )
         )
         return
 
-    if not environments:
-        print_no_matches("environments", query)
+    if not entries:
+        print_no_matches("environment catalog entries", query)
+        manifested = sum(entry.manifest_path is not None for entry in catalog)
+        print(f"Manifest coverage: {manifested}/{len(catalog)}")
         return
 
     title = (
-        f"Environments matching '{query}' ({len(environments)})"
+        f"Environment catalog matching '{query}' ({len(entries)})"
         if query
-        else f"Available environments in NeMo Gym ({len(environments)})"
+        else f"Environment catalog ({len(entries)})"
     )
     table = Table(title=title)
     table.add_column("Name")
+    table.add_column("Kind")
     table.add_column("Domain")
+    table.add_column("Modality")
+    table.add_column("Status")
     table.add_column("Description")
-    for name, environment in environments.items():
-        table.add_row(name, environment.domain or "", environment.description or "")
+    for entry in entries:
+        table.add_row(
+            entry.name,
+            entry.kind,
+            entry.domain or "",
+            entry.modality or "",
+            entry.status,
+            entry.description or "",
+        )
 
     print_rich_table(table)
+    manifested = sum(entry.manifest_path is not None for entry in catalog)
+    print(f"Manifest coverage: {manifested}/{len(catalog)}")
 
 
 @exit_cleanly_on_config_error

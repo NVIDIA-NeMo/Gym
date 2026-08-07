@@ -101,7 +101,7 @@ class BenchmarkConfig(BaseModel):
         )
 
 
-def _benchmark_config_name(rel_config_path: Path) -> str:
+def benchmark_config_name(rel_config_path: Path) -> str:
     """The name of the benchmark config, given its path relative to ``benchmarks/``, sans ``.yaml``.
 
     This is the identity we key benchmarks by, so a listed benchmark is always a valid ``--benchmark`` argument.
@@ -133,7 +133,7 @@ def _is_benchmark_config(config_path: Path) -> bool:
         return True
 
 
-def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
+def benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     """Sorted config paths under one dir that declare a benchmark, discovered by content.
 
     A config is a benchmark iff it declares a `type: benchmark` dataset, regardless of filename, so we scan
@@ -150,7 +150,7 @@ def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
 def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConfig]:
     """Map benchmark name -> :class:`BenchmarkConfig` for every benchmark config under one dir."""
     benchmarks_dict = dict()
-    for config_path in _benchmark_config_paths(benchmarks_dir):
+    for config_path in benchmark_config_paths(benchmarks_dir):
         try:
             # Listing has no runtime context, so tolerate unset runtime-only values.
             maybe_bc = BenchmarkConfig.from_config_path(config_path, strict=False)
@@ -166,7 +166,7 @@ def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConf
         if not maybe_bc:
             continue
 
-        benchmarks_dict[_benchmark_config_name(config_path.relative_to(benchmarks_dir))] = maybe_bc
+        benchmarks_dict[benchmark_config_name(config_path.relative_to(benchmarks_dir))] = maybe_bc
 
     return benchmarks_dict
 

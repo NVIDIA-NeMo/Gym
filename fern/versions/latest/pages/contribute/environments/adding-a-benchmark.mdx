@@ -5,6 +5,10 @@ position: 3
 ---
 The most important principle when adding benchmarks into NeMo Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
 
+<Note>
+Start with [Onboard an environment](/contribute/environments/onboarding) to search the catalog, scaffold the benchmark manifest, and reuse a verifier when possible. This page covers the fidelity work that follows the local onboarding checks.
+</Note>
+
 ## Reward profiling
 
 In order to ensure the rough software correctness of your benchmark, baseline against publicly available models including a mixture of open-source and closed-source models. This process is also known as reward profiling.

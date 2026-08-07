@@ -53,7 +53,7 @@ class TestListBenchmarks:
         # Discovery is content-based (a `type: benchmark` dataset), not filename-based: any yaml that
         # declares such a dataset is a candidate (e.g. tau2's `configs/tau2.yaml`), and yamls that don't
         # are skipped — regardless of filename.
-        from nemo_gym.benchmarks import _benchmark_config_paths
+        from nemo_gym.benchmarks import benchmark_config_paths
 
         (tmp_path / "standard").mkdir()
         (tmp_path / "standard" / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
@@ -63,7 +63,7 @@ class TestListBenchmarks:
         (tmp_path / "notbench" / "config.yaml").write_text("x:\n  prompt_config: hi.yaml\n")  # no benchmark dataset
         (tmp_path / "standard" / "manifest.yaml").write_text("datasets:\n- type: benchmark\n")
 
-        found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
+        found = {str(p.relative_to(tmp_path)) for p in benchmark_config_paths(tmp_path)}
         assert found == {"standard/config.yaml", "flavored/configs/myflavor.yaml"}
 
     @pytest.mark.parametrize(
@@ -91,12 +91,12 @@ class TestListBenchmarks:
     def test_prefilter_keeps_unparseable_yaml_as_candidate(self, tmp_path) -> None:
         # A file we can't parse can't be classified, so it is kept as a candidate for the resolve step to
         # diagnose rather than silently dropped.
-        from nemo_gym.benchmarks import _benchmark_config_paths
+        from nemo_gym.benchmarks import benchmark_config_paths
 
         (tmp_path / "broken").mkdir()
         (tmp_path / "broken" / "config.yaml").write_text("x:\n  - : : not valid yaml : :\n")
 
-        found = {p.relative_to(tmp_path).parts[0] for p in _benchmark_config_paths(tmp_path)}
+        found = {p.relative_to(tmp_path).parts[0] for p in benchmark_config_paths(tmp_path)}
         assert "broken" in found
 
     def test_no_benchmarks(self, capsys) -> None:
@@ -215,9 +215,9 @@ class TestDiscoverBenchmarksInDir:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
         # no silent drop from a name collision (the name-keyed dict is last-writer-wins) or a resolve
         # failure. Mirrors the content-based discovery in `list_benchmarks`.
-        from nemo_gym.benchmarks import BENCHMARKS_DIR, _benchmark_config_paths, _discover_benchmarks_in_dir
+        from nemo_gym.benchmarks import BENCHMARKS_DIR, _discover_benchmarks_in_dir, benchmark_config_paths
 
-        config_paths = _benchmark_config_paths(BENCHMARKS_DIR)
+        config_paths = benchmark_config_paths(BENCHMARKS_DIR)
         assert config_paths, "no benchmark configs discovered under BENCHMARKS_DIR"
 
         benchmarks = _discover_benchmarks_in_dir(BENCHMARKS_DIR)
@@ -239,9 +239,9 @@ class TestBenchmarkConfigName:
         ],
     )
     def test_name_matches_the_benchmark_selector(self, rel: str, expected: str) -> None:
-        from nemo_gym.benchmarks import _benchmark_config_name
+        from nemo_gym.benchmarks import benchmark_config_name
 
-        assert _benchmark_config_name(Path(rel)) == expected
+        assert benchmark_config_name(Path(rel)) == expected
 
     def test_every_listed_token_round_trips_through_the_benchmark_selector(self) -> None:
         # The point of keying by token: every value `gym list benchmarks` prints must resolve back to its own

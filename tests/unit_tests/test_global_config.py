@@ -98,6 +98,38 @@ class TestGlobalConfig:
         global_config_dict = get_global_config_dict()
         assert self._default_global_config_dict_values == global_config_dict
 
+    def test_offline_resolution_assigns_ports_without_probing(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
+        hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
+        wandb_init = MagicMock(side_effect=AssertionError("offline resolution must not initialize W&B"))
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", probe)
+        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", hostname)
+        monkeypatch.setattr(nemo_gym.global_config.wandb, "init", wandb_init)
+
+        config = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        "use_absolute_ip": True,
+                        "wandb_project": "offline-project",
+                        "wandb_name": "offline-run",
+                        "wandb_api_key": "offline-key",  # pragma: allowlist secret
+                        "worker": {"resources_servers": {"example": {"entrypoint": "app.py", "domain": "other"}}},
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert config.worker.resources_servers.example.port == 10_001
+        assert config.worker.resources_servers.example.host == "127.0.0.1"
+        probe.assert_not_called()
+        hostname.assert_not_called()
+        wandb_init.assert_not_called()
+
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
