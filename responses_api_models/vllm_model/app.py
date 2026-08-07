@@ -171,6 +171,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+    session_affinity_header: Optional[str] = Field(
+        default=None,
+        description="Header used to forward the NeMo Gym session ID to an upstream router.",
+    )
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -432,11 +436,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 top_logprobs=0,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
-                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                # For prompt and generation token IDs
-                # return_token_ids=True,
-                # For prompt token IDs
-                # prompt_logprobs=0,
+                # Return prompt and generation token IDs inline when supported.
+                return_token_ids=True,
             )
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
@@ -707,37 +708,28 @@ class VLLMModel(SimpleResponsesAPIModel):
             log_probs = logprobs_block["content"]
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
 
-            """
-            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            """
-            # Looks like `"token_id:151667"`
-            generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
+            generation_token_ids = choice_dict.pop("token_ids", None)
+            if generation_token_ids is None:
+                # Older vLLM versions encode token IDs as `"token_id:151667"`.
+                generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
 
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            #
-            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
-            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
-            # `prompt_str`) can be built with different chat template settings than
-            # the actual generation request.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
+            prompt_token_ids = chat_completion_dict.pop("prompt_token_ids", None)
+            if prompt_token_ids is None:
+                # The tokenize endpoint doesn't accept sampling parameters. Pass
+                # through chat-template knobs so fallback tokenization matches the
+                # actual generation request.
+                tokenize_body_dict = dict()
+                for key in ("model", "messages", "tools", "chat_template_kwargs"):
+                    if key in body_dict:
+                        tokenize_body_dict[key] = body_dict[key]
 
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-            """
-            END
-            """
+                tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+                prompt_token_ids = tokenize_response["tokens"]
 
             message_dict = choice_dict["message"]
             message_dict.update(
                 dict(
-                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
+                    prompt_token_ids=prompt_token_ids,
                     generation_token_ids=generation_token_ids,
                     generation_log_probs=generation_log_probs,
                 )
@@ -745,9 +737,6 @@ class VLLMModel(SimpleResponsesAPIModel):
 
             # Clean the duplicated information
             choice_dict.pop("logprobs")
-            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            # chat_completion_dict.pop("prompt_token_ids")
-            # choice_dict.pop("token_ids")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
@@ -1095,6 +1084,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             # There is probably a better way to select the endpoint for this request. But this will do for now.
             client_idx = len(self._session_id_to_client) % len(self._clients)
             client = self._clients[client_idx]
+            if self.config.session_affinity_header is not None:
+                client = client.model_copy(
+                    update={
+                        "default_headers": client.default_headers | {self.config.session_affinity_header: session_id}
+                    }
+                )
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 

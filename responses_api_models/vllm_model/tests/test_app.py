@@ -52,7 +52,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -736,6 +736,42 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    def test_resolve_client_adds_session_affinity_header(self) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://router/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            default_headers={"X-Static": "keep"},
+            session_affinity_header="X-Session-ID",
+        )
+        model = VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        first_request = MagicMock(session={SESSION_ID_KEY: "session-0"})
+        second_request = MagicMock(session={SESSION_ID_KEY: "session-1"})
+
+        first_client = model._resolve_client(first_request)
+        second_client = model._resolve_client(second_request)
+
+        assert first_client.base_url == "http://router/v1"
+        assert first_client.default_headers == {
+            "X-Static": "keep",
+            "X-Session-ID": "session-0",
+        }
+        assert second_client.base_url == "http://router/v1"
+        assert second_client.default_headers == {
+            "X-Static": "keep",
+            "X-Session-ID": "session-1",
+        }
+        assert model._resolve_client(first_request) is first_client
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -4600,6 +4636,7 @@ class TestTopLogprobsHandling:
         assert result["top_logprobs"] == 0
         assert result["logprobs"] is True
         assert result["return_tokens_as_token_ids"] is True
+        assert result["return_token_ids"] is True
 
         # Inbound non-zero value must also be overridden, not inherited.
         result = model._preprocess_chat_completion_create_params(
@@ -4667,8 +4704,9 @@ class TestTopLogprobsHandling:
     def test_capture_path_succeeds_with_inbound_null_top_logprobs(self) -> None:
         """End-to-end regression: a request with top_logprobs=null no longer empties capture;
         token ids and logprobs come back populated (and coerced to int)."""
+        import asyncio
+
         model = _make_top_logprobs_model(return_token_id_information=True)
-        app = model.setup_webserver()
 
         captured_kwargs: dict[str, Any] = {}
 
@@ -4689,22 +4727,73 @@ class TestTopLogprobsHandling:
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
         mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
-        model._clients = [mock_client]
+        model._resolve_client = lambda _request: mock_client  # type: ignore[assignment]
 
-        client = TestClient(app)
-        response = client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "hi"}], "top_logprobs": None},
+        response = asyncio.run(
+            model.chat_completions(
+                MagicMock(),
+                NeMoGymChatCompletionCreateParamsNonStreaming(
+                    messages=[{"role": "user", "content": "hi"}],
+                    top_logprobs=None,
+                ),
+            )
         )
-        assert response.status_code == 200
 
         # The request forwarded to vLLM had top_logprobs pinned to 0, not the inbound null.
         assert captured_kwargs["top_logprobs"] == 0
+        assert captured_kwargs["return_token_ids"] is True
+        mock_client.create_tokenize.assert_awaited_once()
 
-        message = response.json()["choices"][0]["message"]
-        assert message["generation_token_ids"] == [123, 456]
-        assert message["generation_log_probs"] == [-0.1, -0.2]
-        assert message["prompt_token_ids"] == [10, 20, 30]
+        message = response.choices[0].message
+        assert isinstance(message, NeMoGymChatCompletionMessageForTraining)
+        assert message.generation_token_ids == [123, 456]
+        assert message.generation_log_probs == [-0.1, -0.2]
+        assert message.prompt_token_ids == [10, 20, 30]
+
+    def test_capture_path_prefers_inline_token_ids(self) -> None:
+        import asyncio
+
+        model = _make_top_logprobs_model(return_token_id_information=True)
+
+        captured_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            completion = self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "ignored", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                        {"token": "ignored", "logprob": -0.2, "bytes": None, "top_logprobs": []},
+                    ]
+                }
+            )
+            completion["prompt_token_ids"] = [10, 20, 30]
+            completion["choices"][0]["token_ids"] = [123, 456]
+            return completion
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("create_tokenize must not be called when inline IDs are present")
+        )
+        model._resolve_client = lambda _request: mock_client  # type: ignore[assignment]
+
+        response = asyncio.run(
+            model.chat_completions(
+                MagicMock(),
+                NeMoGymChatCompletionCreateParamsNonStreaming(
+                    messages=[{"role": "user", "content": "hi"}],
+                ),
+            )
+        )
+
+        assert captured_kwargs["return_token_ids"] is True
+        mock_client.create_tokenize.assert_not_awaited()
+        message = response.choices[0].message
+        assert isinstance(message, NeMoGymChatCompletionMessageForTraining)
+        assert message.prompt_token_ids == [10, 20, 30]
+        assert message.generation_token_ids == [123, 456]
+        assert message.generation_log_probs == [-0.1, -0.2]
 
     def test_capture_path_preserves_routed_experts(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
