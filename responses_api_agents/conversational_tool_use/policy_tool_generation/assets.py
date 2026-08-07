@@ -40,9 +40,7 @@ PROMPT_FILENAMES = (
 GOLDEN_FILENAMES = tuple(
     filename for index in range(1, 9) for filename in (f"policy-{index}.md", f"tools_{index}.jsonl")
 )
-GOLDEN_TREE_SHA256 = (  # pragma: allowlist secret
-    "c1c621e88f763dab8fa23e6721180376d65b1386b99e662d32c652dcf28e1cd6"
-)
+GOLDEN_TREE_SHA256 = "c1c621e88f763dab8fa23e6721180376d65b1386b99e662d32c652dcf28e1cd6"  # pragma: allowlist secret
 PREPARE_COMMAND = "python -m resources_servers.conversational_tool_use_simulation.prepare"
 
 
