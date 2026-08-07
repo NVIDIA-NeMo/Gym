@@ -274,10 +274,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
+
         # TODO @bxyu-nvidia: This is a dirty hack to retry this first exec after the connect
         # Eventually as things stabilize we can remove this.
         tries = 0
-        while True:
+        MAX_TRIES = 10
+        result = None
+        while tries < MAX_TRIES:
             try:
                 result = await sandbox.exec(
                     command=command,
@@ -293,10 +296,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     or "Failed to run command" in str(e)
                 ):
                     print(f"Exec try #{tries} hit error.", format_exc(), file=sys.stderr)
+                    tries += 1
                     continue
                 raise e
 
-        if self.config.debug:
+        if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
