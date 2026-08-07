@@ -21,7 +21,6 @@ simple_strands_agent:
       prompt_tag: swe_generic_v2
       native_user_prompt: false
       system_prompt: null
-      api_key: gym
       workspace_root: outputs/simple_strands_agent/workspaces
       keep_workspaces: false
       ssa_source_root: ${oc.env:SSA_SOURCE_ROOT,null}

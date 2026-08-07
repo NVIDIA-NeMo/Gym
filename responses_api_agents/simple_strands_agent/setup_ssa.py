@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 SSA_REPO = "https://github.com/strands-labs/benchmark-harnesses.git"
-SSA_REVISION = "fd9395b672b670ddb6b90de19723327f007b0655"
+SSA_REVISION = "fd9395b672b670ddb6b90de19723327f007b0655"  # pragma: allowlist secret
 _INSTALL_LOCK = threading.Lock()
 
 
