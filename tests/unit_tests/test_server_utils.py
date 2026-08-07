@@ -25,6 +25,7 @@ from aiohttp import (
     ClientOSError,
     ClientPayloadError,
     ClientProxyConnectionError,
+    ClientTimeout,
     ServerDisconnectedError,
 )
 from aiohttp.client_exceptions import ConnectionTimeoutError, InvalidUrlClientError, SocketTimeoutError
@@ -609,3 +610,51 @@ class TestServerUtils:
 
         with raises(asyncio.CancelledError):
             await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+
+    def test_GlobalAIOHTTPAsyncClientConfig_sock_connect_defaults(self) -> None:
+        config = GlobalAIOHTTPAsyncClientConfig()
+
+        # aiohttp's own default for sock_connect, restored rather than newly chosen.
+        assert 30.0 == config.global_aiohttp_sock_connect_timeout_seconds
+        assert 10.0 == config.global_aiohttp_internal_sock_connect_timeout_seconds
+
+    def test_internal_client_timeout_bounds_only_the_socket_connect(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_INTERNAL_SOCK_CONNECT_TIMEOUT_SECONDS", 7.0)
+        timeout = nemo_gym.server_utils.internal_client_timeout()
+
+        assert 7.0 == timeout.sock_connect
+        # `total` unset keeps long generations alive; `connect` unset keeps a request queued behind a
+        # saturated pool from being failed as a connect timeout.
+        assert timeout.total is None
+        assert timeout.connect is None
+        assert timeout.sock_read is None
+
+    async def test_ServerClient_request_applies_the_internal_connect_deadline(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_INTERNAL_SOCK_CONNECT_TIMEOUT_SECONDS", 9.0)
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="abcdef", port=12345),
+            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+        )
+
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(return_value="my mock response")
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        await server_client.get(server_name="my_server", url_path="/blah")
+
+        assert 9.0 == client_mock.return_value.request.await_args.kwargs["timeout"].sock_connect
+
+    async def test_ServerClient_request_does_not_override_a_caller_timeout(self, monkeypatch: MonkeyPatch) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="abcdef", port=12345),
+            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+        )
+
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(return_value="my mock response")
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        caller_timeout = ClientTimeout(total=123.0)
+        await server_client.get(server_name="my_server", url_path="/blah", timeout=caller_timeout)
+
+        assert caller_timeout is client_mock.return_value.request.await_args.kwargs["timeout"]
