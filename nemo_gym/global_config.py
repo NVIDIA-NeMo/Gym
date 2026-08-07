@@ -93,6 +93,10 @@ JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+# Run-wide training-token capture settings; see nemo_gym/token_id_capture/config.py.
+TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+# Per-agent opt-in (on an agent's config block) for participating in training token capture.
+TOKEN_ID_CAPTURE_KEY_NAME = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
@@ -131,6 +135,10 @@ ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
+# Explicit capture id for a run request, used in place of the (task, rollout) derivation. Set it
+# when the caller reuses task and rollout indices across dispatches, since the derived id would
+# then repeat and two dispatches would share one capture key.
+ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
