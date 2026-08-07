@@ -4,6 +4,7 @@ config_paths:
 - benchmarks/tau2/configs/tau2.yaml
 - benchmarks/aalcr/config.yaml
 - benchmarks/scicode/config.yaml
+- benchmarks/omniscience/config.yaml
 # TODO @bxyu-nvidia: need to figure out AA key
 # - benchmarks/critpt/config.yaml
 # TODO @bxyu-nvidia: Implementing in the harness x benchmark decoupling effort.
