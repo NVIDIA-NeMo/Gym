@@ -550,6 +550,119 @@ def test_build_sbatch_script_driver_env(bench_dir, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# mounts: service and driver
+# ---------------------------------------------------------------------------
+
+
+def test_render_service_command_with_mounts():
+    out = _render_service_command("svc", "img:latest", "cmd", mounts=["/src:/dst", "/data"])
+    assert "--container-mounts=/src:/dst,/data" in out
+
+
+def test_render_service_command_no_mounts_by_default():
+    out = _render_service_command("svc", "img:latest", "cmd")
+    assert "--container-mounts" not in out
+
+
+def test_render_service_command_empty_mounts_omits_flag():
+    out = _render_service_command("svc", "img:latest", "cmd", mounts=[])
+    assert "--container-mounts" not in out
+
+
+def test_build_sbatch_script_service_mounts(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "mounts": ["/lustre/datasets:/data", "/tmp/cache"],
+                }
+            },
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--container-mounts=/lustre/datasets:/data,/tmp/cache" in script
+
+
+def test_build_sbatch_script_driver_mounts(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {}},
+                "mounts": ["/lustre/checkpoints:/ckpts"],
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    # mounts flag appears on the driver srun line
+    driver_srun_line = next(line for line in script.splitlines() if "python:3.12" in line)
+    assert "--container-mounts=/lustre/checkpoints:/ckpts" in driver_srun_line
+
+
+def test_build_sbatch_script_no_mounts_by_default(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--container-mounts" not in script
+
+
+# ---------------------------------------------------------------------------
+# output_jsonl_fpath: configurable per benchmark
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_run_config_default_output_jsonl_fpath():
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    assert config.driver.benchmarks["gsm8k"].output_jsonl_fpath == "artifacts/rollouts.jsonl"
+
+
+def test_build_sbatch_script_output_jsonl_fpath_default(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+output_jsonl_fpath=artifacts/rollouts.jsonl" in script
+
+
+def test_build_sbatch_script_output_jsonl_fpath_custom(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {"output_jsonl_fpath": "out/results/rollouts.jsonl"}},
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+output_jsonl_fpath=out/results/rollouts.jsonl" in script
+    assert "artifacts/rollouts.jsonl" not in script
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 

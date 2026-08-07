@@ -94,15 +94,22 @@ def _resolve_env(env: dict[str, str]) -> str:
     return f"env {pairs} "
 
 
-def _render_service_command(name: str, container: str, command: str, env: dict[str, str] | None = None) -> str:
+def _render_service_command(
+    name: str,
+    container: str,
+    command: str,
+    env: dict[str, str] | None = None,
+    mounts: list[str] | None = None,
+) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
+    mounts_flag = f" --container-mounts={','.join(mounts)}" if mounts else ""
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap --no-container-mount-home --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap --no-container-mount-home{mounts_flag} --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -134,7 +141,9 @@ def build_sbatch_script(
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     service_commands = "\n\n".join(
-        _render_service_command(name, service.container, _BUILDERS[type(service)](service), service.env or None)
+        _render_service_command(
+            name, service.container, _BUILDERS[type(service)](service), service.env or None, service.mounts or None
+        )
         for name, service in config.services.items()
     )
 
@@ -152,7 +161,7 @@ def build_sbatch_script(
     if benchmark.prepare:
         prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
 
-    output_path = "+output_jsonl_fpath=artifacts/rollouts.jsonl"
+    output_path = f"+output_jsonl_fpath={benchmark.output_jsonl_fpath}"
     extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
     gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
     entrypoint = render_driver_entrypoint(
@@ -162,9 +171,10 @@ def build_sbatch_script(
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
+    driver_mounts_flag = f" --container-mounts={','.join(config.driver.mounts)}" if config.driver.mounts else ""
     driver_command = (
         f"{gym_cmd}\n"
-        f"{driver_env_prefix}srun --overlap --no-container-mount-home --container-image={shlex.quote(config.driver.container)} "
+        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_mounts_flag} --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
 

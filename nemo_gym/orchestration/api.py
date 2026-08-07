@@ -38,6 +38,8 @@ class BaseServiceConfig(_StrictModel):
     health_check: HealthCheckConfig | None = None
     # Values starting with "$" are resolved from the host environment at submit time.
     env: dict[str, str] = {}
+    # Pyxis-style bind mounts passed as --container-mounts. Each entry is "src:dst" or "src".
+    mounts: list[str] = []
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -110,6 +112,9 @@ class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    # Path (relative to the job's working directory) where the rollout JSONL is written.
+    # The parent directory is pre-created in the staging area before job submission.
+    output_jsonl_fpath: str = "artifacts/rollouts.jsonl"
 
 
 class GymInstallConfig(_StrictModel):
@@ -126,6 +131,8 @@ class DriverConfig(_StrictModel):
     benchmarks: dict[str, BenchmarkRunConfig]
     # Values starting with "$" are resolved from the host environment at submit time.
     env: dict[str, str] = {}
+    # Pyxis-style bind mounts passed as --container-mounts. Each entry is "src:dst" or "src".
+    mounts: list[str] = []
 
 
 class JobConfig(_StrictModel):
