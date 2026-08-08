@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from abc import abstractmethod
 from collections.abc import Mapping
 from functools import wraps
@@ -38,6 +39,8 @@ from nemo_gym.server_utils import (
     BaseServer,
     SimpleServer,
     apply_rollout_prefix,
+    get_response_json,
+    raise_for_status,
     rollout_path_prefix,
 )
 
@@ -150,3 +153,24 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
         )
+
+    async def proxy_aggregate_metrics(
+        self,
+        server_name: str,
+        body: AggregateMetricsRequest,
+        timeout_secs: Optional[float] = 600.0,
+    ) -> AggregateMetrics:
+        """Proxy aggregate metrics to another server with an optional timeout."""
+
+        async def _proxy() -> AggregateMetrics:
+            response = await self.server_client.post(
+                server_name=server_name,
+                url_path="/aggregate_metrics",
+                json=body,
+            )
+            await raise_for_status(response)
+            return AggregateMetrics.model_validate(await get_response_json(response))
+
+        if timeout_secs is None:
+            return await _proxy()
+        return await asyncio.wait_for(_proxy(), timeout=timeout_secs)

@@ -12,9 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -325,6 +328,110 @@ class TestDefaultAgentAggregateMetrics:
         assert result.agent_metrics["mean/reward"] == pytest.approx(1.0)
         assert len(result.group_level_metrics) == 2
         assert "mean/reward" in result.key_metrics
+
+
+class TestProxyAggregateMetrics:
+    @staticmethod
+    def _make_agent(server_client):
+        class TestAgent(SimpleResponsesAPIAgent):
+            async def responses(self, body=None):
+                pass
+
+            async def run(self, body=None):
+                pass
+
+        config = BaseResponsesAPIAgentConfig(host="127.0.0.1", port=12345, entrypoint="app.py", name="test_agent")
+        return TestAgent(config=config, server_client=server_client)
+
+    @staticmethod
+    def _make_response(payload):
+        response = MagicMock()
+        response.ok = True
+        response.read = AsyncMock(return_value=orjson.dumps(payload))
+        return response
+
+    @pytest.mark.asyncio
+    async def test_success(self) -> None:
+        payload = {
+            "group_level_metrics": [],
+            "agent_metrics": {"mean/reward": 1.0},
+            "key_metrics": {"mean/reward": 1.0},
+        }
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=self._make_response(payload))
+        agent = self._make_agent(server_client)
+        body = AggregateMetricsRequest(verify_responses=[])
+
+        result = await agent.proxy_aggregate_metrics("resources", body)
+
+        assert result == AggregateMetrics.model_validate(payload)
+        server_client.post.assert_awaited_once_with(
+            server_name="resources",
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+
+    @pytest.mark.asyncio
+    async def test_http_error(self) -> None:
+        response = MagicMock()
+        response.ok = False
+        response.content.read = AsyncMock(return_value=b"failure")
+        response.raise_for_status.side_effect = RuntimeError("http error")
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=response)
+        agent = self._make_agent(server_client)
+
+        with pytest.raises(RuntimeError, match="http error"):
+            await agent.proxy_aggregate_metrics("resources", AggregateMetricsRequest(verify_responses=[]))
+
+    @pytest.mark.asyncio
+    async def test_invalid_response(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=self._make_response({"agent_metrics": []}))
+        agent = self._make_agent(server_client)
+
+        with pytest.raises(ValidationError):
+            await agent.proxy_aggregate_metrics("resources", AggregateMetricsRequest(verify_responses=[]))
+
+    @pytest.mark.asyncio
+    async def test_timeout(self) -> None:
+        async def hang(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=hang)
+        agent = self._make_agent(server_client)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await agent.proxy_aggregate_metrics(
+                "resources",
+                AggregateMetricsRequest(verify_responses=[]),
+                timeout_secs=0.01,
+            )
+
+    @pytest.mark.asyncio
+    async def test_none_timeout_bypasses_wait_for(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        payload = {
+            "group_level_metrics": [],
+            "agent_metrics": {},
+            "key_metrics": {},
+        }
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=self._make_response(payload))
+        agent = self._make_agent(server_client)
+
+        def unexpected_wait_for(*args, **kwargs):
+            raise AssertionError("asyncio.wait_for should not be called")
+
+        monkeypatch.setattr(asyncio, "wait_for", unexpected_wait_for)
+
+        result = await agent.proxy_aggregate_metrics(
+            "resources",
+            AggregateMetricsRequest(verify_responses=[]),
+            timeout_secs=None,
+        )
+
+        assert result == AggregateMetrics.model_validate(payload)
 
 
 class TestTaskIndexInGroupMetrics:
