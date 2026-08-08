@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from app import (
+    VERIFIER_FIXTURE,
     StringMatchResourcesServer,
     StringMatchResourcesServerConfig,
     _answers_match,
@@ -24,12 +25,22 @@ from app import (
 )
 
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
 
 
 class TestApp:
     def test_sanity(self) -> None:
         config = StringMatchResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
         StringMatchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def test_verifier_fixture(self) -> None:
+        results = await exercise_verifier_fixture(
+            VERIFIER_FIXTURE,
+            reward_range=(0.0, 1.0),
+            determinism="unknown",
+        )
+
+        assert [result.kind for result in results] == ["full_reward", "zero_reward", "malformed"]
 
     @pytest.mark.parametrize(
         ("gt_answer", "pred_answer", "expected_score"),

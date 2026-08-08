@@ -14,9 +14,11 @@
 # limitations under the License.
 import re
 import unicodedata
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
+from omegaconf import OmegaConf
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -25,6 +27,9 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import VerifierFixture
 
 
 class StringMatchResourcesServerConfig(BaseResourcesServerConfig):
@@ -370,6 +375,27 @@ class StringMatchResourcesServer(SimpleResourcesServer):
             expected_answer=body.expected_answer,
             extracted_answer=extracted,
         )
+
+
+def _verifier_fixture_server() -> StringMatchResourcesServer:
+    config = StringMatchResourcesServerConfig(
+        host="127.0.0.1",
+        port=0,
+        entrypoint="",
+        name="string_match_fixture",
+    )
+    server_client = ServerClient(
+        head_server_config=BaseServerConfig(host="127.0.0.1", port=0),
+        global_config_dict=OmegaConf.create(),
+    )
+    return StringMatchResourcesServer(config=config, server_client=server_client)
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=_verifier_fixture_server,
+    request_model=StringMatchVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":

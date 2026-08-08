@@ -6,6 +6,10 @@ An environment consists of three components: Agents, Models, and Resources. Most
 
 This guide focuses on the resources server contribution process.
 
+<Note>
+Start with [Onboard an environment](/contribute/environments/onboarding) to search existing entries, choose an integration profile, and generate the manifest-backed scaffold. The detailed quality and contribution guidance on this page still applies.
+</Note>
+
 <Tip>
 For a guide to building your first resources server, refer to [Single Step Environment](/environment-tutorials/single-step-environment).
 
@@ -63,7 +67,7 @@ Prepare the dataset for your environment:
 
 Build your resources server:
 
-- Run `gym env init --resources-server my_server` to scaffold the new resources server
+- Run `gym env init --environment my_server` to scaffold the environment and a new resources server, or pass `--reuse-verifier` when an existing scorer fits
 - Follow the [Single Step Environment](/environment-tutorials/single-step-environment) guide to implement your specific logic
 - Implement verification logic for your tasks by defining the `verify()` function
 - Set the `domain` field in your resources server configuration (see `Domain`).

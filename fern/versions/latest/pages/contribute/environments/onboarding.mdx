@@ -1,0 +1,164 @@
+---
+title: "Onboard an environment"
+description: "Create and locally validate a manifest-backed Gym environment or benchmark."
+position: 1
+---
+
+Gym environments already compose datasets, resources servers, agent servers, and model servers. The onboarding workflow adds a manifest and a consistent way to assemble those pieces; it does not change how Gym runs them.
+
+Start by searching the local catalog; reuse an entry that already covers the task:
+
+```bash
+gym search "your task"
+gym env init --environment my_eval
+gym env validate my_eval
+gym env test my_eval
+gym env publish my_eval
+```
+
+## Choose what you are adding
+
+An **environment** is a complete task system that an agent interacts with. A **benchmark** uses the same structure and additionally declares a canonical split and standard prompt so results can be compared across runs.
+
+Use a benchmark when its scores will be quoted as a standard measurement:
+
+```bash
+gym env init --benchmark my_benchmark
+```
+
+On an interactive terminal, the scaffold asks what the evaluation measures and selects a profile. In scripts and CI, pass `--profile` explicitly; non-interactive shells default to `stock-loop` and print the choice.
+
+| Profile | Use it when | Scaffolded extension point |
+| --- | --- | --- |
+| `stock-loop` | Gym can drive the agent and only its answers are measured | Dataset and scorer |
+| `measured-loop` | The agent's strategy or tool use is part of the measurement | Thin agent-server extension |
+| `external-loop` | An external framework owns the episode loop | Thin agent adapter |
+| `custom-driver` | Coordination must happen above the agent | Rollout driver that delegates to Gym's collector |
+
+## Put logic at the right boundary
+
+| Concern | Gym boundary |
+| --- | --- |
+| Tasks and model inputs | Dataset rows and, for benchmarks, `prepare.py` plus the prompt config |
+| Reward and verification | Resources server |
+| Tools and environment state | Resources server |
+| Policy endpoint | Model server |
+| Model interaction loop, memory, and agent-side strategy | Harness hosted by the agent server |
+| Deployable agent process | Agent server |
+| Coordination above an agent | Rollout driver |
+
+An environment is the resolved composition of these pieces. A component can package several responsibilities; the table identifies where new logic belongs without changing Gym's deployable boundaries.
+
+## Reuse before writing a scorer
+
+Reuse an existing resources server when it already scores the task shape:
+
+```bash
+gym env init \
+  --benchmark my_benchmark \
+  --profile stock-loop \
+  --reuse-verifier string_match
+```
+
+This creates the benchmark entry without copying the scorer. Without `--reuse-verifier`, Gym generates a small exact-match resources server whose fixture passes immediately. Replace its marked sample logic with the real scorer.
+
+Reuse is opt-in: the selected resources server must export a `VERIFIER_FIXTURE` from its `app.py`. Gym checks this before writing the scaffold. Named tests import that fixture in the current Gym environment, so its dependencies must already be installed. The initial path supports stock-loop entries and canonical resources-server configs; `string_match` is the reference example.
+
+Scaffolding is non-destructive. Repeating the same command is a no-op; if any generated path contains different content, Gym reports every conflict before writing anything.
+
+## The manifest contract
+
+Every newly onboarded entry has one `manifest.yaml` beside `config.yaml`:
+
+```yaml
+name: my_eval
+version: 0.1.0
+kind: environment
+integration_profile: stock-loop
+domain: math
+description: Short description used by catalog search
+modality: text
+licensing: Apache-2.0
+authors: [your-name]
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: my_eval
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: my_eval
+    type: example
+    jsonl_fpath: environments/my_eval/data/example.jsonl
+```
+
+Identity, catalog metadata, reward semantics, and determinism are authored in the manifest. Component and dataset fields mirror the resolved Gym config, which remains authoritative for wiring. `gym env validate --sync` updates only those mirrored fields.
+
+The checked-in JSON Schema is available at `schemas/environment-manifest.schema.json`.
+
+## Author the task set
+
+Environment rows are final rollout inputs and include `responses_create_params.input`.
+
+Benchmark rows stay domain-shaped. A typed `prepare()` produces JSONL, and `standard_prompt_config` is applied during validation and rollout. Validation inspects the script signature but does not execute it or download data.
+
+The scaffold includes one marked sample row. Replace every `GYM_ONBOARDING_TODO` marker before running `gym env publish`.
+
+## Validate and test locally
+
+```bash
+gym env validate my_eval
+```
+
+Validation resolves normal Gym inheritance and references offline. It neither starts services nor executes `prepare.py`. It reports:
+
+- the manifest identity, kind, version, and profile;
+- resolved resources, agent, and model server boundaries;
+- dataset paths, row counts, and prompt materialization;
+- differences between config-authoritative wiring and its manifest mirror.
+
+Then exercise the scorer directly:
+
+```bash
+gym env test my_eval
+```
+
+The resources-server-owned JSONL fixture must cover full reward, zero reward, malformed input, and deterministic repetition when `determinism: seeded`. The test imports the scorer and calls it in-process; it does not start a service or require a model.
+
+After an intentional reward change, refresh observed reward expectations explicitly:
+
+```bash
+gym env test my_eval --update-expected
+```
+
+Only reward expectations are updated; malformed-input and determinism checks must still pass.
+
+## Check publication readiness
+
+```bash
+gym env publish my_eval
+```
+
+This idempotent local check requires the entry to be present in the local catalog, rejects scaffold markers, and reruns validation and verifier tests. It does not publish remotely.
+
+A manifest-backed entry appears as `experimental`. `validated` is reserved for certificate-backed status; local tests do not claim measurement quality or calibration.
+
+Inspect and filter the catalog:
+
+```bash
+gym list environments --kind benchmark --domain math --status experimental
+gym list environments --json
+gym search "exact match science"
+```
+
+Search matches name, description, and domain. The catalog unions manifests with existing configs during migration. Existing entries keep running unchanged and appear as `no-manifest` until they adopt the contract.
+
+## Continue with the detailed guides
+
+For environment design and review requirements, continue with:
+
+- [Build and validate a training environment](/contribute/environments/new-environment)
+- [Add and fidelity-check a benchmark](/contribute/environments/adding-a-benchmark)
+- [Build a single-step environment](/environment-tutorials/single-step-environment)
+- [Integrate an external environment](/environment-tutorials/integrate-external-environments)

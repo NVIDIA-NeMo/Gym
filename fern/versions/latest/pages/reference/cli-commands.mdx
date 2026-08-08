@@ -21,11 +21,11 @@ ng ...                        # 'ng' is an alias for 'gym'
 
 # Discover
 gym list benchmarks [<name>] [--json]         # list benchmarks (or inspect one), by their --benchmark value
-gym list environments [<name>] [--json]       # list environments (or inspect one)
+gym list environments [<name>] [--json]       # local environment + benchmark catalog
 gym list agents [<name>] [--json]             # list agent harnesses and how each composes
 gym list models [<name>] [--json]             # list --model-type values (or inspect a model)
 gym list resources-servers [<name>] [--json]  # list --resources-server values (or inspect one)
-gym search [<type>] <query> [--json]          # filter a component type (default: benchmarks) by query
+gym search [<type>] <query> [--json]          # search the environment catalog, or an explicit type
 
 # Datasets
 gym dataset upload            # upload a prepared dataset to HF (default) or GitLab
@@ -36,11 +36,12 @@ gym dataset render            # generate a dataset preview (materialize prompts)
 gym dataset collate           # validate and collate a dataset
 
 # Environments
-gym env init                  # scaffold a new resources server
+gym env init                  # scaffold a manifest-backed environment or benchmark
 gym env resolve               # resolve and print the final merged config
-gym env validate              # validate a config (no Ray, no servers) — fast pre-flight check
+gym env validate              # validate a manifest entry or config offline
 gym env packages              # list packages in a server's virtual environment
-gym env test                  # test resources server(s); all of them if none is given
+gym env test                  # test a manifest scorer, or legacy resources server(s)
+gym env publish               # run the local readiness and catalog gate
 gym env start                 # start the servers
 gym env status                # show running servers
 
@@ -159,13 +160,14 @@ gym list benchmarks --json | jq '.[].name'
 
 ### `gym list environments`
 
-List the environments available under `environments/`, by short name (with their domain and description).
-The names map to environments' configs and can be passed to `--environment` on commands like `gym env start` / `gym eval run`.
+List environments and benchmarks discovered from manifests and legacy configs. Manifest-backed entries are `experimental`; configurations not yet migrated are `no-manifest`.
 
 | Option | Description |
 | --- | --- |
-| `[<name>]` | Inspect a single environment (config path, resources servers, agent, datasets). |
-| `--json` | Output the environment list as JSON. |
+| `[<name>]` | Inspect a single catalog entry. Use `--kind` if both kinds share a name. |
+| `--kind {environment,benchmark}` | Filter or disambiguate by kind. |
+| `--domain`, `--modality`, `--licensing`, `--status` | Filter authored catalog metadata. |
+| `--json` | Output catalog entries as JSON. |
 
 ```bash
 gym list environments
@@ -222,17 +224,16 @@ gym list resources-servers --json | jq '.[].name'
 
 ### `gym search`
 
-Filter a component type's listing to fuzzy matches on a query (against each component's name/value, description, domain, and type-specific fields).
-The type is optional and defaults to `benchmarks`.
+Search the unified environment and benchmark catalog by name, description, and domain. Supplying a component type preserves the focused component searches.
 
 | Option | Description |
 | --- | --- |
-| `[<type>]` | Component type to search: `benchmarks` (default), `environments`, `agents`, `models`, or `resources-servers`. |
+| `[<type>]` | Optional focused type: `benchmarks`, `environments`, `agents`, `models`, or `resources-servers`. |
 | `QUERY` | Text matched (substring or fuzzy) against a component's name, description, and key metadata (positional, required). |
 | `--json` | Output matches as JSON. |
 
 ```bash
-gym search math                       # benchmarks matching "math" (default type)
+gym search math                       # environments and benchmarks matching "math"
 gym search environments calendar      # environments matching "calendar"
 gym search models vllm --json
 ```
@@ -387,14 +388,18 @@ Commands for developing, running, and inspecting environments (a dataset + agent
 
 ### `gym env init`
 
-Scaffold a new resources server with template files (config, app, tests, README, data directory).
+Create an authoring scaffold for a manifest-backed environment or benchmark. The legacy resources-server-only form remains available.
 
 | Option | Description |
 | --- | --- |
-| `--resources-server NAME` | Name of the resources server to create. |
+| `--environment NAME` / `--benchmark NAME` | Kind and name to scaffold. |
+| `--profile` | `stock-loop`, `measured-loop`, `external-loop`, or `custom-driver`. Interactive when omitted on a terminal; defaults to `stock-loop` otherwise. |
+| `--reuse-verifier NAME` | Reuse a canonical resources-server config for a `stock-loop` entry. |
+| `--resources-server NAME` | Use the legacy resources-server-only scaffold. |
 
 ```bash
-gym env init --resources-server my_server
+gym env init --environment my_eval --profile stock-loop
+gym env init --benchmark my_benchmark --reuse-verifier string_match
 ```
 
 ### `gym env resolve`
@@ -421,10 +426,14 @@ gym env resolve \
 
 ### `gym env validate`
 
-Validate a config without starting Ray or any server subprocess — a fast pre-flight check that catches config mistakes (missing/malformed `config_paths`, unknown server cross-references, unset mandatory `???` values, schema errors) in well under a second instead of after a Ray bootstrap. Exits `0` when valid, or `1` with a clean message (no traceback) when not. A model config is **not** required — model interpolations resolve against a dummy model; pass one (or `--model-type`) if you want it validated too.
+With a positional name, validate its manifest, resolved composition, mirror fields, and dataset rows offline without executing `prepare.py`. Without a name, validate config as before.
 
 | Option | Description |
 | --- | --- |
+| `[NAME]` | Manifest-backed environment or benchmark to validate. |
+| `--kind {environment,benchmark}` | Disambiguate a shared catalog name. |
+| `--sync` | Update only config-mirrored manifest fields. |
+| `--json` | Emit the resolved validation report as JSON. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
 | `--resources-server NAME` | Validate a named resources server config. |
@@ -433,6 +442,8 @@ Validate a config without starting Ray or any server subprocess — a fast pre-f
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
 ```bash
+gym env validate my_eval
+gym env validate shared_name --kind benchmark --sync
 gym env validate --environment workplace_assistant
 gym env validate --benchmark gsm8k
 
@@ -462,19 +473,41 @@ gym env packages \
 
 ### `gym env test`
 
-Test resource server(s) by running their pytest suite. If no resources server is given, all of them are tested.
+With a positional name, run its scorer fixture in-process. Required cases cover full reward, zero reward, malformed input, and seeded determinism when declared. Without a name, the command retains the legacy resources-server pytest behavior.
 
 | Option | Description |
 | --- | --- |
+| `[NAME]` | Manifest-backed environment or benchmark whose scorer fixture should run. |
+| `--kind {environment,benchmark}` | Disambiguate a shared catalog name. |
+| `--update-expected` | Explicitly update observed reward expectations after all gates pass. |
 | `--resources-server NAME` | Resources server to test. Omit to test all servers. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
+# Test a manifest-backed scorer fixture
+gym env test my_eval
+
 # Test a single server
 gym env test --resources-server example_single_tool_call
 
 # Test all servers
 gym env test
+```
+
+### `gym env publish`
+
+Run the local readiness check: reject scaffold markers, validate, test the scorer, and confirm that the same entry is rediscovered in the local catalog. This command does not publish remotely.
+
+| Option | Description |
+| --- | --- |
+| `NAME` | Manifest-backed environment or benchmark whose publication readiness should be checked. |
+| `--kind {environment,benchmark}` | Disambiguate a shared catalog name. |
+| `--json` | Emit the readiness report as JSON. |
+| `--search-dir DIR` | Extra root directory to search for the catalog entry. Repeatable. |
+
+```bash
+gym env publish my_eval
+gym env publish shared_name --kind benchmark --json
 ```
 
 ### `gym env start`

@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
 import os
 import sys
 import types
+from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
@@ -25,6 +27,7 @@ import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
+from nemo_gym.environment_onboarding import PUBLISH_PLACEHOLDER
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
@@ -706,6 +709,245 @@ class TestEnvInitFlags:
         assert target == "nemo_gym.cli.env:init_resources_server"
         assert overrides == ["+entrypoint=resources_servers/my_server"]
 
+    def test_legacy_entrypoint_override_remains_supported(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "init", "+entrypoint=resources_servers/my_server"],
+        )
+
+        assert target == "nemo_gym.cli.env:init_resources_server"
+        assert overrides == ["+entrypoint=resources_servers/my_server"]
+
+    def test_manifest_scaffold_routes_kind_profile_and_reuse(self, monkeypatch: MonkeyPatch) -> None:
+        captured = {}
+        monkeypatch.setattr(
+            "nemo_gym.cli.env.init_catalog_entry",
+            lambda name, **kwargs: captured.update(name=name, **kwargs),
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "gym",
+                "env",
+                "init",
+                "--benchmark",
+                "science",
+                "--profile",
+                "stock-loop",
+                "--reuse-verifier",
+                "string_match",
+            ],
+        )
+
+        main()
+
+        assert captured == {
+            "name": "science",
+            "kind": "benchmark",
+            "profile": "stock-loop",
+            "reuse_verifier": "string_match",
+        }
+
+    def test_noninteractive_scaffold_defaults_to_stock_loop(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        captured = {}
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(
+            "nemo_gym.cli.env.init_catalog_entry",
+            lambda name, **kwargs: captured.update(name=name, **kwargs),
+        )
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "init", "--environment", "science"])
+
+        main()
+
+        assert captured["profile"] == "stock-loop"
+        assert "Pass --profile to override" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("answers", "message"),
+        [
+            (("invalid",), "profile selection must be 1, 2, 3, or 4"),
+            (("3", "invalid"), "driver selection must be 1 or 2"),
+        ],
+    )
+    def test_invalid_interactive_answer_is_a_clean_cli_error(
+        self,
+        monkeypatch: MonkeyPatch,
+        capsys,
+        answers: tuple[str, ...],
+        message: str,
+    ) -> None:
+        responses = iter(answers)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "init", "--environment", "science"])
+
+        with pytest.raises(SystemExit, match="2"):
+            main()
+
+        assert message in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("answers", "profile"),
+        [
+            (("",), "stock-loop"),
+            (("1",), "stock-loop"),
+            (("2",), "measured-loop"),
+            (("3", "1"), "external-loop"),
+            (("3", "2"), "custom-driver"),
+        ],
+    )
+    def test_interactive_profile_questionnaire(
+        self,
+        monkeypatch: MonkeyPatch,
+        answers: tuple[str, ...],
+        profile: str,
+    ) -> None:
+        captured = {}
+        responses = iter(answers)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
+        monkeypatch.setattr(
+            "nemo_gym.cli.env.init_catalog_entry",
+            lambda name, **kwargs: captured.update(name=name, **kwargs),
+        )
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "init", "--environment", "science"])
+
+        main()
+
+        assert captured["profile"] == profile
+
+
+class TestEnvironmentOnboardingRouting:
+    @pytest.mark.parametrize(
+        ("command", "target"),
+        [
+            ("test", "nemo_gym.cli.env:test_all"),
+            ("validate", "nemo_gym.cli.env:validate"),
+        ],
+    )
+    def test_hydra_deletion_override_is_not_treated_as_a_catalog_name(
+        self,
+        monkeypatch: MonkeyPatch,
+        command: str,
+        target: str,
+    ) -> None:
+        actual_target, overrides = _dispatch_for(monkeypatch, ["env", command, "~obsolete"])
+
+        assert actual_target == target
+        assert overrides == ["~obsolete"]
+
+    def test_local_onboarding_workflow(
+        self,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+        capsys,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
+
+        def run(*args: str) -> str:
+            monkeypatch.setattr(sys, "argv", ["gym", *args])
+            main()
+            return capsys.readouterr().out
+
+        assert "Created environment 'sample'" in run(
+            "env", "init", "--environment", "sample", "--profile", "stock-loop"
+        )
+        assert "nothing changed" in run("env", "init", "--environment", "sample", "--profile", "stock-loop")
+
+        validation = json.loads(run("env", "validate", "sample", "--kind", "environment", "--json"))
+        assert validation["name"] == "sample"
+        rendered = run("env", "validate", "sample", "--kind", "environment")
+        assert "Manifest:" in rendered
+        assert "Dataset:" in rendered
+        assert "Components resolved:" in rendered
+
+        assert "3 fixture cases" in run("env", "test", "sample", "--kind", "environment", "--update-expected")
+
+        for path in tmp_path.rglob("*"):
+            if path.is_file() and path.suffix in {".jsonl", ".md", ".py", ".yaml"}:
+                content = path.read_text(encoding="utf-8")
+                path.write_text(content.replace(PUBLISH_PLACEHOLDER, "completed"), encoding="utf-8")
+
+        publication = json.loads(run("env", "publish", "sample", "--kind", "environment", "--json"))
+        assert publication["status"] == "experimental"
+        inspected = json.loads(run("list", "environments", "sample", "--json"))
+        assert inspected["details"]["manifest"].endswith("environments/sample/manifest.yaml")
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("env", "init", "--environment", "sample", "+ignored=true"),
+            ("env", "validate", "sample", "+ignored=true"),
+            ("env", "test", "sample", "+ignored=true"),
+            ("env", "publish", "sample", "+ignored=true"),
+        ],
+    )
+    def test_catalog_commands_reject_ignored_hydra_overrides(
+        self,
+        monkeypatch: MonkeyPatch,
+        args: tuple[str, ...],
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", *args])
+
+        with pytest.raises(SystemExit, match="2"):
+            main()
+
+    @pytest.mark.parametrize(
+        ("args", "message"),
+        [
+            (("env", "validate", "--json"), "require a catalog NAME"),
+            (("env", "test", "--update-expected"), "require a catalog NAME"),
+            (
+                ("env", "init", "--resources-server", "sample", "--profile", "stock-loop"),
+                "require --environment or --benchmark",
+            ),
+        ],
+    )
+    def test_catalog_options_require_a_compatible_selector(
+        self,
+        monkeypatch: MonkeyPatch,
+        capsys,
+        args: tuple[str, ...],
+        message: str,
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", *args])
+
+        with pytest.raises(SystemExit, match="2"):
+            main()
+
+        assert message in capsys.readouterr().err
+
+    def test_catalog_filters_become_reserved_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "list",
+                "environments",
+                "--kind",
+                "benchmark",
+                "--domain",
+                "math",
+                "--modality",
+                "image,video",
+                "--licensing",
+                "Apache-2.0",
+                "--status",
+                "experimental",
+            ],
+        )
+
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert set(overrides) == {
+            '+catalog_kind="benchmark"',
+            '+catalog_domain="math"',
+            '+catalog_modality="image,video"',
+            '+catalog_licensing="Apache-2.0"',
+            '+catalog_status="experimental"',
+        }
+        assert "image,video" in [item.value() for item in OverridesParser.create().parse_overrides(overrides)]
+
 
 class TestEnvPackagesFlags:
     def test_flags(self, monkeypatch: MonkeyPatch) -> None:
@@ -739,10 +981,9 @@ class TestJsonFlag:
 
 
 class TestSearch:
-    def test_search_query_only_defaults_to_benchmarks(self, monkeypatch: MonkeyPatch) -> None:
-        # `gym search <query>` (no type) reuses the benchmarks listing — backward compatible.
+    def test_search_query_only_uses_environment_catalog(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(monkeypatch, ["search", "math"])
-        assert target == "nemo_gym.cli.eval:list_benchmarks"
+        assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ['+query="math"']
 
     @pytest.mark.parametrize(
@@ -759,19 +1000,28 @@ class TestSearch:
         # `gym search <type> <query>` runs that type's listing, filtered by the query.
         target, overrides = _dispatch_for(monkeypatch, ["search", component_type, "swe"])
         assert target == expected_target
-        assert overrides == ['+query="swe"']
+        expected = ['+query="swe"']
+        if component_type == "environments":
+            expected.insert(0, "+catalog_kind=environment")
+        assert overrides == expected
 
     def test_search_json(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["search", "math", "--json"])
         assert set(overrides) == {'+query="math"', "+json=true"}
 
-    @pytest.mark.parametrize("query", ["(A)", "a b", "[x]", "A|B"])
+    def test_explicit_type_requires_query(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "search", "benchmarks"])
+        with pytest.raises(SystemExit, match="2"):
+            main()
+        assert "a query is required" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("query", ["(A)", "a b", "[x]", "A|B", 'say "hi"'])
     def test_search_query_with_special_chars_is_hydra_safe(self, monkeypatch: MonkeyPatch, query) -> None:
         # The query is quoted so Hydra's override grammar accepts characters that are otherwise syntax,
         # e.g. `gym search agents "(A)"` used to raise an override parse error. The quoted override must
         # both be valid Hydra and round-trip back to the original query string.
         _, overrides = _dispatch_for(monkeypatch, ["search", "agents", query])
-        assert overrides == [f'+query="{query}"']
+        assert overrides == [f"+query={json.dumps(query)}"]
         parsed = OverridesParser.create().parse_overrides(overrides)[0]
         assert parsed.value() == query
 

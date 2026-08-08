@@ -173,6 +173,7 @@ class GlobalConfigDictParserConfig(BaseModel):
     skip_load_from_dotenv: bool = False
 
     hide_secrets: bool = False
+    offline: bool = False
 
     # This is a shorthand we use for config resolution use cases that shouldn't require a model
     # e.g. data loading, etc
@@ -330,6 +331,7 @@ Duplicate config paths:
         port_range_low: int,
         port_range_high: int,
         initial_disallowed_ports: Optional[List[int]] = None,
+        probe_ports: bool = True,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
 
@@ -362,11 +364,26 @@ Duplicate config paths:
                 if not run_server_config_dict.get("host"):
                     run_server_config_dict["host"] = default_host
                 if not run_server_config_dict.get("port"):
-                    port = _find_open_port_using_range(
-                        disallowed_ports=disallowed_ports,
-                        port_range_low=port_range_low,
-                        port_range_high=port_range_high,
-                    )
+                    if probe_ports:
+                        port = _find_open_port_using_range(
+                            disallowed_ports=disallowed_ports,
+                            port_range_low=port_range_low,
+                            port_range_high=port_range_high,
+                        )
+                    else:
+                        port = next(
+                            (
+                                candidate
+                                for candidate in range(port_range_low, port_range_high + 1)
+                                if candidate not in disallowed_ports
+                            ),
+                            None,
+                        )
+                        if port is None:
+                            raise ConfigError(
+                                f"No unassigned port remains in configured range "
+                                f"[{port_range_low}, {port_range_high}]."
+                            )
                     run_server_config_dict["port"] = port
                     disallowed_ports.append(port)  # Disallow newly allocated port.
                 else:
@@ -658,7 +675,7 @@ Found global config dict yaml:
 
         with open_dict(global_config_dict):
             use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
-        if use_absolute_ip:
+        if use_absolute_ip and not parse_config.offline:
             default_host = gethostbyname(gethostname())
         else:
             # Do one pass through all the configs validate and populate various configs for our servers.
@@ -679,6 +696,7 @@ Found global config dict yaml:
             initial_disallowed_ports=initial_disallowed_ports,
             port_range_low=port_range_low,
             port_range_high=port_range_high,
+            probe_ports=not parse_config.offline,
         )
 
         with open_dict(global_config_dict):
@@ -727,7 +745,7 @@ Found global config dict yaml:
 
         # Set up W&B and log config. This must happen at the very last step.
         wandb_config = WANDBConfig.model_validate(global_config_dict)
-        if wandb_config.is_available:  # pragma: no cover
+        if wandb_config.is_available and not parse_config.offline:  # pragma: no cover
             environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
 
             global _WANDB_RUN

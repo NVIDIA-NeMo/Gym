@@ -101,7 +101,7 @@ class BenchmarkConfig(BaseModel):
         )
 
 
-def _benchmark_config_name(rel_config_path: Path) -> str:
+def benchmark_config_name(rel_config_path: Path) -> str:
     """The name of the benchmark config, given its path relative to ``benchmarks/``, sans ``.yaml``.
 
     This is the identity we key benchmarks by, so a listed benchmark is always a valid ``--benchmark`` argument.
@@ -133,23 +133,24 @@ def _is_benchmark_config(config_path: Path) -> bool:
         return True
 
 
-def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
+def benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     """Sorted config paths under one dir that declare a benchmark, discovered by content.
 
     A config is a benchmark iff it declares a `type: benchmark` dataset, regardless of filename, so we scan
-    every yaml. :func:`_is_benchmark_config` is a cheap prefilter (pay the resolve cost only on real
-    candidates) that also catches non-`config.yaml` names like tau2's `configs/*.yaml`. Empty if dir missing.
+    every YAML except the reserved onboarding `manifest.yaml`. :func:`_is_benchmark_config` is a cheap
+    prefilter (pay the resolve cost only on real candidates) that also catches non-`config.yaml` names like
+    tau2's `configs/*.yaml`. Empty if dir missing.
     """
     if not benchmarks_dir.is_dir():
         return []
     config_paths = [benchmarks_dir / p for p in glob("**/*.yaml", root_dir=benchmarks_dir, recursive=True)]
-    return sorted(p for p in config_paths if _is_benchmark_config(p))
+    return sorted(p for p in config_paths if p.name != "manifest.yaml" and _is_benchmark_config(p))
 
 
 def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConfig]:
     """Map benchmark name -> :class:`BenchmarkConfig` for every benchmark config under one dir."""
     benchmarks_dict = dict()
-    for config_path in _benchmark_config_paths(benchmarks_dir):
+    for config_path in benchmark_config_paths(benchmarks_dir):
         try:
             # Listing has no runtime context, so tolerate unset runtime-only values.
             maybe_bc = BenchmarkConfig.from_config_path(config_path, strict=False)
@@ -165,7 +166,7 @@ def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConf
         if not maybe_bc:
             continue
 
-        benchmarks_dict[_benchmark_config_name(config_path.relative_to(benchmarks_dir))] = maybe_bc
+        benchmarks_dict[benchmark_config_name(config_path.relative_to(benchmarks_dir))] = maybe_bc
 
     return benchmarks_dict
 
