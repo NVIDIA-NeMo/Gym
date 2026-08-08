@@ -15,7 +15,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
@@ -152,7 +152,6 @@ class SimpleStrandsAgentConfig(BaseResponsesAPIAgentConfig):
     prompt_tag: str = "swe_generic_v2"
     native_user_prompt: bool = False
     system_prompt: Optional[str] = None
-    api_key: str = "gym"
     workspace_root: str = "outputs/simple_strands_agent/workspaces"
     keep_workspaces: bool = False
     ssa_source_root: Optional[str] = None
@@ -173,10 +172,11 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
     config: SimpleStrandsAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    _ssa_python: Path = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        ensure_ssa(self.config.ssa_source_root, self.config.ssa_python)
+        self._ssa_python = ensure_ssa(self.config.ssa_source_root, self.config.ssa_python)
 
     def _workspace(self) -> Path:
         root = Path(self.config.workspace_root).expanduser()
@@ -187,14 +187,13 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         return work_dir
 
     async def _run_ssa(self, payload: dict[str, Any]) -> dict[str, Any]:
-        python = await asyncio.to_thread(ensure_ssa, self.config.ssa_source_root, self.config.ssa_python)
         work_dir = Path(payload["work_dir"])
         request_path = work_dir / "request.json"
         result_path = work_dir / "result.json"
         request_path.write_text(json.dumps(payload))
         runner = Path(__file__).with_name("ssa_runner.py")
         process = await asyncio.create_subprocess_exec(
-            str(python),
+            str(self._ssa_python),
             str(runner),
             str(request_path),
             str(result_path),
@@ -242,7 +241,6 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             "system_prompt": system_prompt,
             "model": model_name,
             "model_base_url": self.resolve_model_base_url(self.config.model_server.name, rollout_id),
-            "api_key": self.config.api_key,
             "work_dir": str(work_dir),
             "output_dir": str(work_dir / "output"),
             "rollout_id": rollout_id or uuid4().hex,

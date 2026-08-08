@@ -69,6 +69,7 @@ def ensure_ssa(source_root: str | None = None, python: str | None = None) -> Pat
             raise RuntimeError("uv is required to install Simple Strands Agent")
         venv.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ | {"UV_PROJECT_ENVIRONMENT": str(venv)}
+        env.pop("VIRTUAL_ENV", None)
         subprocess.run(
             [
                 uv,

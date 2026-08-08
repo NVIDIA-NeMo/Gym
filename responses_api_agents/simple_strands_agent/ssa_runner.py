@@ -98,7 +98,7 @@ def _build_config(payload: dict[str, Any], output_dir: Path):
             "cache_client": False,
             "client_args": {
                 "base_url": payload["model_base_url"],
-                "api_key": payload["api_key"],
+                "api_key": "gym",
                 "timeout": payload["model_timeout"],
                 "max_retries": 0,
             },
@@ -176,7 +176,6 @@ def _run(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "messages": agent.messages,
         "usage": usage,
-        "stop_reason": result.stop_reason if result else "",
     }
 
 
