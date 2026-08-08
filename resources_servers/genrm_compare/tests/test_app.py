@@ -366,6 +366,95 @@ class TestGenRMCompareResourcesServer:
         actual_rewards = [r.reward for r in results]
         assert expected_rewards == actual_rewards
 
+    def _make_cohort_server(self, cohort_timeout_s: float) -> GenRMCompareResourcesServer:
+        config = GenRMCompareConfig(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+            num_rollouts_per_prompt=2,
+            cohort_timeout_s=cohort_timeout_s,
+        )
+        return GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+
+    def _make_cohort_body(self, task_index: int) -> GenRMCompareVerifyRequest:
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "type": "message",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "an answer", "annotations": []}],
+                }
+            ],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        return GenRMCompareVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "same prompt"}]
+            ),
+            response=response,
+            task_index=task_index,
+        )
+
+    @pytest.mark.parametrize(
+        ("task_index", "arrivals", "cohort_timeout_s", "jit_mode", "reason"),
+        [
+            # 1 of 2 ever arrives: the first timed-out waiter claims and scores what came.
+            (41, 1, 0.05, "empty", "cohort_timeout"),
+            # Full cohort resolves promptly; the JIT stub produced nothing to compare.
+            (42, 2, 30.0, "empty", "no_comparisons"),
+            # The cohort-completing arrival's JIT compare straddles the deadline: the timeout
+            # claim wins the race and the final arrival must not crash on the claimed buffer.
+            (43, 2, 0.05, "slow_final", "cohort_timeout"),
+            # Malformed metadata poisons the sort: scoring must still resolve every waiter
+            # instead of hanging them with their timeouts already spent.
+            (44, 2, 30.0, "poisoned", "aggregation_failed"),
+        ],
+    )
+    async def test_cohorts_always_release(
+        self,
+        monkeypatch: MonkeyPatch,
+        task_index: int,
+        arrivals: int,
+        cohort_timeout_s: float,
+        jit_mode: str,
+        reason: str,
+    ) -> None:
+        """Every cohort resolves every waiter — full, timed out, raced, or poisoned."""
+        server = self._make_cohort_server(cohort_timeout_s)
+        calls = {"n": 0}
+
+        async def jit_compare(*args, **kwargs):
+            calls["n"] += 1
+            if jit_mode == "slow_final" and calls["n"] == 2:
+                await asyncio.sleep(0.2)
+            if jit_mode == "poisoned":
+                return ([(1.0, 2.0, 3.0)], [None])
+            return ([], [])
+
+        monkeypatch.setattr(
+            GenRMCompareResourcesServer, "_run_jit_compare_using_most_recent_response_obj", jit_compare
+        )
+
+        responses = await asyncio.wait_for(
+            asyncio.gather(*(server.verify(self._make_cohort_body(task_index=task_index)) for _ in range(arrivals))),
+            timeout=5,
+        )
+
+        expected = (server.config.default_score, reason)
+        assert [(r.reward, r.failure_reason) for r in responses] == [expected] * arrivals
+
 
 class TestRunSingleComparison:
     """Tests for GenRMCompareResourcesServer._run_single_comparison."""
