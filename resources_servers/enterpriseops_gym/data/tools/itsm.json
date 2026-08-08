@@ -1,0 +1,5223 @@
+{
+  "gym_name": "gym-itsm-mcp",
+  "gym_url": "http://localhost:8006",
+  "snapshot_at": "2026-07-07T17:47:19.235473+00:00",
+  "tools": [
+    {
+      "name": "get_user_using_email",
+      "title": null,
+      "description": "Retrieve a user by their email address.\n        \n        Use this tool to find a specific user using their email address as the identifier.\n        The email must be in valid format (e.g., user@domain.com).\n        \n        Authentication Requirements:\n          - x-itsm-user-token: Optional valid user authentication token. Validates the requester's identity.\n          - API returns 401 Unauthorized if provided token is invalid.\n        \n        Parameters:\n          - email (required): User's email address\n        \n        Returns a single user object if found, or an error if the user doesn't exist or email format is invalid.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "User's email address",
+            "format": "email"
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_user",
+      "title": null,
+      "description": "Retrieve a user by their user ID.\n        \n        Use this tool to find a specific user using their unique user_id identifier.\n        \n        Authentication Requirements:\n          - x-itsm-user-token: Optional user authentication token. Validates the requester's identity.\n          - API returns 401 Unauthorized if provided token is invalid.\n        \n        Parameters:\n          - user_id (required): User's unique identifier (format: USER_001, USER_002, etc.)\n        \n        Returns a single user object if found, or an error if the user doesn't exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "User's unique identifier (String, max 32 characters)"
+          }
+        },
+        "required": [
+          "user_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_user_using_name",
+      "title": null,
+      "description": "Retrieve a user by their first and last name combination.\n        \n        Use this tool to find a specific user using both their first name and last name.\n        The search is case-insensitive.\n        \n        Authentication Requirements:\n          - x-itsm-user-token: Optional user authentication token. Validates the requester's identity.\n          - API returns 401 Unauthorized if provided token is invalid.\n        \n        Parameters:\n          - first_name (required): User's first name\n          - last_name (required): User's last name\n        \n        Returns a single user object if found, or an error if no user matches the name combination.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "first_name": {
+            "type": "string",
+            "description": "User's first name"
+          },
+          "last_name": {
+            "type": "string",
+            "description": "User's last name"
+          }
+        },
+        "required": [
+          "first_name",
+          "last_name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_users",
+      "title": null,
+      "description": "List users with optional filters.\n        \n        Use this tool to retrieve a list of users. Without filters, returns all users.\n        With filters, returns only users matching the specified criteria.\n        \n        Authentication Requirements:\n          - x-itsm-user-token: Optional user authentication token. Validates the requester's identity.\n          - API returns 401 Unauthorized if provided token is invalid.\n        \n        Optional Filters:\n          - email: Filter by exact email address\n          - user_id: Filter by exact user ID\n          - first_name: Filter by first name (case-insensitive, partial match)\n          - last_name: Filter by last name (case-insensitive, partial match)\n          - phone: Filter by phone number (format: +1-415-555-0101)\n          - role: Filter by role (admin, manager, agent, reporter)\n          - active: Filter by active status (true or false)\n          - created_after: Filter users created after date (ISO 8601 format: 2024-01-15 or 2024-01-15T09:00:00)\n          - created_before: Filter users created before date (ISO 8601 format)\n        \n        Returns a list of user objects matching the filters, or all users if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by email address (exact match)",
+            "default": ""
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by user ID (exact match)",
+            "default": ""
+          },
+          "first_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by first name (partial match)",
+            "default": ""
+          },
+          "last_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by last name (partial match)",
+            "default": ""
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by phone number (partial match)",
+            "default": ""
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by user role (admin, manager, agent, reporter)",
+            "default": ""
+          },
+          "active": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by active status (true/false)",
+            "default": ""
+          },
+          "created_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter users created after this date (ISO 8601 format)",
+            "default": ""
+          },
+          "created_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter users created before this date (ISO 8601 format)",
+            "default": ""
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_user",
+      "title": null,
+      "description": "Create a new user in the system.\n        \n        Use this tool to add a new user with the specified details. The system automatically generates\n        user_id (incremental: USER_001, USER_002, etc.), user_name (from first.last), and other system fields.\n        \n        Authentication Requirements:\n          - x-itsm-user-token: Optional user authentication token. Validates the requester's identity.\n          - API returns 401 Unauthorized if provided token is invalid.\n        \n        Required Parameters:\n          - first_name: User's first name (1-60 characters)\n          - last_name: User's last name (1-60 characters)\n          - email: User's email address (must be unique and valid format)\n          - phone: User's phone number (format: +1-415-555-0101, must be unique)\n          - role: User's role (must be one of: admin, manager, agent, reporter)\n          - active: Whether the user account is active (true or false)\n        \n        Optional Parameters:\n          - user_name: User login name (generated from first.last if not provided)\n          - location_id: Location identifier\n        \n        Note: The organization ID (org_id) is automatically set from the authenticated user's organization.\n        \n        Auto-Generated Fields:\n          - user_id: Incremental ID (USER_001, USER_002, etc.)\n          - user_name: Generated from first_name.last_name (lowercase)\n          - static_token: Secure authentication token\n          - created_on and updated_on timestamps\n          - sys_id and other audit fields\n        \n        Returns the newly created user object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "first_name": {
+            "type": "string",
+            "description": "User's first name (non-empty string, 1-60 characters)",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "last_name": {
+            "type": "string",
+            "description": "User's last name (non-empty string, 1-60 characters)",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "email": {
+            "type": "string",
+            "description": "User's email address (valid email format required)",
+            "format": "email"
+          },
+          "phone": {
+            "type": "string",
+            "description": "User's phone number (format: +1-415-555-0101)",
+            "pattern": "^\\+\\d{1,3}-\\d{3}-\\d{3}-\\d{4}$"
+          },
+          "role": {
+            "type": "string",
+            "description": "User's role in the system",
+            "enum": [
+              "admin",
+              "manager",
+              "agent",
+              "reporter"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the user account is active"
+          },
+          "user_name": {
+            "type": "string",
+            "description": "User login name (generated from first.last if not provided)"
+          },
+          "location_id": {
+            "type": "string",
+            "description": "Location identifier",
+            "default": ""
+          }
+        },
+        "required": [
+          "first_name",
+          "last_name",
+          "email",
+          "phone",
+          "role",
+          "active"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_user_details",
+      "title": null,
+      "description": "Update specific fields of an existing user.\n        \n        Use this tool to update one or more fields of a user identified by user_id.\n        At least one field (besides user_id) must be provided. The tool validates that\n        the new values are different from current values (idempotency check).\n        \n        Authentication Requirements:\n          - x-itsm-user-token: Optional user authentication token. Validates the requester's identity.\n          - API returns 401 Unauthorized if provided token is invalid.\n        \n        Required Parameter:\n          - user_id: Unique identifier of the user to update\n        \n        Optional Parameters (at least one required):\n          - email: Updated email address (must be unique and valid format)\n          - first_name: Updated first name (1-60 characters)\n          - last_name: Updated last name (1-60 characters)\n          - active: Updated active status (true or false)\n          - phone: Updated phone number (format: +1-415-555-0101, must be unique)\n          - role: Updated role (must be one of: admin, manager, agent, reporter)\n          - user_name: Updated user login name (must be unique)\n          - company_id: Updated company identifier\n          - location_id: Updated location identifier\n        \n        Note: Updating a field to its current value will result in an error (no changes detected).\n        System fields like sys_id, created_on, etc. cannot be directly modified.\n        \n        Returns the updated user object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "User's unique identifier to identify which user to update"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated email address (valid email format required)",
+            "format": "email"
+          },
+          "first_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated first name (non-empty string, 1-60 characters)",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "last_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated last name (non-empty string, 1-60 characters)",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Updated active status"
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated phone number (format: +1-415-555-0101)",
+            "pattern": "^\\+\\d{1,3}-\\d{3}-\\d{3}-\\d{4}$"
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated user role",
+            "enum": [
+              "admin",
+              "manager",
+              "agent",
+              "reporter"
+            ]
+          },
+          "user_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated user login name (must be unique)",
+            "default": ""
+          },
+          "company_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated company identifier",
+            "default": ""
+          },
+          "location_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated location identifier",
+            "default": ""
+          }
+        },
+        "required": [
+          "user_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_user_groups",
+      "title": null,
+      "description": "List user groups with optional filters. Returns all user groups or filtered results based on provided criteria. Requires x-itsm-user-token for authentication requirements. Returns 401 Unauthorized if token is invalid or missing. Response includes sys_* audit fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Filter by group ID (exact match)",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "description": "Filter by group name (partial match)",
+            "default": ""
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status"
+          },
+          "type": {
+            "type": "string",
+            "description": "Filter by group type",
+            "enum": [
+              "IT Support",
+              "Service Desk",
+              "Field Support Technicians",
+              "Infrastructure Problem Team"
+            ]
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter groups created after this date (ISO 8601 format)",
+            "default": ""
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter groups created before this date (ISO 8601 format)",
+            "default": ""
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_group_by_name",
+      "title": null,
+      "description": "Find a user group by its exact name. Returns the group details if found. Requires x-itsm-user-token for authentication requirements. Returns 401 Unauthorized if token is invalid or missing. Response includes sys_* audit fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The exact name of the user group to find"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_user_group",
+      "title": null,
+      "description": "Add a new user group to the system. Group name must be unique. Returns the newly created group object. Requires x-itsm-user-token for authentication requirements. Returns 401 Unauthorized if token is invalid or missing. Response includes sys_* audit fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Group's name",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "type": {
+            "type": "string",
+            "description": "Group's type",
+            "enum": [
+              "IT Support",
+              "Service Desk",
+              "Field Support Technicians",
+              "Infrastructure Problem Team"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the group is active",
+            "default": true
+          },
+          "email": {
+            "type": "string",
+            "description": "Group's email address",
+            "format": "email",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "description": "Group's description",
+            "default": ""
+          },
+          "manager_id": {
+            "type": "string",
+            "description": "Group manager's user ID",
+            "default": ""
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_user_group",
+      "title": null,
+      "description": "Update user group details. At least one field must be provided. Group name must be unique if provided. Returns error if all fields match current values (idempotency validation). Requires x-itsm-user-token for authentication requirements. Returns 401 Unauthorized if token is invalid or missing. Response includes sys_* audit fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Group's unique identifier",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "description": "Updated group name",
+            "minLength": 1,
+            "maxLength": 80,
+            "default": ""
+          },
+          "type": {
+            "type": "string",
+            "description": "Updated group type",
+            "enum": [
+              "IT Support",
+              "Service Desk",
+              "Field Support Technicians",
+              "Infrastructure Problem Team"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Updated active status"
+          }
+        },
+        "required": [
+          "group_id"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_group_member",
+      "title": null,
+      "description": "Add a new group member to a user group. Validates that group and user exist, and that the user is not already a member. Returns the newly created membership object. Requires x-itsm-user-token for authentication requirements. Returns 401 Unauthorized if token is invalid or missing. Response includes sys_* audit fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Group's unique identifier",
+            "default": ""
+          },
+          "user_id": {
+            "type": "string",
+            "description": "User's unique identifier",
+            "default": ""
+          }
+        },
+        "required": [
+          "group_id",
+          "user_id"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "remove_group_membership",
+      "title": null,
+      "description": "Remove group membership from a user group. Validates that group, user, and optional member_id exist. Member_id must match the group_id and user_id if provided. Requires x-itsm-user-token for authentication requirements. Returns 401 Unauthorized if token is invalid or missing. Response includes sys_* audit fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Group's unique identifier",
+            "default": ""
+          },
+          "user_id": {
+            "type": "string",
+            "description": "User's unique identifier",
+            "default": ""
+          },
+          "member_id": {
+            "type": "string",
+            "description": "Member's unique identifier (optional for additional validation)",
+            "default": ""
+          }
+        },
+        "required": [
+          "group_id",
+          "user_id"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_group_members",
+      "title": null,
+      "description": "List group members with optional filters. Returns all group members or filtered results based on provided criteria. Requires x-itsm-user-token for authentication requirements. Returns 401 Unauthorized if token is invalid or missing. Response includes sys_* audit fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "member_id": {
+            "type": "string",
+            "description": "Filter by member ID (exact match)",
+            "default": ""
+          },
+          "group_id": {
+            "type": "string",
+            "description": "Filter by group ID (exact match)",
+            "default": ""
+          },
+          "user_id": {
+            "type": "string",
+            "description": "Filter by user ID (exact match)",
+            "default": ""
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter members created after this date (ISO 8601 format)",
+            "default": ""
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter members created before this date (ISO 8601 format)",
+            "default": ""
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_location_by_given_name",
+      "title": null,
+      "description": "Find a location by its name.\n        \n        Use this tool to find a specific location using its name as the identifier.\n        The search is case-sensitive and requires an exact name match.\n        \n        Parameters:\n          - name (required): Location name to search for\n        \n        Returns a single location object if found, or an error if the location doesn't exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the location to find"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_locations",
+      "title": null,
+      "description": "List locations with optional filters.\n        \n        Use this tool to retrieve a list of locations. Without filters, returns all locations.\n        With filters, returns only locations matching the specified criteria.\n        \n        Optional Filters:\n          - name: Filter by location name (partial match)\n          - city: Filter by city (partial match)\n          - country: Filter by country (partial match)\n          - active: Filter by active status (true or false)\n          - created_after: Filter locations created after date (ISO 8601 format: 2024-01-01 or 2024-01-01T08:00:00)\n          - created_before: Filter locations created before date (ISO 8601 format)\n        \n        Returns a list of location objects matching the filters, or all locations if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by location name (partial match)",
+            "default": ""
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by city (partial match)",
+            "default": ""
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by country (partial match)",
+            "default": ""
+          },
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Filter by active status (true/false)",
+            "default": true
+          },
+          "created_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter locations created after this date (ISO 8601 format)",
+            "default": ""
+          },
+          "created_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter locations created before this date (ISO 8601 format)",
+            "default": ""
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_location",
+      "title": null,
+      "description": "Create a new location in the system.\n        \n        Use this tool to add a new location with the specified details. The system automatically generates\n        location_id (incremental: LOC_001, LOC_002, etc.) and timestamps.\n        \n        Required Parameters:\n          - name: Location name (must be unique)\n          - city: City name (cannot be empty)\n          - country: Country (cannot be empty)\n        \n        Optional Parameters:\n          - active: Whether the location is active (default: true)\n          - plot_no: Plot/building number\n          - street: Street address\n          - state: State/province/region\n        \n        Auto-Generated Fields:\n          - location_id: Incremental ID (LOC_001, LOC_002, etc.)\n          - created_on and updated_on timestamps\n        \n        Returns the newly created location object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Location name (must be unique)",
+            "minLength": 1
+          },
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the location is active",
+            "default": true
+          },
+          "plot_no": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Plot/building number",
+            "default": ""
+          },
+          "street": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Street address",
+            "default": ""
+          },
+          "city": {
+            "type": "string",
+            "description": "City name (cannot be empty)",
+            "minLength": 1
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "State/province/region",
+            "default": ""
+          },
+          "country": {
+            "type": "string",
+            "description": "Country (cannot be empty)",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name",
+          "city",
+          "country"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_location_by_id",
+      "title": null,
+      "description": "Get a location by its ID.\n        \n        Use this tool to find a specific location using its unique location_id identifier.\n        \n        Parameters:\n          - location_id (required): Location's unique identifier (format: LOC_001, LOC_002, etc.)\n        \n        Returns a single location object if found, or an error if the location doesn't exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "location_id": {
+            "type": "string",
+            "description": "Location's unique identifier"
+          }
+        },
+        "required": [
+          "location_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_location",
+      "title": null,
+      "description": "Update specific fields of an existing location.\n        \n        Use this tool to update one or more fields of a location identified by location_id.\n        At least one field (besides location_id) must be provided. The tool validates that\n        the new values are different from current values (idempotency check).\n        \n        Required Parameter:\n          - location_id: Unique identifier of the location to update\n        \n        Optional Parameters (at least one required):\n          - name: Updated location name (must be unique)\n          - active: Updated active status\n          - plot_no: Updated plot/building number\n          - street: Updated street address\n          - city: Updated city name (cannot be empty if provided)\n          - state: Updated state/province/region\n          - country: Updated country (cannot be empty if provided)\n        \n        Note: If updating city or country, they cannot be empty strings.\n        \n        Note: Updating a field to its current value will result in an error (no changes detected).\n        \n        Returns the updated location object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "location_id": {
+            "type": "string",
+            "description": "Location's unique identifier to identify which location to update"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated location name (must be unique)",
+            "default": ""
+          },
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Updated active status",
+            "default": true
+          },
+          "plot_no": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated plot/building number",
+            "default": ""
+          },
+          "street": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated street address",
+            "default": ""
+          },
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated city name (cannot be empty if provided)",
+            "minLength": 1
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated state/province/region",
+            "default": ""
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated country (cannot be empty if provided)",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "location_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_new_incident_template",
+      "title": null,
+      "description": "Create a new incident template in the system.\n        \n        Use this tool to add a new incident template with the specified details. The system automatically\n        generates incident_template_id (incremental: TMPL_001, TMPL_002, etc.) and timestamps.\n        \n        Required Parameters:\n          - name: Template name (1-120 characters, must be unique)\n          - change_request_values: JSON object containing template fields\n        \n        Required fields inside change_request_values:\n          - caller_id: User ID who is the default caller\n          - short_description: Brief description (1-120 characters)\n        \n        Optional fields inside change_request_values:\n          - channel: Incident channel (values: SELF_SERVICE, PHONE, EMAIL, CHAT, WALK_IN, VIRTUAL_AGENT)\n          - category: Incident category (values: INQUIRY_HELP, SOFTWARE, HARDWARE, DATABASE, PASSWORD_RESET)\n          - impact: Impact level (values: HIGH, MEDIUM, LOW) - defaults to LOW\n          - urgency: Urgency level (values: HIGH, MEDIUM, LOW) - defaults to LOW\n          - priority: Priority level (values: CRITICAL, HIGH, MODERATE, LOW, PLANNING) - defaults to PLANNING\n          - configuration_item: Configuration item ID\n          - service: Service ID\n          - service_offering: Service offering ID\n        \n        Optional Parameters:\n          - active: Whether the template is active (defaults to true)\n        \n        Auto-Generated Fields:\n          - incident_template_id: Incremental ID (TMPL_001, TMPL_002, etc.)\n          - created_at and updated_at timestamps\n        \n        Returns the newly created incident template object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Template name (unique, 1-120 characters)",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "change_request_values": {
+            "type": "object",
+            "description": "JSON object containing template fields. Required: caller_id, short_description. Optional: channel, category, impact, urgency, priority, configuration_item, service, service_offering",
+            "properties": {
+              "caller_id": {
+                "type": "string",
+                "description": "Default caller user ID (required)"
+              },
+              "short_description": {
+                "type": "string",
+                "description": "Brief description (required, 1-120 characters)"
+              },
+              "channel": {
+                "type": "string",
+                "description": "Incident channel",
+                "enum": [
+                  "self-service",
+                  "phone",
+                  "email",
+                  "chat",
+                  "walk-in",
+                  "virtual-agent"
+                ]
+              },
+              "category": {
+                "type": "string",
+                "description": "Incident category",
+                "enum": [
+                  "inquiry-help",
+                  "software",
+                  "hardware",
+                  "database",
+                  "password-reset"
+                ]
+              },
+              "impact": {
+                "type": "string",
+                "description": "Impact level (defaults to 'low')",
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "urgency": {
+                "type": "string",
+                "description": "Urgency level (defaults to 'low')",
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "priority": {
+                "type": "string",
+                "description": "Priority level (defaults to 'planning')",
+                "enum": [
+                  "critical",
+                  "high",
+                  "moderate",
+                  "low",
+                  "planning"
+                ]
+              },
+              "configuration_item": {
+                "type": "string",
+                "description": "Configuration item ID"
+              },
+              "service": {
+                "type": "string",
+                "description": "Service ID"
+              },
+              "service_offering": {
+                "type": "string",
+                "description": "Service offering ID"
+              }
+            },
+            "required": [
+              "caller_id",
+              "short_description"
+            ]
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the template is active (defaults to true)"
+          }
+        },
+        "required": [
+          "name",
+          "change_request_values"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_incident_template",
+      "title": null,
+      "description": "Update specific fields of an existing incident template.\n        \n        Use this tool to update one or more fields of an incident template identified by incident_template_id.\n        At least one field (besides incident_template_id) must be provided. The tool validates that\n        the new values are different from current values (idempotency check).\n        \n        IMPORTANT - Field Update Behavior:\n        - Empty strings (\"\") are IGNORED - the field will not be updated\n        - Explicit null values for nullable fields (channel, category, configuration_item, service, service_offering) will SET the field to null\n        - Only fields with actual values will be validated and updated\n        - At least one field must be provided with a non-empty value\n        \n        Required Parameter:\n          - incident_template_id: Unique identifier of the template to update\n        \n        Optional Parameters (at least one required):\n          - name: Updated template name (1-120 characters, must be unique)\n            * Empty string (\"\") = ignore, don't update\n            * Valid string = update to this value\n          - change_request_values: JSON object containing any of these fields:\n            * caller_id: Updated caller user ID (empty string = ignore)\n            * short_description: Updated brief description (empty string = ignore)\n            * channel: Updated incident channel (self-service, phone, email, chat, walk-in, virtual-agent)\n              - Empty string (\"\") = ignore, don't update\n              - null = set to null (clear the field)\n              - Valid value = update to this value\n            * category: Updated incident category (inquiry-help, software, hardware, database, password-reset)\n              - Empty string (\"\") = ignore, don't update\n              - null = set to null (clear the field)\n              - Valid value = update to this value\n            * impact: Updated impact level (high, medium, low) (empty string = ignore)\n            * urgency: Updated urgency level (high, medium, low) (empty string = ignore)\n            * priority: Updated priority level (critical, high, moderate, low, planning) (empty string = ignore)\n            * configuration_item: Updated configuration item ID\n              - Empty string (\"\") = ignore, don't update\n              - null = set to null (clear the field)\n              - Valid ID = update to this value\n            * service: Updated service ID\n              - Empty string (\"\") = ignore, don't update\n              - null = set to null (clear the field)\n              - Valid ID = update to this value\n            * service_offering: Updated service offering ID\n              - Empty string (\"\") = ignore, don't update\n              - null = set to null (clear the field)\n              - Valid ID = update to this value\n          - active: Updated active status\n            * null = ignore, don't update\n            * true/false = update to this value\n        \n        Note: Updating a field to its current value will result in an error (no changes detected).\n        \n        Returns the updated incident template object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_template_id": {
+            "type": "string",
+            "description": "Unique identifier of the incident template to update"
+          },
+          "name": {
+            "type": "string",
+            "description": "Updated template name (1-120 characters, must be unique). Empty string (\"\") = ignore, don't update",
+            "default": "",
+            "minLength": 0,
+            "maxLength": 120
+          },
+          "change_request_values": {
+            "type": "object",
+            "description": "JSON object containing template fields to update. Empty strings (\"\") = ignore field. null for nullable fields = set to null. Can include: caller_id, short_description, channel, category, impact, urgency, priority, configuration_item, service, service_offering",
+            "default": {
+              "caller_id": "",
+              "short_description": "",
+              "channel": "",
+              "category": "",
+              "impact": "",
+              "urgency": "",
+              "priority": "",
+              "configuration_item": "",
+              "service": "",
+              "service_offering": ""
+            },
+            "properties": {
+              "caller_id": {
+                "type": "string",
+                "description": "Updated caller user ID. Empty string (\"\") = ignore, don't update"
+              },
+              "short_description": {
+                "type": "string",
+                "description": "Updated brief description. Empty string (\"\") = ignore, don't update"
+              },
+              "channel": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Updated incident channel. Empty string (\"\") = ignore, null = set to null, valid value = update",
+                "enum": [
+                  "self-service",
+                  "phone",
+                  "email",
+                  "chat",
+                  "walk-in",
+                  "virtual-agent"
+                ]
+              },
+              "category": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Updated incident category. Empty string (\"\") = ignore, null = set to null, valid value = update",
+                "enum": [
+                  "inquiry-help",
+                  "software",
+                  "hardware",
+                  "database",
+                  "password-reset"
+                ]
+              },
+              "impact": {
+                "type": "string",
+                "description": "Updated impact level. Empty string (\"\") = ignore, don't update",
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "urgency": {
+                "type": "string",
+                "description": "Updated urgency level. Empty string (\"\") = ignore, don't update",
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "priority": {
+                "type": "string",
+                "description": "Updated priority level. Empty string (\"\") = ignore, don't update",
+                "enum": [
+                  "critical",
+                  "high",
+                  "moderate",
+                  "low",
+                  "planning"
+                ]
+              },
+              "configuration_item": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Updated configuration item ID. Empty string (\"\") = ignore, null = set to null, valid ID = update"
+              },
+              "service": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Updated service ID. Empty string (\"\") = ignore, null = set to null, valid ID = update"
+              },
+              "service_offering": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Updated service offering ID. Empty string (\"\") = ignore, null = set to null, valid ID = update"
+              }
+            }
+          },
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Updated active status. null = ignore, don't update. true/false = update to this value"
+          }
+        },
+        "required": [
+          "incident_template_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_incident_template_by_name",
+      "title": null,
+      "description": "Retrieve an incident template by its exact name.\n        \n        Use this tool to find a specific incident template using its name as the identifier.\n        The search is case-sensitive and requires an exact match.\n        \n        Parameters:\n          - name (required): Incident template name\n        \n        Returns a single incident template object if found, or an error if the template doesn't exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Incident template name (exact match, case-sensitive)"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_incident_templates",
+      "title": null,
+      "description": "List incident templates with optional filters.\n        \n        Use this tool to retrieve a list of incident templates. Without filters, returns all templates.\n        With filters, returns only templates matching the specified criteria.\n        \n        Optional Filters:\n          - incident_template_id: Filter by exact template ID\n          - name: Filter by template name (exact match)\n          - active: Filter by active status (boolean: true or false)\n          - created_after: Filter templates created after date (ISO 8601 format: 2024-01-15 or 2024-01-15T09:00:00)\n          - created_before: Filter templates created before date (ISO 8601 format)\n        \n        Returns a list of incident template objects matching the filters, or all templates if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_template_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by incident template ID (exact match)"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by template name (exact match)"
+          },
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Filter by active status (true or false)"
+          },
+          "created_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter templates created after this date (ISO 8601 format)"
+          },
+          "created_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter templates created before this date (ISO 8601 format)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "register_configuration_item",
+      "title": null,
+      "description": "Register a new configuration item in the system.\n        \n        Use this tool to add a new configuration item (CI) with the specified details.\n        The system automatically generates configuration_item_id (CI_001, CI_002, etc.) and timestamps.\n        \n        Required Parameters:\n          - name: CI name (1-120 characters, required)\n          - owner_id: User ID who owns the CI\n          - location_id: Location ID where CI is located\n          - serial_number: Serial number (must be unique, 1-60 characters)\n          - status: CI status (values: IN_USE, IN_STOCK, MAINTENANCE, RETIRED, DISPOSED)\n          - cost: Cost of the CI (must be >= 0)\n        \n        Auto-Generated Fields:\n          - configuration_item_id: Incremental ID (CI_001, CI_002, etc.)\n          - created_on and updated_on timestamps\n        \n        Unique Constraints:\n          - name must be unique across all CIs\n          - serial_number must be unique across all CIs\n          - Combination of (owner_id, serial_number, location_id) must be unique\n        \n        Returns the newly created configuration item object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "CI name (required, 1-120 characters)",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "owner_id": {
+            "type": "string",
+            "description": "User ID who owns the CI"
+          },
+          "location_id": {
+            "type": "string",
+            "description": "Location ID where CI is located"
+          },
+          "serial_number": {
+            "type": "string",
+            "description": "Serial number (unique, 1-60 characters)",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "status": {
+            "type": "string",
+            "description": "CI status (in_use, in_stock, maintenance, retired, disposed)",
+            "enum": [
+              "in_use",
+              "in_stock",
+              "maintenance",
+              "retired",
+              "disposed"
+            ]
+          },
+          "cost": {
+            "type": "number",
+            "description": "Cost of the CI (must be >= 0)",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "name",
+          "owner_id",
+          "location_id",
+          "serial_number",
+          "status",
+          "cost"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_configuration_item",
+      "title": null,
+      "description": "Update specific fields of an existing configuration item.\n        \n        Use this tool to update one or more fields of a CI identified by configuration_item_id.\n        At least one field (besides configuration_item_id) must be provided. The tool validates that\n        the new values are different from current values (idempotency check).\n        \n        Required Parameter:\n          - configuration_item_id: Unique identifier of the CI to update\n        \n        Optional Parameters (at least one required):\n          - owner_id: Updated owner user ID\n          - location_id: Updated location ID\n          - serial_number: Updated serial number (must remain unique)\n          - status: Updated CI status (IN_USE, IN_STOCK, MAINTENANCE, RETIRED, DISPOSED)\n          - cost: Updated cost (must be >= 0)\n          - name: Updated CI name\n        \n        Unique Constraints:\n          - If serial_number is updated, it must be unique\n          - If owner_id, serial_number, or location_id are updated, the combination must be unique\n        \n        Note: Updating a field to its current value will result in an error (no changes detected).\n        \n        Returns the updated configuration item object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "configuration_item_id": {
+            "type": "string",
+            "description": "Unique identifier of the CI to update"
+          },
+          "owner_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated owner user ID"
+          },
+          "location_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated location ID"
+          },
+          "serial_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated serial number (must remain unique)",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated CI status (in_use, in_stock, maintenance, retired, disposed)",
+            "enum": [
+              "in_use",
+              "in_stock",
+              "maintenance",
+              "retired",
+              "disposed"
+            ]
+          },
+          "cost": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Updated cost (must be >= 0)",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Updated CI name",
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "configuration_item_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_configuration_item_by_serial_number",
+      "title": null,
+      "description": "Retrieve a configuration item by its serial number.\n        \n        Use this tool to find a specific CI using its serial number as the identifier.\n        The serial number is unique across all configuration items.\n        \n        Parameters:\n          - serial_number (required): Configuration item serial number\n        \n        Returns a single configuration item object if found, or an error if the CI doesn't exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "serial_number": {
+            "type": "string",
+            "description": "Configuration item serial number (exact match)"
+          }
+        },
+        "required": [
+          "serial_number"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_configuration_items",
+      "title": null,
+      "description": "List configuration items with optional filters.\n        \n        Use this tool to retrieve a list of configuration items. Without filters, returns all CIs.\n        With filters, returns only CIs matching the specified criteria.\n        \n        Optional Filters:\n          - configuration_item_id: Filter by CI ID (exact match)\n          - owner_id: Filter by owner user ID (exact match)\n          - location_id: Filter by location ID (exact match)\n          - serial_number: Filter by serial number (exact match)\n          - status: Filter by status (IN_USE, IN_STOCK, MAINTENANCE, RETIRED, DISPOSED)\n          - cost: Filter by cost (exact match)\n          - created_after: Filter CIs created after date (ISO 8601 format: 2024-01-15 or 2024-01-15T09:00:00)\n          - created_before: Filter CIs created before date (ISO 8601 format)\n        \n        Returns a list of configuration item objects matching the filters, or all CIs if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "configuration_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by configuration item ID (exact match)"
+          },
+          "owner_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by owner user ID (exact match)"
+          },
+          "location_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by location ID (exact match)"
+          },
+          "serial_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by serial number (exact match)"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by status",
+            "enum": [
+              "in_use",
+              "in_stock",
+              "maintenance",
+              "retired",
+              "disposed"
+            ]
+          },
+          "cost": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Filter by cost (exact match)"
+          },
+          "created_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter CIs created after this date (ISO 8601 format)"
+          },
+          "created_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter CIs created before this date (ISO 8601 format)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_services",
+      "title": null,
+      "description": "List services with optional filters. Returns all services or filtered results.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "description": "Filter by service ID (exact match)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Filter by service name (partial match)"
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "Filter by owner"
+          },
+          "used_for": {
+            "type": "string",
+            "description": "Filter by usage",
+            "enum": [
+              "production",
+              "QA",
+              "test",
+              "development"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by status",
+            "enum": [
+              "operational",
+              "non-operational",
+              "repair_in_progress",
+              "ready",
+              "retired"
+            ]
+          },
+          "service_classification": {
+            "type": "string",
+            "description": "Filter by classification",
+            "enum": [
+              "business",
+              "technology-management",
+              "application"
+            ]
+          },
+          "business_criticality": {
+            "type": "string",
+            "description": "Filter by criticality",
+            "enum": [
+              "critical",
+              "somewhat-critical",
+              "less-critical",
+              "not-critical"
+            ]
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter services created after this date (ISO 8601 format)"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter services created before this date (ISO 8601 format)"
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_service_by_name",
+      "title": null,
+      "description": "Find a service by its exact name. Returns the service details if found.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The exact name of the service to find"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_service",
+      "title": null,
+      "description": "Add a new service to the system. Service name must be unique. Returns the newly created service object.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Service name",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "Owner of the service"
+          },
+          "used_for": {
+            "type": "string",
+            "description": "Purpose/usage of the service",
+            "enum": [
+              "production",
+              "QA",
+              "test",
+              "development"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Service status",
+            "enum": [
+              "operational",
+              "non-operational",
+              "repair_in_progress",
+              "ready",
+              "retired"
+            ]
+          },
+          "service_classification": {
+            "type": "string",
+            "description": "Service classification",
+            "enum": [
+              "business",
+              "technology-management",
+              "application"
+            ]
+          },
+          "business_criticality": {
+            "type": "string",
+            "description": "Business criticality level",
+            "enum": [
+              "critical",
+              "somewhat-critical",
+              "less-critical",
+              "not-critical"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of the service"
+          }
+        },
+        "required": [
+          "name",
+          "owned_by"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_service",
+      "title": null,
+      "description": "Update service details. At least one field must be provided. Service name must be unique if provided. Returns error if all fields match current values (idempotency validation).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "description": "Service's unique identifier"
+          },
+          "name": {
+            "type": "string",
+            "description": "Updated service name",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "Updated owner"
+          },
+          "used_for": {
+            "type": "string",
+            "description": "Updated usage/purpose",
+            "enum": [
+              "production",
+              "QA",
+              "test",
+              "development"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Updated status",
+            "enum": [
+              "operational",
+              "non-operational",
+              "repair_in_progress",
+              "ready",
+              "retired"
+            ]
+          },
+          "service_classification": {
+            "type": "string",
+            "description": "Updated classification",
+            "enum": [
+              "business",
+              "technology-management",
+              "application"
+            ]
+          },
+          "business_criticality": {
+            "type": "string",
+            "description": "Updated business criticality",
+            "enum": [
+              "critical",
+              "somewhat-critical",
+              "less-critical",
+              "not-critical"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of the service"
+          }
+        },
+        "required": [
+          "service_id"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_change",
+      "title": null,
+      "description": "Create a new change request.\n\nAutomatically generates:\n- change_id (CHG_001, CHG_002, ...)\n- number (CHG0000001, CHG0000002, ...)\n\nRequired fields:\n- short_description: Brief description (<=120 chars)\n- status: Change status (new, assess, authorize, scheduled, implement, review, closed, canceled)\n- impact: Impact level (high, medium, low)\n- risk: Risk level (high, medium, low)\n- priority: Priority level (critical, high, moderate, low)\n\nOptional fields:\n- service: Service ID\n- service_offering: Service offering ID\n- configuration_item: Configuration item ID\n- category: Change category (network, software, hardware, documentation, system_software, application_software, service, telecom, other)\n- description: Detailed description (<=120 chars)\n- implementation_plan: Implementation plan (<=120 chars)\n- testing_plan: Testing plan (<=120 chars)\n- cab_required: Boolean indicating if CAB approval is needed\n- assigned_to: Assigned user ID\n- assignment_group: Assigned group ID\n- close_code: Close code (successful, successful_with_issues, unsuccessful)\n- close_notes: Close notes (<=120 chars)\n\nExample payload:\n{\n    \"short_description\": \"Upgrade database cluster\",\n    \"status\": \"assess\",\n    \"impact\": \"high\",\n    \"risk\": \"high\",\n    \"priority\": \"critical\",\n    \"category\": \"service\",\n    \"implementation_plan\": \"Rollover to replica, upgrade primary, fail back\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "short_description": {
+            "type": "string",
+            "description": "Short description (<=120 chars)"
+          },
+          "status": {
+            "type": "string",
+            "description": "Change status (new, assess, authorize, scheduled, implement, review, closed, canceled)"
+          },
+          "impact": {
+            "type": "string",
+            "description": "Impact level (high, medium, low)"
+          },
+          "risk": {
+            "type": "string",
+            "description": "Risk level (high, medium, low)"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Priority level (critical, high, moderate, low)"
+          },
+          "service": {
+            "type": "string",
+            "description": "Service ID"
+          },
+          "service_offering": {
+            "type": "string",
+            "description": "Service offering ID"
+          },
+          "configuration_item": {
+            "type": "string",
+            "description": "Configuration item ID"
+          },
+          "category": {
+            "type": "string",
+            "description": "Change category (network, software, hardware, documentation, system_software, application_software, service, telecom, other)"
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed description (<=120 chars)"
+          },
+          "implementation_plan": {
+            "type": "string",
+            "description": "Implementation plan (<=120 chars)"
+          },
+          "testing_plan": {
+            "type": "string",
+            "description": "Testing plan (<=120 chars)"
+          },
+          "cab_required": {
+            "type": "boolean",
+            "description": "Whether CAB approval is required"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "Assigned user ID"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Assigned group ID"
+          },
+          "close_code": {
+            "type": "string",
+            "description": "Close code (successful, successful_with_issues, unsuccessful)"
+          },
+          "close_notes": {
+            "type": "string",
+            "description": "Close notes (<=120 chars)"
+          }
+        },
+        "required": [
+          "short_description",
+          "status",
+          "impact",
+          "risk",
+          "priority"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_change",
+      "title": null,
+      "description": "Update an existing change request by change_id.\n\nAll fields are optional; only provided fields are updated.\nIf no changes are detected, the API returns an error.\n\nExample payload:\n{\n    \"change_id\": \"CHG_001\",\n    \"status\": \"implement\",\n    \"assigned_to\": \"USER_010\",\n    \"implementation_plan\": \"Deploy patch to production nodes sequentially\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "change_id": {
+            "type": "string",
+            "description": "Change ID (CHG_001, CHG_002, ...). Required when calling this tool."
+          },
+          "number": {
+            "type": "string",
+            "description": "Change number (CHG0000001, CHG0000002, ...)"
+          },
+          "requested_by": {
+            "type": "string",
+            "description": "User ID who requested the change"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Short description (<=120 chars)"
+          },
+          "service": {
+            "type": "string",
+            "description": "Service ID"
+          },
+          "service_offering": {
+            "type": "string",
+            "description": "Service offering ID"
+          },
+          "configuration_item": {
+            "type": "string",
+            "description": "Configuration item ID"
+          },
+          "category": {
+            "type": "string",
+            "description": "Change category (network, software, hardware, documentation, system_software, application_software, service, telecom, other)"
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed description (<=120 chars)"
+          },
+          "implementation_plan": {
+            "type": "string",
+            "description": "Implementation plan (<=120 chars)"
+          },
+          "testing_plan": {
+            "type": "string",
+            "description": "Testing plan (<=120 chars)"
+          },
+          "cab_required": {
+            "type": "boolean",
+            "description": "Whether CAB approval is required"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "Assigned user ID"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Assigned group ID"
+          },
+          "close_code": {
+            "type": "string",
+            "description": "Close code (successful, successful_with_issues, unsuccessful)"
+          },
+          "close_notes": {
+            "type": "string",
+            "description": "Close notes (<=120 chars)"
+          },
+          "status": {
+            "type": "string",
+            "description": "Change status (new, assess, authorize, scheduled, implement, review, closed, canceled)"
+          },
+          "impact": {
+            "type": "string",
+            "description": "Impact level (high, medium, low)"
+          },
+          "risk": {
+            "type": "string",
+            "description": "Risk level (high, medium, low)"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Priority level (critical, high, moderate, low)"
+          }
+        },
+        "required": [
+          "change_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_change_by_number",
+      "title": null,
+      "description": "Retrieve a change by its unique number (CHG0000001, CHG0000002, ...).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "string",
+            "description": "Change number (CHG0000001, CHG0000002, ...)"
+          }
+        },
+        "required": [
+          "number"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_changes",
+      "title": null,
+      "description": "List changes applying optional filters. Returns all changes if no filters provided.\n\nSupported filters (all optional):\n- change_id, number, service, service_offering, configuration_item\n- requested_by, assigned_to, assignment_group\n- status, category, impact, risk, priority, close_code\n- short_description, description, implementation_plan, testing_plan, close_notes (partial match)\n- created_after, created_before (ISO timestamp strings)\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "change_id": {
+            "type": "string",
+            "description": "Filter by change_id"
+          },
+          "number": {
+            "type": "string",
+            "description": "Filter by change number"
+          },
+          "service": {
+            "type": "string",
+            "description": "Filter by service ID"
+          },
+          "service_offering": {
+            "type": "string",
+            "description": "Filter by service offering ID"
+          },
+          "configuration_item": {
+            "type": "string",
+            "description": "Filter by configuration item ID"
+          },
+          "requested_by": {
+            "type": "string",
+            "description": "Filter by requester"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "Filter by assigned user"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Filter by assignment group"
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by status (new, assess, authorize, scheduled, implement, review, closed, canceled)"
+          },
+          "category": {
+            "type": "string",
+            "description": "Filter by category (network, software, hardware, documentation, system_software, application_software, service, telecom, other)"
+          },
+          "impact": {
+            "type": "string",
+            "description": "Filter by impact (high, medium, low)"
+          },
+          "risk": {
+            "type": "string",
+            "description": "Filter by risk (high, medium, low)"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Filter by priority (critical, high, moderate, low)"
+          },
+          "close_code": {
+            "type": "string",
+            "description": "Filter by close code (successful, successful_with_issues, unsuccessful)"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Filter by short description (partial match)"
+          },
+          "description": {
+            "type": "string",
+            "description": "Filter by description (partial match)"
+          },
+          "implementation_plan": {
+            "type": "string",
+            "description": "Filter by implementation plan (partial match)"
+          },
+          "testing_plan": {
+            "type": "string",
+            "description": "Filter by testing plan (partial match)"
+          },
+          "close_notes": {
+            "type": "string",
+            "description": "Filter by close notes (partial match)"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "ISO timestamp: return changes created after this value"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "ISO timestamp: return changes created before this value"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_changes_assigned_to",
+      "title": null,
+      "description": "Retrieve changes assigned to a specific user and/or assignment group.\n\nAt least one of assignment_group or assigned_to must be provided.\n\nExamples:\n{\n    \"assignment_group\": \"GROUP_002\"\n}\n\n{\n    \"assigned_to\": \"USER_005\"\n}\n\n{\n    \"assignment_group\": \"GROUP_002\",\n    \"assigned_to\": \"USER_005\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_group": {
+            "type": "string",
+            "description": "Assignment group ID"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "Assigned user ID"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_problem",
+      "title": null,
+      "description": "Create a new problem record.\n\nAuto-generates:\n- problem_id: PRB_001, PRB_002, etc.\n- number: PRB0000001, PRB0000002, etc.\n\nRequired fields:\n- problem_statement: Detailed problem statement\n- status: Problem status (NEW, ASSESS, ROOT_CAUSE, FIX_IN_PROGRESS, RESOLVED, CLOSED)\n- impact: Impact level (HIGH, MEDIUM, LOW)\n- urgency: Urgency level (HIGH, MEDIUM, LOW)\n- priority: Priority level (CRITICAL, HIGH, MODERATE, LOW, PLANNING)\n\nOptional fields:\n- short_description: Short description (max 255 chars)\n- service: Service ID\n- service_offering: Service offering ID\n- configuration_item: Configuration item ID\n- assigned_to: User ID assigned to\n- assignment_group: Group ID assigned to\n- original_task: Original incident ID\n- category: Problem category (NETWORK, SOFTWARE, HARDWARE, DATABASE)\n- worknotes: Work notes\n- workaround: Workaround description\n- fix_notes: Fix notes\n\nExample:\n{\n    \"problem_statement\": \"Multiple users experiencing periodic email service disruptions\",\n    \"status\": \"NEW\",\n    \"impact\": \"HIGH\",\n    \"urgency\": \"MEDIUM\",\n    \"priority\": \"HIGH\",\n    \"category\": \"NETWORK\",\n    \"short_description\": \"Email service outages\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "problem_statement": {
+            "type": "string",
+            "description": "Detailed problem statement"
+          },
+          "status": {
+            "type": "string",
+            "description": "Problem status (new, assess, root_cause, fix_in_progress, resolved, closed)"
+          },
+          "impact": {
+            "type": "string",
+            "description": "Impact level (high, medium, low)"
+          },
+          "urgency": {
+            "type": "string",
+            "description": "Urgency level (high, medium, low)"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Priority level (critical, high, moderate, low, planning)"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Short description (max 255 chars)"
+          },
+          "service": {
+            "type": "string",
+            "description": "Service ID"
+          },
+          "service_offering": {
+            "type": "string",
+            "description": "Service offering ID"
+          },
+          "configuration_item": {
+            "type": "string",
+            "description": "Configuration item ID"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "User ID assigned to"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Group ID assigned to"
+          },
+          "original_task": {
+            "type": "string",
+            "description": "Original incident ID"
+          },
+          "category": {
+            "type": "string",
+            "description": "Problem category (network, software, hardware, database)"
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "Work notes"
+          },
+          "workaround": {
+            "type": "string",
+            "description": "Workaround description"
+          },
+          "fix_notes": {
+            "type": "string",
+            "description": "Fix notes"
+          }
+        },
+        "required": [
+          "problem_statement",
+          "status",
+          "impact",
+          "urgency",
+          "priority"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_problem",
+      "title": null,
+      "description": "Update an existing problem by problem_id or number.\n\nCan update by:\n- problem_id: PRB_001, PRB_002, etc.\n- number: PRB0000001, PRB0000002, etc.\n\nAll fields are optional. Only provided fields will be updated.\nReturns error if no changes detected (idempotency).\n\nExample:\n{\n    \"problem_id\": \"PRB_001\",\n    \"status\": \"RESOLVED\",\n    \"fix_notes\": \"Load balancer configuration corrected\"\n}\n\nOr update by number:\n{\n    \"number\": \"PRB0000001\",\n    \"assigned_to\": \"USER_007\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "problem_id": {
+            "type": "string",
+            "description": "Problem ID (e.g., PRB_001). Use either this or 'number', not both."
+          },
+          "number": {
+            "type": "string",
+            "description": "Problem number (e.g., PRB0000001). Use either this or 'problem_id', not both."
+          },
+          "opened_by": {
+            "type": "string",
+            "description": "User ID who opened the problem"
+          },
+          "problem_statement": {
+            "type": "string",
+            "description": "Detailed problem statement"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Short description"
+          },
+          "service": {
+            "type": "string",
+            "description": "Service ID"
+          },
+          "service_offering": {
+            "type": "string",
+            "description": "Service offering ID"
+          },
+          "configuration_item": {
+            "type": "string",
+            "description": "Configuration item ID"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "User ID assigned to"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Group ID assigned to"
+          },
+          "original_task": {
+            "type": "string",
+            "description": "Original incident ID"
+          },
+          "status": {
+            "type": "string",
+            "description": "Problem status (new, assess, root_cause, fix_in_progress, resolved, closed)"
+          },
+          "category": {
+            "type": "string",
+            "description": "Problem category (network, software, hardware, database)"
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "Work notes"
+          },
+          "workaround": {
+            "type": "string",
+            "description": "Workaround description"
+          },
+          "fix_notes": {
+            "type": "string",
+            "description": "Fix notes"
+          },
+          "impact": {
+            "type": "string",
+            "description": "Impact level (high, medium, low)"
+          },
+          "urgency": {
+            "type": "string",
+            "description": "Urgency level (high, medium, low)"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Priority level (critical, high, moderate, low, planning)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_problem_by_number",
+      "title": null,
+      "description": "Find a problem by its unique problem number.\n\nThe number field is unique and follows the format PRB0000001, PRB0000002, etc.\n\nExample:\n{\n    \"number\": \"PRB0000001\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "string",
+            "description": "Problem number (e.g., PRB0000001)"
+          }
+        },
+        "required": [
+          "number"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_problems",
+      "title": null,
+      "description": "List problems with optional filters.\n\nAll filters are optional. Returns all problems if no filters provided.\n\nSupported filters:\n- problem_id: Exact match on problem ID\n- number: Exact match on number\n- service: Exact match on service ID\n- service_offering: Exact match on service offering ID\n- configuration_item: Exact match on configuration item ID\n- opened_by: Exact match on user who opened\n- status: Exact match on status (NEW, ASSESS, ROOT_CAUSE, FIX_IN_PROGRESS, RESOLVED, CLOSED)\n- category: Exact match on category (NETWORK, SOFTWARE, HARDWARE, DATABASE)\n- problem_statement: Partial match on problem statement\n- short_description: Partial match on short description\n- impact: Exact match on impact (HIGH, MEDIUM, LOW)\n- urgency: Exact match on urgency (HIGH, MEDIUM, LOW)\n- priority: Exact match on priority (CRITICAL, HIGH, MODERATE, LOW, PLANNING)\n- assigned_to: Exact match on assigned user\n- assignment_group: Exact match on assigned group\n- worknotes: Partial match on worknotes\n- workaround: Partial match on workaround\n- fix_notes: Partial match on fix notes\n- original_task: Exact match on original incident ID\n- created_after: Filter by created after datetime (ISO format)\n- created_before: Filter by created before datetime (ISO format)\n\nExample:\n{\n    \"status\": \"NEW\",\n    \"priority\": \"HIGH\"\n}\n\nReturns:\n{\n    \"problems\": [...],\n    \"total_count\": 5\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "problem_id": {
+            "type": "string",
+            "description": "Filter by problem ID"
+          },
+          "number": {
+            "type": "string",
+            "description": "Filter by number"
+          },
+          "service": {
+            "type": "string",
+            "description": "Filter by service ID"
+          },
+          "service_offering": {
+            "type": "string",
+            "description": "Filter by service offering ID"
+          },
+          "configuration_item": {
+            "type": "string",
+            "description": "Filter by configuration item ID"
+          },
+          "opened_by": {
+            "type": "string",
+            "description": "Filter by user who opened"
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by status (new, assess, root_cause, fix_in_progress, resolved, closed)"
+          },
+          "category": {
+            "type": "string",
+            "description": "Filter by category (network, software, hardware, database)"
+          },
+          "problem_statement": {
+            "type": "string",
+            "description": "Filter by problem statement (partial)"
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Filter by short description (partial)"
+          },
+          "impact": {
+            "type": "string",
+            "description": "Filter by impact (high, medium, low)"
+          },
+          "urgency": {
+            "type": "string",
+            "description": "Filter by urgency (high, medium, low)"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Filter by priority (critical, high, moderate, low, planning)"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "Filter by assigned user"
+          },
+          "assignment_group": {
+            "type": "string",
+            "description": "Filter by assigned group"
+          },
+          "worknotes": {
+            "type": "string",
+            "description": "Filter by worknotes (partial)"
+          },
+          "workaround": {
+            "type": "string",
+            "description": "Filter by workaround (partial)"
+          },
+          "fix_notes": {
+            "type": "string",
+            "description": "Filter by fix notes (partial)"
+          },
+          "original_task": {
+            "type": "string",
+            "description": "Filter by original incident ID"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter by created after (ISO datetime)"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter by created before (ISO datetime)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_problems_assigned_to",
+      "title": null,
+      "description": "Get problems assigned to a specific user or group.\n\nCan filter by:\n- assignment_group: Group ID\n- assigned_to: User ID\n- Both (AND condition)\n\nExample:\n{\n    \"assignment_group\": \"GROUP_004\"\n}\n\nOr:\n{\n    \"assigned_to\": \"USER_007\"\n}\n\nOr both:\n{\n    \"assignment_group\": \"GROUP_004\",\n    \"assigned_to\": \"USER_007\"\n}\n\nReturns:\n{\n    \"problems\": [...],\n    \"total_count\": 3\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_group": {
+            "type": "string",
+            "description": "Filter by assignment group ID"
+          },
+          "assigned_to": {
+            "type": "string",
+            "description": "Filter by assigned user ID"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_incident_by_number",
+      "title": null,
+      "description": "Retrieve an incident by its incident number.\n        \n        Use this tool to find a specific incident using its unique incident number.\n        \n        Parameters:\n          - number (required): Incident number (e.g., INC-000001)\n        \n        Returns a single incident object if found, or an error if the incident doesn't exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "string",
+            "description": "Incident number (e.g., INC-000001)"
+          }
+        },
+        "required": [
+          "number"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_incident_by_id",
+      "title": null,
+      "description": "Retrieve an incident by its incident ID.\n        \n        Use this tool to find a specific incident using its unique incident ID.\n        \n        Parameters:\n          - incident_id (required): Incident's unique identifier\n        \n        Returns a single incident object if found, or an error if the incident doesn't exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "description": "Incident's unique identifier"
+          }
+        },
+        "required": [
+          "incident_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_incidents",
+      "title": null,
+      "description": "List incidents with optional filters.\n        \n        Use this tool to retrieve a list of incidents. Without filters, returns all incidents.\n        With filters, returns only incidents matching the specified criteria.\n        \n        Optional Filters:\n          - incident_id: Filter by exact incident ID\n          - number: Filter by exact incident number\n          - service: Filter by service ID\n          - service_offering: Filter by service offering ID\n          - configuration_item: Filter by configuration item ID\n          - called_id: Filter by caller ID\n          - channel: Filter by channel (self-service, phone, email, chat, walk-in, virtual-agent)\n          - status: Filter by status (new, in_progress, on_hold, resolved, closed, canceled)\n          - category: Filter by category (inquiry-help, software, hardware, database, password-reset, network)\n          - short_description: Filter by short description (partial match)\n          - description: Filter by description (partial match)\n          - impact: Filter by impact (high, medium, low)\n          - urgency: Filter by urgency (high, medium, low)\n          - priority: Filter by priority (critical, high, moderate, low, planning)\n          - assigned_to: Filter by assigned user ID\n          - assignment_group: Filter by assignment group ID\n          - worknotes: Filter by worknotes (partial match)\n          - resolution_notes: Filter by resolution notes (partial match)\n          - close_notes: Filter by close notes (partial match)\n          - resolution_code: Filter by resolution code\n          - parent_incident: Filter by parent incident ID\n          - problem: Filter by problem ID\n          - change_request: Filter by change request ID\n          - caused_by_change: Filter by caused by change ID\n          - resolved_by: Filter by resolved by user ID\n          - on_hold_reason: Filter by on hold reason\n          - incident_template: Filter by incident template ID\n          - resolved: Filter by resolved timestamp\n          - created_after: Filter incidents created after date (ISO 8601 format)\n          - created_before: Filter incidents created before date (ISO 8601 format)\n        \n        Returns a list of incident objects matching the filters, or all incidents if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by incident ID (exact match)"
+          },
+          "number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by incident number (exact match)"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by service ID"
+          },
+          "service_offering": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by service offering ID"
+          },
+          "configuration_item": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by configuration item ID"
+          },
+          "called_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by caller ID"
+          },
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by channel (self-service, phone, email, chat, walk-in, virtual-agent)",
+            "enum": [
+              "self-service",
+              "phone",
+              "email",
+              "chat",
+              "walk-in",
+              "virtual-agent",
+              "web"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by status (new, in_progress, on_hold, resolved, closed, canceled)",
+            "enum": [
+              "new",
+              "in_progress",
+              "on_hold",
+              "resolved",
+              "closed",
+              "canceled"
+            ]
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by category (inquiry-help, software, hardware, database, password-reset)",
+            "enum": [
+              "inquiry-help",
+              "software",
+              "hardware",
+              "database",
+              "password-reset",
+              "network"
+            ]
+          },
+          "short_description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by short description (partial match)"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by description (partial match)"
+          },
+          "impact": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by impact (high, medium, low)",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "urgency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by urgency (high, medium, low)",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by priority (critical, high, moderate, low, planning)",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "assigned_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by assigned user ID"
+          },
+          "assignment_group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by assignment group ID"
+          },
+          "worknotes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by worknotes (partial match)"
+          },
+          "resolution_notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by resolution notes (partial match)"
+          },
+          "close_notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by close notes (partial match)"
+          },
+          "resolution_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by resolution code",
+            "enum": [
+              "Duplicate",
+              "Known Error",
+              "No resolution provided",
+              "Resolved By Caller",
+              "Resolved By Problem",
+              "Resolved By Change",
+              "Solution Provided",
+              "Workaround Provided",
+              "User error"
+            ]
+          },
+          "parent_incident": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by parent incident ID"
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by problem ID"
+          },
+          "change_request": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by change request ID"
+          },
+          "caused_by_change": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by caused by change ID"
+          },
+          "resolved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by resolved by user ID"
+          },
+          "on_hold_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by on hold reason",
+            "enum": [
+              "Awaiting Change",
+              "Awaiting Caller",
+              "Awaiting Problem"
+            ]
+          },
+          "incident_template": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by incident template ID"
+          },
+          "resolved": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by resolved timestamp"
+          },
+          "created_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter incidents created after this date (ISO 8601 format)"
+          },
+          "created_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter incidents created before this date (ISO 8601 format)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_incidents_assigned_to",
+      "title": null,
+      "description": "Find incidents that are assigned to a particular group or to a user.\n        \n        Use this tool to retrieve incidents assigned to a specific user or group.\n        \n        Note: This tool requires incident CRUD permissions. Reporter roles do not have access\n        to this tool, and agent roles must have write permissions to incidents.\n        \n        Parameters:\n          - assignment_group (optional): Group ID to filter by\n          - assigned_to (optional): User ID to filter by\n        \n        Returns a list of incident objects assigned to the specified group or user.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Group ID to filter incidents by"
+          },
+          "assigned_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User ID to filter incidents by"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_incident",
+      "title": null,
+      "description": "Create a new incident in the system.\n        \n        Use this tool to create a new incident with the specified details.\n        \n        Required Parameters:\n          - short_description: Brief description of the incident\n          - caller_id: ID of the user who reported the incident\n        \n        Optional Parameters (all can be null/omitted):\n          - service: Service ID related to the incident\n          - service_offering: Service offering ID related to the incident\n          - configuration_item: Configuration item ID related to the incident\n          - channel: How the incident was reported (self-service, phone, email, chat, walk-in, virtual-agent)\n          - status: Current status of the incident (new, in_progress, on_hold, resolved, closed, canceled). Default: \"new\"\n          - category: Category of the incident (inquiry-help, software, hardware, database, password-reset, network). Default: \"inquiry-help\"\n          - description: Detailed description of the incident\n          - impact: Impact level (high, medium, low). Default: \"low\"\n          - urgency: Urgency level (high, medium, low). Default: \"low\"\n          - priority: Priority level (critical, high, moderate, low, planning). Default: \"planning\"\n          - assigned_to: User ID to assign the incident to\n          - assignment_group: Group ID to assign the incident to\n          - worknotes: Work notes for the incident\n          - resolution_notes: Resolution notes for the incident\n          - close_notes: Close notes for the incident\n          - resolution_code: Resolution code for the incident\n          - parent_incident: Parent incident ID if this is a child incident\n          - problem: Problem ID related to the incident\n          - change_request: Change request ID related to the incident\n          - caused_by_change: Change ID that caused this incident\n          - resolved_by: User ID who resolved the incident\n          - on_hold_reason: Reason why the incident is on hold\n          - incident_template: Incident template ID to use\n          - resolved: Timestamp when the incident was resolved\n        \n        Default Values:\n          When a parameter is null or omitted, the following defaults are applied:\n          - status: \"new\"\n          - category: \"inquiry-help\"\n          - impact: \"low\"\n          - urgency: \"low\"\n          - priority: \"planning\"\n        \n        Auto-Generated Fields:\n          - incident_id: Unique identifier for the incident (format: INC_001, INC_002, etc.)\n          - number: Incident number (e.g., INC-000001)\n          - created_at: Timestamp when the incident was created\n          - updated_at: Timestamp when the incident was last updated\n        \n        Returns the newly created incident object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service ID related to the incident"
+          },
+          "service_offering": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service offering ID related to the incident"
+          },
+          "configuration_item": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Configuration item ID related to the incident"
+          },
+          "caller_id": {
+            "type": "string",
+            "description": "ID of the user who reported the incident"
+          },
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How the incident was reported (self-service, phone, email, chat, walk-in, virtual-agent)",
+            "enum": [
+              "self-service",
+              "phone",
+              "email",
+              "chat",
+              "walk-in",
+              "virtual-agent"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current status of the incident. Default: 'new' if null or omitted",
+            "enum": [
+              "new",
+              "in_progress",
+              "on_hold",
+              "resolved",
+              "closed",
+              "canceled"
+            ]
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Category of the incident. Default: 'inquiry-help' if null or omitted",
+            "enum": [
+              "inquiry-help",
+              "software",
+              "hardware",
+              "database",
+              "password-reset",
+              "network"
+            ]
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Brief description of the incident"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Detailed description of the incident"
+          },
+          "impact": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Impact level. Default: 'low' if null or omitted",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "urgency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Urgency level. Default: 'low' if null or omitted",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Priority level. Default: 'planning' if null or omitted",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "assigned_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User ID to assign the incident to"
+          },
+          "assignment_group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Group ID to assign the incident to"
+          },
+          "worknotes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Work notes for the incident"
+          },
+          "resolution_notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resolution notes for the incident"
+          },
+          "close_notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Close notes for the incident"
+          },
+          "resolution_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resolution code for the incident",
+            "enum": [
+              "Duplicate",
+              "Known Error",
+              "No resolution provided",
+              "Resolved By Caller",
+              "Resolved By Problem",
+              "Resolved By Change",
+              "Solution Provided",
+              "Workaround Provided",
+              "User error"
+            ]
+          },
+          "parent_incident": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Parent incident ID if this is a child incident"
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Problem ID related to the incident"
+          },
+          "change_request": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Change request ID related to the incident"
+          },
+          "caused_by_change": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Change ID that caused this incident"
+          },
+          "resolved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User ID who resolved the incident"
+          },
+          "on_hold_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reason why the incident is on hold",
+            "enum": [
+              "Awaiting Change",
+              "Awaiting Caller",
+              "Awaiting Problem"
+            ]
+          },
+          "incident_template": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Incident template ID to use"
+          },
+          "resolved": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Timestamp when the incident was resolved (ISO 8601 format)"
+          }
+        },
+        "required": [
+          "caller_id",
+          "short_description"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_incident",
+      "title": null,
+      "description": "Update an existing incident in the system.\n        \n        Use this tool to update an existing incident with the specified details.\n        \n        Required Parameters:\n          - incident_id: ID of the incident to update\n        \n        Optional Parameters:\n          - number: Incident number\n          - service: Service ID related to the incident\n          - service_offering: Service offering ID related to the incident\n          - configuration_item: Configuration item ID related to the incident\n          - caller_id: ID of the user who reported the incident\n          - channel: How the incident was reported (self-service, phone, email, chat, walk-in, virtual-agent)\n          - status: Current status of the incident (new, in_progress, on_hold, resolved, closed, canceled)\n          - category: Category of the incident (inquiry-help, software, hardware, database, password-reset, network)\n          - short_description: Brief description of the incident\n          - description: Detailed description of the incident\n          - impact: Impact level (high, medium, low)\n          - urgency: Urgency level (high, medium, low)\n          - priority: Priority level (critical, high, moderate, low, planning)\n          - assigned_to: User ID to assign the incident to\n          - assignment_group: Group ID to assign the incident to\n          - worknotes: Work notes for the incident\n          - resolution_notes: Resolution notes for the incident\n          - close_notes: Close notes for the incident\n          - resolution_code: Resolution code for the incident\n          - parent_incident: Parent incident ID if this is a child incident\n          - problem: Problem ID related to the incident\n          - change_request: Change request ID related to the incident\n          - caused_by_change: Change ID that caused this incident\n          - resolved_by: User ID who resolved the incident\n          - on_hold_reason: Reason why the incident is on hold\n          - incident_template: Incident template ID to use\n          - resolved: Timestamp when the incident was resolved\n        \n        Returns the updated incident object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "description": "ID of the incident to update"
+          },
+          "number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Incident number"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service ID related to the incident"
+          },
+          "service_offering": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service offering ID related to the incident"
+          },
+          "configuration_item": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Configuration item ID related to the incident"
+          },
+          "caller_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ID of the user who reported the incident"
+          },
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How the incident was reported (self-service, phone, email, chat, walk-in, virtual-agent)",
+            "enum": [
+              "self-service",
+              "phone",
+              "email",
+              "chat",
+              "walk-in",
+              "virtual-agent"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current status of the incident",
+            "enum": [
+              "new",
+              "in_progress",
+              "on_hold",
+              "resolved",
+              "closed",
+              "canceled"
+            ]
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Category of the incident",
+            "enum": [
+              "inquiry-help",
+              "software",
+              "hardware",
+              "database",
+              "password-reset",
+              "network"
+            ]
+          },
+          "short_description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Brief description of the incident"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Detailed description of the incident"
+          },
+          "impact": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Impact level",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "urgency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Urgency level",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Priority level",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "assigned_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User ID to assign the incident to"
+          },
+          "assignment_group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Group ID to assign the incident to"
+          },
+          "worknotes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Work notes for the incident"
+          },
+          "resolution_notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resolution notes for the incident"
+          },
+          "close_notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Close notes for the incident"
+          },
+          "resolution_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resolution code for the incident",
+            "enum": [
+              "Duplicate",
+              "Known Error",
+              "No resolution provided",
+              "Resolved By Caller",
+              "Resolved By Problem",
+              "Resolved By Change",
+              "Solution Provided",
+              "Workaround Provided",
+              "User error"
+            ]
+          },
+          "parent_incident": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Parent incident ID if this is a child incident"
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Problem ID related to the incident"
+          },
+          "change_request": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Change request ID related to the incident"
+          },
+          "caused_by_change": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Change ID that caused this incident"
+          },
+          "resolved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User ID who resolved the incident"
+          },
+          "on_hold_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reason why the incident is on hold",
+            "enum": [
+              "Awaiting Change",
+              "Awaiting Caller",
+              "Awaiting Problem"
+            ]
+          },
+          "incident_template": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Incident template ID to use"
+          },
+          "resolved": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Timestamp when the incident was resolved (ISO 8601 format)"
+          }
+        },
+        "required": [
+          "incident_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_child_incidents",
+      "title": null,
+      "description": "List child incidents for a parent incident.\n        \n        Use this tool to retrieve all child incidents associated with a parent incident.\n        \n        Parameters:\n          - parent_incident (required): Parent incident ID\n        \n        Returns a list of child incident mapping objects.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "parent_incident": {
+            "type": "string",
+            "description": "Parent incident ID"
+          }
+        },
+        "required": [
+          "parent_incident"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_parent_incident",
+      "title": null,
+      "description": "Find the parent incident for a child incident.\n        \n        Use this tool to retrieve the parent incident mapping for a child incident.\n        \n        Parameters:\n          - child_incident (required): Child incident ID\n        \n        Returns the parent incident mapping object if found.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "child_incident": {
+            "type": "string",
+            "description": "Child incident ID"
+          }
+        },
+        "required": [
+          "child_incident"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_child_incident",
+      "title": null,
+      "description": "Add a child incident to a parent incident.\n        \n        Use this tool to create a parent-child relationship between two incidents.\n        \n        Parameters:\n          - parent_incident (required): Parent incident ID\n          - child_incident (required): Child incident ID\n        \n        Returns the child incident mapping object that was created.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "parent_incident": {
+            "type": "string",
+            "description": "Parent incident ID"
+          },
+          "child_incident": {
+            "type": "string",
+            "description": "Child incident ID"
+          }
+        },
+        "required": [
+          "parent_incident",
+          "child_incident"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_child_incidents",
+      "title": null,
+      "description": "Add multiple child incidents to a parent incident.\n        \n        Use this tool to create parent-child relationships between a parent incident and multiple child incidents.\n        \n        Parameters:\n          - parent_incident (required): Parent incident ID\n          - child_incidents (required): Array of child incident IDs\n        \n        Returns a list of child incident mapping objects that were created.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "parent_incident": {
+            "type": "string",
+            "description": "Parent incident ID"
+          },
+          "child_incidents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Array of child incident IDs"
+          }
+        },
+        "required": [
+          "parent_incident",
+          "child_incidents"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_child_incident",
+      "title": null,
+      "description": "Update a child incident mapping.\n        \n        Use this tool to update an existing parent-child relationship between incidents.\n        \n        Parameters:\n          - child_incident_mapping_id (required): ID of the child incident mapping to update\n          - parent_incident (required): Parent incident ID\n          - child_incident (required): Child incident ID\n        \n        Returns the updated child incident mapping object.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "child_incident_mapping_id": {
+            "type": "string",
+            "description": "ID of the child incident mapping to update"
+          },
+          "parent_incident": {
+            "type": "string",
+            "description": "Parent incident ID"
+          },
+          "child_incident": {
+            "type": "string",
+            "description": "Child incident ID"
+          }
+        },
+        "required": [
+          "child_incident_mapping_id",
+          "parent_incident",
+          "child_incident"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "remove_child_incident",
+      "title": null,
+      "description": "Remove a child incident mapping.\n        \n        Use this tool to remove a parent-child relationship between incidents.\n        \n        Parameters (at least one required):\n          - child_incident_mapping_id: ID of the child incident mapping to remove\n          - parent_incident AND child_incident: Parent and child incident IDs to remove the mapping for\n        \n        Returns a boolean indicating success.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "child_incident_mapping_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ID of the child incident mapping to remove"
+          },
+          "parent_incident": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Parent incident ID"
+          },
+          "child_incident": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Child incident ID"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "get_count_of_incident_priority_wise",
+      "title": null,
+      "description": "Get count of incidents grouped by priority.\n        \n        Returns an Object with priority as the key and the count of incidents which has that priority value\n        as the value, for example {'critical': 5, 'low': 3}.\n        \n        Parameters:\n          - priority_list (optional): Array of priorities to filter by (e.g., [\"critical\", \"high\", \"low\"])\n        \n        If a priority list is given in input then only those priorities will be considered for output.\n        Empty string values in the array are ignored. All values must be valid Priority enum values.\n        ",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "priority_list": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "critical",
+                "high",
+                "moderate",
+                "low",
+                "planning"
+              ]
+            },
+            "default": [],
+            "description": "Optional array of priorities to filter. Valid values: critical, high, moderate, low, planning. Empty strings are ignored."
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_incident_for_assignment_group",
+      "title": null,
+      "description": "Count incidents for a specific assignment group with optional filters.\n        \n        Returns object where group id is the key and the number of incidents assigned to it is the count value.\n        \n        Parameters:\n          - assignment_group_id (required): The assignment group ID to count incidents for\n          - status (optional): Filter by incident status (new, in_progress, on_hold, resolved, closed, canceled)\n          - priority (optional): Filter by incident priority (critical, high, moderate, low, planning)\n          - channel (optional): Filter by incident channel (self-service, phone, email, chat, walk-in, virtual-agent, web)\n        \n        Optional fields are to support filtering to only find specific values.\n        Empty string values are treated as no filter. All values must be valid enum values.\n        ",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assignment_group_id": {
+            "type": "string",
+            "description": "The assignment group ID to count incidents for"
+          },
+          "status": {
+            "type": "string",
+            "default": "",
+            "description": "Optional status filter (new, in_progress, on_hold, resolved, closed, canceled)",
+            "enum": [
+              "new",
+              "in_progress",
+              "on_hold",
+              "resolved",
+              "closed",
+              "canceled"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "default": "",
+            "description": "Optional priority filter (critical, high, moderate, low, planning)",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low",
+              "planning"
+            ]
+          },
+          "channel": {
+            "type": "string",
+            "default": "",
+            "description": "Optional channel filter (self-service, phone, email, chat, walk-in, virtual-agent, web)",
+            "enum": [
+              "self-service",
+              "phone",
+              "email",
+              "chat",
+              "walk-in",
+              "virtual-agent",
+              "web"
+            ]
+          }
+        },
+        "required": [
+          "assignment_group_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_service_offerings",
+      "title": null,
+      "description": "List service offerings with optional filters. Returns all service offerings or filtered results.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_offering_id": {
+            "type": "string",
+            "description": "Filter by service offering ID (exact match)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Filter by service offering name (partial match)"
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "Filter by owner"
+          },
+          "used_for": {
+            "type": "string",
+            "description": "Filter by usage",
+            "enum": [
+              "production",
+              "QA",
+              "test",
+              "development"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by status",
+            "enum": [
+              "operational",
+              "non-operational",
+              "repair_in_progress",
+              "ready",
+              "retired"
+            ]
+          },
+          "service_classification": {
+            "type": "string",
+            "description": "Filter by classification",
+            "enum": [
+              "business",
+              "technology-management",
+              "application"
+            ]
+          },
+          "business_criticality": {
+            "type": "string",
+            "description": "Filter by criticality",
+            "enum": [
+              "critical",
+              "somewhat-critical",
+              "less-critical",
+              "not-critical"
+            ]
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Filter by short description (partial match)"
+          },
+          "parent": {
+            "type": "string",
+            "description": "Filter by parent service offering"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter service offerings created after this date (ISO 8601 format)"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter service offerings created before this date (ISO 8601 format)"
+          }
+        },
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_service_offering_by_name",
+      "title": null,
+      "description": "Find a service offering by its exact name. Returns the service offering details if found.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The exact name of the service offering to find"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "register_new_service_offering",
+      "title": null,
+      "description": "Register a new service offering to the system. Service offering name must be unique. Returns the newly created service offering object.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Service offering name",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "Owner of the service offering"
+          },
+          "used_for": {
+            "type": "string",
+            "description": "Purpose/usage of the service offering",
+            "enum": [
+              "production",
+              "QA",
+              "test",
+              "development"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Service offering status",
+            "enum": [
+              "operational",
+              "non-operational",
+              "repair_in_progress",
+              "ready",
+              "retired"
+            ]
+          },
+          "service_classification": {
+            "type": "string",
+            "description": "Service offering classification",
+            "enum": [
+              "business",
+              "technology-management",
+              "application"
+            ]
+          },
+          "business_criticality": {
+            "type": "string",
+            "description": "Business criticality level",
+            "enum": [
+              "critical",
+              "somewhat-critical",
+              "less-critical",
+              "not-critical"
+            ]
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Short description of the service offering",
+            "maxLength": 120
+          },
+          "parent": {
+            "type": "string",
+            "description": "Parent service offering ID"
+          }
+        },
+        "required": [
+          "name",
+          "owned_by",
+          "parent",
+          "short_description"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_service_offering",
+      "title": null,
+      "description": "Update service offering details. At least one field must be provided. Service offering name must be unique if provided. Returns error if all fields match current values (idempotency validation).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_offering_id": {
+            "type": "string",
+            "description": "Service offering's unique identifier"
+          },
+          "name": {
+            "type": "string",
+            "description": "Updated service offering name",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "Updated owner"
+          },
+          "used_for": {
+            "type": "string",
+            "description": "Updated usage/purpose",
+            "enum": [
+              "production",
+              "QA",
+              "test",
+              "development"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Updated status",
+            "enum": [
+              "operational",
+              "non-operational",
+              "repair_in_progress",
+              "ready",
+              "retired"
+            ]
+          },
+          "service_classification": {
+            "type": "string",
+            "description": "Updated classification",
+            "enum": [
+              "business",
+              "technology-management",
+              "application"
+            ]
+          },
+          "business_criticality": {
+            "type": "string",
+            "description": "Updated criticality",
+            "enum": [
+              "critical",
+              "somewhat-critical",
+              "less-critical",
+              "not-critical"
+            ]
+          },
+          "short_description": {
+            "type": "string",
+            "description": "Updated short description",
+            "maxLength": 120
+          },
+          "parent": {
+            "type": "string",
+            "description": "Updated parent service offering ID"
+          }
+        },
+        "required": [
+          "service_offering_id"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "retrieve_knowledge_articles",
+      "title": null,
+      "description": "List knowledge articles with optional filters.\n        \n        Use this tool to retrieve a list of knowledge articles. Without filters, returns all articles.\n        With filters, returns only articles matching the specified criteria.\n        \n        Returns a list of knowledge article objects matching the filters with total_count, or all articles if no filters provided.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "knowledge_id": {
+            "type": "string",
+            "description": "Filter by knowledge ID (exact match, e.g., KB_001)"
+          },
+          "kb_number": {
+            "type": "string",
+            "description": "Filter by KB number (exact match, e.g., KB0000001)"
+          },
+          "title": {
+            "type": "string",
+            "description": "Filter by title (partial match, case-insensitive)"
+          },
+          "body": {
+            "type": "string",
+            "description": "Filter by body content (partial match, case-insensitive)"
+          },
+          "state": {
+            "type": "string",
+            "description": "Filter by article state",
+            "enum": [
+              "draft",
+              "review",
+              "published",
+              "retired"
+            ]
+          },
+          "visibility": {
+            "type": "string",
+            "description": "Filter by visibility level",
+            "enum": [
+              "internal",
+              "external"
+            ]
+          },
+          "owner_id": {
+            "type": "string",
+            "description": "Filter by owner user ID (exact match)"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Filter articles created after this date (ISO 8601 format)"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Filter articles created before this date (ISO 8601 format)"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "create_knowledge_article",
+      "title": null,
+      "description": "Create a new knowledge article in the system.\n        \n        Use this tool to add a new knowledge article with the specified details. The system automatically\n        generates knowledge_id (KB_001, KB_002, etc.), kb_number (KB0000001, KB0000002, etc.), and timestamps.\n        Returns the newly created knowledge article object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Article title (required, 1-120 characters)",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "body": {
+            "type": "string",
+            "description": "Full article content (detailed explanation, solutions, troubleshooting steps, etc.)"
+          },
+          "state": {
+            "type": "string",
+            "description": "Article state (defaults to 'published')",
+            "enum": [
+              "draft",
+              "review",
+              "published",
+              "retired"
+            ]
+          },
+          "visibility": {
+            "type": "string",
+            "description": "Article visibility (defaults to 'internal')",
+            "enum": [
+              "internal",
+              "external"
+            ]
+          },
+          "owner_id": {
+            "type": "string",
+            "description": "User ID who owns the article (author/responsible person)"
+          }
+        },
+        "required": [
+          "title",
+          "owner_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_knowledge_article",
+      "title": null,
+      "description": "Update a knowledge article by either its knowledge_id OR kb_number.\n        \n        Use this tool to update one or more fields of a knowledge article. You can identify the article\n        using either knowledge_id (e.g., KB_001) or kb_number (e.g., KB0000001). These are mutually\n        exclusive identifiers - provide exactly one, not both.\n        \n        Returns the updated knowledge article object with all fields.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "knowledge_id": {
+            "type": "string",
+            "description": "Unique identifier of the article to update (e.g., KB_001). Mutually exclusive with kb_number - provide only one."
+          },
+          "kb_number": {
+            "type": "string",
+            "description": "Unique KB number of the article to update (e.g., KB0000001). Mutually exclusive with knowledge_id - provide only one."
+          },
+          "title": {
+            "type": "string",
+            "description": "Updated title (1-120 characters)",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "body": {
+            "type": "string",
+            "description": "Updated body content"
+          },
+          "state": {
+            "type": "string",
+            "description": "Updated state",
+            "enum": [
+              "draft",
+              "review",
+              "published",
+              "retired"
+            ]
+          },
+          "visibility": {
+            "type": "string",
+            "description": "Updated visibility",
+            "enum": [
+              "internal",
+              "external"
+            ]
+          },
+          "owner_id": {
+            "type": "string",
+            "description": "Updated owner user ID"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_incident_knowledge_links",
+      "title": null,
+      "description": "Find incident-knowledge links with optional filters. Returns list of incident knowledge links matching the criteria.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_kb_id": {
+            "type": "string",
+            "description": "Filter by incident knowledge link ID"
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Filter by incident ID"
+          },
+          "knowledge_id": {
+            "type": "string",
+            "description": "Filter by knowledge article ID"
+          },
+          "used_as": {
+            "type": "string",
+            "description": "Filter by usage type(s). Can be a single value or comma-separated list of values (e.g., 'suggested,applied,resolution' or 'suggested, applied, resolution'). Valid values (lowercase only): suggested, applied, resolution. Returns links matching any of the specified values. Values must be provided in lowercase."
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "link_knowledge_to_incident",
+      "title": null,
+      "description": "Link a knowledge article to an incident. Creates a new incident-knowledge link.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "description": "Incident ID to link knowledge to"
+          },
+          "knowledge_id": {
+            "type": "string",
+            "description": "Knowledge article ID to link"
+          },
+          "used_as": {
+            "type": "string",
+            "description": "How the knowledge was used",
+            "enum": [
+              "suggested",
+              "applied",
+              "resolution"
+            ]
+          }
+        },
+        "required": [
+          "incident_id",
+          "knowledge_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "remove_knowledge_link_to_incident",
+      "title": null,
+      "description": "Remove a knowledge link from an incident. Can identify the link by incident_kb_id OR by combination of incident_id and knowledge_id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_kb_id": {
+            "type": "string",
+            "description": "Incident knowledge link ID to remove"
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Incident ID (must be used with knowledge_id)"
+          },
+          "knowledge_id": {
+            "type": "string",
+            "description": "Knowledge article ID (must be used with incident_id)"
+          },
+          "used_as": {
+            "type": "string",
+            "description": "Usage type to filter removal",
+            "enum": [
+              "suggested",
+              "applied",
+              "resolution"
+            ]
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "add_new_sla_definition",
+      "title": null,
+      "description": "Create a new SLA definition.\n\nAutomatically generates:\n- sla_def_id (SLA_001, SLA_002, ...)\n\nRequired fields:\n- name: Unique name for the SLA definition (<=120 chars)\n- metric: response or resolution\n- target_mins: Target time in minutes (>=1)\n- pause_on_pending: Boolean indicating if SLA pauses on pending status\n- active: Boolean indicating if the SLA definition is active\n\nOptional fields:\n- applies_to_priority: CRITICAL, HIGH, MODERATE, LOW\n- schedule: Schedule ID\n\nExample payload:\n{\n    \"name\": \"Critical Response SLA\",\n    \"metric\": \"RESPONSE\",\n    \"target_mins\": 60,\n    \"pause_on_pending\": true,\n    \"active\": true,\n    \"applies_to_priority\": \"CRITICAL\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the SLA definition (unique, <=120 chars)"
+          },
+          "metric": {
+            "type": "string",
+            "enum": [
+              "response",
+              "resolution"
+            ],
+            "description": "SLA metric (response or resolution)"
+          },
+          "target_mins": {
+            "type": "integer",
+            "description": "Target time in minutes (>=1)",
+            "minimum": 1
+          },
+          "pause_on_pending": {
+            "type": "boolean",
+            "description": "Whether to pause SLA on pending status"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the SLA definition is active"
+          },
+          "applies_to_priority": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low"
+            ],
+            "description": "Priority this SLA applies to"
+          },
+          "schedule": {
+            "type": "string",
+            "description": "Schedule ID (<=32 chars)"
+          }
+        },
+        "required": [
+          "name",
+          "metric",
+          "target_mins",
+          "pause_on_pending",
+          "active"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_sla_definition",
+      "title": null,
+      "description": "Update an existing SLA definition by sla_def_id.\n\nAll fields are optional; only provided fields are updated.\nIf no changes are detected, the API returns an error.\n\nExample payload:\n{\n    \"sla_def_id\": \"SLA_001\",\n    \"target_mins\": 120,\n    \"active\": false\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sla_def_id": {
+            "type": "string",
+            "description": "SLA definition ID (SLA_001, SLA_002, ...). Required when calling this tool."
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the SLA definition (unique, <=120 chars)"
+          },
+          "metric": {
+            "type": "string",
+            "enum": [
+              "response",
+              "resolution"
+            ],
+            "description": "SLA metric"
+          },
+          "target_mins": {
+            "type": "integer",
+            "description": "Target time in minutes (>=1)",
+            "minimum": 1
+          },
+          "pause_on_pending": {
+            "type": "boolean",
+            "description": "Whether to pause SLA on pending status"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the SLA definition is active"
+          },
+          "applies_to_priority": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low"
+            ],
+            "description": "Priority this SLA applies to"
+          },
+          "schedule": {
+            "type": "string",
+            "description": "Schedule ID (<=32 chars)"
+          }
+        },
+        "required": [
+          "sla_def_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_sla_definition_by_name",
+      "title": null,
+      "description": "Retrieve an SLA definition by its unique name.\n\nExample:\n{\n    \"name\": \"Critical Response SLA\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the SLA definition"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_sla_definitions",
+      "title": null,
+      "description": "List SLA definitions applying optional filters. Returns all SLA definitions if no filters provided.\n\nSupported filters (all optional):\n- sla_def_id, name\n- metric (RESPONSE, RESOLUTION)\n- target_mins, pause_on_pending, active\n- applies_to_priority (CRITICAL, HIGH, MODERATE, LOW)\n- created_after, created_before (ISO timestamp strings)\n\nNote:\n- Empty strings (\"\") or null values for parameters will return all results without filtering\n- For boolean fields (pause_on_pending, active), only use true/false to filter - null will return all results\n\nExample:\n{\n    \"metric\": \"RESPONSE\",\n    \"active\": true,\n    \"applies_to_priority\": \"CRITICAL\"\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sla_def_id": {
+            "type": "string",
+            "description": "Filter by sla_def_id"
+          },
+          "name": {
+            "type": "string",
+            "description": "Filter by name"
+          },
+          "metric": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "response",
+              "resolution"
+            ],
+            "description": "Filter by metric (response or resolution). Null returns all."
+          },
+          "target_mins": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Filter by target_mins"
+          },
+          "pause_on_pending": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Filter by pause_on_pending. Null returns all."
+          },
+          "applies_to_priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "critical",
+              "high",
+              "moderate",
+              "low"
+            ],
+            "description": "Filter by applies_to_priority. Null returns all."
+          },
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Filter by active status. Null returns all."
+          },
+          "created_after": {
+            "type": "string",
+            "description": "ISO timestamp: return SLA definitions created after this value"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "ISO timestamp: return SLA definitions created before this value"
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "total_sum_of_target_mins_per_priority",
+      "title": null,
+      "description": "Compute the total sum of target minutes grouped by priority.\n\nOptional arguments:\n- priority: Array of priorities to filter by (critical, high, moderate, low)\n\nReturns an object where keys are priorities and values are summed target minutes.\nExample response:\n{\n    \"CRITICAL\": 120,\n    \"HIGH\": 90,\n    \"MODERATE\": 60\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "priority": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "critical",
+                "high",
+                "moderate",
+                "low"
+              ]
+            },
+            "description": "Optional list of priorities to filter by. Accepted values: critical, high, moderate, low."
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "average_target_mins_per_priority",
+      "title": null,
+      "description": "Compute the average of target minutes grouped by priority.\n\nOptional arguments:\n- priority: Array of priorities to filter by (critical, high, moderate, low)\n\nReturns an object where keys are priorities and values are average target minutes.\nValues are rounded to 2 decimal places.\nExample response:\n{\n    \"CRITICAL\": 45.5,\n    \"HIGH\": 30.0\n}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "priority": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "critical",
+                "high",
+                "moderate",
+                "low"
+              ]
+            },
+            "description": "Optional list of priorities to filter by. Accepted values: critical, high, moderate, low."
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_notifications_by_status",
+      "title": null,
+      "description": "Count notifications grouped by status.\n\nOptional arguments:\n- status: Array of statuses (queued, sent, delivered, opened, failed)\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "sent",
+                "delivered",
+                "opened",
+                "failed"
+              ]
+            },
+            "description": "Optional array of statuses to filter by. Accepted values: queued, sent, delivered, opened, failed."
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_notifications_by_incident",
+      "title": null,
+      "description": "Count notifications grouped by incident.\n\nOptional arguments:\n- incident_id: Array of incident IDs to filter by\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional array of incident IDs to limit the count."
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "average_notifications_by_incident",
+      "title": null,
+      "description": "Calculate the average number of notifications per incident.\n\nOptional arguments:\n- incident_id: Array of incident IDs to limit the calculation\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional array of incident IDs."
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "count_notifications_by_type",
+      "title": null,
+      "description": "Count notifications grouped by type.\n\nOptional arguments:\n- type: Array of notification types (report, update, alert, reminder, solution_proposal, other)\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "report",
+                "update",
+                "alert",
+                "reminder",
+                "solution_proposal",
+                "other"
+              ]
+            },
+            "description": "Optional array of notification types to filter by. Accepted values: report, update, alert, reminder, solution_proposal, other."
+          }
+        },
+        "required": []
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_notifications_for_email",
+      "title": null,
+      "description": "Retrieve notifications sent to a specific email address.\n        \n        Use this tool to find all notifications that have been sent to a particular email address.\n        \n        Parameters:\n          - email (required): Email address to search for\n        \n        Returns a list of notification objects if found, or an empty list if no notifications exist for the email.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Email address to search for"
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_notifications_sent_for_incident",
+      "title": null,
+      "description": "Retrieve notifications related to a specific incident.\n        \n        Use this tool to find all notifications that have been sent regarding a particular incident.\n        \n        Parameters:\n          - incident_id (required): Incident ID to search for\n        \n        Returns a list of notification objects if found, or an empty list if no notifications exist for the incident.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "description": "Incident ID to search for"
+          }
+        },
+        "required": [
+          "incident_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_notifications",
+      "title": null,
+      "description": "Search for notifications using various filter criteria.\n        \n        Use this tool to find notifications based on different filter parameters.\n        All parameters below are optional, and you can search without providing any parameters to get all notifications.\n        Empty string or null values for any parameter will be ignored in the search.\n        \n        Parameters:\n          - notification_id (optional): Filter by notification ID\n          - incident_id (optional): Filter by incident ID\n          - email (optional): Filter by recipient email address\n          - type (optional): Filter by notification type (alert, update, reminder, report, solution_proposal, other)\n          - status (optional): Filter by notification status (queued, sent, delivered, opened, failed)\n          - created_before (optional): Filter for notifications created before this timestamp (ISO format)\n          - created_after (optional): Filter for notifications created after this timestamp (ISO format)\n        \n        Returns a list of notification objects that match the criteria.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by notification ID"
+          },
+          "incident_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by incident ID"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by recipient email address"
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by notification type",
+            "enum": [
+              "alert",
+              "update",
+              "reminder",
+              "report",
+              "solution_proposal",
+              "other"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by notification status",
+            "enum": [
+              "queued",
+              "sent",
+              "delivered",
+              "opened",
+              "failed"
+            ]
+          },
+          "created_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter for notifications created before this timestamp (ISO format)"
+          },
+          "created_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter for notifications created after this timestamp (ISO format)"
+          }
+        }
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "send_notification",
+      "title": null,
+      "description": "Create and send a new notification.\n        \n        Use this tool to create a new notification associated with an incident.\n        \n        Parameters:\n          - incident_id (required): ID of the associated incident\n          - email (required): Email address for notification delivery\n          - type (optional): Type of notification (alert, update, reminder, report, solution_proposal, other)\n          - status (optional): Status of notification (queued, sent, delivered, opened, failed)\n          - subject (optional): Subject of the notification\n          - message (optional): Message content of the notification\n        \n        Returns the created notification object.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "description": "ID of the associated incident"
+          },
+          "email": {
+            "type": "string",
+            "description": "Email address for notification delivery"
+          },
+          "type": {
+            "type": "string",
+            "description": "Type of notification",
+            "enum": [
+              "alert",
+              "update",
+              "reminder",
+              "report",
+              "solution_proposal",
+              "other"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Status of notification",
+            "enum": [
+              "queued",
+              "sent",
+              "delivered",
+              "opened",
+              "failed"
+            ],
+            "default": "queued"
+          },
+          "subject": {
+            "type": "string",
+            "description": "Subject of the notification"
+          },
+          "message": {
+            "type": "string",
+            "description": "Message content of the notification"
+          }
+        },
+        "required": [
+          "incident_id",
+          "email"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_notification",
+      "title": null,
+      "description": "Update an existing notification.\n        \n        Use this tool to update the properties of an existing notification.\n        \n        Parameters:\n          - notification_id (required): ID of notification to update\n          - incident_id (optional): New incident ID\n          - email (optional): New email address\n          - type (optional): New notification type (alert, update, reminder, report, solution_proposal, other)\n          - status (optional): New notification status (queued, sent, delivered, opened, failed)\n          - subject (optional): New subject\n          - message (optional): New message content\n        \n        Returns the updated notification object, or an error if the notification doesn't exist.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": "string",
+            "description": "ID of notification to update"
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "New incident ID"
+          },
+          "email": {
+            "type": "string",
+            "description": "New email address"
+          },
+          "type": {
+            "type": "string",
+            "description": "New notification type",
+            "enum": [
+              "alert",
+              "update",
+              "reminder",
+              "report",
+              "solution_proposal",
+              "other"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "New notification status",
+            "enum": [
+              "queued",
+              "sent",
+              "delivered",
+              "opened",
+              "failed"
+            ]
+          },
+          "subject": {
+            "type": "string",
+            "description": "New subject"
+          },
+          "message": {
+            "type": "string",
+            "description": "New message content"
+          }
+        },
+        "required": [
+          "notification_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "delete_notifications",
+      "title": null,
+      "description": "Delete a notification by ID.\n        \n        Use this tool to delete a specific notification by its notification_id.\n        The notification must belong to your organization.\n        \n        Parameters:\n          - notification_id (required): The ID of the notification to delete (e.g., NOTIF_001)\n        \n        Returns a success message with the deleted notification ID.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "notification_id": {
+            "type": "string",
+            "description": "The ID of the notification to delete (e.g., NOTIF_001)"
+          }
+        },
+        "required": [
+          "notification_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "map_change_request",
+      "title": null,
+      "description": "Create a mapping between a change and either an incident or a problem.\n\nRequirements:\n- `change_id` is mandatory.\n- At least one of `incident_id` or `problem_id` must be provided (you can supply both to create parallel links).\n- The API automatically scopes the mapping to the caller's organization via headers.\n\nCommon uses:\n- Link an in-flight change to impacted incidents for traceability.\n- Associate a change with the problem it resolves.\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "change_id": {
+            "type": "string",
+            "description": "Change ID (e.g., CHG_001). Must belong to the caller's organization."
+          },
+          "incident_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Incident ID to link (optional if problem_id supplied)."
+          },
+          "problem_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Problem ID to link (optional if incident_id supplied)."
+          }
+        },
+        "required": [
+          "change_id"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "incident_id"
+            ]
+          },
+          {
+            "required": [
+              "problem_id"
+            ]
+          }
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_change_request_mappings",
+      "title": null,
+      "description": "List change mappings with powerful filters.\n\nAll parameters are optional; omitting filters returns every mapping within the caller's organization.\nUseful filters include change_id, incident_id, problem_id, and ISO timestamps for created_at windows.\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "change_request_mapping_id": {
+            "type": "string",
+            "description": "Exact mapping ID (CRM_###)."
+          },
+          "change_id": {
+            "type": "string",
+            "description": "Filter by change ID (CHG_###)."
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Filter by incident ID (INC_###)."
+          },
+          "problem_id": {
+            "type": "string",
+            "description": "Filter by problem ID (PRB_###)."
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Return mappings created on/after this ISO timestamp (e.g., 2024-02-10T09:00:00)."
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Return mappings created on/before this ISO timestamp."
+          }
+        }
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_change_request_mappings_for_incident",
+      "title": null,
+      "description": "Retrieve all mappings tied to a specific incident ID within the caller's org.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "description": "Incident ID (INC_###) whose change mappings should be returned."
+          }
+        },
+        "required": [
+          "incident_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_change_request_mappings_for_problem",
+      "title": null,
+      "description": "Retrieve all mappings tied to a specific problem ID within the caller's org.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "problem_id": {
+            "type": "string",
+            "description": "Problem ID (PRB_###) whose change mappings should be returned."
+          }
+        },
+        "required": [
+          "problem_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "delete_change_request_mappings",
+      "title": null,
+      "description": "Delete change request mappings using precise filters with AND logic.\n\nThis tool deletes change request mappings based on filter criteria. It requires at least one\nfilter and uses AND logic when multiple filters are provided (all filters must match).\n\nSafety requirements:\n- You **must** provide at least one filter (`change_request_mapping_id`, `change_id`, `incident_id`, or `problem_id`).\n- If multiple filters are provided, ALL must match (AND logic) - this ensures precise deletion.\n- Prevents accidental bulk deletions by requiring all specified criteria to match.\n\nReturns:\n- deleted_count: Number of mappings deleted\n- deleted_mappings: List of deleted mapping objects with full details\n- message: Success message indicating what was deleted\n\nExamples:\n- Delete by mapping ID: {\"change_request_mapping_id\": \"CRM_001\"}\n- Delete by change and incident: {\"change_id\": \"CHG_001\", \"incident_id\": \"INC_001\"}\n- Delete by change only: {\"change_id\": \"CHG_001\"}\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "change_request_mapping_id": {
+            "type": "string",
+            "description": "Specific mapping ID (CRM_###)."
+          },
+          "change_id": {
+            "type": "string",
+            "description": "Delete mappings for this change."
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Delete mappings linked to this incident."
+          },
+          "problem_id": {
+            "type": "string",
+            "description": "Delete mappings linked to this problem."
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "change_request_mapping_id"
+            ]
+          },
+          {
+            "required": [
+              "change_id"
+            ]
+          },
+          {
+            "required": [
+              "incident_id"
+            ]
+          },
+          {
+            "required": [
+              "problem_id"
+            ]
+          }
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "link_affected_ci_to_incident",
+      "title": null,
+      "description": "Attach a configuration item to an incident, creating a TASKCI_xxx link.\n\nRequirements:\n- configuration_item: existing CI ID within the caller's organization\n- incident_id: existing incident ID within the same org\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "configuration_item": {
+            "type": "string",
+            "description": "CI identifier (e.g., CI_001)"
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Incident identifier (e.g., INC_001)"
+          }
+        },
+        "required": [
+          "configuration_item",
+          "incident_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "list_incident_affected_cis",
+      "title": null,
+      "description": "List configuration items linked to incidents. All parameters optional.\nUse filters like incident_id or configuration_item to narrow the response, or created_before/after for time windows.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_affected_cis_id": {
+            "type": "string",
+            "description": "Specific mapping ID (TASKCI_###)."
+          },
+          "configuration_item": {
+            "type": "string",
+            "description": "Filter by CI ID."
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Filter by incident ID."
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Return mappings created on/before this ISO timestamp."
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Return mappings created on/after this ISO timestamp."
+          }
+        }
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "remove_affected_ci_from_incident",
+      "title": null,
+      "description": "Delete incident-CI links. You must provide at least one filter (ID, incident_id, configuration_item, or date range).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_affected_cis_id": {
+            "type": "string",
+            "description": "Specific mapping ID to delete"
+          },
+          "configuration_item": {
+            "type": "string",
+            "description": "Remove mappings for this CI"
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Remove mappings for this incident"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Delete mappings created on/before this ISO timestamp"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Delete mappings created on/after this ISO timestamp"
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "incident_affected_cis_id"
+            ]
+          },
+          {
+            "required": [
+              "configuration_item"
+            ]
+          },
+          {
+            "required": [
+              "incident_id"
+            ]
+          },
+          {
+            "required": [
+              "created_before"
+            ]
+          },
+          {
+            "required": [
+              "created_after"
+            ]
+          }
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_incident_slas",
+      "title": null,
+      "description": "List Incident SLA records with optional filters.\nAll parameters are optional; omitting them returns every incident SLA for the caller's organization.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_sla_id": {
+            "type": "string",
+            "description": "Filter by SLA record ID"
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Filter by incident ID"
+          },
+          "sla_def_id": {
+            "type": "string",
+            "description": "Filter by SLA definition ID"
+          },
+          "stage": {
+            "type": "string",
+            "description": "Filter by stage (in_progress, paused, completed, cancelled, breached)"
+          },
+          "has_breached": {
+            "type": "boolean",
+            "description": "Filter by breach flag"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "ISO timestamp (<=) filter on created_on"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "ISO timestamp (>=) filter on created_on"
+          }
+        }
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "find_stage_wise_breached_incident_sla_counts",
+      "title": null,
+      "description": "Return the breached incident SLA counts grouped by stage.\nProvide an optional array of stages ([\"in_progress\", \"breached\", ...]) to limit the aggregation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "stages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional stage filters"
+          }
+        }
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "link_new_incident_sla",
+      "title": null,
+      "description": "Create a new Incident SLA record (incident_sla).\nRequires incident_id, sla_def_id, and start_time. Stage defaults to IN_PROGRESS.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "description": "Incident identifier"
+          },
+          "sla_def_id": {
+            "type": "string",
+            "description": "SLA definition identifier"
+          },
+          "stage": {
+            "type": "string",
+            "description": "Stage (in_progress, paused, completed, cancelled, breached)"
+          },
+          "has_breached": {
+            "type": "boolean",
+            "description": "Whether SLA has breached"
+          },
+          "start_time": {
+            "type": "string",
+            "description": "Start time (ISO timestamp)"
+          },
+          "breach_time": {
+            "type": "string",
+            "description": "Breach time (ISO timestamp)"
+          },
+          "completed_time": {
+            "type": "string",
+            "description": "Completion time (ISO timestamp)"
+          }
+        },
+        "required": [
+          "incident_id",
+          "sla_def_id",
+          "start_time"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "update_incident_sla_details",
+      "title": null,
+      "description": "Update an existing Incident SLA. Provide the incident_sla_id plus one or more fields to change.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_sla_id": {
+            "type": "string",
+            "description": "SLA record ID to update"
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "New incident ID"
+          },
+          "sla_def_id": {
+            "type": "string",
+            "description": "New SLA definition ID"
+          },
+          "stage": {
+            "type": "string",
+            "description": "New stage (in_progress, paused, completed, cancelled, breached)"
+          },
+          "has_breached": {
+            "type": "boolean",
+            "description": "Update breach flag"
+          },
+          "start_time": {
+            "type": "string",
+            "description": "New start time (ISO timestamp)"
+          },
+          "breach_time": {
+            "type": "string",
+            "description": "New breach time (ISO timestamp)"
+          },
+          "completed_time": {
+            "type": "string",
+            "description": "New completion time (ISO timestamp)"
+          }
+        },
+        "required": [
+          "incident_sla_id"
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    },
+    {
+      "name": "delete_incident_slas",
+      "title": null,
+      "description": "Delete Incident SLA records filtered by identifiers or timestamps.\nAt least one filter is required (incident_sla_id, incident_id, sla_def_id, stage, has_breached, created_before, created_after).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "incident_sla_id": {
+            "type": "string",
+            "description": "Specific record ID"
+          },
+          "incident_id": {
+            "type": "string",
+            "description": "Incident ID"
+          },
+          "sla_def_id": {
+            "type": "string",
+            "description": "SLA definition ID"
+          },
+          "stage": {
+            "type": "string",
+            "description": "Stage filter"
+          },
+          "has_breached": {
+            "type": "boolean",
+            "description": "Breach flag filter"
+          },
+          "created_before": {
+            "type": "string",
+            "description": "Created_on <= timestamp"
+          },
+          "created_after": {
+            "type": "string",
+            "description": "Created_on >= timestamp"
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "incident_sla_id"
+            ]
+          },
+          {
+            "required": [
+              "incident_id"
+            ]
+          },
+          {
+            "required": [
+              "sla_def_id"
+            ]
+          },
+          {
+            "required": [
+              "stage"
+            ]
+          },
+          {
+            "required": [
+              "has_breached"
+            ]
+          },
+          {
+            "required": [
+              "created_before"
+            ]
+          },
+          {
+            "required": [
+              "created_after"
+            ]
+          }
+        ]
+      },
+      "outputSchema": null,
+      "icons": null,
+      "annotations": null,
+      "meta": null,
+      "execution": null
+    }
+  ]
+}
