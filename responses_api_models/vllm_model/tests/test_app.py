@@ -5125,7 +5125,7 @@ class TestEndpointFile:
 
     def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
         (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
-        server = self._make_server(tmp_path)
+        server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0)
         server._session_id_to_client["session-on-old-host"] = server._clients[0]
 
         server._maybe_rebind_endpoint()
@@ -5137,6 +5137,14 @@ class TestEndpointFile:
         # client; sessions re-resolve onto the new host.
         assert server._clients[0].max_connection_retries == 8
         assert not server._session_id_to_client
+        # Within endpoint_check_interval_s the filesystem is left alone, so a
+        # fresh publish is only seen once the window is over.
+        (tmp_path / "endpoint.txt").write_text("http://newer-host:8712/v1\n")
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        server._endpoint_last_check_at = None  # window over: the next call re-checks
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://newer-host:8712/v1"]
         # Static base_url clients keep today's retry-forever behavior.
         assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
 
@@ -5156,7 +5164,11 @@ class TestEndpointFile:
             server._maybe_rebind_endpoint()
 
         endpoint_file.write_text("http://placeholder:8712/v1\n")  # republish on the SAME host
-        server._maybe_rebind_endpoint()  # heals with no rebind needed
+        now = 1301.5  # within the check window: the publish is not seen yet, the raise stays loud
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()
+        now = 1311.5  # next window: heals with no rebind needed
+        server._maybe_rebind_endpoint()
         assert server._endpoint_missing_since is None
 
         now = 1400.0
