@@ -19,7 +19,7 @@ import json
 import logging
 import os
 from copy import deepcopy
-from time import time, time_ns
+from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
@@ -171,6 +171,16 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+
+    # Optional path to a file that publishes the current backend base_url.
+    # Used for shared serving jobs that move hosts when they restart.
+    endpoint_file: Optional[str] = None
+
+    # How long a missing endpoint file allows for the use of the last-known-good clients.
+    endpoint_stale_grace_s: float = 300.0
+
+    # Connection-error retry bound applied to clients when endpoint_file is set.
+    endpoint_connection_retries: Optional[int] = 8
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -231,11 +241,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                 base_url=base_url,
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
+                max_connection_retries=(
+                    self.config.endpoint_connection_retries if self.config.endpoint_file else None
+                ),
             )
             for base_url in self.config.base_url
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._endpoint_file_mtime: Optional[float] = None
+        self._endpoint_missing_since: Optional[float] = None
 
         self._converter = self.get_converter()
         self._transport_call_index = 0
@@ -1089,7 +1104,71 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         )
 
+    def _maybe_rebind_endpoint(self) -> None:
+        """Rebind clients when a shared serving job publishes a new endpoint.
+
+        Raises when the endpoints have stayed unpublished for longer than `endpoint_stale_grace_s`.
+        """
+        if not self.config.endpoint_file:
+            return
+        try:
+            mtime = os.stat(self.config.endpoint_file).st_mtime
+        except FileNotFoundError:
+            # Serving jobs remove the endpoint file while rotating;
+            # keep the current clients until the successor publishes.
+            self._note_endpoint_unpublished()
+            return
+        except OSError:
+            # Transient filesystem trouble is not a backend exit; retry the current clients.
+            return
+        if mtime == self._endpoint_file_mtime:
+            if self._endpoint_missing_since is not None:
+                self._note_endpoint_unpublished()
+            return
+        try:
+            with open(self.config.endpoint_file) as endpoint_stream:
+                url = endpoint_stream.read().strip()
+        except OSError:
+            return
+        self._endpoint_file_mtime = mtime
+        if not url:
+            # An empty file is as unpublished as a missing one.
+            self._note_endpoint_unpublished()
+            return
+        self._endpoint_missing_since = None
+        if [url] == self.config.base_url:
+            return
+        print(
+            f"vllm_model '{self.config.name}': backend endpoint changed "
+            f"{self.config.base_url} -> {[url]}; rebinding clients.",
+            flush=True,
+        )
+        self.config.base_url = [url]
+        self._clients = [
+            NeMoGymAsyncOpenAI(
+                base_url=url,
+                api_key=self.config.api_key,
+                default_headers=self.config.default_headers,
+                max_connection_retries=self.config.endpoint_connection_retries,
+            )
+        ]
+        # Every session re-resolves onto the new host.
+        self._session_id_to_client.clear()
+
+    def _note_endpoint_unpublished(self) -> None:
+        now = monotonic()
+        if self._endpoint_missing_since is None:
+            self._endpoint_missing_since = now
+        elif now - self._endpoint_missing_since > self.config.endpoint_stale_grace_s:
+            raise RuntimeError(
+                f"vllm_model endpoint file {self.config.endpoint_file} unpublished (absent "
+                f"or empty) for {now - self._endpoint_missing_since:.0f}s (grace "
+                f"{self.config.endpoint_stale_grace_s:.0f}s); refusing to keep serving "
+                "against a backend that is no longer published."
+            )
+
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+        self._maybe_rebind_endpoint()
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # Uvicorn workers do not share this cache. A stable assignment keeps
