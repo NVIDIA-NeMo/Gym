@@ -20,9 +20,10 @@ import math
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Self
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
@@ -306,51 +307,65 @@ def _log_operation_retry(retry_state: Any) -> None:
     )
 
 
-class DaytonaConfigBase:
-    """Shared dataclass construction for Daytona provider config blocks."""
+class DaytonaConfigBase(BaseModel):
+    """Shared Pydantic construction for Daytona provider config blocks."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     @classmethod
-    def from_mapping(cls, value: Any) -> Any:
+    def from_mapping(cls, value: Any) -> Self:
         if value is None:
             return cls()
         if isinstance(value, cls):
             return value
         if not isinstance(value, Mapping):
             raise TypeError(f"{cls.__name__} must be a mapping or {cls.__name__} instance")
-        field_names = {field.name for field in fields(cls) if field.init}
+        field_names = set(cls.model_fields)
         unsupported_keys = sorted(str(key) for key in value if key not in field_names)
         if unsupported_keys:
             raise ValueError(f"Unsupported Daytona {cls.__name__} settings: {', '.join(unsupported_keys)}")
-        return cls(**{key: val for key, val in value.items() if key in field_names})
-
-
-def _supplied_config_keys(value: Any, config_cls: type[Any]) -> set[str]:
-    if not isinstance(value, Mapping):
-        return set()
-    field_names = {field.name for field in fields(config_cls) if field.init}
-    return {str(key) for key in value if key in field_names}
+        return cls.model_validate(dict(value))
 
 
 def _string_map(values: dict[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in values.items()}
 
 
-@dataclass(frozen=True)
-class DaytonaProviderOptions:
+class DaytonaProviderOptions(BaseModel):
     """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``."""
 
-    extensions: Mapping[str, str] = field(default_factory=dict)
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    extensions: dict[str, str] = Field(default_factory=dict)
     snapshot_id: str | None = None
-    volumes: tuple[Mapping[str, Any], ...] = ()
+    volumes: tuple[dict[str, Any], ...] = ()
+
+    @field_validator("extensions", mode="before")
+    @classmethod
+    def normalize_extensions(cls, extensions: Any) -> Any:
+        if isinstance(extensions, Mapping):
+            return _string_map(dict(extensions))
+        return extensions
+
+    @field_validator("volumes", mode="before")
+    @classmethod
+    def normalize_volumes(cls, volumes: Any) -> Any:
+        if volumes is None:
+            return ()
+        if isinstance(volumes, (list, tuple)):
+            return tuple(dict(volume) if isinstance(volume, Mapping) else volume for volume in volumes)
+        return volumes
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any] | None) -> "DaytonaProviderOptions":
         if options is None:
             return cls()
+        if isinstance(options, cls):
+            return options
         if not isinstance(options, Mapping):
             raise TypeError("Daytona provider_options must be a mapping")
 
-        allowed = set(cls.__dataclass_fields__)
+        allowed = set(cls.model_fields)
         unknown = set(options) - allowed
         if unknown:
             raise ValueError(
@@ -370,10 +385,12 @@ class DaytonaProviderOptions:
         if not isinstance(volumes, (list, tuple)) or not all(isinstance(volume, Mapping) for volume in volumes):
             raise TypeError("Daytona provider option 'volumes' must be a list of mappings")
 
-        return cls(
-            extensions=_string_map(dict(extensions)),
-            snapshot_id=snapshot_id,
-            volumes=tuple(dict(volume) for volume in volumes),
+        return cls.model_validate(
+            {
+                "extensions": dict(extensions),
+                "snapshot_id": snapshot_id,
+                "volumes": volumes,
+            }
         )
 
 
@@ -383,11 +400,12 @@ def _provider_options(spec: SandboxSpec) -> DaytonaProviderOptions:
 
 def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
     _provider_options(spec)
-    return replace(
-        spec,
-        env=_string_map(spec.env),
-        metadata=_string_map(spec.metadata),
-        provider_options={} if spec.provider_options is None else dict(spec.provider_options),
+    return spec.model_copy(
+        update={
+            "env": _string_map(spec.env),
+            "metadata": _string_map(spec.metadata),
+            "provider_options": {} if spec.provider_options is None else dict(spec.provider_options),
+        }
     )
 
 
@@ -452,7 +470,7 @@ def _configured_or_extension(spec: SandboxSpec, key: str, configured: Any) -> An
 
 def _resources_requested(resources: SandboxResources | Mapping[str, Any]) -> bool:
     if isinstance(resources, SandboxResources):
-        return any(getattr(resources, field.name) is not None for field in fields(SandboxResources))
+        return bool(resources.model_dump(exclude_none=True))
     return bool(resources)
 
 
@@ -527,7 +545,6 @@ def _to_sandbox_status(value: Any) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-@dataclass(frozen=True)
 class DaytonaConnectionConfig(DaytonaConfigBase):
     """Daytona API client connection settings."""
 
@@ -540,12 +557,13 @@ class DaytonaConnectionConfig(DaytonaConfigBase):
     connection_pool_maxsize: int | None = None
     otel_enabled: bool | None = None
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_connection_pool_maxsize(self) -> Self:
         if self.connection_pool_maxsize is not None and self.connection_pool_maxsize <= 0:
             raise ValueError("connection.connection_pool_maxsize must be > 0")
+        return self
 
 
-@dataclass(frozen=True)
 class DaytonaCreateConfig(DaytonaConfigBase):
     """Daytona sandbox creation settings."""
 
@@ -563,7 +581,8 @@ class DaytonaCreateConfig(DaytonaConfigBase):
     network_block_all: bool | None = None
     network_allow_list: str | None = None
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_create_settings(self) -> Self:
         if self.timeout_s < 0:
             raise ValueError("create.timeout_s must be >= 0")
         if self.retries < 0:
@@ -572,9 +591,9 @@ class DaytonaCreateConfig(DaytonaConfigBase):
             raise ValueError("create.retry_delay_s must be >= 0")
         if self.retry_max_delay_s < 0:
             raise ValueError("create.retry_max_delay_s must be >= 0")
+        return self
 
 
-@dataclass(frozen=True)
 class DaytonaProbeConfig(DaytonaConfigBase):
     """Post-create probe settings."""
 
@@ -583,14 +602,15 @@ class DaytonaProbeConfig(DaytonaConfigBase):
     timeout_s: int = 30
     deadline_s: float | None = None
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_probe_settings(self) -> Self:
         if self.command is not None and self.timeout_s <= 0:
             raise ValueError("probe.timeout_s must be > 0")
         if self.deadline_s is not None and self.deadline_s <= 0:
             raise ValueError("probe.deadline_s must be > 0")
+        return self
 
 
-@dataclass(frozen=True)
 class DaytonaOperationConfig(DaytonaConfigBase):
     """Retry and timeout settings for Daytona operations after create."""
 
@@ -602,7 +622,8 @@ class DaytonaOperationConfig(DaytonaConfigBase):
     file_timeout_s: int | None = 30 * 60
     close_timeout_s: float | None = 60.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_operation_settings(self) -> Self:
         if self.retries < 0:
             raise ValueError("operations.retries must be >= 0")
         if self.retry_delay_s < 0:
@@ -617,17 +638,19 @@ class DaytonaOperationConfig(DaytonaConfigBase):
             raise ValueError("operations.file_timeout_s must be > 0")
         if self.close_timeout_s is not None and self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
+        return self
 
 
-@dataclass(frozen=True)
 class DaytonaBatchConfig(DaytonaConfigBase):
     """Client-side batch fanout settings."""
 
     concurrency: int = 4
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_concurrency(self) -> Self:
         if self.concurrency < 1:
             raise ValueError("batch.concurrency must be >= 1")
+        return self
 
 
 class DaytonaProvider:
@@ -649,7 +672,7 @@ class DaytonaProvider:
         self._probe = DaytonaProbeConfig.from_mapping(probe)
         self._operations = DaytonaOperationConfig.from_mapping(operations)
         self._batch = DaytonaBatchConfig.from_mapping(batch)
-        self._connection_supplied_keys = _supplied_config_keys(connection, DaytonaConnectionConfig)
+        self._connection_supplied_keys = set(self._connection.model_fields_set)
         self._daytona: Any | None = None
 
     def _client(self) -> Any:
@@ -781,7 +804,7 @@ class DaytonaProvider:
         extensions = _spec_extensions(spec)
         extensions[f"{DAYTONA_EXTENSION_PREFIX}name"] = sandbox_id
         provider_options[PROVIDER_OPTION_EXTENSIONS] = extensions
-        return replace(spec, metadata=metadata, provider_options=provider_options)
+        return spec.model_copy(update={"metadata": metadata, "provider_options": provider_options})
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
         if self._probe.command is None:

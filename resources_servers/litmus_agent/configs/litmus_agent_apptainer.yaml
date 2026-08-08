@@ -31,9 +31,8 @@ litmus_agent:
             mount_point: /sandbox
             start_timeout_s: 600
             # cgroups-v2 delegation is not guaranteed inside an enroot container;
-            # leave resource limits off unless the node supports it. Literal bool
-            # (not oc.env) because the apptainer sub-config is a plain dataclass
-            # with no string coercion -- "False" would be truthy.
+            # leave resource limits off unless the node supports it. Keep this a
+            # literal bool so the checked-in config is explicit and self-contained.
             apply_resource_limits: false
           probe:
             command: printf apptainer-sandbox-ready

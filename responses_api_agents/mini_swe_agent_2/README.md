@@ -173,14 +173,16 @@ mini_swe_agent_2:
       sandbox_spec:
         ttl_s: 18000
         ready_timeout_s: 1200
+        # Resource limits (burst ceiling).
         resources:
           cpu: 2
           memory_mib: 8192
-          disk_gib: 20
-        provider_options:
-          platform:
-            os: linux
-            arch: amd64
+          disk_gib: 30
+        # Provider-neutral scheduling requests.
+        resource_requests:
+          cpu: 0.5
+          memory_mib: 2048
+          disk_gib: 30
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent
@@ -200,6 +202,12 @@ mini_swe_agent_2:
 sandbox block in the merged config, the recommended decoupled form) or an inline
 single-key provider mapping (`{provider_name: {...}}`) when you prefer to keep
 everything in one file.
+
+`sandbox_spec.resources` defines the resource limits, while the optional
+`sandbox_spec.resource_requests` field provides provider-neutral scheduling
+requests for providers that support separate requests and limits. Each numeric
+request must be less than or equal to its corresponding limit. Providers without
+separate request semantics may ignore this hint.
 
 ### Sandbox Provider Configuration
 
@@ -264,7 +272,10 @@ Optional `sandbox_resource_profiles` can be configured as a list of resource
 maps. When present, the agent hashes `instance_id` and deterministically merges
 one profile into `sandbox_spec.resources`. This is useful for spreading
 SWE-bench tasks across a small set of resource sizes without changing the input
-data.
+data. If a selected profile lowers a numeric resource limit below its configured
+request, the agent clamps that request to the profiled limit. It does not create
+requests when `sandbox_spec.resource_requests` is omitted; other request-over-limit
+configurations fail validation.
 
 ### Advanced: multiple sandboxes
 
@@ -656,6 +667,7 @@ environment:
       connection: ...
   spec:
     resources: ...
+    resource_requests: ...
     provider_options:
       platform: ...
     metadata: ...
@@ -667,7 +679,7 @@ environment:
 
 - Validates that a sandbox provider was configured.
 - Builds a `SandboxSpec` from the task image, environment variables, metadata,
-  resources, and provider-specific options.
+  resource limits, resource requests, and provider-specific options.
 - Adds standard metadata such as `nemo_gym_agent=mini_swe_agent_2` and
   `instance_id`.
 - Creates a `Sandbox` facade and calls `Sandbox.start(...)`.

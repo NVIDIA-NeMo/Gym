@@ -681,6 +681,7 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         spec = dict(self.config.sandbox_spec)
         files = dict(spec.pop("files", {}))
         files[_CODE_EXEC_DRIVER_PATH] = _CODE_EXEC_DRIVER
+        resource_requests = spec.pop("resource_requests", None)
 
         known = SandboxSpec(
             image=spec.pop("image", None),
@@ -691,8 +692,12 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             files=files,
             metadata=dict(spec.pop("metadata", {})),
             resources=SandboxResources.from_mapping(spec.pop("resources", {})),
+            resource_requests=(
+                SandboxResources.from_mapping(resource_requests) if resource_requests is not None else None
+            ),
             entrypoint=spec.pop("entrypoint", None),
             provider_options=dict(spec.pop("provider_options", {})),
+            ports=spec.pop("ports", ()),
         )
         if spec:
             raise ValueError(f"Unknown sandbox_spec keys: {', '.join(sorted(spec))}")

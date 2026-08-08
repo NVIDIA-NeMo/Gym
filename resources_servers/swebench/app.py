@@ -34,7 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import run_instance
@@ -172,14 +172,13 @@ fi
         await self._inner_container.stop()
 
 
-# TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
-# They can possibly even omitted once this graduates to core infra.
 class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest):
     sandbox_spec: Optional[Dict[str, Any]] = None
 
 
 class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
-    sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    # A generic seed-session handle type can replace this provider-facing string once available.
+    sandbox_handle: str
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
@@ -190,28 +189,27 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
 
-    async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
-        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+    async def _create_sandbox(
+        self,
+        test_spec: TestSpec,
+        sandbox_spec: Optional[Dict[str, Any]] = None,
+    ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
-        eval_sandbox_spec = SandboxSpec(
-            image=test_spec.instance_image_key,
-            ttl_s=self.config.sandbox_config.get("ttl_s", None),
-            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
-            workdir=None,  # Default to container's WORKDIR
-            env=dict(),
-            files=dict(),
-            metadata=provider_default_metadata
+        request_spec = sandbox_spec or {}
+        merged_spec = self.config.sandbox_config | request_spec
+        merged_spec["image"] = test_spec.instance_image_key
+        merged_spec["metadata"] = (
+            provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
+            | request_spec.get("metadata", {})
             | {
                 "nemo_gym_agent": self.config.name,
                 "instance_id": test_spec.instance_id[:63],
-            },
-            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
-            entrypoint=None,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            }
         )
+        eval_sandbox_spec = SandboxSpec.model_validate(merged_spec)
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
@@ -244,12 +242,12 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         test_spec = self._make_test_spec(body)
-        eval_sandbox = await self._create_sandbox(test_spec)
+        eval_sandbox = await self._create_sandbox(test_spec, sandbox_spec=body.sandbox_spec)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
+        # Activate the necessary conda environments for SWE Bench Verified Python instances.
         # This may be overfit and needs to be config'd or detected.
-        # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
+        # This pattern is not yet supported because calls to sandbox.exec use separate processes.
         # For now, the activation is put on the harness side.
         # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
 

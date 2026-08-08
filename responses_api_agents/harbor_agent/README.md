@@ -39,6 +39,16 @@ The default Harbor environments are not sufficient for HPC training, so this rep
 includes a custom Singularity environment implementation.
 It is designed around task-local setup, staged task files, and predictable runtime
 paths used by Harbor jobs.
+
+The package also includes a provider-neutral NeMo Gym sandbox environment for
+running Harbor tasks through any configured sandbox provider. Its
+`harbor_environment_kwargs.sandbox_resource_requests` mapping sets optional
+scheduling requests separately from the task or `override_*` resource limits;
+requests must not exceed those resolved limits. Reserve
+`sandbox_provider_options` for settings specific to the selected provider. See
+[`configs/harbor_agent_opensandbox.yaml`](configs/harbor_agent_opensandbox.yaml)
+for a complete example.
+
 For Singularity installation and image preparation (`docker_image` as `.sif` path vs.
 registry reference), see [Quick Start: 2) Set up dependencies and task images](#2-set-up-dependencies-and-task-images).
 

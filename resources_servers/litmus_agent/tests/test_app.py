@@ -817,6 +817,23 @@ class TestSandboxSpecAndRouting:
         assert _CODE_EXEC_DRIVER_PATH in spec.files
         assert spec.image == "fake:latest"
 
+    def test_resource_requests_forwarded_as_public_spec_field(self):
+        server = _make_sandbox_server(
+            sandbox_spec={
+                "image": "fake:latest",
+                "resources": {"cpu": 2, "memory_mib": 4096},
+                "resource_requests": {"cpu": 0.5, "memory_mib": 1024},
+                "provider_options": {"network": "isolated"},
+                "ports": [8000, 9222],
+            }
+        )
+        spec = server._build_sandbox_spec()
+        assert spec.resource_requests is not None
+        assert spec.resource_requests.cpu == 0.5
+        assert spec.resource_requests.memory_mib == 1024
+        assert spec.provider_options == {"network": "isolated"}
+        assert spec.ports == (8000, 9222)
+
     def test_unknown_spec_key_raises(self):
         server = _make_sandbox_server(sandbox_spec={"image": "x", "bogus": 1})
         with pytest.raises(ValueError, match="Unknown sandbox_spec keys: bogus"):

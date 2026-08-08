@@ -41,6 +41,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 
 from nemo_gym.sandbox import (
     AsyncSandbox,
+    SandboxResources,
     SandboxSpec,
     resolve_provider_config,
     resolve_provider_metadata,
@@ -80,9 +81,11 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             (optionally wrapped with a reserved ``default_metadata`` key, same
             shape as the shipped ``sandbox:`` config blocks).
         sandbox_metadata: Extra ``SandboxSpec.metadata`` entries.
-        sandbox_provider_options: ``SandboxSpec.provider_options`` passed through
-            to the provider, e.g. ``resource_requests`` to schedule sandboxes
-            below their resource limits.
+        sandbox_resource_requests: Provider-neutral scheduling resource requests.
+            Accepts ``SandboxResources`` fields and must not exceed the task's
+            resolved resource limits.
+        sandbox_provider_options: Provider-specific ``SandboxSpec.provider_options``
+            passed through unchanged.
         sandbox_env: Extra environment variables set in the sandbox.
         sandbox_ttl_s: Sandbox server-side TTL safety net (default 21600).
         sandbox_ready_timeout_s: Create/readiness timeout incl. image pull
@@ -119,6 +122,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         *args,
         sandbox_provider: Optional[Mapping[str, Any]] = None,
         sandbox_metadata: Optional[Mapping[str, Any]] = None,
+        sandbox_resource_requests: Optional[Mapping[str, Any]] = None,
         sandbox_provider_options: Optional[Mapping[str, Any]] = None,
         sandbox_env: Optional[Mapping[str, str]] = None,
         sandbox_ttl_s: Optional[float] = 21600,
@@ -135,6 +139,9 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         # _validate_* hooks, which read these.
         self._sandbox_provider = sandbox_provider
         self._sandbox_metadata = dict(sandbox_metadata or {})
+        self._sandbox_resource_requests = None
+        if sandbox_resource_requests is not None:
+            self._sandbox_resource_requests = SandboxResources.from_mapping(sandbox_resource_requests)
         self._sandbox_provider_options = dict(sandbox_provider_options or {})
         self._sandbox_env = {str(k): str(v) for k, v in dict(sandbox_env or {}).items()}
         self._sandbox_ttl_s = sandbox_ttl_s
@@ -221,6 +228,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             env=self._sandbox_env,
             metadata=metadata,
             resources=resources,
+            resource_requests=self._sandbox_resource_requests,
             provider_options=dict(self._sandbox_provider_options),
         )
 

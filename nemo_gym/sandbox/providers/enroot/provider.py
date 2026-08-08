@@ -37,7 +37,9 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
@@ -134,9 +136,10 @@ def _require_enroot() -> str:
     return path
 
 
-@dataclass(frozen=True)
-class EnrootCreateConfig:
+class EnrootCreateConfig(BaseModel):
     """Settings for creating an Enroot sandbox container."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     mount_point: str = DEFAULT_MOUNT_POINT
     # Provider-scoped enroot paths. When None they are resolved under a
@@ -161,11 +164,12 @@ class EnrootCreateConfig:
     create_timeout_s: float | None = 600
     start_timeout_s: float | None = 600
     start_poll_s: float = 0.5
-    extra_import_args: list[str] = field(default_factory=list)
-    extra_create_args: list[str] = field(default_factory=list)
-    extra_start_args: list[str] = field(default_factory=list)
+    extra_import_args: list[str] = Field(default_factory=list)
+    extra_create_args: list[str] = Field(default_factory=list)
+    extra_start_args: list[str] = Field(default_factory=list)
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         for attr in ("import_timeout_s", "create_timeout_s", "start_timeout_s"):
             value = getattr(self, attr)
             if value is not None and value <= 0:
@@ -174,28 +178,33 @@ class EnrootCreateConfig:
             raise ValueError("create.start_poll_s must be > 0")
         if not self.mount_point.startswith("/"):
             raise ValueError("create.mount_point must be an absolute path")
+        return self
 
 
-@dataclass(frozen=True)
-class EnrootExecConfig:
+class EnrootExecConfig(BaseModel):
     """Settings for running commands inside an Enroot sandbox."""
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     default_timeout_s: float | None = 180
-    default_mounts: list[str] = field(default_factory=list)
-    extra_exec_args: list[str] = field(default_factory=list)
+    default_mounts: list[str] = Field(default_factory=list)
+    extra_exec_args: list[str] = Field(default_factory=list)
     concurrency: int = 32
     exec_shell: str = "sh"
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
+        return self
 
 
-@dataclass(frozen=True)
-class EnrootProbeConfig:
+class EnrootProbeConfig(BaseModel):
     """Post-create probe settings: a test command confirming the sandbox is usable."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     command: str | None = READY_PROBE_COMMAND
     expected_stdout: str | None = READY_PROBE_EXPECTED
@@ -204,7 +213,8 @@ class EnrootProbeConfig:
     stable_count: int = 1
     stable_delay_s: float = 0.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.command is not None and self.timeout_s <= 0:
             raise ValueError("probe.timeout_s must be > 0")
         if self.deadline_s is not None and self.deadline_s <= 0:
@@ -213,6 +223,7 @@ class EnrootProbeConfig:
             raise ValueError("probe.stable_count must be >= 1")
         if self.stable_delay_s < 0:
             raise ValueError("probe.stable_delay_s must be >= 0")
+        return self
 
 
 @dataclass

@@ -161,14 +161,24 @@ class TestStartStop:
         assert provider.exec_calls[0]["command"] == "mkdir -p /logs/agent /logs/verifier"
 
     @pytest.mark.asyncio
-    async def test_start_passes_provider_options_through(self, tmp_path):
+    async def test_start_passes_resource_requests_and_provider_options(self, tmp_path):
         env = _make_environment(
             tmp_path,
-            sandbox_provider_options={"resource_requests": {"cpu": 0.25, "memory_mib": 1024}},
+            sandbox_resource_requests={"cpu": 0.25, "memory_mib": 1024},
+            sandbox_provider_options={"runtime_class": "batch"},
         )
         await env.start(force_build=False)
         spec = _provider().created_specs[0]
-        assert spec.provider_options == {"resource_requests": {"cpu": 0.25, "memory_mib": 1024}}
+        assert spec.resource_requests is not None
+        assert spec.resource_requests.cpu == 0.25
+        assert spec.resource_requests.memory_mib == 1024
+        assert spec.provider_options == {"runtime_class": "batch"}
+
+    def test_resource_requests_cannot_exceed_task_limits(self, tmp_path):
+        env = _make_environment(tmp_path, sandbox_resource_requests={"cpu": 4.5})
+
+        with pytest.raises(ValueError, match=r"resource_requests\.cpu.*cannot exceed resources\.cpu"):
+            env._build_spec()
 
     @pytest.mark.asyncio
     async def test_start_honours_harbor_resource_overrides(self, tmp_path):

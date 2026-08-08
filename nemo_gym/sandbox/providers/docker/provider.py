@@ -28,7 +28,9 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self, TypeVar
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
@@ -43,6 +45,8 @@ from nemo_gym.sandbox.providers.base import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+_ConfigT = TypeVar("_ConfigT", bound=BaseModel)
 
 CONTAINER_NAME_PREFIX = "nemo-gym-"
 SANDBOX_LABEL = "nemo-gym.sandbox"
@@ -79,13 +83,13 @@ def _require_docker() -> str:
     return path
 
 
-def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
+def _coerce_config(value: Any, config_cls: type[_ConfigT]) -> _ConfigT:
     if value is None:
         return config_cls()
     if isinstance(value, config_cls):
         return value
     if isinstance(value, Mapping):
-        return config_cls(**value)
+        return config_cls.model_validate(value)
     raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
 
@@ -112,22 +116,24 @@ def _redact_argv(argv: list[str]) -> list[str]:
     return out
 
 
-@dataclass(frozen=True)
-class DockerCreateConfig:
+class DockerCreateConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     keepalive_shell: str = DEFAULT_KEEPALIVE_SHELL
     keepalive_cmd: str = DEFAULT_KEEPALIVE_CMD
     start_timeout_s: float | None = 600
     use_init: bool = True
     network: str | None = None  # None: default bridge; "none": no network; else a named network.
     read_only: bool = False
-    cap_drop: list[str] = field(default_factory=list)
-    security_opt: list[str] = field(default_factory=list)
+    cap_drop: list[str] = Field(default_factory=list)
+    security_opt: list[str] = Field(default_factory=list)
     pids_limit: int | None = None
-    extra_run_args: list[str] = field(default_factory=list)
+    extra_run_args: list[str] = Field(default_factory=list)
     apply_resource_limits: bool = True
     publish_host: str = "127.0.0.1"
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
             raise ValueError("create.start_timeout_s must be > 0")
         if self.pids_limit is not None and self.pids_limit <= 0:
@@ -136,27 +142,32 @@ class DockerCreateConfig:
             ipaddress.ip_address(self.publish_host)
         except ValueError as exc:
             raise ValueError("create.publish_host must be an IPv4 or IPv6 address") from exc
+        return self
 
 
-@dataclass(frozen=True)
-class DockerExecConfig:
+class DockerExecConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     default_timeout_s: float | None = 180
-    extra_exec_args: list[str] = field(default_factory=list)
+    extra_exec_args: list[str] = Field(default_factory=list)
     concurrency: int = 32
     # `<shell> -c <cmd>`. None auto-detects bash (needed for conda `source`), else falls back to sh.
     exec_shell: str | None = None
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
         if self.exec_shell is not None and not self.exec_shell:
             raise ValueError("exec.exec_shell must be null (auto) or a non-empty shell name/path")
+        return self
 
 
-@dataclass(frozen=True)
-class DockerProbeConfig:
+class DockerProbeConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     command: str | None = READY_PROBE_COMMAND
     expected_stdout: str | None = READY_PROBE_EXPECTED
     timeout_s: int = 30
@@ -164,7 +175,8 @@ class DockerProbeConfig:
     stable_count: int = 1
     stable_delay_s: float = 0.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.command is not None and self.timeout_s <= 0:
             raise ValueError("probe.timeout_s must be > 0")
         if self.deadline_s is not None and self.deadline_s <= 0:
@@ -173,6 +185,7 @@ class DockerProbeConfig:
             raise ValueError("probe.stable_count must be >= 1")
         if self.stable_delay_s < 0:
             raise ValueError("probe.stable_delay_s must be >= 0")
+        return self
 
 
 @dataclass

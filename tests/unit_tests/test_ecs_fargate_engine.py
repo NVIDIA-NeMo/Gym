@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.sandbox.providers.ecs_fargate import engine
 
@@ -248,6 +249,132 @@ def test_port_from_url_defaults():
 # ── _OutsideEndpointRoute / _OutsideEndpointRouting ───────────────────
 
 
+def test_ecs_config_types_are_frozen_pydantic_models_and_round_trip():
+    assert issubclass(engine.SshSidecarConfig, BaseModel)
+    assert issubclass(engine.EcsFargateConfig, BaseModel)
+
+    config = engine.EcsFargateConfig.model_validate(
+        {
+            "region": "us-west-2",
+            "cluster": "sandbox-cluster",
+            "subnets": ["subnet-a"],
+            "extra_env": {"MODEL_URL": "http://{task_ip}:8000"},
+            "ssh_sidecar": {
+                "sshd_port": 52222,
+                "public_key_secret_arn": "arn:pub",  # pragma: allowlist secret
+                "private_key_secret_arn": "arn:priv",  # pragma: allowlist secret
+                "exec_server_port": 19542,
+            },
+        }
+    )
+
+    assert config.ssh_sidecar == engine.SshSidecarConfig(
+        sshd_port=52222,
+        public_key_secret_arn="arn:pub",  # pragma: allowlist secret
+        private_key_secret_arn="arn:priv",  # pragma: allowlist secret
+        exec_server_port=19542,
+    )
+    assert engine.EcsFargateConfig.model_validate(config.model_dump()) == config
+
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        config.region = "us-east-1"
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        config.ssh_sidecar.sshd_port = 2222
+
+
+@pytest.mark.parametrize("model", [engine.SshSidecarConfig, engine.EcsFargateConfig])
+def test_ecs_config_types_forbid_extra_fields(model):
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        model.model_validate({"unexpected": True})
+
+
+def test_ecs_config_mutable_defaults_are_isolated():
+    first = engine.EcsFargateConfig()
+    second = engine.EcsFargateConfig()
+
+    first.subnets.append("subnet-a")
+    first.security_groups.append("sg-a")
+
+    assert second.subnets == []
+    assert second.security_groups == []
+
+
+def test_sandbox_spec_types_are_pydantic_models_and_validate_nested_mappings():
+    assert issubclass(engine.OutsideEndpoint, BaseModel)
+    assert issubclass(engine.VolumeMount, BaseModel)
+    assert issubclass(engine.SandboxSpec, BaseModel)
+
+    spec = engine.SandboxSpec.model_validate(
+        {
+            "image": "python:3.12",
+            "env": {"MODEL": "test"},
+            "volumes": [
+                {
+                    "container_path": "/mnt/data",
+                    "readonly": True,
+                    "efs_filesystem_id": "fs-123",
+                }
+            ],
+        }
+    )
+
+    assert spec.volumes == [engine.VolumeMount(container_path="/mnt/data", readonly=True, efs_filesystem_id="fs-123")]
+    assert spec.model_dump() == {
+        "image": "python:3.12",
+        "workdir": "/workspace",
+        "env": {"MODEL": "test"},
+        "files": {},
+        "entrypoint": None,
+        "volumes": [
+            {
+                "host_path": "",
+                "container_path": "/mnt/data",
+                "readonly": True,
+                "efs": False,
+                "efs_filesystem_id": "fs-123",
+                "efs_root_directory": None,
+                "efs_access_point_id": None,
+            }
+        ],
+        "environment_dir": None,
+    }
+    assert engine.SandboxSpec.model_validate(spec.model_dump()) == spec
+
+
+@pytest.mark.parametrize(
+    ("model", "values"),
+    [
+        (engine.OutsideEndpoint, {"url": "http://model:8000/v1", "env_var": "MODEL_URL"}),
+        (engine.VolumeMount, {"container_path": "/mnt/data"}),
+        (engine.SandboxSpec, {"image": "python:3.12"}),
+    ],
+)
+def test_sandbox_spec_types_forbid_extra_fields(model, values):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        model.model_validate({**values, "unexpected": True})
+
+
+def test_sandbox_spec_types_preserve_mutability_default_isolation_and_efs_property():
+    first = engine.SandboxSpec(image="python:3.12")
+    second = engine.SandboxSpec(image="python:3.12")
+
+    first.workdir = "/app"
+    first.env["KEY"] = "value"
+    first.files["script.py"] = "print('hello')"
+    first.volumes.append(engine.VolumeMount(container_path="/mnt/default", efs=True))
+
+    assert first.workdir == "/app"
+    assert second.env == {}
+    assert second.files == {}
+    assert second.volumes == []
+    assert first.volumes[0].is_efs
+
+    mount = engine.VolumeMount(container_path="/mnt/explicit")
+    assert not mount.is_efs
+    mount.efs_filesystem_id = "fs-456"
+    assert mount.is_efs
+
+
 def test_route_for_endpoint_and_rewrite():
     ep = engine.OutsideEndpoint(url="https://api.host:9000/v1", env_var="MODEL_BASE_URL")
     route = engine._OutsideEndpointRoute.for_endpoint(ep, remote_port=20001)
@@ -290,13 +417,16 @@ def test_routing_for_exec_server_dedupes_and_allocates():
 def test_routing_for_agent_server_validation_and_target():
     with pytest.raises(ValueError, match="only one OutsideEndpoint"):
         engine._OutsideEndpointRouting.for_agent_server(
-            [engine.OutsideEndpoint("http://h:1/", "A"), engine.OutsideEndpoint("http://h:2/", "B")]
+            [
+                engine.OutsideEndpoint(url="http://h:1/", env_var="A"),
+                engine.OutsideEndpoint(url="http://h:2/", env_var="B"),
+            ]
         )
     with pytest.raises(ValueError, match="requires OutsideEndpoint"):
         engine._OutsideEndpointRouting.for_agent_server([])
 
     routing = engine._OutsideEndpointRouting.for_agent_server(
-        [engine.OutsideEndpoint("http://model.host:7000/v1", "MODEL")]
+        [engine.OutsideEndpoint(url="http://model.host:7000/v1", env_var="MODEL")]
     )
     assert routing.agent_tunnel_port == 7000
     assert routing.agent_tunnel_target() == ("model.host", 7000)
@@ -312,12 +442,14 @@ def test_routing_agent_tunnel_target_requires_endpoints():
 
 def test_routing_resolve_url_paths():
     # Reverse-tunnel match by netloc.
-    endpoints = [engine.OutsideEndpoint("http://10.0.0.1:4000/v1", "A")]
+    endpoints = [engine.OutsideEndpoint(url="http://10.0.0.1:4000/v1", env_var="A")]
     routing = engine._OutsideEndpointRouting.for_exec_server(endpoints, _exec_sidecar())
     assert routing.resolve_url("http://10.0.0.1:4000/chat").startswith("http://127.0.0.1:")
 
     # Agent-tunnel fallback rewrites netloc to the agent port.
-    agent = engine._OutsideEndpointRouting.for_agent_server([engine.OutsideEndpoint("http://m:7000/v1", "M")])
+    agent = engine._OutsideEndpointRouting.for_agent_server(
+        [engine.OutsideEndpoint(url="http://m:7000/v1", env_var="M")]
+    )
     assert agent.resolve_url("http://anything:1/path") == "http://127.0.0.1:7000/path"
 
     # No routes and no agent tunnel -> error.
@@ -1484,7 +1616,7 @@ def test_build_env_vars_merges_spec_extra_and_routing():
     sb = _make_sandbox(spec=spec, extra_env={"RENDERED": "ip={task_ip} img={image}"})
     sb._task_ip = "9.9.9.9"
     sb._outside_endpoint_routing = engine._OutsideEndpointRouting.for_exec_server(
-        [engine.OutsideEndpoint("http://10.0.0.1:4000/v1", "MODEL_BASE_URL")], _exec_sidecar()
+        [engine.OutsideEndpoint(url="http://10.0.0.1:4000/v1", env_var="MODEL_BASE_URL")], _exec_sidecar()
     )
     env = sb._build_env_vars()
     assert env["FROM_SPEC"] == "1"
@@ -1495,7 +1627,7 @@ def test_build_env_vars_merges_spec_extra_and_routing():
 def test_split_env_separates_runtime_keys():
     sb = _make_sandbox()
     sb._outside_endpoint_routing = engine._OutsideEndpointRouting.for_exec_server(
-        [engine.OutsideEndpoint("http://10.0.0.1:4000/v1", "MODEL_BASE_URL")], _exec_sidecar()
+        [engine.OutsideEndpoint(url="http://10.0.0.1:4000/v1", env_var="MODEL_BASE_URL")], _exec_sidecar()
     )
     env = {"STABLE": "a", "_NEL_EFS_SESSION": "sess", "MODEL_BASE_URL": "http://127.0.0.1:4000/v1"}
     stable, runtime = sb._split_env(env)
@@ -2177,7 +2309,7 @@ def test_open_tunnel_exec_server_mode():
     sb._task_ip = "1.2.3.4"
     sb._ssh_key_file = "/tmp/key"
     sb._outside_endpoint_routing = engine._OutsideEndpointRouting.for_exec_server(
-        [engine.OutsideEndpoint("http://10.0.0.1:4000/v1", "MODEL")], _exec_sidecar()
+        [engine.OutsideEndpoint(url="http://10.0.0.1:4000/v1", env_var="MODEL")], _exec_sidecar()
     )
     tunnel = MagicMock()
     with patch(f"{_ENG}.SshTunnel", return_value=tunnel) as ctor:
@@ -2195,7 +2327,7 @@ def test_open_tunnel_agent_server_mode():
     sb._ssh_key_file = "/tmp/key"
     sb._ssh_tunnel_port = 7000
     sb._outside_endpoint_routing = engine._OutsideEndpointRouting.for_agent_server(
-        [engine.OutsideEndpoint("http://10.0.0.2:9000/v1", "MODEL")]
+        [engine.OutsideEndpoint(url="http://10.0.0.2:9000/v1", env_var="MODEL")]
     )
     tunnel = MagicMock()
     with patch(f"{_ENG}.SshTunnel", return_value=tunnel) as ctor, patch(f"{_ENG}._free_port", return_value=15000):
@@ -2213,7 +2345,7 @@ def test_open_tunnel_agent_server_requires_container_port():
     sb._ssh_key_file = "/tmp/key"
     sb._ssh_tunnel_port = 7000
     sb._outside_endpoint_routing = engine._OutsideEndpointRouting.for_agent_server(
-        [engine.OutsideEndpoint("http://10.0.0.2:9000/v1", "MODEL")]
+        [engine.OutsideEndpoint(url="http://10.0.0.2:9000/v1", env_var="MODEL")]
     )
     with patch(f"{_ENG}._free_port", return_value=15000):
         with pytest.raises(ValueError, match="container_port is required"):
@@ -2415,7 +2547,7 @@ def test_local_port_property_paths():
 def test_resolved_endpoint_url_and_resolve_outside_endpoint():
     sb = _make_sandbox()
     sb._outside_endpoint_routing = engine._OutsideEndpointRouting.for_agent_server(
-        [engine.OutsideEndpoint("http://model:7000/v1", "MODEL")]
+        [engine.OutsideEndpoint(url="http://model:7000/v1", env_var="MODEL")]
     )
     assert sb.resolved_endpoint_url("MODEL") == "http://127.0.0.1:7000/v1"
     assert sb.resolve_outside_endpoint("http://anything/v1").startswith("http://127.0.0.1:7000")
@@ -2705,7 +2837,7 @@ def test_do_start_agent_server_full_path():
         ssh_sidecar=_agent_sidecar(),
         container_port=9000,
     )
-    sb._outside_endpoints = [engine.OutsideEndpoint("http://10.0.0.9:9000/v1", "MODEL")]
+    sb._outside_endpoints = [engine.OutsideEndpoint(url="http://10.0.0.9:9000/v1", env_var="MODEL")]
     with _do_start_seams() as (tunnel, _ec):
         sb._do_start()
     assert sb._ssh_tunnel is tunnel

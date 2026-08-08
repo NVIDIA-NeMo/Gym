@@ -47,7 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox import SandboxResources, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
@@ -73,7 +73,7 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     skip_if_exists: bool = False
     step_limit: int = 250
     tool_choice: Optional[str | dict[str, Any]] = None
-    sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
+    sandbox_resource_profiles: Optional[list[dict[str, Any]]] = None
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -214,10 +214,34 @@ def _sandbox_spec_for_instance(
         return instance_spec
 
     resources = dict(instance_spec.get("resources") or {})
+    base_resources = SandboxResources.from_mapping(resources)
     digest = hashlib.sha256(instance_id.encode("utf-8")).digest()
     profile = resource_profiles[int.from_bytes(digest[:4], "big") % len(resource_profiles)]
     resources.update(profile)
     instance_spec["resources"] = resources
+
+    # Profiles override resource limits. If one lowers a limit below a
+    # configured scheduling request, lower that request with it so the
+    # provider-neutral SandboxSpec remains valid. An omitted request block is
+    # intentionally left omitted, preserving each provider's default behavior.
+    if instance_spec.get("resource_requests") is not None:
+        resource_requests = dict(instance_spec["resource_requests"])
+        normalized_requests = SandboxResources.from_mapping(resource_requests)
+        profile_resources = SandboxResources.from_mapping(resources)
+        for field_name in ("cpu", "memory_mib", "disk_gib", "gpu"):
+            if field_name not in profile:
+                continue
+            request = getattr(normalized_requests, field_name)
+            limit = getattr(profile_resources, field_name)
+            base_limit = getattr(base_resources, field_name)
+            if (
+                request is not None
+                and limit is not None
+                and request > limit
+                and (base_limit is None or (request <= base_limit and limit < base_limit))
+            ):
+                resource_requests[field_name] = resources[field_name]
+        instance_spec["resource_requests"] = resource_requests
     return instance_spec
 
 

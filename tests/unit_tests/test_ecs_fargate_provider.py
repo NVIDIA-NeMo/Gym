@@ -20,6 +20,7 @@ import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers import (
@@ -139,6 +140,49 @@ def test_config_no_ssm_when_cluster_present():
     with patch(f"{_ENG}.resolve_ecs_config_from_ssm") as resolve:
         create_provider(_provider_config())
     resolve.assert_not_called()
+
+
+def test_config_preserves_an_existing_sidecar_model():
+    sidecar = engine.SshSidecarConfig(
+        public_key_secret_arn="arn:pub",  # pragma: allowlist secret
+        private_key_secret_arn="arn:priv",  # pragma: allowlist secret
+    )
+
+    cfg = engine_config_from_mapping({"cluster": "c", "ssh_sidecar": sidecar})
+
+    assert cfg.ssh_sidecar is sidecar
+
+
+def test_config_mapping_forwards_all_declared_fields():
+    cfg = engine_config_from_mapping(
+        {
+            "cluster": "c",
+            "poll_interval_sec": 0.25,
+            "run_task_max_retries": 7,
+            "build_parallelism": 11,
+        }
+    )
+
+    assert cfg.poll_interval_sec == 0.25
+    assert cfg.run_task_max_retries == 7
+    assert cfg.build_parallelism == 11
+
+
+def test_config_mapping_rejects_unknown_provider_and_sidecar_fields():
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        engine_config_from_mapping({"cluster": "c", "unknown": True})
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        engine_config_from_mapping(
+            {
+                "cluster": "c",
+                "ssh_sidecar": {
+                    "public_key_secret_arn": "arn:pub",  # pragma: allowlist secret
+                    "private_key_secret_arn": "arn:priv",  # pragma: allowlist secret
+                    "unknown": True,
+                },
+            }
+        )
 
 
 def test_sidecar_missing_key_arns_raises():
@@ -415,6 +459,8 @@ def test_apply_spec_overrides_maps_resources_and_ttl():
     assert out.cpu == "2048"  # vCPUs -> Fargate CPU units
     assert out.memory == "4096"
     assert out.ephemeral_storage_gib == 50
+    assert cfg.cpu == "256"
+    assert cfg.memory == "512"
     # no per-sandbox requests -> config returned unchanged (same object)
     assert _apply_spec_overrides(cfg, SandboxSpec(image="img")) is cfg
 

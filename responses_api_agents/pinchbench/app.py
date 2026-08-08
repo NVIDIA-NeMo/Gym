@@ -221,13 +221,18 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     # --- per-task sandbox (Gym Sandbox API; provider-neutral) ---------------
     def _build_spec(self, task_id: str) -> SandboxSpec:
         cfg = dict(self.config.sandbox_spec)
+        resource_requests = cfg.get("resource_requests")
         return SandboxSpec(
             image=cfg.get("image"),
             ttl_s=cfg.get("ttl_s"),
             ready_timeout_s=cfg.get("ready_timeout_s"),
             workdir=cfg.get("workdir"),
             resources=SandboxResources.from_mapping(cfg.get("resources", {})),
+            resource_requests=(
+                SandboxResources.from_mapping(resource_requests) if resource_requests is not None else None
+            ),
             provider_options=cfg.get("provider_options", {}),
+            ports=cfg.get("ports", ()),
             env=self._task_env(task_id),
             metadata={"task_id": task_id},
         )

@@ -37,12 +37,12 @@ mini_swe_agent_2:
           # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
           # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
           disk_gib: 30
-        provider_options:
-          # Scheduling requests, kept below the limits so sandboxes pack densely.
-          resource_requests:
-            cpu: 0.5
-            memory_mib: 2048
-            disk_gib: 30
+        # Provider-neutral scheduling requests, kept below the limits so
+        # sandboxes pack densely on providers that support separate requests.
+        resource_requests:
+          cpu: 0.5
+          memory_mib: 2048
+          disk_gib: 30
         metadata:
           benchmark: swebench-verified
           harness: mini-swe-agent

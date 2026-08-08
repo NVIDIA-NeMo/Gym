@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.daytona import provider as daytona_provider
@@ -211,6 +212,61 @@ def test_config_unknown_keys_fail_fast() -> None:
         daytona_provider.DaytonaProvider(create={"typo": "value"})
 
 
+@pytest.mark.parametrize(
+    ("config_cls", "values"),
+    [
+        (daytona_provider.DaytonaConnectionConfig, {"api_url": "https://api.example"}),
+        (daytona_provider.DaytonaCreateConfig, {"timeout_s": 12.5}),
+        (daytona_provider.DaytonaProbeConfig, {"command": None, "timeout_s": 0}),
+        (daytona_provider.DaytonaOperationConfig, {"command_retries": 2}),
+        (daytona_provider.DaytonaBatchConfig, {"concurrency": 8}),
+    ],
+)
+def test_config_models_are_frozen_strict_and_round_trip(
+    config_cls: type[daytona_provider.DaytonaConfigBase],
+    values: dict[str, Any],
+) -> None:
+    assert issubclass(config_cls, BaseModel)
+
+    config = config_cls.from_mapping(values)
+    restored = config_cls.model_validate(config.model_dump(exclude_unset=True))
+    assert restored == config
+    assert restored.model_fields_set == config.model_fields_set
+    assert config_cls.from_mapping(config) is config
+
+    field_name = next(iter(values))
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        setattr(config, field_name, values[field_name])
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        config_cls.model_validate({**values, "typo": "value"})
+    with pytest.raises(TypeError, match="must be a mapping"):
+        config_cls.from_mapping(object())
+
+
+def test_provider_options_model_is_frozen_strict_and_serializable() -> None:
+    assert issubclass(daytona_provider.DaytonaProviderOptions, BaseModel)
+    raw_options = {
+        "extensions": {"daytona.name": 123},
+        "snapshot_id": "snapshot-1",
+        "volumes": [{"name": "workspace"}],
+    }
+    options = daytona_provider.DaytonaProviderOptions.from_mapping(raw_options)
+
+    assert options.extensions == {"daytona.name": "123"}
+    assert options.volumes == ({"name": "workspace"},)
+    assert daytona_provider.DaytonaProviderOptions.model_validate(raw_options) == options
+    assert daytona_provider.DaytonaProviderOptions.model_validate(options.model_dump()) == options
+    assert (
+        daytona_provider.DaytonaProviderOptions().extensions
+        is not daytona_provider.DaytonaProviderOptions().extensions
+    )
+
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        options.snapshot_id = "snapshot-2"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        daytona_provider.DaytonaProviderOptions.model_validate({"platform": {"os": "linux"}})
+
+
 def test_conversion_helpers_and_config_validation(fake_daytona_sdk: None) -> None:
     create_config = daytona_provider.DaytonaCreateConfig(timeout_s=1)
     assert daytona_provider.DaytonaCreateConfig.from_mapping(create_config) is create_config
@@ -297,6 +353,10 @@ def test_conversion_helpers_and_config_validation(fake_daytona_sdk: None) -> Non
     with pytest.raises(ValueError, match="Unsupported Daytona DaytonaConnectionConfig settings: typo"):
         daytona_provider.DaytonaProvider(connection={"typo": True})
 
+    assert daytona_provider.DaytonaProbeConfig(command=None, timeout_s=0).timeout_s == 0
+    with pytest.raises(ValueError, match="probe.deadline_s must be > 0"):
+        daytona_provider.DaytonaProbeConfig(command=None, timeout_s=0, deadline_s=0)
+
 
 def test_snapshot_creation_rejects_ignored_resources(fake_daytona_sdk: None) -> None:
     provider = daytona_provider.DaytonaProvider(probe={"command": None})
@@ -311,13 +371,15 @@ def test_snapshot_creation_rejects_ignored_resources(fake_daytona_sdk: None) -> 
 
 def test_image_creation_keeps_resource_overrides(fake_daytona_sdk: None) -> None:
     provider = daytona_provider.DaytonaProvider(probe={"command": None})
-    params = provider._to_create_params(
-        SandboxSpec(
-            image="python:3.12",
-            resources={"cpu": 2, "memory_mib": 2048, "disk_gib": 9},
-        )
+    spec = SandboxSpec(
+        image="python:3.12",
+        resources={"cpu": 2, "memory_mib": 2048, "disk_gib": 9},
+        resource_requests={"cpu": 0.5, "memory_mib": 1024, "disk_gib": 1},
     )
+    options = daytona_provider._provider_options(spec)
+    params = provider._to_create_params(spec)
 
+    assert options == daytona_provider.DaytonaProviderOptions()
     assert isinstance(params, FakeImageParams)
     assert params.kwargs["resources"].kwargs == {"cpu": 2, "memory": 2, "disk": 9}
 
@@ -368,6 +430,27 @@ async def test_client_lifecycle_create_kwargs_and_status_fallbacks(fake_daytona_
     unlimited_client = unlimited_provider._client()
     assert unlimited_client.config.kwargs == {"connection_pool_maxsize": None}
     await unlimited_provider.aclose()
+
+    typed_connection = daytona_provider.DaytonaConnectionConfig(connection_pool_maxsize=None)
+    assert typed_connection.model_fields_set == {"connection_pool_maxsize"}
+    restored_typed_connection = daytona_provider.DaytonaConnectionConfig.model_validate(
+        typed_connection.model_dump(exclude_unset=True)
+    )
+    assert restored_typed_connection.model_fields_set == {"connection_pool_maxsize"}
+    typed_unlimited_provider = daytona_provider.DaytonaProvider(connection=restored_typed_connection)
+    typed_unlimited_client = typed_unlimited_provider._client()
+    assert typed_unlimited_client.config.kwargs == {"connection_pool_maxsize": None}
+    await typed_unlimited_provider.aclose()
+
+    default_connection = daytona_provider.DaytonaConnectionConfig()
+    restored_default_connection = daytona_provider.DaytonaConnectionConfig.model_validate(
+        default_connection.model_dump(exclude_unset=True)
+    )
+    assert restored_default_connection.model_fields_set == set()
+    default_connection_provider = daytona_provider.DaytonaProvider(connection=restored_default_connection)
+    default_connection_client = default_connection_provider._client()
+    assert default_connection_client.config is None
+    await default_connection_provider.aclose()
 
     kwargs = provider._base_create_kwargs(
         SandboxSpec(

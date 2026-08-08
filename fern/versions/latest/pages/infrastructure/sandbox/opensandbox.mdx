@@ -71,7 +71,7 @@ gym env start \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
-The provider constructor accepts four optional config sections:
+The provider constructor accepts five optional config sections:
 
 | Section | Purpose |
 | --- | --- |
@@ -79,6 +79,7 @@ The provider constructor accepts four optional config sections:
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 | `operations` | Retry and timeout behavior for SDK operations after create, including command retries and close timeout. |
+| `attribution` | Default team, user, workload, and run metadata attached to every sandbox. |
 
 ## SandboxSpec Provider Options
 
@@ -121,7 +122,8 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 | `env` | Passed to OpenSandbox create and command execution. |
 | `files` | Seed files uploaded before the first command. |
 | `metadata` | Passed to OpenSandbox create after provider-specific normalization. |
-| `resources` | Mapped to OpenSandbox resource quantities. |
+| `resources` | Mapped to OpenSandbox resource limits. |
+| `resource_requests` | Mapped to separate OpenSandbox scheduling requests. When omitted, OpenSandbox applies the resource limits as requests too. |
 | `entrypoint` | Passed to OpenSandbox create when set. |
 | `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
 
@@ -136,6 +138,8 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 | `disk_gib` | `ephemeral-storage`, formatted as `<value>Gi` |
 | `gpu` | `gpu` |
 | `gpu_type` | `gpu_type` |
+
+Use `SandboxSpec.resources` for limits and `SandboxSpec.resource_requests` for lower scheduling requests when a workload needs burst headroom without reserving its full limit. Numeric request values must not exceed their corresponding limits.
 
 The provider also normalizes metadata values for backend labels by replacing unsupported characters and truncating values to the provider limit.
 

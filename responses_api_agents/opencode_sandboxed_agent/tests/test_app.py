@@ -34,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.sandbox import SandboxResources
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
 
@@ -127,6 +128,46 @@ class TestOpenCodeSandboxedAgent:
         ]
 
         assert expected_usages == actual_usages
+
+    async def test_start_sandbox_forwards_resource_requests(self, monkeypatch: MonkeyPatch) -> None:
+        config = self._create_config().model_copy(
+            update={
+                "sandbox_provider": "opensandbox",
+                "sandbox_config": {
+                    "resources": {"cpu": 2, "memory_mib": 4096, "disk_gib": 30},
+                    "resource_requests": {"cpu": 0.5, "memory_mib": 2048, "disk_gib": 30},
+                    "ports": [8000, 9222],
+                },
+            }
+        )
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        provider = MagicMock()
+        sandbox = MagicMock()
+        sandbox.start = AsyncMock()
+
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.get_global_config_dict", lambda: {})
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.resolve_provider_config",
+            lambda _provider_name, _global_config: {},
+        )
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.resolve_provider_metadata",
+            lambda _provider_name, _global_config: {},
+        )
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.create_provider", lambda _config: provider
+        )
+        sandbox_factory = MagicMock(return_value=sandbox)
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.AsyncSandbox", sandbox_factory)
+
+        assert await server._start_sandbox() is sandbox
+
+        sandbox_factory.assert_called_once_with(provider)
+        sandbox.start.assert_awaited_once()
+        spec = sandbox.start.await_args.args[0]
+        assert spec.resources == SandboxResources(cpu=2, memory_mib=4096, disk_gib=30)
+        assert spec.resource_requests == SandboxResources(cpu=0.5, memory_mib=2048, disk_gib=30)
+        assert spec.ports == (8000, 9222)
 
     async def test_responses_sanity(self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch) -> None:
         config = self._create_config()

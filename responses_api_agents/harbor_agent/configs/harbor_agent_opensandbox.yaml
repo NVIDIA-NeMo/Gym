@@ -75,6 +75,12 @@ harbor_agent:
         override_cpus: 8
         override_memory_mb: 16384
         override_storage_mb: 30720
+        # Provider-neutral scheduling requests, kept below the limits so
+        # providers with separate requests can pack sandboxes more densely.
+        sandbox_resource_requests:
+          cpu: 0.5
+          memory_mib: 2048
+          disk_gib: 30
         # Sandboxes see the host's full core count, so build tools fan out to
         # nproc workers and get CFS-throttled; pinning right-sizes that.
         # Fail-open: no taskset or too few cores leaves the command unpinned.

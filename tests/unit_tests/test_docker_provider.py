@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
@@ -113,6 +114,67 @@ def test_coerce_config() -> None:
     assert coerce({"concurrency": 7}, cls).concurrency == 7
     with pytest.raises(TypeError):
         coerce(123, cls)
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "values"),
+    [
+        (docker_provider.DockerCreateConfig, {"network": "none", "cap_drop": ["ALL"]}),
+        (docker_provider.DockerExecConfig, {"concurrency": 7, "exec_shell": "bash"}),
+        (docker_provider.DockerProbeConfig, {"stable_count": 2, "stable_delay_s": 0.5}),
+    ],
+)
+def test_config_pydantic_round_trip(config_cls: type[BaseModel], values: dict[str, Any]) -> None:
+    config = config_cls.model_validate(values)
+
+    assert isinstance(config, BaseModel)
+    assert config_cls.model_validate(config) is config
+    assert config_cls.model_validate(config.model_dump()) == config
+    for key, value in values.items():
+        assert config.model_dump()[key] == value
+
+
+@pytest.mark.parametrize(
+    "config_cls",
+    [
+        docker_provider.DockerCreateConfig,
+        docker_provider.DockerExecConfig,
+        docker_provider.DockerProbeConfig,
+    ],
+)
+def test_config_rejects_extra_fields(config_cls: type[BaseModel]) -> None:
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        config_cls.model_validate({"unknown_option": True})
+
+
+@pytest.mark.parametrize(
+    ("config", "field_name", "new_value"),
+    [
+        (docker_provider.DockerCreateConfig(), "network", "none"),
+        (docker_provider.DockerExecConfig(), "concurrency", 1),
+        (docker_provider.DockerProbeConfig(), "stable_count", 2),
+    ],
+)
+def test_config_is_frozen(config: BaseModel, field_name: str, new_value: Any) -> None:
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        setattr(config, field_name, new_value)
+
+
+def test_config_list_defaults_are_isolated() -> None:
+    create_a = docker_provider.DockerCreateConfig()
+    create_b = docker_provider.DockerCreateConfig()
+    exec_a = docker_provider.DockerExecConfig()
+    exec_b = docker_provider.DockerExecConfig()
+
+    create_a.cap_drop.append("ALL")
+    create_a.security_opt.append("no-new-privileges")
+    create_a.extra_run_args.append("--pull=never")
+    exec_a.extra_exec_args.append("--privileged")
+
+    assert create_b.cap_drop == []
+    assert create_b.security_opt == []
+    assert create_b.extra_run_args == []
+    assert exec_b.extra_exec_args == []
 
 
 def test_config_validation() -> None:

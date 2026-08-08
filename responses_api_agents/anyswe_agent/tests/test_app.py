@@ -107,7 +107,9 @@ class TestSandboxAPI:
                 "ttl_s": 600,
                 "ready_timeout_s": 300,
                 "resources": {"cpu": 2, "memory_mib": 4096},
+                "resource_requests": {"cpu": 0.5, "memory_mib": 2048},
                 "provider_options": {"platform": {"arch": "amd64"}},
+                "ports": [8000, 9222],
             },
             sandbox_default_metadata={"sandbox-api": "opensandbox-sdk"},
             swebench_agent_timeout=100,
@@ -119,9 +121,13 @@ class TestSandboxAPI:
         assert spec.image == "image:tag"
         assert spec.ttl_s == 600
         assert spec.resources.cpu == 2
+        assert spec.resource_requests is not None
+        assert spec.resource_requests.cpu == 0.5
+        assert spec.resource_requests.memory_mib == 2048
         assert spec.metadata["sandbox-api"] == "opensandbox-sdk"
         assert spec.provider_options == {"platform": {"arch": "amd64"}}
         assert spec.files == {"/tmp/input": "data"}
+        assert spec.ports == (8000, 9222)
 
     def test_agent_config_is_forwarded_without_harness_specific_changes(self) -> None:
         params = SimpleNamespace(

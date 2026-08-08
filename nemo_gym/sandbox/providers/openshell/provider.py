@@ -37,7 +37,9 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
@@ -179,9 +181,10 @@ def _is_retryable_create_error(exc: BaseException) -> bool:
     }
 
 
-@dataclass(frozen=True)
-class OpenShellConnectionConfig:
+class OpenShellConnectionConfig(BaseModel):
     """Gateway connection settings. Defaults target a local plaintext gateway (deploy/docker compose)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     endpoint: str = "localhost:8080"
     workspace: str = "default"
@@ -191,7 +194,8 @@ class OpenShellConnectionConfig:
     tls_key_path: str | None = None
     request_timeout_s: float = 30.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if not self.endpoint:
             raise ValueError("connection.endpoint must be a non-empty host:port")
         if not self.workspace:
@@ -200,17 +204,20 @@ class OpenShellConnectionConfig:
             raise ValueError("connection.request_timeout_s must be > 0")
         if bool(self.tls_cert_path) != bool(self.tls_key_path):
             raise ValueError("connection.tls_cert_path and connection.tls_key_path must be set together")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenShellCreateConfig:
+class OpenShellCreateConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     ready_timeout_s: float = 300
     poll_interval_s: float = 1.0
     retries: int = 2
     retry_delay_s: float = 1.0
     retry_max_delay_s: float = 30.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.ready_timeout_s <= 0:
             raise ValueError("create.ready_timeout_s must be > 0")
         if self.poll_interval_s <= 0:
@@ -221,10 +228,12 @@ class OpenShellCreateConfig:
             raise ValueError("create.retry_delay_s must be >= 0")
         if self.retry_max_delay_s < 0:
             raise ValueError("create.retry_max_delay_s must be >= 0")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenShellExecConfig:
+class OpenShellExecConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     default_timeout_s: float | None = 180
     # Bounds in-flight gateway RPCs across ALL operations sharing this connection config --
     # exec as well as control-plane calls (create/get/delete and probe polling). The pool
@@ -234,7 +243,8 @@ class OpenShellExecConfig:
     exec_shell: str = "/bin/sh"
     upload_chunk_bytes: int = DEFAULT_UPLOAD_CHUNK_BYTES
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
         if self.concurrency < 1:
@@ -243,10 +253,12 @@ class OpenShellExecConfig:
             raise ValueError("exec.exec_shell must be a non-empty shell name/path")
         if self.upload_chunk_bytes < 1:
             raise ValueError("exec.upload_chunk_bytes must be >= 1")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenShellProbeConfig:
+class OpenShellProbeConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     command: str | None = READY_PROBE_COMMAND
     expected_stdout: str | None = READY_PROBE_EXPECTED
     timeout_s: int = 30
@@ -256,7 +268,8 @@ class OpenShellProbeConfig:
     # hammer it for the full deadline when a sandbox is slow to become exec-ready.
     stable_delay_s: float = 1.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.command is not None and self.timeout_s <= 0:
             raise ValueError("probe.timeout_s must be > 0")
         if self.deadline_s is not None and self.deadline_s <= 0:
@@ -265,33 +278,42 @@ class OpenShellProbeConfig:
             raise ValueError("probe.stable_count must be >= 1")
         if self.stable_delay_s < 0:
             raise ValueError("probe.stable_delay_s must be >= 0")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenShellOperationsConfig:
+class OpenShellOperationsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     close_wait_deleted: bool = True
     close_timeout_s: float = 60
     poll_interval_s: float = 1.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
         if self.poll_interval_s <= 0:
             raise ValueError("operations.poll_interval_s must be > 0")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenShellProviderOptions:
+class OpenShellProviderOptions(BaseModel):
     """Validated per-sandbox options carried in ``SandboxSpec.provider_options``."""
 
-    providers: list[str] = field(default_factory=list)
-    policy: Any | None = None
-    template_resources: dict[str, Any] = field(default_factory=dict)
-    driver_config: dict[str, Any] = field(default_factory=dict)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
+    providers: list[str] = Field(default_factory=list)
+    policy: Any | None = None
+    template_resources: dict[str, Any] = Field(default_factory=dict)
+    driver_config: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
     @classmethod
-    def from_mapping(cls, options: Mapping[str, Any]) -> "OpenShellProviderOptions":
-        allowed = set(cls.__dataclass_fields__)
+    def normalize_options(cls, options: Any) -> Any:
+        if not isinstance(options, Mapping):
+            return options
+
+        allowed = set(cls.model_fields)
         unknown = set(options) - allowed
         if unknown:
             raise ValueError(
@@ -315,12 +337,16 @@ class OpenShellProviderOptions:
         driver_config = options.get("driver_config") or {}
         if not isinstance(driver_config, Mapping):
             raise TypeError(f"provider_options['driver_config'] must be a mapping, got {type(driver_config).__name__}")
-        return cls(
-            providers=[str(p) for p in providers],
-            policy=policy,
-            template_resources=dict(template_resources),
-            driver_config=dict(driver_config),
-        )
+        return {
+            "providers": [str(p) for p in providers],
+            "policy": policy,
+            "template_resources": dict(template_resources),
+            "driver_config": dict(driver_config),
+        }
+
+    @classmethod
+    def from_mapping(cls, options: Mapping[str, Any]) -> "OpenShellProviderOptions":
+        return cls.model_validate(options)
 
 
 @dataclass
@@ -473,7 +499,7 @@ class OpenShellProvider:
         ]
         if ignored:
             LOGGER.warning(
-                "%s resource requests are not mapped by this provider; OpenShell exposes driver-specific "
+                "%s resource limits are not mapped by this provider; OpenShell exposes driver-specific "
                 "limits through SandboxTemplate.resources — pass provider_options.template_resources instead.",
                 ", ".join(ignored),
             )

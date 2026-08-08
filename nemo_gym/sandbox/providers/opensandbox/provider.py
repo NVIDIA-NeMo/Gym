@@ -19,10 +19,11 @@ import logging
 import re
 import shlex
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Self
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
@@ -308,10 +309,11 @@ def _metadata_map(values: dict[str, Any]) -> dict[str, str]:
 
 
 def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
-    return replace(
-        spec,
-        env=_string_map(spec.env),
-        metadata=_metadata_map(spec.metadata),
+    return spec.model_copy(
+        update={
+            "env": _string_map(spec.env),
+            "metadata": _metadata_map(spec.metadata),
+        }
     )
 
 
@@ -346,8 +348,13 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-@dataclass(frozen=True)
-class OpenSandboxConnectionConfig:
+class _OpenSandboxConfig(BaseModel):
+    """Shared validation and immutability for OpenSandbox configuration models."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class OpenSandboxConnectionConfig(_OpenSandboxConfig):
     """OpenSandbox server connection settings.
 
     ``keepalive_expiry_s`` must stay below the server's own keep-alive idle
@@ -375,8 +382,7 @@ class OpenSandboxConnectionConfig:
     transport_backend: str = "httpx"
 
 
-@dataclass(frozen=True)
-class OpenSandboxAttributionConfig:
+class OpenSandboxAttributionConfig(_OpenSandboxConfig):
     """Job attribution merged into every sandbox's metadata (Kubernetes labels on the sandbox).
 
     OpenSandbox propagates sandbox metadata as Kubernetes labels on the sandbox resources, so
@@ -402,22 +408,23 @@ class OpenSandboxAttributionConfig:
     run: str | None = None
     key_prefix: str = DEFAULT_ATTRIBUTION_KEY_PREFIX
 
-    def __post_init__(self) -> None:
-        normalized = self.key_prefix.strip()
+    @field_validator("key_prefix")
+    @classmethod
+    def normalize_key_prefix(cls, key_prefix: str) -> str:
+        normalized = key_prefix.strip()
         if normalized and not normalized.endswith("/"):
             normalized += "/"
         if normalized and not ATTRIBUTION_KEY_PREFIX_RE.fullmatch(normalized[:-1]):
             # Invalid prefixes would otherwise fail server-side at sandbox create with an
             # opaque error; values are sanitized by the provider but keys pass through.
             raise ValueError(
-                f"attribution key_prefix {self.key_prefix!r} must be a lowercase DNS subdomain "
+                f"attribution key_prefix {key_prefix!r} must be a lowercase DNS subdomain "
                 "(Kubernetes label-key prefix), e.g. 'nemo-gym.nvidia.com/', or '' for bare keys"
             )
-        object.__setattr__(self, "key_prefix", normalized)
+        return normalized
 
 
-@dataclass(frozen=True)
-class OpenSandboxCreateConfig:
+class OpenSandboxCreateConfig(_OpenSandboxConfig):
     """OpenSandbox create/reconnect retry settings."""
 
     request_timeout_s: int | None = None
@@ -430,7 +437,8 @@ class OpenSandboxCreateConfig:
     connect_attempt_timeout_s: float = 30.0
     connect_poll_s: float = 2.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.image_pull_policy is not None:
             validate_image_pull_policy(self.image_pull_policy)
         if self.timeout_s is not None and self.timeout_s <= 0:
@@ -445,10 +453,10 @@ class OpenSandboxCreateConfig:
             raise ValueError("create.connect_attempt_timeout_s must be > 0")
         if self.connect_poll_s <= 0:
             raise ValueError("create.connect_poll_s must be > 0")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenSandboxProbeConfig:
+class OpenSandboxProbeConfig(_OpenSandboxConfig):
     """Post-create probe settings."""
 
     command: str | None = "printf nemo-gym-sandbox-ready"
@@ -458,7 +466,8 @@ class OpenSandboxProbeConfig:
     stable_count: int = 1
     stable_delay_s: float = 0.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.command is not None and self.timeout_s <= 0:
             raise ValueError("probe.timeout_s must be > 0")
         if self.deadline_s is not None and self.deadline_s <= 0:
@@ -467,10 +476,10 @@ class OpenSandboxProbeConfig:
             raise ValueError("probe.stable_count must be >= 1")
         if self.stable_delay_s < 0:
             raise ValueError("probe.stable_delay_s must be >= 0")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenSandboxOperationConfig:
+class OpenSandboxOperationConfig(_OpenSandboxConfig):
     """Retry and timeout settings for SDK operations after create."""
 
     retries: int = 3
@@ -478,6 +487,7 @@ class OpenSandboxOperationConfig:
     retry_max_delay_s: float = 15.0
     command_retries: int = 0
     close_timeout_s: float | None = 30.0
+
     # Poll short status/log requests instead of holding one SSE stream open for
     # the whole command. Set this behind a load balancer that caps stream
     # duration, which would otherwise drop the stream and hang the client.
@@ -486,7 +496,8 @@ class OpenSandboxOperationConfig:
     background_poll_initial_s: float = 0.25
     background_poll_interval_s: float = 2.0
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
         if self.retries < 0:
             raise ValueError("operations.retries must be >= 0")
         if self.retry_delay_s < 0:
@@ -501,34 +512,49 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.background_poll_interval_s must be > 0")
         if self.background_poll_initial_s <= 0:
             raise ValueError("operations.background_poll_initial_s must be > 0")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenSandboxProviderOptions:
+class OpenSandboxProviderOptions(_OpenSandboxConfig):
     """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
 
     ``image_auth``, ``platform``, and ``volumes`` entries are passed through to the
     OpenSandbox SDK, so their inner fields are validated by the SDK rather than here.
     """
 
-    image_auth: Mapping[str, Any] | None = None
-    platform: Mapping[str, Any] | None = None
+    image_auth: dict[str, Any] | None = None
+    platform: dict[str, Any] | None = None
     snapshot_id: str | None = None
-    volumes: tuple[Mapping[str, Any], ...] = ()
+    volumes: tuple[dict[str, Any], ...] = ()
     skip_health_check: bool | None = None
-    extensions: Mapping[str, str] = field(default_factory=dict)
-    # Scheduling requests (same keys as SandboxSpec.resources, which become the
-    # limits). Unset, the server applies the single resources map as both.
-    resource_requests: Mapping[str, Any] | None = None
+    extensions: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("volumes", mode="before")
+    @classmethod
+    def normalize_volumes(cls, volumes: Any) -> Any:
+        if volumes is None:
+            return ()
+        if isinstance(volumes, (list, tuple)):
+            return tuple(dict(volume) if isinstance(volume, Mapping) else volume for volume in volumes)
+        return volumes
+
+    @field_validator("extensions", mode="before")
+    @classmethod
+    def normalize_extensions(cls, extensions: Any) -> Any:
+        if isinstance(extensions, Mapping):
+            return _string_map(extensions)
+        return extensions
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any] | None) -> "OpenSandboxProviderOptions":
         if options is None:
             return cls()
+        if isinstance(options, cls):
+            return options
         if not isinstance(options, Mapping):
             raise TypeError("OpenSandbox provider_options must be a mapping")
 
-        allowed = set(cls.__dataclass_fields__)
+        allowed = set(cls.model_fields)
         unknown = set(options) - allowed
         if unknown:
             raise ValueError(
@@ -554,9 +580,6 @@ class OpenSandboxProviderOptions:
         extensions = options.get("extensions", {})
         if not isinstance(extensions, Mapping):
             raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
-        resource_requests = options.get("resource_requests")
-        if resource_requests is not None and not isinstance(resource_requests, Mapping):
-            raise TypeError("OpenSandbox provider option 'resource_requests' must be a mapping")
 
         return cls(
             image_auth=dict(image_auth) if image_auth is not None else None,
@@ -565,7 +588,6 @@ class OpenSandboxProviderOptions:
             volumes=tuple(dict(volume) for volume in volumes),
             skip_health_check=skip_health_check,
             extensions=_string_map(dict(extensions)),
-            resource_requests=dict(resource_requests) if resource_requests is not None else None,
         )
 
 
@@ -888,8 +910,8 @@ class OpenSandboxProvider:
             "extensions": self._resolve_extensions(options.extensions),
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
-        if options.resource_requests is not None:
-            kwargs["resource_requests"] = _resource_map(SandboxResources.from_mapping(options.resource_requests))
+        if spec.resource_requests is not None:
+            kwargs["resource_requests"] = _resource_map(spec.resource_requests)
         if spec.image is not None:
             kwargs["image"] = _to_image_spec(spec.image, options.image_auth)
         if options.snapshot_id is not None:
@@ -991,7 +1013,7 @@ class OpenSandboxProvider:
         Job attribution keys (``team`` / ``user`` / ``workload`` / ``run``) are merged into the
         spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
         """
-        spec = replace(spec, metadata={**self._attribution_metadata(), **spec.metadata})
+        spec = spec.model_copy(update={"metadata": {**self._attribution_metadata(), **spec.metadata}})
         return await self._create_with_retries(_normalize_spec(spec))
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:

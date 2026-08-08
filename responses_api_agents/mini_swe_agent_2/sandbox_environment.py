@@ -80,6 +80,7 @@ class MiniSWESandboxEnvironment:
         image = spec_config.pop("image", None) or self.config.image
         image = rewrite_image(image, spec_config.pop("image_rewrites", []))
         provider_options = dict(spec_config.pop("provider_options", {}))
+        resource_requests_config = spec_config.pop("resource_requests", None)
 
         env = dict(spec_config.pop("env", {}))
         for key in self.config.forward_env:
@@ -102,8 +103,14 @@ class MiniSWESandboxEnvironment:
                     "instance_id": (self.config.instance_id or "unknown")[:63],
                 },
                 resources=SandboxResources.from_mapping(spec_config.pop("resources", {})),
+                resource_requests=(
+                    SandboxResources.from_mapping(resource_requests_config)
+                    if resource_requests_config is not None
+                    else None
+                ),
                 entrypoint=spec_config.pop("entrypoint", None),
                 provider_options=provider_options,
+                ports=spec_config.pop("ports", ()),
             )
         )
 
