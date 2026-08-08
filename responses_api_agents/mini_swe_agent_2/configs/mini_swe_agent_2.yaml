@@ -51,6 +51,18 @@ mini_swe_agent_2:
         conda_env: testbed
         activate_conda: true
         user: root
+      # How `gym sandbox debug` reconstructs a task's sandbox without running the
+      # agent. The image is derived from the row rather than declared, so a
+      # resolver is needed; the wrapper makes a debugged command run against the
+      # testbed Python, exactly as a rollout's does (`--bare` opts out).
+      #
+      #   gym sandbox debug --config <this file> --config <provider config> \
+      #       --task django__django-10973 --command "python -m pytest -x"
+      sandbox_task:
+        id_from_row: instance_id
+        image_from_row: image_name
+        spec_resolver: responses_api_agents.mini_swe_agent_2.sandbox_hooks:spec_for_row
+        exec_wrapper: responses_api_agents.mini_swe_agent_2.sandbox_hooks:conda_activate_wrap
       run_golden: false
       step_timeout: 600
       eval_timeout: 1800
