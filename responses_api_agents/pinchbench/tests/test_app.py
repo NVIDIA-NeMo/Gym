@@ -19,10 +19,17 @@ fast and offline.
 """
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ContextCompactionObservation,
+    ToolCallObservation,
+)
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pinchbench.app import (
     NG_FAILURE_CLASS_KEY,
@@ -30,6 +37,7 @@ from responses_api_agents.pinchbench.app import (
     NG_TERMINAL_KEY,
     PinchBenchAgent,
     PinchBenchAgentConfig,
+    PinchBenchRunRequest,
     SandboxKilledError,
     _classify_task_failure,
 )
@@ -57,6 +65,10 @@ def make_agent(**over) -> PinchBenchAgent:
     return PinchBenchAgent(config=make_config(**over), server_client=MagicMock(spec=ServerClient))
 
 
+def _records(bundle, record_type):
+    return [record for record in bundle.records if isinstance(record, record_type)]
+
+
 def test_sanity_construct():
     agent = make_agent()
     assert agent.config.openclaw_mode == "gateway"  # per-task gateway: proven working mode
@@ -78,6 +90,24 @@ def test_task_env_gateway_mode():
     assert env["MODEL_NAME"] == "vendor/model"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
     assert env["BRAVE_API_KEY"] == "brave-key"
+    assert "NEMO_GYM_OBSERVABILITY_ENABLED" not in env
+    assert make_agent(openclaw_mode="gateway")._task_env("task_x", "1-2")["NEMO_GYM_OBSERVABILITY_ENABLED"] == "1"
+
+
+def test_task_env_prefixes_configured_gym_model_servers() -> None:
+    model_ref = ModelServerRef(type="responses_api_models", name="policy")
+    judge_ref = ModelServerRef(type="responses_api_models", name="judge")
+    agent = make_agent(model_server=model_ref, judge_model_server=judge_ref)
+    with patch.object(
+        PinchBenchAgent,
+        "resolve_model_base_url",
+        side_effect=lambda _self, name, rollout_id: f"http://{name}/ng-rollout/{rollout_id}/v1",
+        autospec=True,
+    ):
+        env = agent._task_env("task_x", "7-2")
+
+    assert env["MODEL_BASE_URL"] == "http://policy/ng-rollout/7-2/v1"
+    assert env["JUDGE_BASE_URL"] == "http://judge/ng-rollout/7-2/v1"
 
 
 def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
@@ -165,6 +195,16 @@ def test_response_from_transcript(tmp_path):
     assert resp.output[0].content[0].text == "Done."
 
 
+def test_transcript_reader_preserves_non_object_records_as_raw_evidence(tmp_path):
+    tdir = tmp_path / "0001_transcripts"
+    tdir.mkdir()
+    (tdir / "task_x.jsonl").write_text('null\n[]\n{"type":"message","message":{"role":"assistant"}}\n')
+
+    events = make_agent()._read_transcript_events("task_x", tmp_path)
+
+    assert events[:2] == [{"raw": "null"}, {"raw": "[]"}]
+
+
 def test_response_from_transcript_common_output_items_and_usage(tmp_path):
     tdir = tmp_path / "0001_transcripts"
     tdir.mkdir()
@@ -224,6 +264,21 @@ def test_response_from_transcript_common_output_items_and_usage(tmp_path):
     assert resp.usage.total_tokens == 26
 
 
+def test_transcript_parsing_ignores_non_object_message_and_usage():
+    events = [
+        {"type": "message", "message": "invalid"},
+        {
+            "type": "message",
+            "message": {"role": "assistant", "content": "Done.", "usage": "invalid"},
+        },
+    ]
+
+    resp = make_agent()._response_from_transcript_events("task_x", events)
+
+    assert resp.output[0].content[0].text == "Done."
+    assert resp.usage.total_tokens == 0
+
+
 def test_collect_transcript_archives(tmp_path):
     out = tmp_path / "out"
     (out / "0001_transcripts").mkdir(parents=True)
@@ -242,7 +297,7 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     otherwise ng_collect_rollouts (fail-fast) aborts the whole collection."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -272,12 +327,23 @@ def _run_body(task_id="task_x"):
     return body
 
 
+def _observed_run_body(task_id="task_x"):
+    return PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "solve"},
+            "verifier_metadata": {"task_id": task_id},
+            "_ng_task_index": 1,
+            "_ng_rollout_index": 2,
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_generic_failure_routes_to_sidecar_not_main(tmp_path, monkeypatch):
     """A failed task must carry a failure class so it never lands in the main jsonl."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -293,7 +359,7 @@ async def test_signal_killed_sandbox_is_kill_shaped_and_unpersisted(tmp_path, mo
     """Walltime SIGTERM shape: no row anywhere; resume's set-difference re-dispatches."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def killed(task_id, out_dir):
+    async def killed(task_id, out_dir, rollout_id=None):
         raise SandboxKilledError("direct apptainer exec killed (rc=-15) for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", killed)
@@ -308,7 +374,7 @@ async def test_task_timeout_is_terminal_sidecar(tmp_path, monkeypatch):
     """Per-task timeout consumed its budget: one sidecar row, never retried."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def slow(task_id, out_dir):
+    async def slow(task_id, out_dir, rollout_id=None):
         raise TimeoutError("direct apptainer exec timed out for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", slow)
@@ -324,7 +390,7 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
     """Scored rollouts must keep landing in the main jsonl (no sentinel keys)."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def ok(task_id, out_dir):
+    async def ok(task_id, out_dir, rollout_id=None):
         return None
 
     monkeypatch.setattr(agent, "_run_in_sandbox", ok)
@@ -339,13 +405,265 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
             "status": "success",
         },
     )
-    monkeypatch.setattr(agent, "_response_from_transcript", lambda task_id, out_dir: agent._empty_response(task_id))
     monkeypatch.setattr(agent, "_collect_transcript", lambda task_id, out_dir, run_id: ([], ""))
     resp = await agent.run(body=_run_body())
     dumped = resp.model_dump()
     assert dumped["reward"] == 1.0
+    assert "ng_agent_observations" not in dumped
     for key in (NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY):
         assert key not in dumped
+
+
+@pytest.mark.asyncio
+async def test_run_returns_openclaw_observations_when_enabled(tmp_path, monkeypatch):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "archive"))
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+
+    async def run_in_sandbox(task_id, out_dir, rollout_id=None):
+        transcript_dir = out_dir / "0001_transcripts"
+        transcript_dir.mkdir(parents=True)
+        root_transcript = transcript_dir / f"{task_id}.jsonl"
+        root_transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "session", "id": "session-1"}),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {"role": "user", "content": "retained pinch input"},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "reasoning", "text": "need to search"},
+                                    {"type": "toolCall", "id": "call-1", "name": "search"},
+                                ],
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "toolResult",
+                                "toolCallId": "call-1",
+                                "content": [{"type": "text", "text": "result"}],
+                                "timestamp": 1_750_000_002_000,
+                                "details": {"durationMs": 500, "status": "completed"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "compaction",
+                            "summary": "condensed context",
+                            "firstKeptEntryId": "entry-7",
+                            "tokensBefore": 120_000,
+                        }
+                    ),
+                ]
+            )
+        )
+        sessions_dir = out_dir / "openclaw_sessions" / "agents" / "main" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        (sessions_dir / "session-1.jsonl").write_text(root_transcript.read_text())
+        child_transcript = sessions_dir / "child-session.jsonl"
+        child_transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "session", "id": "child-session"}),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "user",
+                                "content": [{"type": "text", "text": "research this"}],
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "child done"}],
+                            },
+                        }
+                    ),
+                ]
+            )
+        )
+        (sessions_dir / "sessions.json").write_text(
+            json.dumps(
+                {
+                    "agent:main:main": {"sessionId": "session-1"},
+                    "agent:main:subagent:child": {
+                        "sessionId": "child-session",
+                        "spawnedBy": "agent:main:main",
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", run_in_sandbox)
+    monkeypatch.setattr(
+        agent,
+        "_parse_result",
+        lambda *args: {
+            "reward": 1.0,
+            "grading_type": "automated",
+            "breakdown": {},
+            "notes": "ok",
+            "status": "success",
+        },
+    )
+    body = PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "solve"},
+            "verifier_metadata": {"task_id": "task_x"},
+            "_ng_task_index": 1,
+            "_ng_rollout_index": 2,
+        }
+    )
+
+    result = await agent.run(body=body)
+
+    observations = result.ng_agent_observations
+    assert observations is not None
+    assert observations.source == "openclaw"
+    assert result.model_dump()["ng_agent_observations"]["source"] == "openclaw"
+    invocations = _records(observations, AgentInvocation)
+    tool_calls = _records(observations, ToolCallObservation)
+    compactions = _records(observations, ContextCompactionObservation)
+    assert invocations[0].invocation_id == "agent:main:main"
+    assert [item.type for item in invocations[0].conversation] == [
+        "message",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]
+    assert invocations[0].conversation[0].content == "retained pinch input"
+    assert invocations[0].conversation[1].summary[0].text == "need to search"
+    assert invocations[1].parent_invocation_id == "agent:main:main"
+    assert "research this" in str(invocations[1].conversation)
+    assert tool_calls[0].duration_ms == 500
+    assert compactions[0].summary == "condensed context"
+
+
+@pytest.mark.asyncio
+async def test_managed_sandbox_timeout_is_terminal(tmp_path, monkeypatch):
+    agent = make_agent(
+        work_root=str(tmp_path / "work"),
+        transcripts_dir=str(tmp_path / "archive"),
+        sandbox_provider={"opensandbox": {}},
+    )
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+
+    class TimedOutSandbox:
+        sandbox_id = "sandbox-1"
+        download_called = False
+
+        async def start(self, spec):
+            return None
+
+        async def exec(self, command, timeout_s):
+            return SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout")
+
+        async def download(self, source, target):
+            self.download_called = True
+
+        async def stop(self):
+            return None
+
+    sandbox = TimedOutSandbox()
+    monkeypatch.setattr("responses_api_agents.pinchbench.app.AsyncSandbox", lambda config: sandbox)
+
+    result = await agent.run(body=_observed_run_body())
+
+    dumped = result.model_dump()
+    assert dumped[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+    assert dumped[NG_TERMINAL_KEY] is True
+    assert result.ng_agent_observations.source == "openclaw"
+    assert sandbox.download_called is False
+
+
+@pytest.mark.asyncio
+async def test_managed_sandbox_error_skips_download(tmp_path, monkeypatch):
+    agent = make_agent(
+        work_root=str(tmp_path / "work"),
+        transcripts_dir=str(tmp_path / "archive"),
+        sandbox_provider={"opensandbox": {}},
+    )
+
+    class FailedSandbox:
+        download_called = False
+
+        async def start(self, spec):
+            return None
+
+        async def exec(self, command, timeout_s):
+            return SandboxExecResult(stdout=None, stderr="provider failed", return_code=125, error_type="sandbox")
+
+        async def download(self, source, target):
+            self.download_called = True
+
+        async def stop(self):
+            return None
+
+    sandbox = FailedSandbox()
+    monkeypatch.setattr("responses_api_agents.pinchbench.app.AsyncSandbox", lambda config: sandbox)
+
+    with pytest.raises(RuntimeError, match=r"sandbox.*provider failed"):
+        await agent._run_in_sandbox("task_x", tmp_path)
+    assert sandbox.download_called is False
+
+
+@pytest.mark.asyncio
+async def test_observation_failure_does_not_change_result(tmp_path, monkeypatch):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "archive"))
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+
+    async def run_in_sandbox(task_id, out_dir, rollout_id=None):
+        return None
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", run_in_sandbox)
+    monkeypatch.setattr(
+        agent,
+        "_parse_result",
+        lambda *args: {
+            "reward": 1.0,
+            "grading_type": "automated",
+            "breakdown": {},
+            "notes": "ok",
+            "status": "success",
+        },
+    )
+    monkeypatch.setattr(
+        "responses_api_agents.pinchbench.app.build_openclaw_observations",
+        MagicMock(side_effect=RuntimeError("observer failed")),
+    )
+    body = PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "solve"},
+            "verifier_metadata": {"task_id": "task_x"},
+            "_ng_task_index": 1,
+            "_ng_rollout_index": 2,
+        }
+    )
+
+    result = await agent.run(body=body)
+
+    assert result.reward == 1.0
+    assert result.status == "success"
+    assert result.response.output[0].content[0].text == ""
+    observations = result.ng_agent_observations
+    assert observations is not None
+    assert observations.source == "openclaw"
+    assert [gap.code for gap in observations.gaps] == ["observation_capture_failed"]
 
 
 def test_classify_task_failure_mapping():
