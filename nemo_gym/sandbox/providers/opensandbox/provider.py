@@ -96,6 +96,10 @@ DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 # Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
 ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
+
+# Shortest sandbox lifetime the OpenSandbox API accepts; below it, create returns
+# an HTTP 422 that does not say which field was at fault.
+MIN_TTL_S = 60.0
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
@@ -691,6 +695,17 @@ class OpenSandboxProvider:
         """
         return {"sandbox_id": handle.sandbox_id}
 
+    async def renew(self, handle: SandboxHandle, ttl_s: float) -> None:
+        """Push the sandbox's expiry out to ``ttl_s`` seconds from now."""
+        await self._await_sdk_operation(
+            lambda: handle.raw.renew(timedelta(seconds=ttl_s)),
+            operation="renew",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=float(self._connection.request_timeout_s)
+            if self._connection.request_timeout_s is not None
+            else None,
+        )
+
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
         """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
 
@@ -909,6 +924,12 @@ class OpenSandboxProvider:
         if options.snapshot_id is not None:
             kwargs["snapshot_id"] = options.snapshot_id
         if spec.ttl_s is not None:
+            # The API rejects a shorter lifetime with a bare HTTP 422, which says
+            # nothing about which field was wrong. Name it here instead.
+            if spec.ttl_s < MIN_TTL_S:
+                raise ValueError(
+                    f"OpenSandbox requires a sandbox lifetime of at least {MIN_TTL_S:g}s; got ttl_s={spec.ttl_s:g}"
+                )
             kwargs["timeout"] = timedelta(seconds=spec.ttl_s)
         if spec.ready_timeout_s is not None:
             kwargs["ready_timeout"] = timedelta(seconds=spec.ready_timeout_s)

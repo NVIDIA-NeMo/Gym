@@ -69,6 +69,56 @@ Provider implementations should preserve the same lifecycle contract as the buil
 - Make `close()` safe to call from cleanup paths.
 - Use `aclose()` for provider-scoped resources such as SDK clients.
 
+## Optional Capabilities
+
+Beyond the required protocol, a provider can advertise extra abilities by implementing one of
+the `runtime_checkable` capability protocols in `nemo_gym.sandbox.providers.base`. Callers test
+for them with `isinstance()` and fall back when they are absent, so implementing one is
+additive — nothing breaks by leaving it out.
+
+### `RenewableProvider`
+
+Implement this when your backend can move a sandbox's expiry after creation. It lets callers
+give sandboxes a short lifetime and keep them alive through use, instead of granting a long
+lifetime up front and hoping something deletes it.
+
+```python
+class MySandboxProvider:
+    ...
+
+    async def renew(self, handle: SandboxHandle, ttl_s: float) -> None:
+        # Expire ttl_s seconds FROM NOW — not ttl_s added to the time remaining.
+        await handle.raw.set_expiry(seconds_from_now=ttl_s)
+```
+
+The contract callers rely on:
+
+- The new expiry is measured from *now*, so repeated calls hold a constant window rather than
+  extending without bound.
+- Renewing an already-expired or deleted sandbox should raise; callers treat renewal as best
+  effort and carry on with the original lifetime.
+- If your backend has no expiry concept at all, do not implement this — its absence is the
+  correct signal, and a no-op `renew()` would claim a guarantee you cannot keep.
+
+### `ConnectableProvider`
+
+Implement this when a sandbox is reachable by id from a different process — that is, when the
+state lives in an external control plane rather than in this process. It backs
+`AsyncSandbox.serialize()` / `AsyncSandbox.connect()`, so a sandbox created in one
+process can be operated from another.
+
+```python
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict:
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        raw = await my_runtime_attach(descriptor["sandbox_id"])
+        return SandboxHandle(sandbox_id=str(raw.id), provider_name=self.name, raw=raw)
+```
+
+A provider whose sandboxes only exist in-process should not implement this; callers surface a
+clear "cannot reattach" error rather than silently leaking a sandbox they can no longer reach.
+
 ## Provider Config
 
 Provider constructors receive the single provider-specific mapping from a named sandbox block:
