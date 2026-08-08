@@ -1,0 +1,470 @@
+---
+title: Debugging sandboxes
+description: Boot and inspect the sandbox a task runs in, without running a rollout.
+---
+
+Answering "what is actually inside this task's container?" normally means starting the whole
+stack — model server, Ray, agent, rollout — and hoping the failure reproduces. `gym sandbox
+debug` skips all of that: it boots the sandbox a server would create for a task, using the
+same provider, image, and `SandboxSpec` a rollout gets, and runs whatever you ask inside it.
+
+```bash
+# What would this task boot? (no sandbox created, no cluster needed)
+gym sandbox debug --config <config> --task <task-id> --dry-run
+
+# Actually boot it and look around
+gym sandbox debug --config <config> --task <task-id> --command "ls -la && python -V"
+```
+
+See [CLI commands](/reference/cli-commands) for the full flag list.
+
+## A worked example: SWE-bench with mini-swe-agent
+
+`mini_swe_agent_2` is the reference case, because its sandbox is the interesting kind: the
+image is derived per task rather than declared, and commands are wrapped so they run against
+the task's own Python. Its config already declares both hooks, so nothing extra is needed.
+
+First, find out which tasks exist. `--list-tasks` reads the dataset and nothing else — no
+provider config, no credentials, no cluster:
+
+```bash
+AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+
+gym sandbox debug --config $AGENT --list-tasks
+```
+
+```
+5 task(s) in .../mini_swe_agent_2/data/example.jsonl
+  django__django-10973              repo=django/django  subset=verified  split=test  difficulty=15 min - 1 hour
+  pylint-dev__pylint-4551           repo=pylint-dev/pylint  subset=verified  split=test  difficulty=1-4 hours
+  sphinx-doc__sphinx-8595           repo=sphinx-doc/sphinx  subset=verified  split=test  difficulty=<15 min fix
+  sympy__sympy-20916                repo=sympy/sympy  subset=verified  split=test  difficulty=<15 min fix
+  scikit-learn__scikit-learn-14141  repo=scikit-learn/scikit-learn  subset=verified  split=test  difficulty=<15 min fix
+
+Run one with --task <id>
+```
+
+`--list-tasks` prints each row's id plus whichever of `repo`, `subset`, `split`, `difficulty`
+and `image_name` the row carries, which is usually enough to pick one. `--json` gives the same
+thing machine-readably:
+
+```bash
+gym sandbox debug --config $AGENT --list-tasks --json | jq -r '.[].id'
+```
+
+<Warning>
+With no `-i/--input` this lists the server's committed `data/example.jsonl`, which is a smoke
+fixture pinned at **five rows** — `gym env test` enforces that count. It is not the benchmark.
+</Warning>
+
+SWE-bench Verified itself is 500 instances and is not in the repo. Materialize it once, then
+point `-i` at the result:
+
+```bash
+python - <<'EOF'
+import json
+from datasets import load_dataset
+
+rows = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
+with open("swebench_verified.jsonl", "w") as f:
+    for row in rows:
+        record = dict(row)
+        # What mini_swe_agent_2's spec_resolver reads to derive the image, plus
+        # the Gym envelope every row needs.
+        record["subset"] = "verified"
+        record["split"] = "test"
+        record.setdefault("responses_create_params", {"input": []})
+        f.write(json.dumps(record) + "\n")
+EOF
+
+gym sandbox debug --config $AGENT -i swebench_verified.jsonl --list-tasks
+```
+
+A row only has to carry what the server's `spec_resolver` reads — for `mini_swe_agent_2` that
+is `instance_id` and `subset`, from which the image is derived. A row may also set
+`image_name` to name its image outright, which takes precedence.
+
+<Note>
+Every SWE-bench Verified task is Python. The 500 instances span 12 repositories — django (231),
+sympy (75), sphinx (44), matplotlib (34), scikit-learn (32), astropy (22), xarray (22), pytest
+(19), pylint (10), requests (8), seaborn (2), flask (1) — and their test patches touch `.py`
+files almost exclusively. There are no Go, Rust, C++, or Java tasks.
+
+The *containers* are not Python-only, though: `gcc` and `g++` are present, because several of
+those projects build C extensions. Each image ships a conda env named `testbed` holding the
+interpreter the task expects, which is why the wrapper activates it.
+</Note>
+
+Now inspect one. This creates nothing and needs no cluster:
+
+```bash
+PROVIDER=nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+gym sandbox debug --config $AGENT --config $PROVIDER \
+    --task django__django-10973 --dry-run
+```
+
+```
+server    mini_swe_agent_2  (responses_api_agents)
+sandbox   opensandbox
+task      django__django-10973  (index 0 of 1, from .../data/example.jsonl)
+image     docker.io/swebench/sweb.eval.x86_64.django_1776_django-10973:latest
+          via spec_resolver (responses_api_agents.mini_swe_agent_2.sandbox_hooks:spec_for_row)
+spec      ttl_s=900.0  ready_timeout_s=1200  cpu=2.0  memory_mib=8192  disk_gib=30  workdir=/testbed
+exec      activate_conda=True conda_env=testbed cwd=/testbed user=root
+wrapper   responses_api_agents.mini_swe_agent_2.sandbox_hooks:conda_activate_wrap
+```
+
+The image was derived from `instance_id` + `subset`; no row field carried it. Now run
+something in it:
+
+```bash
+gym sandbox debug --config $AGENT --config $PROVIDER \
+    --task django__django-10973 \
+    --command "python -c 'import django; print(django.__version__)'"
+```
+
+```
+3.0.dev20250910094507
+✓ django__django-10973  reason=pass exit=0  8.6s (command 1.4s + overhead 1.1s, boot 7.1s)
+```
+
+That is the testbed interpreter, not the system one — the wrapper did that.
+
+### Timing a long install
+
+Short commands hide the distinction between a slow command and a slow link. A large install
+does not, which makes it the clearest way to read the timing fields:
+
+```bash
+gym sandbox debug --config $AGENT --config $PROVIDER \
+    --task django__django-10973 \
+    --command "pip install torch" \
+    --timeout-total 900
+```
+
+```
+✓ django__django-10973  reason=pass exit=0  67.1s (command 21.0s + overhead 1.3s, boot 44.8s)
+```
+
+`command` is measured by execd *inside* the sandbox; `overhead` is what the round trip added.
+Only the first is a property of the task — so this is the number to watch when comparing
+images, package indexes, or clusters. Figures vary with cache state and cluster; treat the
+shape, not the values, as the point.
+
+Add `--json` for the full trace, or `-o` to persist it:
+
+```bash
+gym sandbox debug --config $AGENT --config $PROVIDER \
+    --task django__django-10973 --command "pip install torch" --json \
+  | jq '.timing'
+```
+
+```json
+{"boot": 44.812, "setup": 0.0, "exec": 22.303, "command": 21.024, "overhead": 1.279, "total": 67.115}
+```
+
+<Note>
+Note *which* torch: this image's `testbed` env is Python 3.6, so pip resolves to torch 1.10.2 —
+the last release with `cp36` wheels — at about 880 MB, not a multi-GB modern build. Run it
+against a package cache if your cluster has one; a repeated install that holds the same
+`command` time while `boot` moves is telling you the install is not what changed.
+</Note>
+
+### Pointing at a real OpenSandbox server
+
+The shipped `opensandbox.yaml` reads its endpoint and credential from the environment, so
+neither lands in a config file:
+
+```bash
+export OPENSANDBOX_DOMAIN=<your-opensandbox-host>:<port>
+export OPENSANDBOX_API_KEY=<your-api-key>
+```
+
+If the server runs with authentication disabled (`api_key = ""` server-side, with
+`OPENSANDBOX_INSECURE_SERVER=YES`), there is no key to obtain — but the variable must still be
+set to something, because the config interpolates it and Hydra fails on an unset reference.
+
+Reaching a cluster-internal server usually means a port-forward, in which case
+`OPENSANDBOX_DOMAIN` is the local end of the tunnel:
+
+```bash
+kubectl port-forward -n <namespace> svc/<opensandbox-service> 18080:80
+export OPENSANDBOX_DOMAIN=127.0.0.1:18080
+```
+
+<Warning>
+If the sandbox's egress sidecar is intercepting TLS, a **conda-based image will not trust the
+proxy's CA** and `pip` fails with `CERTIFICATE_VERIFY_FAILED`. The CA is installed into the system
+trust store, but conda ships and consults its own at
+`/opt/miniconda3/envs/<env>/ssl/cert.pem`. Every SWE-bench image is conda-based, so this is the
+common case rather than an edge one. Point the standard variables at the CA that is already
+delivered to the container:
+
+```bash
+--env SSL_CERT_FILE=/opt/opensandbox/mitmproxy-ca-cert.pem \
+--env REQUESTS_CA_BUNDLE=/opt/opensandbox/mitmproxy-ca-cert.pem
+```
+
+Debian-style images (`python:3.12-slim`) read the system store and need none of this.
+</Warning>
+
+### Overriding what the server resolved
+
+`--env`, `--metadata` and `--provider-option` are the top layer of the resolution chain: they apply
+on top of both the declarative `sandbox_spec` and whatever a `spec_resolver` returned. That matters
+for a server that computes its spec in Python, because the resolver's spec wins outright over
+config — without these flags there would be no way to add anything to it from the command line.
+
+`--provider-option` decodes its value as JSON when it decodes, since provider options are not all
+strings; anything that is not valid JSON stays a string, so ids and names need no quoting.
+
+Asking a sandbox for a transparently-intercepting egress sidecar needs one of each, which is what
+this looks like in practice:
+
+```bash
+gym sandbox debug --config $AGENT --config $PROVIDER --task django__django-10973 \
+    --command "pip install --no-input tabulate" \
+    --env OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true \
+    --env SSL_CERT_FILE=/opt/opensandbox/mitmproxy-ca-cert.pem \
+    --metadata istio.io/dataplane-mode=none \
+    --provider-option 'network_policy={"defaultAction":"allow","egress":[]}'
+```
+
+### With and without the wrapper
+
+`--bare` runs the command exactly as typed, skipping the server's `exec_wrapper`. The
+difference is what the rollout actually sees versus what a plain shell would:
+
+```bash
+# wrapped (default) — conda activate testbed && ...
+gym sandbox debug --config $AGENT --config $PROVIDER --task django__django-10973 \
+    --command "python -c 'import sys; print(sys.executable)'"
+```
+
+```
+/opt/miniconda3/envs/testbed/bin/python
+✓ django__django-10973  reason=pass exit=0  8.359s (command 0.316s + overhead 1.079s, boot 6.964s)
+```
+
+```bash
+# --bare — the command as typed, no preamble
+gym sandbox debug --config $AGENT --config $PROVIDER --task django__django-10973 --bare \
+    --command "python -c 'import sys; print(sys.executable)'"
+```
+
+```
+/opt/miniconda3/bin/python
+✓ django__django-10973  reason=pass exit=0  8.051s (command 0.013s + overhead 1.088s, boot 6.95s)
+```
+
+Same command, different interpreter — and the wrapped run spends 0.316s of command time
+against 0.013s, which is what conda activation costs. Use `--bare` when the wrapper itself is what you are
+debugging; leave it off when you want to reproduce the rollout.
+
+`--dry-run` prints the fully wrapped command without running anything, which is the quickest
+way to see what the preamble expands to:
+
+```bash
+gym sandbox debug --config $AGENT --config $PROVIDER --task django__django-10973 \
+    --command "pytest -x" --dry-run
+```
+
+To poke at several tasks at once, select them by count instead of by id. `--concurrency`
+bounds how many sandboxes exist at the same time:
+
+```bash
+gym sandbox debug --config $AGENT --config $PROVIDER --limit 3 --concurrency 3 \
+    --command "git -C /testbed log --oneline -1"
+```
+
+And to stay in one sandbox across several commands:
+
+```bash
+gym sandbox debug --config $AGENT --config $PROVIDER --task django__django-10973 \
+    --command "true" --keep --ttl 1800
+# sandbox <id> left running (expires in 30m)
+
+gym sandbox exec --config $AGENT --config $PROVIDER --sandbox-id <id> \
+    --command "python -m pytest tests/dbshell -x"
+gym sandbox rm --config $AGENT --config $PROVIDER --sandbox-id <id>
+```
+
+## How a sandbox gets resolved
+
+Every sandbox-backed server declares `sandbox_provider`, and that is the only thing they all
+agree on — how each one arrives at a `SandboxSpec` varies. Resolution is therefore layered,
+and each layer is optional. Most environments never need more than the first two.
+
+### Layer 0 — the provider
+
+`gym sandbox` scans the merged config for any block declaring `sandbox_provider`. Agents and
+resources servers are treated identically; nothing keys off the server kind. Both accepted
+forms work — a name referencing a provider block elsewhere in the config, or an inline
+single-key mapping.
+
+When exactly one server declares a sandbox it is used automatically; otherwise pass
+`--server <name>`. `--sandbox <name>` swaps the provider that block points at, so the same
+task can run against a local provider and a cluster one without editing committed config.
+
+### Layer 1 — the declarative spec
+
+If the block has a `sandbox_spec` mapping, it becomes the base `SandboxSpec`: `image`,
+`ttl_s`, `ready_timeout_s`, `workdir`, `env`, `files`, `metadata`, `resources`, `entrypoint`,
+and `provider_options`, plus `image_rewrites` for deployments that serve a registry mirror.
+Unknown keys are rejected rather than ignored, since a typo'd spec key is otherwise invisible
+until the sandbox misbehaves.
+
+An environment whose sandbox is fully described in YAML is already debuggable at this point,
+with no code and no further config:
+
+```bash
+gym sandbox debug --config <config> --command "python -V"
+```
+
+### Layer 2 — `spec_resolver`, when the spec is computed
+
+Some environments build their spec in Python because it depends on the task row. Rather than
+have the CLI guess, such a server points at the function that already does it:
+
+```yaml
+      sandbox_task:
+        spec_resolver: my_env.sandbox_hooks:spec_for_row
+```
+
+The function takes `(row, server_config)` and returns a `SandboxSpec` (or a mapping). It is
+called with `row=None` when no task is selected, so it should fall back to the configured
+spec in that case.
+
+If the image is simply *on* the row, no code is needed — name the field instead:
+
+```yaml
+      sandbox_task:
+        image_from_row: image_name     # dotted paths work: verifier_metadata.image
+```
+
+### Layer 3 — `exec_wrapper`, when commands are prepared
+
+Environments routinely set up the shell before their real command: activating a conda
+environment, fixing `PATH`, relaxing apt's sandbox. Reproducing that is the difference
+between debugging the environment the rollout sees and debugging a different one, so the
+wrapper is applied by default:
+
+```yaml
+      sandbox_task:
+        exec_wrapper: my_env.sandbox_hooks:wrap_command
+```
+
+The function takes `(command, **exec_kwargs)` — where `exec_kwargs` is the server's
+`sandbox_environment_kwargs` merged with any CLI overrides — and returns the command to run.
+Pass `--bare` to skip it, which is what you want when the wrapper itself is the suspect.
+
+## Resolution precedence
+
+```
+image:    --image  >  spec_resolver / sandbox_spec  >  row[image_from_row]
+command:  --bare ? <as typed> : exec_wrapper(command, **exec_kwargs)
+exec:     --cwd / --user / --env  >  sandbox_environment_kwargs
+```
+
+<Note>
+Hook references are `"module.path:attribute"` and are imported by the CLI, not by the server.
+Point them at a dependency-light module rather than an `app.py` that imports Ray or a
+benchmark harness at module scope, or the import will fail.
+</Note>
+
+## Output
+
+Each run writes a directory you can come back to:
+
+```
+outputs/<server>--debug/<run-uuid>/
+├── config.yaml     # the resolved config — re-runnable via --config
+└── traces.jsonl    # one record per task
+```
+
+A trace record carries the resolved spec and image, the sandbox id, the exact command that
+ran (wrapped or not), the exit code and output, and per-stage timings. Outcomes are classified as `pass`, `nonzero_exit`, `timeout`, `cancelled`, `error`, or
+`not_run`, and the command exits non-zero if any task failed — so it works as a check, not
+just as something to read.
+
+### Where the time went
+
+Timing a sandbox command from the outside measures the round-trip as well as the work. When
+the provider can report how long the command itself ran, the trace separates the two:
+
+```json
+"timing": {"boot": 7.123, "setup": 0.0, "exec": 6.389,
+           "command": 5.307, "overhead": 1.082, "total": 13.512}
+```
+
+- `boot` — provisioning the sandbox
+- `command` — the command's own runtime, measured inside the sandbox
+- `overhead` — `exec` minus `command`: dispatch and transport
+- `total` — everything, including teardown
+
+So a ten-minute `pip install` reads as `command 580s + overhead 20s` rather than an
+undifferentiated ten minutes. Providers that cannot measure the command omit `command` and
+`overhead` rather than guessing.
+
+## Sandbox lifetime
+
+Every sandbox this command creates gets a short, bounded lifetime. A debugging session can be
+interrupted, killed, or simply forgotten, and a sandbox nobody is using still holds cluster
+capacity until it expires.
+
+- **Default: 15 minutes.** This is a *cap*, applied whether the server sets `ttl_s` or not.
+  Server configs size `ttl_s` for a whole rollout — mini-swe-agent asks for five hours — which
+  is the wrong order of magnitude for poking at a container. A server asking for *less* than
+  the cap keeps its shorter value.
+- **`--ttl <seconds>` opts out** for cases that genuinely need longer. Above an hour it warns,
+  since sandboxes held that long are usually forgotten rather than needed.
+- **Servers that set no `ttl_s` are covered too.** Providers read an absent lifetime as *never
+  auto-terminate* — safe for a rollout that always deletes its own sandbox, unsafe here.
+
+Providers impose their own floor as well (OpenSandbox requires at least 60 seconds).
+
+### Renewal keeps an in-use sandbox alive
+
+A short lifetime would be useless if it expired while you were still working, so
+`gym sandbox exec` pushes the expiry back before each command, on providers that advertise the
+`RenewableProvider` capability. Activity is what keeps a sandbox alive, rather than a long
+lifetime granted up front:
+
+```
+$ gym sandbox exec --config $AGENT --config $PROVIDER --sandbox-id <id> --command "echo hi"
+hi
+✓ <id>  exit=0  command 0.302s  expires in 15m
+```
+
+The renewal window is `max(--ttl, --timeout-total + 60s)`, so a command running longer than the
+TTL will not have the sandbox expire underneath it. On a provider that cannot renew, the
+sandbox keeps the lifetime it was created with.
+
+## Keeping a sandbox alive
+
+By default a sandbox is torn down as soon as the command finishes. `--keep` leaves it running
+and prints its id, so you can keep poking:
+
+```bash
+gym sandbox debug --config <config> --task <id> --command "ls" --keep
+#   sandbox <id> left running (expires in 15m)
+#   reattach: gym sandbox exec --sandbox-id <id> --command ...
+#   delete:   gym sandbox rm --sandbox-id <id>
+
+gym sandbox exec  --config <config> --sandbox-id <id> --command "git status"
+gym sandbox rm    --config <config> --sandbox-id <id>
+```
+
+This needs a provider that can reattach to a sandbox by id — one backed by an external
+control plane. `--keep` is refused up front on providers that cannot, since the sandbox would
+otherwise be left running with no way to reach or delete it.
+
+Interrupt handling is deliberate for the same reason: the first Ctrl-C tears down cleanly and
+subsequent ones are ignored while cleanup runs, so a second Ctrl-C cannot orphan a sandbox
+that is costing capacity.
+
+## Limitations
+
+- Output is captured and printed when the command finishes, not streamed as it runs.
+- The gold/setup checks that `verifiers` exposes as `validate` are not implemented yet.

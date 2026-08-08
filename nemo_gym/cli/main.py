@@ -99,6 +99,60 @@ def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
     )
 
 
+def hydra_quote(value: str) -> str:
+    """Quote a value so Hydra's override grammar takes it literally.
+
+    Free-text values (a shell command, a path with spaces) collide with that
+    grammar: `--command "python -c 'x'"` fails on the inner quotes, and commas
+    or brackets are read as sweep/list syntax.
+
+    Hydra unescapes `\\"` but leaves `\\\\` alone, so a backslash directly before a
+    quote cannot be encoded. Rather than guess, prefer a delimiter the value does
+    not contain and verify the result parses back to exactly what was typed —
+    running a *different* command than the one you asked for is a worse failure
+    than refusing.
+    """
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    text = str(value)
+    for delimiter in ('"', "'"):
+        if delimiter in text:
+            continue
+        candidate = f"{delimiter}{text}{delimiter}"
+        try:
+            if OverridesParser.create().parse_overrides([f"+_probe={candidate}"])[0].value() == text:
+                return candidate
+        except Exception:  # noqa: S110 - fall through to the next delimiter
+            pass
+
+    raise ValueError(
+        f"Cannot pass {text!r} through Hydra's override grammar because it contains both quote "
+        f"characters. Put it in a file and use --script-path instead."
+    )
+
+
+def _text_flag(name: str, hydra_key: str, flag_help: str, *, aliases: tuple[str, ...] = ()) -> Flag:
+    """A `--name VALUE` flag for free text, quoted so Hydra accepts any characters."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, help=flag_help),
+        translate_to_hydra=lambda args: (
+            [f"+{hydra_key}={hydra_quote(getattr(args, dest))}"] if getattr(args, dest) is not None else []
+        ),
+    )
+
+
+def _text_list_flag(name: str, hydra_key: str, flag_help: str, *, metavar: str) -> Flag:
+    """A repeatable `--name VALUE` flag collected into one Hydra list, each element quoted."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", action="append", metavar=metavar, help=flag_help),
+        translate_to_hydra=lambda args: (
+            [f"+{hydra_key}=[{','.join(hydra_quote(v) for v in getattr(args, dest))}]"] if getattr(args, dest) else []
+        ),
+    )
+
+
 # Shared flag: load Gym config files. Reused by every command that reads server/benchmark configs.
 CONFIG = Flag(
     register=lambda p: p.add_argument(
@@ -293,6 +347,20 @@ ENVIRONMENT = _asset_selector("environment")
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
 
+# Shared `gym sandbox` flags. `--server` names the config block whose sandbox to act on (an agent or a
+# resources server — both declare `sandbox_provider`); `--sandbox` swaps the provider that block points at,
+# so the same task can run against a local provider and a cluster one without editing committed config.
+SANDBOX_SERVER = _value_flag("server", "server_name", "Server whose sandbox to use; inferred when unambiguous.")
+SANDBOX_NAME = _value_flag("sandbox", "sandbox_name", "Override the server's sandbox_provider reference.")
+SANDBOX_ID = _text_flag("sandbox-id", "sandbox_id", "Id of a running sandbox.")
+SANDBOX_COMMAND = _text_flag("command", "command", "Command to run inside the sandbox.")
+SANDBOX_BARE = _bool_flag("bare", "bare", "Skip the server's exec_wrapper and run the command as typed.")
+SANDBOX_CWD = _text_flag("cwd", "cwd", "Working directory for the command.")
+SANDBOX_USER = _text_flag("user", "user", "User to run the command as.")
+SANDBOX_QUIET = _bool_flag("quiet", "quiet", "Suppress command stdout/stderr; keep the summary line.")
+SANDBOX_EXIT_ZERO = _bool_flag("exit-zero", "exit_zero", "Always exit 0, even when the command failed.")
+SANDBOX_TIMEOUT_TOTAL = _value_flag("timeout-total", "timeout_total", "Seconds allowed for the command itself.")
+
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
 # var before dispatch (see there), so a single register-only flag suffices for every command — the roots
 # reach discovery, the `--<component> NAME` selectors, deep path resolution, and spawned servers alike.
@@ -368,6 +436,7 @@ GROUPS = {
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
+    "sandbox": "Inspect and poke at task sandboxes.",
     "dev": "Contributor helpers.",
 }
 
@@ -690,6 +759,71 @@ COMMANDS = {
                 ),
             ),
         ),
+    ),
+    "sandbox debug": Command(
+        target="nemo_gym.cli.sandbox:debug",
+        summary="Boot a task's sandbox and run a command or script inside it.",
+        flags=(
+            CONFIG,
+            SEARCH_DIR,
+            JSON,
+            SANDBOX_SERVER,
+            SANDBOX_NAME,
+            _text_flag("input", "input_jsonl_fpath", "Task rows JSONL file.", aliases=("-i",)),
+            _text_list_flag("task", "task_ids", "Select a row by task id; repeatable.", metavar="ID"),
+            _value_flag("limit", "limit", "Maximum number of tasks to run."),
+            _bool_flag("shuffle", "shuffle", "Shuffle rows (fixed seed) before applying --limit."),
+            SANDBOX_COMMAND,
+            _text_flag("script-path", "script_path", "Local script to upload and run."),
+            _bool_flag("dry-run", "dry_run", "Print the resolved sandbox and exit without provisioning."),
+            _bool_flag("list-tasks", "list_tasks", "List the task ids available to --task and exit."),
+            _text_flag("image", "image", "Override the resolved container image."),
+            SANDBOX_BARE,
+            SANDBOX_CWD,
+            SANDBOX_USER,
+            _text_list_flag("env", "env", "Extra environment variable; repeatable.", metavar="KEY=VALUE"),
+            _text_list_flag("metadata", "metadata", "Extra sandbox metadata; repeatable.", metavar="KEY=VALUE"),
+            _text_list_flag(
+                "provider-option",
+                "provider_option",
+                "Extra provider option, value parsed as JSON when it parses; repeatable.",
+                metavar="KEY=VALUE",
+            ),
+            _value_flag("concurrency", "concurrency", "Maximum sandboxes in flight."),
+            _value_flag("timeout-setup", "timeout_setup", "Seconds allowed for boot and upload."),
+            SANDBOX_TIMEOUT_TOTAL,
+            _value_flag("ttl", "ttl_s", "Sandbox lifetime in seconds before it self-deletes."),
+            _bool_flag("keep", "keep", "Leave sandboxes running and print their ids."),
+            _text_flag(
+                "output-dir", "output_dirpath", "Where to write config.yaml and traces.jsonl.", aliases=("-o",)
+            ),
+            SANDBOX_QUIET,
+            SANDBOX_EXIT_ZERO,
+        ),
+    ),
+    "sandbox exec": Command(
+        target="nemo_gym.cli.sandbox:exec_command",
+        summary="Run a command in an already-running sandbox.",
+        flags=(
+            CONFIG,
+            SEARCH_DIR,
+            SANDBOX_ID,
+            SANDBOX_SERVER,
+            SANDBOX_NAME,
+            SANDBOX_COMMAND,
+            SANDBOX_BARE,
+            SANDBOX_CWD,
+            SANDBOX_USER,
+            SANDBOX_TIMEOUT_TOTAL,
+            _value_flag("ttl", "ttl_s", "Seconds to extend the sandbox's expiry by before running."),
+            SANDBOX_QUIET,
+            SANDBOX_EXIT_ZERO,
+        ),
+    ),
+    "sandbox rm": Command(
+        target="nemo_gym.cli.sandbox:rm",
+        summary="Delete a running sandbox.",
+        flags=(CONFIG, SEARCH_DIR, SANDBOX_ID, SANDBOX_SERVER, SANDBOX_NAME),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
 }

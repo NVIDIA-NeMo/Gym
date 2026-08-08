@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import logging
 import os
 import sys
@@ -1276,3 +1277,114 @@ class TestListEnvironmentsRouting:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "calendar"])
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+component_name=calendar"]
+
+
+class TestSandboxFlags:
+    """`gym sandbox` routing: argparse flags -> Hydra overrides."""
+
+    def test_debug_routes_with_config_and_task(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["sandbox", "debug", "--config", "a.yaml", "--task", "t1", "--command", "ls"],
+        )
+        assert target == "nemo_gym.cli.sandbox:debug"
+        paths, others = _split_overrides(overrides)
+        assert paths == {"a.yaml"}
+        assert others == {'+task_ids=["t1"]', '+command="ls"'}
+
+    def test_repeated_task_becomes_one_list(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["sandbox", "debug", "--task", "t1", "--task", "t2", "--dry-run"])
+        _, others = _split_overrides(overrides)
+        assert '+task_ids=["t1","t2"]' in others
+
+    def test_repeated_env_becomes_one_list(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch, ["sandbox", "debug", "--env", "A=1", "--env", "B=2", "--command", "ls"]
+        )
+        _, others = _split_overrides(overrides)
+        assert '+env=["A=1","B=2"]' in others
+
+    def test_bool_flags_translate(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["sandbox", "debug", "--dry-run", "--bare", "--keep", "--shuffle"])
+        _, others = _split_overrides(overrides)
+        assert others == {"+dry_run=true", "+bare=true", "+keep=true", "+shuffle=true"}
+
+    def test_unset_flags_contribute_nothing(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["sandbox", "debug", "--dry-run"])
+        assert overrides == ["+dry_run=true"]
+
+    def test_server_and_sandbox_selectors(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch, ["sandbox", "debug", "--server", "s1", "--sandbox", "sbx", "--dry-run"]
+        )
+        _, others = _split_overrides(overrides)
+        assert "+server_name=s1" in others
+        assert "+sandbox_name=sbx" in others
+
+    def test_input_alias(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["sandbox", "debug", "-i", "rows.jsonl", "--dry-run"])
+        _, others = _split_overrides(overrides)
+        assert '+input_jsonl_fpath="rows.jsonl"' in others
+
+    def test_output_dir_alias(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["sandbox", "debug", "-o", "out/", "--command", "ls"])
+        _, others = _split_overrides(overrides)
+        assert '+output_dirpath="out/"' in others
+
+    def test_exec_routes(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["sandbox", "exec", "--sandbox-id", "abc", "--command", "ls"])
+        assert target == "nemo_gym.cli.sandbox:exec_command"
+        _, others = _split_overrides(overrides)
+        assert others == {'+sandbox_id="abc"', '+command="ls"'}
+
+    def test_rm_routes(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["sandbox", "rm", "--sandbox-id", "abc"])
+        assert target == "nemo_gym.cli.sandbox:rm"
+        assert overrides == ['+sandbox_id="abc"']
+
+    def test_rm_rejects_command_flag(self, monkeypatch: MonkeyPatch) -> None:
+        # `sandbox rm` does not take --command; the router must reject it rather than leak it downstream.
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
+        monkeypatch.setattr(sys, "argv", ["gym", "sandbox", "rm", "--sandbox-id", "a", "--command", "ls"])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_targets_are_importable(self) -> None:
+        # A typo'd target string only surfaces at dispatch time, which is too late.
+        for name in ("sandbox debug", "sandbox exec", "sandbox rm"):
+            module_path, func_name = cli_main.COMMANDS[name].target.split(":")
+            assert callable(getattr(importlib.import_module(module_path), func_name))
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -c 'import django; print(django.__version__)'",
+            'python -c "print(1)"',
+            "pytest -k 'a or b' --tb=short",
+            "ls [abc]",
+            "echo a,b",
+            "grep -r 'x' . | wc -l",
+            r"printf 'a\\tb'",
+            "echo $HOME && ls",
+            "sed -i 's/a/b/g' f.txt",
+            'python -c "print(1)"',
+        ],
+    )
+    def test_command_with_shell_syntax_is_hydra_safe(self, monkeypatch: MonkeyPatch, command) -> None:
+        # A debug command is arbitrary shell, so it collides with Hydra's override grammar: quotes,
+        # brackets and commas are all syntax there. The emitted override must parse AND round-trip
+        # back to exactly what was typed, or the sandbox runs a different command than you asked for.
+        _, overrides = _dispatch_for(monkeypatch, ["sandbox", "debug", "--command", command])
+        parsed = OverridesParser.create().parse_overrides(overrides)[0]
+        assert parsed.value() == command
+
+    def test_task_ids_with_special_chars_round_trip(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["sandbox", "debug", "--task", "a,b", "--dry-run"])
+        token = next(o for o in overrides if o.startswith("+task_ids="))
+        assert OverridesParser.create().parse_overrides([token])[0].value() == ["a,b"]
+
+    def test_command_that_cannot_be_encoded_is_refused_not_mangled(self, monkeypatch: MonkeyPatch) -> None:
+        # A value containing both quote characters with a backslash before one of them cannot be
+        # encoded (Hydra unescapes \" but not \\). Refusing beats silently running something else.
+        with pytest.raises(SystemExit):
+            _dispatch_for(monkeypatch, ["sandbox", "debug", "--command", 'echo "a\\"b" \'c\''])

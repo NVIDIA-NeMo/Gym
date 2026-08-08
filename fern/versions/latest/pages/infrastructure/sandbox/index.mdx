@@ -190,6 +190,68 @@ async with AsyncSandbox(provider_config, spec) as sandbox:
     passed = result.return_code == 0
 ```
 
+## Sandbox Lifetime and Renewal
+
+A sandbox's lifetime is set by `SandboxSpec.ttl_s`, which providers map onto their own expiry
+mechanism. The sandbox self-deletes when it expires, whether or not anything is still using it.
+
+<Warning>
+Leaving `ttl_s` unset does **not** mean "a sensible default". Providers with a server-side
+expiry read it as *never auto-terminate*, so the sandbox survives until something explicitly
+deletes it. That is safe for a rollout whose `finally` always calls `stop()`, and a capacity
+leak for anything that can be interrupted, crash, or be forgotten. Set `ttl_s` unless you are
+certain a caller always deletes the sandbox.
+</Warning>
+
+Pick a lifetime from how long the work takes, not how long you might want the sandbox:
+
+```python
+spec = SandboxSpec(
+    image="ghcr.io/example/eval-image:py312",
+    ttl_s=1800,  # a backstop, not the expected duration
+)
+```
+
+The TTL is a backstop for the case where cleanup never runs. Normal teardown is still
+`stop()` — an expiry is what saves you when `stop()` never happens.
+
+### Renewal
+
+Some providers can push an expiry back after creation. That allows a pattern that is safer
+than a long TTL: give the sandbox a short lifetime, then extend it while it is genuinely in
+use. A sandbox that stops being used stops being renewed, and expires on its own.
+
+The capability is optional, so check for it before relying on it:
+
+```python
+from nemo_gym.sandbox import RenewableProvider, create_provider
+
+provider = create_provider(provider_config)
+
+if isinstance(provider, RenewableProvider):
+    # Expire 15 minutes from now, refreshed on each pass through the loop.
+    await provider.renew(handle, ttl_s=900)
+```
+
+`renew()` sets the expiry to `ttl_s` seconds **from now**; it does not add to the time
+remaining. Calling it with the same value repeatedly holds the sandbox at a constant window
+rather than extending it without bound.
+
+Two things to get right when renewing around work:
+
+- **Renew before, not after.** A command that outlives the current expiry dies partway
+  through. Renew with at least the command's own timeout plus some slack —
+  `max(ttl_s, timeout_s + 60)` is the rule `gym sandbox exec` uses.
+- **Treat failures as non-fatal.** A failed renewal means the sandbox keeps its existing
+  expiry, which is a shorter lifetime rather than a broken one. Failing the caller's work over
+  it trades a small problem for a larger one.
+
+Providers without the capability ignore renewal entirely; their sandboxes keep the lifetime
+they were created with. See each provider page for whether it supports renewal.
+
+For the CLI side of this — the 15-minute cap, `--ttl`, and per-command renewal — see
+[Debugging sandboxes](/infrastructure/sandbox/debugging).
+
 ## Sync vs. Async
 
 Use `AsyncSandbox` inside FastAPI handlers, async resources servers, async agents, and rollout collection code.
@@ -217,7 +279,7 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 | Field | Description |
 | --- | --- |
 | `image` | Container image to create. |
-| `ttl_s` | Sandbox lifetime in seconds, when supported by the provider. |
+| `ttl_s` | Sandbox lifetime in seconds, when supported by the provider. Unset means *never auto-terminate* on providers with a server-side expiry — see [Sandbox Lifetime and Renewal](#sandbox-lifetime-and-renewal). |
 | `ready_timeout_s` | Time to wait for sandbox readiness. |
 | `workdir` | Default working directory for `exec()` calls. |
 | `env` | Environment variables injected into the sandbox. Forward only values required by the task. |
