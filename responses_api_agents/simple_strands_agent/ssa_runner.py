@@ -98,7 +98,7 @@ def _build_config(payload: dict[str, Any], output_dir: Path):
             "cache_client": False,
             "client_args": {
                 "base_url": payload["model_base_url"],
-                "api_key": "gym",
+                "api_key": "gym",  # pragma: allowlist secret
                 "timeout": payload["model_timeout"],
                 "max_retries": 0,
             },
