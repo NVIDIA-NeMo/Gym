@@ -12,3 +12,7 @@ policy_model:
       sampling_overrides: null
       extra_body: null
       default_headers: {}
+      endpoint_file: null
+      endpoint_stale_grace_s: 300.0
+      endpoint_connection_retries: 8
+      endpoint_check_interval_s: 10.0

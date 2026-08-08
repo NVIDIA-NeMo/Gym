@@ -203,6 +203,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # Connection-error retry bound applied to clients when endpoint_file is set.
     endpoint_connection_retries: Optional[int] = 8
+
+    # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
+    endpoint_check_interval_s: float = 10.0
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -289,6 +292,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
         self._endpoint_file_mtime: Optional[float] = None
         self._endpoint_missing_since: Optional[float] = None
+        self._endpoint_last_check_at: Optional[float] = None
 
         self._converter = self.get_converter()
         self._transport_call_index = 0
@@ -1292,6 +1296,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         if not self.config.endpoint_file:
             return
+        now = monotonic()
+        if (
+            self._endpoint_last_check_at is not None
+            and now - self._endpoint_last_check_at < self.config.endpoint_check_interval_s
+        ):
+            if self._endpoint_missing_since is not None:
+                self._note_endpoint_unpublished()
+            return
+        self._endpoint_last_check_at = now
         try:
             mtime = os.stat(self.config.endpoint_file).st_mtime
         except FileNotFoundError:
