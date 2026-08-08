@@ -17,20 +17,25 @@ services:
     type: vllm
     model: Qwen/Qwen2.5-0.5B-Instruct
     trust_remote_code: true
-    tensor_parallel_size: 1
+    tensor_parallel_size: $TP
     pipeline_parallel_size: 1
     port: 8000
     health_check:
       timeout_seconds: 1200
+    mounts: 
+      - /lustre/datasets:/data
 
 driver:
   policy_model: vllm_model # synthactic sugar
   container: python:3.12 # optional, defaults to the service container
   gym_install:
     ref: main
+  # mounts: 
+  #   - /lustre/datasets:/data
   benchmarks:
     gpqa:
-      prepare: 
+      output_jsonl_fpath: artifacts/rollouts_gpqa.jsonl  # default; relative to the job's working directory
+      prepare:
         config_paths:
           - benchmarks/ifbench/config.yaml
       run: # gym eval run
