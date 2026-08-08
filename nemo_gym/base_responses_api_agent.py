@@ -45,6 +45,11 @@ from nemo_gym.server_utils import (
 )
 
 
+# Default bound on the aggregate-metrics proxy hop. ServerClient retries connection errors
+# indefinitely, so an unbounded proxy to a dead server would hang the caller forever.
+DEFAULT_AGGREGATE_METRICS_PROXY_TIMEOUT_SECS = 600.0
+
+
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     pass
 
@@ -158,7 +163,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         self,
         server_name: str,
         body: AggregateMetricsRequest,
-        timeout_secs: Optional[float] = 600.0,
+        timeout_secs: Optional[float] = DEFAULT_AGGREGATE_METRICS_PROXY_TIMEOUT_SECS,
     ) -> AggregateMetrics:
         """Proxy aggregate metrics to another server with an optional timeout.
 

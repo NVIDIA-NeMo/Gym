@@ -410,6 +410,34 @@ class TestProxyAggregateMetrics:
             )
 
     @pytest.mark.asyncio
+    async def test_default_timeout_bounds_the_hop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        payload = {
+            "group_level_metrics": [],
+            "agent_metrics": {},
+            "key_metrics": {},
+        }
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=self._make_response(payload))
+        agent = self._make_agent(server_client)
+
+        recorded = []
+        original_wait_for = asyncio.wait_for
+
+        async def recording_wait_for(awaitable, timeout=None):
+            recorded.append(timeout)
+            return await original_wait_for(awaitable, timeout=timeout)
+
+        monkeypatch.setattr(asyncio, "wait_for", recording_wait_for)
+
+        result = await agent.proxy_aggregate_metrics(
+            "resources",
+            AggregateMetricsRequest(verify_responses=[]),
+        )
+
+        assert result == AggregateMetrics.model_validate(payload)
+        assert recorded == [600.0]
+
+    @pytest.mark.asyncio
     async def test_none_timeout_bypasses_wait_for(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = {
             "group_level_metrics": [],
