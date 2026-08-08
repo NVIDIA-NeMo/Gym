@@ -1,0 +1,20 @@
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_agent.yaml
+- resources_servers/swebench/configs/swebench.yaml
+
+opencode_swebench_pro_resources_server:
+  _inherit_from: swebench_resources_server
+
+opencode_sandboxed_agent_swebench_pro:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: opencode_swebench_pro_resources_server
+      datasets:
+        - name: swebench_pro
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro/prepare.py
+          num_repeats: 3
