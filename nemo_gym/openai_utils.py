@@ -263,9 +263,8 @@ class NeMoGymResponseMcpApprovalRequest(McpApprovalRequest):
 class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
     """A hosted file-search call (OpenAI Responses ``file_search_call`` output item).
 
-    Like ``mcp_call``, hosted-tool calls are executed *server-side* and arrive in
-    ``response.output`` already resolved, so there is no client-side execution and
-    hence no training variant. Inherits the upstream typing unchanged.
+    The provider executes the search and returns the call in ``response.output``.
+    Inherits the upstream typing unchanged.
     """
 
 
@@ -274,7 +273,7 @@ class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
 
 
 class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
-    """A hosted computer-use call (OpenAI Responses ``computer_call`` output item)."""
+    """A computer-use action for the client to execute (``computer_call`` output item)."""
 
 
 class NeMoGymImageGenerationCall(ImageGenerationCall):
@@ -286,7 +285,7 @@ class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
 
 
 class NeMoGymLocalShellCall(LocalShellCall):
-    """A hosted local-shell call (OpenAI Responses ``local_shell_call`` output item)."""
+    """A local-shell command for the client to execute (``local_shell_call`` output item)."""
 
 
 class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):

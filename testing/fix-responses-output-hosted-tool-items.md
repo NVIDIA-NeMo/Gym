@@ -2,16 +2,16 @@
 
 ## Functional Behavior
 
-- Every hosted-tool or custom-tool output variant supported by the pinned OpenAI SDK validates in `NeMoGymResponse.output`.
+- Every provider-executed or client-executed output-call variant supported by the pinned OpenAI SDK validates in `NeMoGymResponse.output`.
 - Each wrapper preserves the upstream requirement that the `type` discriminator be present; malformed items without it are rejected.
-- `split_responses_input_output_items` starts the output partition at every model-output item type, including hosted MCP, hosted tools, and custom tool calls.
+- `split_responses_input_output_items` starts the output partition at every model-output item type, including hosted MCP and provider- or client-executed calls.
 - A transcript containing only input items stays entirely on the input side.
 - Conversational transcript canonicalization retains a tool-only model response instead of moving it into request input.
 - The PR body and commit metadata contain none of the prohibited attribution terms requested by the contributor.
 
 ## Unit Tests
 
-- `TestNeMoGymResponseHostedToolItems.test_hosted_tool_items_require_type_discriminator` rejects every new item when `type` is absent.
+- `TestNeMoGymResponseToolCallItems.test_output_call_items_require_type_discriminator` rejects every new item when `type` is absent.
 - `test_split_on_model_output_item_type` covers every non-message output discriminator.
 - `test_split_input_only_items` covers the no-output boundary.
 - `test_canonicalize_run_transcript_preserves_tool_only_model_output` covers tool-only transcript canonicalization.
