@@ -221,6 +221,64 @@ class TestResolveServerDir:
         assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
 
 
+class TestRunHelperStart:
+    def test_server_process_prefers_resolved_gym_project_root(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        gym_root = tmp_path / "Gym"
+        server_dir = gym_root / "resources_servers" / "mcqa"
+        server_dir.mkdir(parents=True)
+
+        global_config_dict = OmegaConf.create(
+            {
+                "dry_run": False,
+                "mcqa": {
+                    "resources_servers": {
+                        "mcqa": {
+                            "entrypoint": "app.py",
+                            "host": "127.0.0.1",
+                            "port": 1234,
+                        }
+                    }
+                },
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "GlobalConfigDictParser", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", MagicMock())
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_resolve_server_dir",
+            MagicMock(return_value=server_dir),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", MagicMock(return_value="setup"))
+
+        process = MagicMock(pid=1234)
+        run_command_mock = MagicMock(return_value=process)
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command_mock)
+
+        server_client = MagicMock()
+        server_client.poll_for_status.return_value = "success"
+        server_client_cls = MagicMock(return_value=server_client)
+        server_client_cls.load_head_server_config.return_value = {}
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", server_client_cls)
+
+        runner = RunHelper()
+        runner.wait_for_spinup = MagicMock()
+        runner.start(MagicMock())
+
+        assert run_command_mock.call_args.args[1] == server_dir
+        assert run_command_mock.call_args.kwargs["server_name"] == "mcqa"
+        assert run_command_mock.call_args.kwargs["project_root"] == gym_root
+
+
 class TestRunHelperShutdownReap:
     """RunHelper.shutdown must reap every server subprocess on every exit path."""
 
