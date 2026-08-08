@@ -40,7 +40,35 @@ ns_tools:
 
       # Disable session replay after sandbox worker restarts (improves stability)
       disable_session_restore: true
-      
+
+      # Sandbox backend switch: 'local' (default — today's colocated server, byte-identical
+      # with zero env vars set) or 'sandbox_pool' (disaggregated pods on OpenSandbox).
+      sandbox_type: ${oc.env:NS_TOOLS_SANDBOX_TYPE,local}
+      # Pool settings; read only when sandbox_type == sandbox_pool. Selecting that
+      # backend with an empty domain/api_key/image is a hard startup error, never a no-op.
+      sandbox_pool:
+        provider:
+          opensandbox:
+            connection:
+              domain: ${oc.env:OPENSANDBOX_BASE_URL,}
+              api_key: ${oc.env:OPENSANDBOX_API_KEY,}
+              use_server_proxy: true
+              # First-ever create on a new image tag blocks on nydus conversion (40-55s);
+              # the SDK default request_timeout (30s) fails the whole cold warmup wave.
+              request_timeout: 180
+        image: ${oc.env:NS_SANDBOX_IMAGE,}
+        # Server-side Pool CRD name (pools.sandbox.opensandbox.io). When set,
+        # creates claim prewarmed pods via extensions.poolRef — image/resources come
+        # from the pool template and warmup drops to allocation time.
+        pool_ref: ${oc.env:NS_SANDBOX_POOL_REF,}
+        # With pool_ref set: fall back to a direct create when the pool is full or
+        # unavailable (true, default) or fail the slot instead (false). Fallback pods
+        # go through the prepare step, so keep setup/service settings configured.
+        pool_fallback: ${oc.decode:${oc.env:NS_SANDBOX_POOL_FALLBACK,true}}
+        port: 6000
+        size: ${oc.env:NS_SANDBOX_POOL_SIZE,8}
+        ttl_s: ${oc.env:NS_SANDBOX_TTL_S,14400}
+
       domain: agent
       verified: false
       description: NeMo Skills tool execution with math verification
