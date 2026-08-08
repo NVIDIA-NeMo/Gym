@@ -226,6 +226,7 @@ class ExecuteContainerCommandArgs(BaseModel):
     expected_file_pattern: str
     mode: Union[Literal["agent"], Literal["eval"]]
     timeout: int
+    overlay_dirname: Optional[str] = None
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
@@ -2448,12 +2449,20 @@ def _kill_container_tree(root_pid: int) -> None:
             pass
 
 
+def _reap_overlay_dir(overlay_dirname: Optional[str]) -> None:
+    """Remove a container's overlay upperdir after a SIGKILL teardown."""
+    if not overlay_dirname:
+        return
+    rmtree(Path(os.environ.get("TMPDIR") or "/tmp") / overlay_dirname, ignore_errors=True)
+
+
 class ActiveContainerCommand(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     process: Process
     log_file: Any
     log_file_path: Path
+    overlay_dirname: Optional[str] = None
     watchdog_task: Optional[Any] = None
     watchdog_stats: Dict[str, Any] = Field(default_factory=dict)
 
@@ -2596,7 +2605,12 @@ class RunOpenHandsAgent(BaseModel):
             apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
         )
 
-        active_command = ActiveContainerCommand(process=process, log_file=log_file, log_file_path=log_file_path)
+        active_command = ActiveContainerCommand(
+            process=process,
+            log_file=log_file,
+            log_file_path=log_file_path,
+            overlay_dirname=command.overlay_dirname,
+        )
         if self.config.memory_watchdog_enabled:
             active_command.watchdog_task = asyncio.create_task(
                 self._memory_watchdog(process.pid, active_command.watchdog_stats, command.mode)
@@ -2624,6 +2638,8 @@ class RunOpenHandsAgent(BaseModel):
             active_command.log_file.close()
             if active_command.watchdog_task is not None:
                 active_command.watchdog_task.cancel()
+            if active_command.process.returncode is not None:
+                _reap_overlay_dir(active_command.overlay_dirname)
 
         if active_command.watchdog_stats.get("oom_killed"):
             raise RuntimeError(
@@ -2667,6 +2683,7 @@ class RunOpenHandsAgent(BaseModel):
         active_command.log_file.close()
         if active_command.watchdog_task is not None:
             active_command.watchdog_task.cancel()
+        _reap_overlay_dir(active_command.overlay_dirname)
 
     async def process_single_datapoint(self) -> Optional[Path]:
         if self.config.verify_golden_patch:
@@ -3486,11 +3503,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # Back the container's writable layer with a directory overlay.
         # The tmpfs layer is capped, but SWE working trees routinely exceed it.
         # A `git reset --hard` call is often sufficient to kill the episode otherwise.
-        overlay_prefix = f"apptainer_overlay_{command.mode}_"
+        # The dir name is generated here rather than by shell mktemp so the kill paths
+        # can reap the dir after a SIGKILL, which never runs the shell's cleanup trap.
+        command.overlay_dirname = f"apptainer_overlay_{command.mode}_{uuid.uuid4().hex}"
 
         # Launch Apptainer container and execute the script file
         apptainer_cmd = (
-            f'OVERLAY_DIR="$(mktemp -d "${{TMPDIR:-/tmp}}/{overlay_prefix}XXXXXX")" && '
+            f'OVERLAY_DIR="${{TMPDIR:-/tmp}}/{command.overlay_dirname}" && '
+            f'rm -rf "$OVERLAY_DIR" && mkdir "$OVERLAY_DIR" && '
             f"trap 'rm -rf \"$OVERLAY_DIR\"' EXIT TERM INT && "
             f'apptainer exec --overlay "$OVERLAY_DIR" --cleanenv --pid --no-mount home,tmp,bind-paths '
             f"{env_args}"
