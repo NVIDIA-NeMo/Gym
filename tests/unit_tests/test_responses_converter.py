@@ -141,6 +141,57 @@ def test_flush_assistant_emits_training_message_when_token_info_present():
     assert state.messages[0]["generation_token_ids"] == [3]
 
 
+def test_flush_assistant_does_not_leak_token_info_to_a_later_message():
+    """Token ids describe one turn; a later assistant turn must not inherit them.
+
+    Regression: `token_information` used to survive the flush, so an assistant message that
+    carried no ids of its own was stamped with the PREVIOUS turn's ids -- attributing one turn's
+    generated tokens to another turn's text in the training data.
+    """
+    from nemo_gym.openai_utils import TokenIDLogProbMixin
+
+    state = ResponsesConverterState(return_token_id_information=True)
+
+    # Turn 1 carries ids.
+    state.content_buffer = "turn one"
+    state.token_information = TokenIDLogProbMixin(
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+    )
+    state.flush_assistant()
+
+    # Turn 2 carries none (e.g. a harness-injected or rewritten assistant message).
+    state.content_buffer = "turn two"
+    state.flush_assistant()
+
+    assert state.messages[0]["content"] == "turn one"
+    assert state.messages[0]["prompt_token_ids"] == [1, 2]
+
+    assert state.messages[1]["content"] == "turn two"
+    for field in ("prompt_token_ids", "generation_token_ids", "generation_log_probs"):
+        assert field not in state.messages[1], f"turn two inherited turn one's {field}"
+
+
+def test_flush_assistant_clears_token_info_even_when_buffers_are_empty():
+    """An ids-carrying item that produces no content/tool_calls is dropped -- its ids must go too."""
+    from nemo_gym.openai_utils import TokenIDLogProbMixin
+
+    state = ResponsesConverterState(return_token_id_information=True)
+    state.token_information = TokenIDLogProbMixin(
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[],
+        generation_log_probs=[],
+    )
+    state.flush_assistant()  # early-returns: nothing buffered
+    assert state.messages == []
+    assert state.token_information is None
+
+    state.content_buffer = "later turn"
+    state.flush_assistant()
+    assert "prompt_token_ids" not in state.messages[0]
+
+
 # ===========================================================================
 # responses_to_chat_completion_create_params
 # ===========================================================================
