@@ -315,6 +315,17 @@ dev = [
     "requests-mock",
 ]
 
+[dependency-groups]
+# Codec-bearing packages excluded from the shipped package and container.
+# Not published to PyPI. Versions are tracked in uv.lock here as the single
+# source of truth. docker/install_codec_deps.sh reads these versions at
+# runtime so there are no hardcoded pins to maintain manually.
+codec = [
+    "opencv-python-headless",
+    "torchvision",
+    "torchaudio",
+]
+
 [build-system]
 requires = ["setuptools>=61", "setuptools-scm"]
 build-backend = "setuptools.build_meta"

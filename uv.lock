@@ -2601,6 +2601,13 @@ vllm = [
     { name = "vllm" },
 ]
 
+[package.dev-dependencies]
+codec = [
+    { name = "opencv-python-headless", marker = "sys_platform == 'never'" },
+    { name = "torchaudio", marker = "sys_platform == 'never'" },
+    { name = "torchvision", marker = "sys_platform == 'never'" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.1" },
@@ -2653,6 +2660,13 @@ requires-dist = [
     { name = "yappi" },
 ]
 provides-extras = ["all", "vllm", "sandbox", "dev"]
+
+[package.metadata.requires-dev]
+codec = [
+    { name = "opencv-python-headless" },
+    { name = "torchaudio" },
+    { name = "torchvision" },
+]
 
 [[package]]
 name = "networkx"
