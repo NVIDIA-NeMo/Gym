@@ -18,7 +18,7 @@ vllm serve $MODEL \
     --distributed-executor-backend ray \
     --data-parallel-backend ray \
     --data-parallel-size $((NUM_NODES * 4)) \
-    --data-parallel-size-local 1 \
+    --data-parallel-size-local 4 \
     --tensor-parallel-size 1 \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
