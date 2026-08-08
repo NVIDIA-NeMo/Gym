@@ -151,12 +151,19 @@ class SandboxExecResult:
     command. Providers may use a non-process sentinel with ``error_type`` set
     when the sandbox runtime reports an execution failure without a process
     exit code.
+
+    ``duration_ms`` is how long the command itself ran *inside* the sandbox, as
+    measured there. A caller timing the ``exec`` call also measures transport and
+    dispatch, which is the difference between "my build takes ten minutes" and
+    "my build takes eight and the round-trip takes two". Providers that cannot
+    report it leave it ``None``.
     """
 
     stdout: str | None
     stderr: str | None
     return_code: int
     error_type: str | None = None
+    duration_ms: float | None = None
 
 
 ExecResult = SandboxExecResult

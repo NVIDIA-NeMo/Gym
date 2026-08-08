@@ -333,6 +333,20 @@ def _to_image_spec(image: str, image_auth: Mapping[str, Any] | None) -> Any:
     return SandboxImageSpec(image, auth=SandboxImageAuth(**dict(image_auth)))
 
 
+def _duration_ms_between(started_at: Any, finished_at: Any) -> float | None:
+    """Milliseconds between two SDK timestamps, or None if they cannot be subtracted.
+
+    Deliberately forgiving: a timing number is a nice-to-have, and a renamed or
+    re-typed timestamp field must not turn a successful command into an exception.
+    """
+    if started_at is None or finished_at is None:
+        return None
+    try:
+        return (finished_at - started_at).total_seconds() * 1000.0
+    except (AttributeError, TypeError):
+        return None
+
+
 def _to_sandbox_status(state: Any) -> SandboxStatus:
     normalized = str(state or "").lower()
     if normalized in {"active", "ready", "running"}:
@@ -1082,7 +1096,19 @@ class OpenSandboxProvider:
             else:
                 return_code = 0
 
-            return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+            # execd reports how long the command actually ran inside the sandbox.
+            # A caller timing its own exec() measures the command plus the round
+            # trip and cannot separate a slow command from a slow link.
+            completion = getattr(execution, "complete", None)
+            duration_ms = getattr(completion, "execution_time_in_millis", None) if completion is not None else None
+
+            return SandboxExecResult(
+                stdout=stdout,
+                stderr=stderr,
+                return_code=return_code,
+                error_type=error_type,
+                duration_ms=float(duration_ms) if duration_ms is not None else None,
+            )
 
         # Backstop for wedges the inner deadlines miss. Background exec polls, so
         # sdk_timeout_s bounds a single request rather than the command: without
@@ -1185,7 +1211,19 @@ class OpenSandboxProvider:
         else:
             return_code = 0
 
-        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+        # Same measurement as the foreground path, from the only fields this one
+        # has: the background status carries started_at/finished_at rather than a
+        # completion block. Reporting nothing here would make duration_ms depend on
+        # which path happened to run, which is worse than not reporting it at all.
+        duration_ms = _duration_ms_between(getattr(status, "started_at", None), getattr(status, "finished_at", None))
+
+        return SandboxExecResult(
+            stdout=stdout,
+            stderr=stderr,
+            return_code=return_code,
+            error_type=error_type,
+            duration_ms=float(duration_ms) if duration_ms is not None else None,
+        )
 
     async def exec(
         self,

@@ -1247,3 +1247,66 @@ async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: N
     await provider.connect({"sandbox_id": "sandbox-9"})
 
     assert FakeSandbox.connected_kwargs["skip_health_check"] is True
+
+
+async def test_exec_reports_the_duration_execd_measured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """execd already times the command; dropping that leaves callers guessing.
+
+    A client that only times its own ``exec`` call cannot tell a slow command
+    from a slow link. Surfacing execd's number gives it both halves.
+    """
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self, complete: Any) -> None:
+            self._complete = complete
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(
+                logs=SimpleNamespace(stdout=[], stderr=[]),
+                error=None,
+                exit_code=0,
+                complete=self._complete,
+            )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5})
+
+    def handle_reporting(complete: Any) -> opensandbox_provider.SandboxHandle:
+        return opensandbox_provider.SandboxHandle(
+            sandbox_id="sandbox-1",
+            provider_name="opensandbox",
+            raw=SimpleNamespace(commands=FakeCommands(complete)),
+        )
+
+    result = await provider.exec(handle_reporting(SimpleNamespace(execution_time_in_millis=3002)), "sleep 3")
+    assert result.duration_ms == 3002.0
+
+    # Older execd builds, and the error paths, report no completion block at all.
+    for complete in (None, SimpleNamespace()):
+        assert (await provider.exec(handle_reporting(complete), "true")).duration_ms is None
+
+
+def test_duration_ms_between_handles_missing_and_odd_timestamps() -> None:
+    """Timing is a nice-to-have; a renamed or re-typed field must not raise.
+
+    The background exec path has no completion block, so it derives the duration
+    from started_at/finished_at. If that ever stops subtracting cleanly the command
+    should still return its result, just without a number.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    started = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+    assert opensandbox_provider._duration_ms_between(started, started + timedelta(seconds=3.002)) == 3002.0
+
+    assert opensandbox_provider._duration_ms_between(None, started) is None
+    assert opensandbox_provider._duration_ms_between(started, None) is None
+    # A string timestamp (a plausible SDK change) must degrade, not explode.
+    assert opensandbox_provider._duration_ms_between("2026-08-01T12:00:00Z", started) is None
