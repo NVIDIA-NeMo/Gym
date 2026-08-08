@@ -22,9 +22,9 @@ install_portable_python
 install_nemo_gym_deps
 
 if [ ! -x "$DEPS_DIR/bin/node" ]; then
-    node_url="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz"
+    node_url="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${NODE_ARCH}.tar.gz"
     echo "Downloading portable node: $node_url"
-    curl -fsSL "$node_url" | tar xJ -C "$DEPS_DIR" --strip-components=1
+    curl -fsSL "$node_url" | tar xz -C "$DEPS_DIR" --strip-components=1
 fi
 
 export PATH="$DEPS_DIR/bin:$PATH"
