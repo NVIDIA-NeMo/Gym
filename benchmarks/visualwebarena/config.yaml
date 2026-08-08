@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - resources_servers/browsergym_web/configs/browsergym_web.yaml
+  - responses_api_agents/web_agent/configs/web_agent.yaml
+
+visualwebarena_benchmark_resources_server:
+  _inherit_from: browsergym_web
+  resources_servers:
+    browsergym_web:
+      allowed_benchmarks: [visualwebarena]
+
+visualwebarena_benchmark_agent:
+  _inherit_from: web_agent
+  responses_api_agents:
+    web_agent:
+      resources_server:
+        type: resources_servers
+        name: visualwebarena_benchmark_resources_server
+      datasets:
+        - name: visualwebarena
+          type: benchmark
+          jsonl_fpath: benchmarks/visualwebarena/data/visualwebarena_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/visualwebarena/prepare.py
+          num_repeats: 1

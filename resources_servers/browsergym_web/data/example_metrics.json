@@ -1,0 +1,9 @@
+{
+  "name": "example",
+  "type": "example",
+  "jsonl_fpath": "resources_servers/browsergym_web/data/example.jsonl",
+  "num_repeats": 1,
+  "license": "Apache 2.0",
+  "Number of examples": 5,
+  "note": "Schema and data-validation fixtures only; no benchmark scores are reported."
+}

@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+web_agent:
+  responses_api_agents:
+    web_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: browsergym_web
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      webvoyager_judge_server: null
+      max_steps: 15
+      max_parse_retries: 2
+      max_image_history: 3
+      judge_max_screenshots: 3
+      visual_observation_text: full_axtree
+      action_prompt_profile: standard
+      redact_old_visual_observations: false
+      resources_request_timeout_secs: 180.0
+      seed_request_timeout_secs: 1800.0
+      seed_retry_initial_delay_secs: 2.0
+      seed_retry_max_delay_secs: 30.0
+      model_request_timeout_secs: 600.0
+      judge_request_timeout_secs: 300.0
+      close_request_timeout_secs: 30.0
+      run_timeout_secs: 1800.0
+      datasets: []

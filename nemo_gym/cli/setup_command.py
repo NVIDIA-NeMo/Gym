@@ -131,15 +131,15 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     else:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
         has_requirements_txt = (dir_path / "requirements.txt").exists()
+        has_overrides_txt = (dir_path / "overrides.txt").exists()
+        override_flag = "--override overrides.txt " if has_overrides_txt else ""
         if has_pyproject_toml and has_requirements_txt:
             raise RuntimeError(
                 f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
-                )
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{override_flag}'-e .' {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
@@ -147,11 +147,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources {override_flag}'-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
-            has_overrides_txt = (dir_path / "overrides.txt").exists()
-            override_flag = "--override overrides.txt " if has_overrides_txt else ""
             if is_editable_install:
                 install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:

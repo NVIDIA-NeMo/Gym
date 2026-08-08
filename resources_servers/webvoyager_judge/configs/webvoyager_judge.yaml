@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+webvoyager_judge:
+  resources_servers:
+    webvoyager_judge:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: WebVoyager-compatible VLM judge over final answer and trailing screenshots
+      value: Keep live-browser execution separate from model-based WebVoyager verification
+      judge_model_server:
+        type: responses_api_models
+        name: webvoyager_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 1000
+        temperature: 0
+      max_screenshots: 3
+      require_screenshot: true
+      verifier_version: webvoyager-llm-judge-v1

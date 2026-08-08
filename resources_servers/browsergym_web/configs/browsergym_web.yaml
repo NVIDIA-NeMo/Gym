@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+browsergym_web:
+  resources_servers:
+    browsergym_web:
+      entrypoint: app.py
+      num_workers: 1
+      domain: agent
+      verified: false
+      description: Stateful BrowserGym runtime for WebArena, VisualWebArena, and WebVoyager profiles
+      value: Reuse one Gym control contract while retaining benchmark-native evaluation boundaries
+      max_sessions: 1
+      artifact_dir: cache/browsergym-web/artifacts
+      inline_screenshots: true
+      max_evidence_screenshots: 3
+      headless: true
+      tags_to_mark: standard_html
+      pre_observation_delay: 0.5
+      record_video: false
+      session_ttl_seconds: 3600
+      reaper_interval_seconds: 60
+      require_auth: false
+      auth_token_env: BROWSERGYM_WEB_RESOURCES_TOKEN
+      site_pool_mode: unmanaged
+      visualwebarena_evaluator_model: null
+      allowed_benchmarks: [webarena, visualwebarena, webvoyager]

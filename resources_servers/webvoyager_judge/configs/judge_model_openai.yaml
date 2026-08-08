@@ -1,0 +1,11 @@
+# Default hosted VLM for WebVoyager judging. Override these values through
+# env.yaml/CLI, or replace this config with another model server named
+# webvoyager_judge_model.
+webvoyager_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:webvoyager_judge_base_url,http://unset.local/v1}
+      openai_api_key: ${oc.select:webvoyager_judge_api_key,unset}
+      openai_model: ${oc.select:webvoyager_judge_model_name,unset}
+      openai_default_headers: {}

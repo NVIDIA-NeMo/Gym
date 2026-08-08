@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Playwright 1.44.0 declares greenlet 3.0.3, which predates Python 3.13.
+greenlet==3.1.1

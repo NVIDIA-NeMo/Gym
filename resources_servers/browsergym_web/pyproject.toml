@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "browsergym-web-resources-server"
+version = "0.0.0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "nemo-gym[dev]",
+    "browsergym-webarena==0.14.3",
+    "browsergym-visualwebarena==0.14.3",
+    # libvisualwebarena 0.0.15 pins beartype 0.12.0, whose NumPy NDArray
+    # annotations are not understood when resolved against NumPy 2.x.
+    "numpy>=1.26.4,<2",
+    # evaluate leaves datasets unconstrained. With the current package index,
+    # the resolver can otherwise select datasets 2.14.4 with pyarrow 25, but
+    # that datasets release imports the removed pyarrow.PyExtensionType API.
+    "datasets==5.0.1",
+    # Keep the benchmark-era NLTK behavior. Newer NLTK import-security hooks
+    # reject component-local virtualenv imports when Gym starts this server
+    # with the component directory as its working directory.
+    "nltk==3.8.1",
+    "Pillow>=10",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61"]
+
+[tool.setuptools.packages.find]
+where = ["../.."]
+include = ["resources_servers.browsergym_web*"]
+
+[tool.uv]
+# BrowserGym 0.14.3 pins Playwright 1.44.0, whose greenlet 3.0.3 cannot build
+# on Python 3.13. Greenlet 3.1.1 keeps the Playwright API contract and ships
+# CPython 3.13 wheels. Gym's uv-pip setup path reads the matching overrides.txt.
+override-dependencies = ["greenlet==3.1.1"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
