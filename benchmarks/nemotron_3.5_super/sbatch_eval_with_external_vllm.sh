@@ -45,6 +45,15 @@ until curl -s \$ip >/dev/null; do
     sleep 5
 done
 
+nohup bash -c '
+while true; do
+  printf "# SCRAPE %s\n" "\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  curl -fsS http://\$host:8000/metrics || printf "# ERROR curl failed\n"
+  printf "\n"
+  sleep 60
+done
+' >> "results/\${experiment_name}_vllm_metrics.log" 2>&1 &
+
 experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
