@@ -1,2 +1,5 @@
 -e nemo-gym[dev] @ ../../
 httpx>=0.27.0
+## OpenSandbox SDK — used only by the opt-in opensandbox/ns_http_proxy sandbox backends
+opensandbox==0.1.15
+tenacity

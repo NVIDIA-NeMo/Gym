@@ -78,6 +78,13 @@ class NSToolsConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: str = "6000"
 
+    # Sandbox backend: "local" (default — today's colocated server) or "sandbox_pool"
+    # (disaggregated pods on OpenSandbox; requires the sandbox_pool block below).
+    sandbox_type: str = "local"
+    # SandboxPool constructor kwargs (see sandbox_pool.py). Only read when
+    # sandbox_type == "sandbox_pool"; the default backend never touches it.
+    sandbox_pool: Dict[str, Any] = Field(default_factory=dict)
+
     # Legacy python_tool HTTP server port (only used for pre-main HTTP PythonTool variants)
     python_tool_port: int = 8765
 
@@ -87,6 +94,11 @@ class NSToolsConfig(BaseResourcesServerConfig):
     # When True, skip replaying session history after sandbox worker restarts.
     # The model receives a warning in stderr instead of restored state.
     disable_session_restore: bool = False
+
+    # Staged guard for tool calls arriving WITHOUT a gym session cookie (each such call
+    # silently mints a fresh sandbox session today). False = log + count (default,
+    # behavior-neutral); True = reject with 400 once the cookie path is proven end-to-end.
+    strict_session_cookie: bool = False
 
 
 # ============================================================
@@ -131,6 +143,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
+    _missing_cookie_count: int = 0
     _uses_python_tool_sidecar: bool = False
 
     def setup_webserver(self) -> FastAPI:
@@ -144,6 +157,12 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
+            if self.config.sandbox_type == "sandbox_pool":
+                import gym_sandbox
+
+                if gym_sandbox.CURRENT_POOL is not None:
+                    # Budgeted, non-blocking warmup: kicks pod creation without gating server boot.
+                    await gym_sandbox.CURRENT_POOL.start()
             try:
                 async with main_app_lifespan(app) as maybe_state:
                     yield maybe_state
@@ -262,12 +281,16 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         context = {
             "sandbox": {
-                "sandbox_type": "local",
+                "sandbox_type": self.config.sandbox_type,
                 "host": self.config.sandbox_host,
                 "port": self.config.sandbox_port,
                 "disable_session_restore": self.config.disable_session_restore,
             }
         }
+        if self.config.sandbox_type == "sandbox_pool":
+            import gym_sandbox  # noqa: F401 — registers the backend with the nemo_skills registry
+
+            context["sandbox"]["pool"] = dict(self.config.sandbox_pool)
 
         overrides = {
             tool_name: dict(tool_config) for tool_name, tool_config in self.config.nemo_skills_tool_overrides.items()
@@ -315,8 +338,19 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         # Get session ID for stateful execution
         session_id = request.session.get(SESSION_ID_KEY)
         if not session_id:
+            # A missing gym cookie means every call mints a fresh sandbox session — silent
+            # per-call state loss. Staged fix: count + log by default; reject only once the
+            # cookie path is proven end-to-end and strict_session_cookie is flipped.
+            self._missing_cookie_count += 1
+            if self.config.strict_session_cookie:
+                return PlainTextResponse(
+                    json.dumps({"error": "missing session cookie; stateful tools require a session"}),
+                    status_code=400,
+                )
             session_id = str(uuid.uuid4())
-            logger.warning(f"No session ID found, using fallback: {session_id}")
+            logger.warning(
+                f"No session ID found (occurrence {self._missing_cookie_count}), using fallback: {session_id}"
+            )
 
         if session_id not in self._timing_by_session:
             self._timing_by_session[session_id] = []
@@ -463,7 +497,18 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     async def shutdown(self):
         """Cleanup resources on server shutdown."""
         if self.tool_manager:
-            await self.tool_manager.shutdown()
+            try:
+                await self.tool_manager.shutdown()
+            except (asyncio.CancelledError, Exception):
+                # Tool-manager teardown must not skip pool teardown: unkilled pool
+                # pods stay allocated (and billed against pool capacity) until TTL.
+                logger.warning("tool_manager.shutdown failed; continuing to pool teardown", exc_info=True)
+
+        if self.config.sandbox_type == "sandbox_pool":
+            import gym_sandbox
+
+            if gym_sandbox.CURRENT_POOL is not None:
+                await gym_sandbox.CURRENT_POOL.aclose()
 
         # Terminate the python_tool subprocess if one was started.
         if self._python_tool_process:
