@@ -146,14 +146,13 @@ class TestNeMoGymResponseHostedMcpItems:
         assert issubclass(NeMoGymResponseMcpApprovalRequest, McpApprovalRequest)
 
 
-class TestNeMoGymResponseHostedToolItems:
-    """Hosted-tool output items (``web_search_call`` etc.) must validate rather than 500.
+class TestNeMoGymResponseToolCallItems:
+    """Responses API output-call items (``web_search_call`` etc.) must validate rather than 500.
 
-    The OpenAI Responses API emits these in ``response.output`` when a hosted
-    tool (web search, file search, computer use, image generation, code
-    interpreter, local shell, custom tools) runs server-side; before they were
-    in the union, ``NeMoGymResponse.model_validate`` raised and the model
-    server returned a 500 for an upstream response that succeeded (issue #2436).
+    The OpenAI Responses API emits these in ``response.output`` for hosted tools
+    and client-executed custom tools. Before they were in the union,
+    ``NeMoGymResponse.model_validate`` raised and the model server returned a
+    500 for an upstream response that succeeded (issue #2436).
     """
 
     def test_web_search_call_in_response_output_validates(self) -> None:
@@ -258,6 +257,31 @@ class TestNeMoGymResponseHostedToolItems:
             ]
         )
         assert isinstance(params.input[0], NeMoGymResponseFunctionWebSearch)
+
+    def test_hosted_tool_items_require_type_discriminator(self) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymResponse.model_validate(
+                _response_with_output(
+                    [
+                        {
+                            "id": "ws_1",
+                            "action": {"type": "search", "query": "official OpenAI homepage domain"},
+                            "status": "completed",
+                        }
+                    ]
+                )
+            )
+
+        pairs = (
+            (NeMoGymResponseFileSearchToolCall, ResponseFileSearchToolCall),
+            (NeMoGymResponseFunctionWebSearch, ResponseFunctionWebSearch),
+            (NeMoGymResponseComputerToolCall, ResponseComputerToolCall),
+            (NeMoGymImageGenerationCall, ImageGenerationCall),
+            (NeMoGymResponseCodeInterpreterToolCall, ResponseCodeInterpreterToolCall),
+            (NeMoGymLocalShellCall, LocalShellCall),
+            (NeMoGymResponseCustomToolCall, ResponseCustomToolCall),
+        )
+        assert all(gym_cls.model_fields["type"].is_required() for gym_cls, _ in pairs)
 
     def test_hosted_tool_items_inherit_upstream_types(self) -> None:
         # These must inherit the upstream openai typing rather than redefine it

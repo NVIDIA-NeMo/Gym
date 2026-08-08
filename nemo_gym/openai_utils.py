@@ -15,6 +15,7 @@
 import json
 from asyncio import sleep
 from typing import (
+    Annotated,
     Any,
     Dict,
     List,
@@ -92,7 +93,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -267,43 +268,29 @@ class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
     hence no training variant. Inherits the upstream typing unchanged.
     """
 
-    type: Literal["file_search_call"] = "file_search_call"
-
 
 class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
     """A hosted web-search call (OpenAI Responses ``web_search_call`` output item)."""
-
-    type: Literal["web_search_call"] = "web_search_call"
 
 
 class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
     """A hosted computer-use call (OpenAI Responses ``computer_call`` output item)."""
 
-    type: Literal["computer_call"] = "computer_call"
-
 
 class NeMoGymImageGenerationCall(ImageGenerationCall):
     """A hosted image-generation call (OpenAI Responses ``image_generation_call`` output item)."""
-
-    type: Literal["image_generation_call"] = "image_generation_call"
 
 
 class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
     """A hosted code-interpreter call (OpenAI Responses ``code_interpreter_call`` output item)."""
 
-    type: Literal["code_interpreter_call"] = "code_interpreter_call"
-
 
 class NeMoGymLocalShellCall(LocalShellCall):
     """A hosted local-shell call (OpenAI Responses ``local_shell_call`` output item)."""
 
-    type: Literal["local_shell_call"] = "local_shell_call"
-
 
 class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
-    """A custom tool call (OpenAI Responses ``custom_tool_call`` output item)."""
-
-    type: Literal["custom_tool_call"] = "custom_tool_call"
+    """A client-executed custom tool call (OpenAI Responses ``custom_tool_call`` output item)."""
 
 
 class NeMoGymResponseInputText(ResponseInputTextParam):
@@ -349,7 +336,7 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseMcpCall,
     NeMoGymResponseMcpListTools,
     NeMoGymResponseMcpApprovalRequest,
-    # Hosted-tool call items. The upstream SDK includes these in both
+    # Responses API output-call items. The upstream SDK includes these in both
     # ResponseOutputItem and ResponseInputItemParam (outputs are echoed back as
     # input on subsequent turns), so they belong in this shared union:
     NeMoGymResponseFileSearchToolCall,
@@ -409,7 +396,17 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 ########################################
 
 
-NeMoGymResponseOutputItem = NeMoGymResponseInputItem
+def _require_response_output_item_type(value: Any) -> Any:
+    """Prevent an untagged output item from being coerced into the wrong union member."""
+    if isinstance(value, dict) and "type" not in value:
+        raise ValueError("Responses API output items must include a type discriminator")
+    return value
+
+
+NeMoGymResponseOutputItem = Annotated[
+    NeMoGymResponseInputItem,
+    BeforeValidator(_require_response_output_item_type),
+]
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
