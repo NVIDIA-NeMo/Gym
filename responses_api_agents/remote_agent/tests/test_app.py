@@ -24,7 +24,7 @@ from fastapi import Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import ServerClient
@@ -984,25 +984,17 @@ class TestReviewFindingPins:
         server_client.post = AsyncMock(side_effect=_post)
         agent = make_agent(server_client=server_client)
 
-        from nemo_gym.base_resources_server import AggregateMetricsRequest
-
         result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
         assert result.key_metrics == {"mean/reward": 1.0}
 
-    async def test_aggregate_metrics_bounded_when_resources_server_hangs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        async def hang(*args, **kwargs):
-            await asyncio.sleep(60)
+    async def test_aggregate_metrics_delegates_to_shared_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        expected = AggregateMetrics(key_metrics={"mean/reward": 1.0})
+        proxy = AsyncMock(return_value=expected)
+        agent = make_agent()
+        monkeypatch.setattr(RemoteAgent, "proxy_aggregate_metrics", proxy)
+        body = AggregateMetricsRequest(verify_responses=[])
 
-        server_client = MagicMock(spec=ServerClient)
-        server_client.post = AsyncMock(side_effect=hang)
-        agent = make_agent(server_client=server_client)
-        monkeypatch.setattr(remote_agent_app, "_AGGREGATE_PROXY_TIMEOUT_SECS", 0.05)
+        result = await agent.aggregate_metrics(body)
 
-        with pytest.raises(asyncio.TimeoutError):
-            await agent.aggregate_metrics(
-                __import__(
-                    "nemo_gym.base_resources_server", fromlist=["AggregateMetricsRequest"]
-                ).AggregateMetricsRequest(verify_responses=[])
-            )
+        assert result is expected
+        proxy.assert_awaited_once_with("my_env", body)
