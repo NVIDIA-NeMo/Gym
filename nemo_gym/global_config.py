@@ -593,6 +593,7 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
+        extra_configs.reverse()
 
         # Merge config dicts
         # global_config_dict is the last config arg here since we want command line args to override everything else.

@@ -5,6 +5,7 @@ config_paths:
 - benchmarks/aalcr/config.yaml
 - benchmarks/scicode/config.yaml
 - benchmarks/omniscience/config.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
 # TODO @bxyu-nvidia: need to figure out AA key
 # - benchmarks/critpt/config.yaml
 # TODO @bxyu-nvidia: Implementing in the harness x benchmark decoupling effort.
@@ -21,8 +22,6 @@ config_paths:
 # GDPVal-AA-V2
 # TODO @bxyu-nvidia: need internal branch
 # LM Arena proxy (To help text Arena)
-- responses_api_models/vllm_model/configs/vllm_model.yaml
-- env.yaml
 
 ########################################
 # START Secrets
