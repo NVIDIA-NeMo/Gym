@@ -992,13 +992,19 @@ class TestReviewFindingPins:
     async def test_aggregate_metrics_bounded_when_resources_server_hangs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        original_wait_for = asyncio.wait_for
+
+        async def short_wait_for(awaitable, timeout):
+            assert timeout == 600.0
+            return await original_wait_for(awaitable, timeout=0.05)
+
         async def hang(*args, **kwargs):
             await asyncio.sleep(60)
 
         server_client = MagicMock(spec=ServerClient)
         server_client.post = AsyncMock(side_effect=hang)
         agent = make_agent(server_client=server_client)
-        monkeypatch.setattr(remote_agent_app, "_AGGREGATE_PROXY_TIMEOUT_SECS", 0.05)
+        monkeypatch.setattr(asyncio, "wait_for", short_wait_for)
 
         with pytest.raises(asyncio.TimeoutError):
             await agent.aggregate_metrics(
