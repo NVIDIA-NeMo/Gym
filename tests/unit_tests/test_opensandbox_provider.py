@@ -1344,3 +1344,43 @@ def test_ttl_below_the_api_minimum_is_named_locally() -> None:
     provider = OpenSandboxProvider(connection={"domain": "example", "api_key": "k"})
     with pytest.raises(ValueError, match=f"at least {MIN_TTL_S:g}s"):
         asyncio.run(provider.create(SandboxSpec(image="img", ttl_s=30)))
+async def test_direct_create_passes_network_policy_to_sdk_create(
+    fake_opensandbox_sdk: None,
+) -> None:
+    """A networkPolicy is what makes the server attach the egress sidecar at all.
+
+    Server-side, ``apply_egress_to_spec`` returns early without one, so omitting it
+    silently disables every egress feature -- filtering, the credential proxy and
+    transparent MITM alike -- while the sandbox itself still works.
+    """
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(
+        SandboxSpec(
+            image="image:tag",
+            provider_options={"network_policy": {"defaultAction": "allow", "egress": []}},
+        ),
+    )
+
+    sent = FakeSandbox.created_kwargs["network_policy"]
+    # Validated by alias: callers write the API's defaultAction, not default_action.
+    assert sent.model_dump(by_alias=True, exclude_none=True) == {"defaultAction": "allow", "egress": []}
+
+
+async def test_direct_create_omits_network_policy_when_unset(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag"))
+
+    assert "network_policy" not in FakeSandbox.created_kwargs
+
+
+def test_network_policy_option_must_be_a_mapping() -> None:
+    with pytest.raises(TypeError, match="network_policy"):
+        opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"network_policy": "allow-all"})
