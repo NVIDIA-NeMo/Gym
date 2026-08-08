@@ -30,8 +30,7 @@ vllm serve $MODEL \
     --mamba-ssm-cache-dtype float32 \
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
     --enable-expert-parallel \
-    --max-num-seqs 256 \
-    --max-num-batched-tokens 8192 \
+    --max-num-batched-tokens 32768 \
     --host \$host \
     --port 8000 &
 
