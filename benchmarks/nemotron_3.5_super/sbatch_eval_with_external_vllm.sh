@@ -17,9 +17,9 @@ vllm serve $MODEL \
     --gpu-memory-utilization 0.9 \
     --distributed-executor-backend ray \
     --data-parallel-backend ray \
-    --data-parallel-size $NUM_NODES \
+    --data-parallel-size $((NUM_NODES * 4)) \
     --data-parallel-size-local 1 \
-    --tensor-parallel-size 4 \
+    --tensor-parallel-size 1 \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
     --reasoning-parser nemotron_v3 \
