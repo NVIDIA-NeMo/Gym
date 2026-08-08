@@ -1,0 +1,30 @@
+prime_agent:
+  responses_api_agents:
+    prime_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      concurrency: 8
+      command: prime-agent
+      model: policy/...
+      env: {}
+      workspace_root: outputs/prime_agent/workspaces
+      kernel_venv: outputs/prime_agent/kernel-venv
+      thinking: null
+      system_prompt: null
+      timeout: 900
+      extra_args: []
+      models_config:
+        providers:
+          policy:
+            baseUrl: ...
+            api: openai-completions
+            apiKey: ...
+            compat:
+              supportsDeveloperRole: false
+              supportsReasoningEffort: false
+            models:
+            - id: ...
+              reasoning: false
+      prime_agent_version: 0.7.0
