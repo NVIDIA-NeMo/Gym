@@ -19,7 +19,7 @@ vllm serve $MODEL \
     --data-parallel-backend ray \
     --data-parallel-size $NUM_NODES \
     --data-parallel-size-local 1 \
-    --tensor-parallel-size 4 \
+    --tensor-parallel-size 1 \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
     --reasoning-parser nemotron_v3 \
