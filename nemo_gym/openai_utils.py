@@ -56,6 +56,11 @@ from openai.types.chat.completion_create_params import (
 from openai.types.responses import (
     FunctionToolParam,
     Response,
+    ResponseCodeInterpreterToolCall,
+    ResponseComputerToolCall,
+    ResponseCustomToolCall,
+    ResponseFileSearchToolCall,
+    ResponseFunctionWebSearch,
     ResponseInputTextParam,
 )
 from openai.types.responses.response_create_params import (
@@ -72,6 +77,8 @@ from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
 from openai.types.responses.response_output_item import (
+    ImageGenerationCall,
+    LocalShellCall,
     McpApprovalRequest,
     McpCall,
     McpListTools,
@@ -252,6 +259,53 @@ class NeMoGymResponseMcpApprovalRequest(McpApprovalRequest):
     server_label: Optional[str] = None
 
 
+class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
+    """A hosted file-search call (OpenAI Responses ``file_search_call`` output item).
+
+    Like ``mcp_call``, hosted-tool calls are executed *server-side* and arrive in
+    ``response.output`` already resolved, so there is no client-side execution and
+    hence no training variant. Inherits the upstream typing unchanged.
+    """
+
+    type: Literal["file_search_call"] = "file_search_call"
+
+
+class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
+    """A hosted web-search call (OpenAI Responses ``web_search_call`` output item)."""
+
+    type: Literal["web_search_call"] = "web_search_call"
+
+
+class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
+    """A hosted computer-use call (OpenAI Responses ``computer_call`` output item)."""
+
+    type: Literal["computer_call"] = "computer_call"
+
+
+class NeMoGymImageGenerationCall(ImageGenerationCall):
+    """A hosted image-generation call (OpenAI Responses ``image_generation_call`` output item)."""
+
+    type: Literal["image_generation_call"] = "image_generation_call"
+
+
+class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
+    """A hosted code-interpreter call (OpenAI Responses ``code_interpreter_call`` output item)."""
+
+    type: Literal["code_interpreter_call"] = "code_interpreter_call"
+
+
+class NeMoGymLocalShellCall(LocalShellCall):
+    """A hosted local-shell call (OpenAI Responses ``local_shell_call`` output item)."""
+
+    type: Literal["local_shell_call"] = "local_shell_call"
+
+
+class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
+    """A custom tool call (OpenAI Responses ``custom_tool_call`` output item)."""
+
+    type: Literal["custom_tool_call"] = "custom_tool_call"
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -295,6 +349,16 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseMcpCall,
     NeMoGymResponseMcpListTools,
     NeMoGymResponseMcpApprovalRequest,
+    # Hosted-tool call items. The upstream SDK includes these in both
+    # ResponseOutputItem and ResponseInputItemParam (outputs are echoed back as
+    # input on subsequent turns), so they belong in this shared union:
+    NeMoGymResponseFileSearchToolCall,
+    NeMoGymResponseFunctionWebSearch,
+    NeMoGymResponseComputerToolCall,
+    NeMoGymImageGenerationCall,
+    NeMoGymResponseCodeInterpreterToolCall,
+    NeMoGymLocalShellCall,
+    NeMoGymResponseCustomToolCall,
     # For training:
     NeMoGymEasyInputMessageForTraining,
     NeMoGymMessageForTraining,
