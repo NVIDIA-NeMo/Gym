@@ -149,10 +149,10 @@ class TestNeMoGymResponseHostedMcpItems:
 class TestNeMoGymResponseToolCallItems:
     """Responses API output-call items (``web_search_call`` etc.) must validate rather than 500.
 
-    The OpenAI Responses API emits these in ``response.output`` for hosted tools
-    and client-executed custom tools. Before they were in the union,
-    ``NeMoGymResponse.model_validate`` raised and the model server returned a
-    500 for an upstream response that succeeded (issue #2436).
+    The OpenAI Responses API emits these in ``response.output`` for provider-
+    executed tools and client-executed actions. Before they were in the union,
+    ``NeMoGymResponse.model_validate`` raised and the model server returned a 500
+    for an upstream response that succeeded (issue #2436).
     """
 
     def test_web_search_call_in_response_output_validates(self) -> None:
@@ -181,7 +181,7 @@ class TestNeMoGymResponseToolCallItems:
         assert call.type == "web_search_call"
         assert call.status == "completed"
 
-    def test_remaining_hosted_tool_items_validate(self) -> None:
+    def test_remaining_output_call_items_validate(self) -> None:
         response = NeMoGymResponse.model_validate(
             _response_with_output(
                 [
@@ -237,8 +237,8 @@ class TestNeMoGymResponseToolCallItems:
         assert isinstance(response.output[4], NeMoGymLocalShellCall)
         assert isinstance(response.output[5], NeMoGymResponseCustomToolCall)
 
-    def test_hosted_tool_items_accepted_as_input(self) -> None:
-        # The upstream SDK also allows hosted-tool items in ResponseInputItemParam:
+    def test_output_call_items_accepted_as_input(self) -> None:
+        # The upstream SDK also allows output-call items in ResponseInputItemParam:
         # a rollout echoes response.output back as input on the next turn, so
         # request validation must accept them too.
         params = NeMoGymResponseCreateParamsNonStreaming(
@@ -258,7 +258,7 @@ class TestNeMoGymResponseToolCallItems:
         )
         assert isinstance(params.input[0], NeMoGymResponseFunctionWebSearch)
 
-    def test_hosted_tool_items_require_type_discriminator(self) -> None:
+    def test_output_call_items_require_type_discriminator(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponse.model_validate(
                 _response_with_output(
@@ -283,7 +283,7 @@ class TestNeMoGymResponseToolCallItems:
         )
         assert all(gym_cls.model_fields["type"].is_required() for gym_cls, _ in pairs)
 
-    def test_hosted_tool_items_inherit_upstream_types(self) -> None:
+    def test_output_call_items_inherit_upstream_types(self) -> None:
         # These must inherit the upstream openai typing rather than redefine it
         # from scratch, so schema drift is caught when the openai pin moves.
         assert issubclass(NeMoGymResponseFileSearchToolCall, ResponseFileSearchToolCall)
