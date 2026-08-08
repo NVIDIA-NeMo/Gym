@@ -191,6 +191,7 @@ class TestApp:
             "user": None,
             "conversation": None,
             "prompt_cache_key": None,
+            "prompt_cache_retention": None,
             "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict
@@ -665,6 +666,7 @@ class TestApp:
             "user": None,
             "conversation": None,
             "prompt_cache_key": None,
+            "prompt_cache_retention": None,
             "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict
@@ -893,6 +895,7 @@ class TestApp:
             "user": None,
             "conversation": None,
             "prompt_cache_key": None,
+            "prompt_cache_retention": None,
             "safety_identifier": None,
         }
         assert expected_responses_dict == actual_responses_dict
