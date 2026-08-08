@@ -101,9 +101,11 @@ class TestFailureReason:
         assert result.failure_reason == reason
         assert judge.await_count == judge_calls
 
-    def test_problem_is_required(self) -> None:
+    @mark.parametrize("problem_kwargs", [{}, {"problem": ""}], ids=["missing", "empty"])
+    def test_problem_is_required_and_nonempty(self, problem_kwargs) -> None:
         with raises(Exception):
             ProofWithJudgeVerifyRequest(
                 responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
                 response=_make_response(VALID_POLICY_RESPONSE),
+                **problem_kwargs,
             )
