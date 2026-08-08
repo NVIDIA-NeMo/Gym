@@ -2563,7 +2563,6 @@ all = [
     { name = "daytona" },
     { name = "mypy" },
     { name = "opensandbox" },
-    { name = "openshell" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -2584,11 +2583,13 @@ dev = [
     { name = "requests-mock" },
     { name = "ruff" },
 ]
+openshell = [
+    { name = "openshell" },
+]
 sandbox = [
     { name = "boto3" },
     { name = "daytona" },
     { name = "opensandbox" },
-    { name = "openshell" },
     { name = "tenacity" },
 ]
 vllm = [
@@ -2620,7 +2621,7 @@ requires-dist = [
     { name = "omegaconf" },
     { name = "openai", specifier = "<=2.7.2" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
-    { name = "openshell", marker = "extra == 'sandbox'", specifier = ">=0.0.92,<0.1" },
+    { name = "openshell", marker = "extra == 'openshell'", specifier = ">=0.0.92,<0.1" },
     { name = "orjson" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "psutil" },
@@ -2647,7 +2648,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi" },
 ]
-provides-extras = ["all", "vllm", "sandbox", "dev"]
+provides-extras = ["all", "vllm", "sandbox", "openshell", "dev"]
 
 [[package]]
 name = "networkx"
