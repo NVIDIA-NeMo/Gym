@@ -254,6 +254,59 @@ class TestGlobalConfig:
             == global_config_dict
         )
 
+    def test_get_global_config_dict_skip_verification_defaults_for_agents(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.side_effect = [12345, 12346, 12347]
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        parser = GlobalConfigDictParser()
+        global_config_dict = parser.parse_no_environment(
+            DictConfig(
+                {
+                    "skip_verification": True,
+                    "skip_verification_reward": -1.5,
+                    "agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                            }
+                        }
+                    },
+                    "explicit_agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                                "skip_verification": False,
+                                "skip_verification_reward": 0.25,
+                            }
+                        }
+                    },
+                    "resources_name": {
+                        "resources_servers": {
+                            "resources_type": {
+                                "entrypoint": "app.py",
+                                "domain": "other",
+                            }
+                        }
+                    },
+                }
+            )
+        )
+
+        agent_config = global_config_dict["agent_name"]["responses_api_agents"]["agent_type"]
+        assert agent_config["skip_verification"] is True
+        assert agent_config["skip_verification_reward"] == -1.5
+
+        explicit_agent_config = global_config_dict["explicit_agent_name"]["responses_api_agents"]["agent_type"]
+        assert explicit_agent_config["skip_verification"] is False
+        assert explicit_agent_config["skip_verification_reward"] == 0.25
+
+        resources_config = global_config_dict["resources_name"]["resources_servers"]["resources_type"]
+        assert "skip_verification" not in resources_config
+        assert "skip_verification_reward" not in resources_config
+
     def test_get_global_config_dict_server_refs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
