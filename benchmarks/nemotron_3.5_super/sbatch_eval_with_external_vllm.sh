@@ -24,8 +24,9 @@ vllm serve $MODEL \
     --tool-call-parser qwen3_coder \
     --reasoning-parser nemotron_v3 \
     --api-server-count 1 \
+    --enable-prefix-caching \
+    --enable-chunked-prefill \
     --kv-cache-dtype fp8 \
-    -cc.pass_config.fuse_allreduce_rms=False \
     --mamba-ssm-cache-dtype float32 \
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
     --enable-expert-parallel \
