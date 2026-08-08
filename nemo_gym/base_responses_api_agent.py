@@ -160,7 +160,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         body: AggregateMetricsRequest,
         timeout_secs: Optional[float] = 600.0,
     ) -> AggregateMetrics:
-        """Proxy aggregate metrics to another server with an optional timeout."""
+        """Proxy aggregate metrics to another server with an optional timeout.
+
+        ServerClient retries connection errors indefinitely, so a dead resources server
+        at the end of a run could otherwise hang the collector after all rollouts are on disk.
+        """
 
         async def _proxy() -> AggregateMetrics:
             response = await self.server_client.post(
