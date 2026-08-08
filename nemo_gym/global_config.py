@@ -591,9 +591,11 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 
+        # Reverse here so the "inner" configs (appended to the list) are ovreridden by the outer configs.
+        extra_configs.reverse()
+
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
-        extra_configs.reverse()
 
         # Merge config dicts
         # global_config_dict is the last config arg here since we want command line args to override everything else.
