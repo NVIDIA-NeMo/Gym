@@ -2,22 +2,10 @@
 
 set -euo pipefail
 
-# This launcher splits a four-node allocation into two 2-node vLLM pools:
-# a NIXL KV producer for prefill and a KV consumer for decode.  vllm-router
-# exposes the combined OpenAI-compatible endpoint on port 8000.
-#
-# Required environment variables: MODEL, NUM_NODES, CONTAINER, and MOUNTS.
-# NUM_NODES must be 4: each pool uses data parallelism 2 with TP=4 on a
-# four-GPU GB200 node.
 NUM_NODES=${NUM_NODES:?Set NUM_NODES=4}
 MODEL=${MODEL:?Set MODEL to the model path or ID}
 CONTAINER=${CONTAINER:?Set CONTAINER to the vLLM container image}
 MOUNTS=${MOUNTS:?Set MOUNTS to the required container mounts}
-
-if [[ "$NUM_NODES" != 4 ]]; then
-    echo "This prefill/decode-disaggregated configuration requires NUM_NODES=4." >&2
-    exit 2
-fi
 
 command=$(cat <<EOF
 set -euo pipefail
@@ -30,7 +18,7 @@ common_args=(
     --gpu-memory-utilization 0.9
     --distributed-executor-backend ray
     --data-parallel-backend ray
-    --data-parallel-size 2
+    --data-parallel-size 1
     --tensor-parallel-size 4
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
@@ -41,7 +29,7 @@ common_args=(
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
-    --max-num-batched-tokens 32768
+    --max-num-batched-tokens 8192
     --host \$host
 )
 
