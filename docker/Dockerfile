@@ -32,6 +32,7 @@ USER root
 
 ARG NEMO_GYM_UID=10001
 ARG NEMO_GYM_GID=10001
+ARG ENROOT_VERSION=3.5.0
 
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -39,6 +40,7 @@ export TZ=America/Los_Angeles
 
 apt-get update
 apt-get install -y --no-install-recommends \
+    bash \
     jq \
     curl \
     git \
@@ -49,6 +51,14 @@ apt-get install -y --no-install-recommends \
 
 groupadd --gid "${NEMO_GYM_GID}" nemo-gym
 useradd --uid "${NEMO_GYM_UID}" --gid "${NEMO_GYM_GID}" --create-home --shell /bin/bash nemo-gym
+
+# Install enroot for the EnrootProvider sandbox backend.
+# GitHub releases provide signed .debs for amd64 and arm64.
+arch=$(dpkg --print-architecture)
+curl -fSsL -o /tmp/enroot.deb \
+    "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot_${ENROOT_VERSION}-1_${arch}.deb"
+apt-get install -y /tmp/enroot.deb
+rm /tmp/enroot.deb
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
