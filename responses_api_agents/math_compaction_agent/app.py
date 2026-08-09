@@ -103,6 +103,7 @@ class MathCompactionAgent(SimpleAgent):
         model_response: NeMoGymResponse | None = None
         execution_steps = 0
         compaction_count = 0
+        empty_summary_count = 0
 
         while execution_steps < self.config.max_steps:
             request_params = params.model_copy(
@@ -134,14 +135,20 @@ class MathCompactionAgent(SimpleAgent):
                     )
                     summary = self._extract_response_text(summary_response)
                     if not summary:
-                        raise RuntimeError("Compaction policy returned an empty summary")
-                    segments.append(
-                        self._make_segment(
-                            request_params=summary_params,
-                            response=summary_response,
-                            segment_type="summary",
+                        empty_summary_count += 1
+                        print(
+                            "Compaction policy returned no summary text; "
+                            "continuing from the retained recent steps",
+                            flush=True,
                         )
-                    )
+                    if self._has_trainable_generation(summary_response):
+                        segments.append(
+                            self._make_segment(
+                                request_params=summary_params,
+                                response=summary_response,
+                                segment_type="summary",
+                            )
+                        )
 
                     recent_steps = self._extract_recent_steps(
                         segment_outputs, self.config.recent_steps
@@ -256,6 +263,7 @@ class MathCompactionAgent(SimpleAgent):
                     "segment_index": segment_index,
                     "is_final_segment": segment_index == len(segments) - 1,
                     "compaction_count": compaction_count,
+                    "empty_summary_count": empty_summary_count,
                     "loss_multiplier": 1.0,
                 }
             )
@@ -352,6 +360,13 @@ class MathCompactionAgent(SimpleAgent):
                         reasoning_chunks.append(text)
         chunks = message_chunks or reasoning_chunks
         return "\n".join(chunks).strip()
+
+    @staticmethod
+    def _has_trainable_generation(response: NeMoGymResponse) -> bool:
+        return any(
+            bool(getattr(item, "generation_token_ids", None))
+            for item in response.output
+        )
 
     async def _count_prompt_tokens(self, params) -> int:
         if self._policy_model_openai_client is None:
