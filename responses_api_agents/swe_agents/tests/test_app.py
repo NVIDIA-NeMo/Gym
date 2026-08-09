@@ -1590,6 +1590,50 @@ class TestRunOpenHandsAgent:
         config = _make_instance_config(tmpdir, **overrides)
         return RunOpenHandsAgent(config=config)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "agent_timeout_s, oom, expected_reason, expected_kind",
+        [
+            (0, False, "agent_timeout", "other"),
+            (900, True, "agent_oom", "oom"),
+            (900, False, "agent_command_failure", "other"),
+        ],
+        ids=["timeout", "oom", "other"],
+    )
+    async def test_worker_classifies_agent_failure_reason(
+        self, monkeypatch, agent_timeout_s, oom, expected_reason, expected_kind
+    ) -> None:
+        """The agent-failure path stamps the specific reason at the worker —
+        responses() never refines an already-set failure_reason — and keeps the
+        watchdog's oom error kind instead of clobbering it to "other". The raised
+        exception is deliberately generic: classification must come from the
+        timeout/OOM signals, not the exception type."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._make_agent(tmpdir, swebench_agent_timeout=agent_timeout_s)
+
+            async def fake_start(_self, _command, _cmd_str):
+                process = await asyncio.create_subprocess_shell("true")
+                await process.wait()
+                return ActiveContainerCommand(
+                    process=process,
+                    log_file=MagicMock(),
+                    log_file_path=Path(tmpdir) / "log.txt",
+                    watchdog_stats={"oom_killed": True} if oom else {},
+                )
+
+            monkeypatch.setattr(RunOpenHandsAgent, "_start_container_command", fake_start)
+            monkeypatch.setattr(
+                RunOpenHandsAgent, "_finish_container_command", AsyncMock(side_effect=RuntimeError("boom"))
+            )
+            monkeypatch.setattr(RunOpenHandsAgent, "_kill_active_command", AsyncMock())
+
+            assert await agent.process_single_datapoint() is None
+
+            persisted = json.loads(agent.config.metrics_fpath.read_text())
+            assert persisted["mask_sample"] is True
+            assert persisted["failure_reason"] == expected_reason
+            assert persisted["agent_error_kind"] == expected_kind
+
     def test_openhands_dir_copy_from_host_no_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)

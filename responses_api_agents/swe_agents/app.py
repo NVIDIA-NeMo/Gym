@@ -2763,11 +2763,6 @@ class RunOpenHandsAgent(BaseModel):
             self._apply_watchdog_stats(metrics, openhands_active_command, mode="agent")
             metrics.openhands_run_time += time.time()
             metrics.patch_exists = False
-            # An agent command that died without producing output is an infrastructure failure,
-            # not a model failure; allow for it to be masked out of the gradient.
-            metrics.mask_sample = True
-            metrics.failure_reason = "agent_command_failure"
-            metrics.agent_error_kind = "other"
             metrics.final_eval_apptainer_spinup_time = None
             # Detect wall-clock agent timeout: openhands_run_time (elapsed since start)
             # reached or exceeded the configured swebench_agent_timeout.
@@ -2775,6 +2770,16 @@ class RunOpenHandsAgent(BaseModel):
                 metrics.openhands_run_time is not None
                 and metrics.openhands_run_time >= self.config.swebench_agent_timeout
             )
+            # An agent command that died without producing output is an infrastructure failure,
+            # not a model failure; allow for it to be masked out of the gradient.
+            metrics.mask_sample = True
+            if metrics.agent_timed_out:
+                metrics.failure_reason = "agent_timeout"
+            elif metrics.oom_killed:
+                metrics.failure_reason = "agent_oom"
+            else:
+                metrics.failure_reason = "agent_command_failure"
+            metrics.agent_error_kind = metrics.agent_error_kind or "other"
             update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
                 profiler.stop()
