@@ -6,7 +6,8 @@
 #   bash docker/install_codec_deps.sh
 #
 # Safe to call multiple times — exits immediately if already installed.
-# Versions are read from uv.lock automatically — no manual pins to maintain.
+# Versions are pinned to match uv.lock — if uv lock changes these versions,
+# CI will catch the mismatch via server tests that depend on these packages.
 # --no-config bypasses the project's sys_platform=='never' overrides.
 set -euo pipefail
 
@@ -15,22 +16,10 @@ if python -c "import cv2, torchvision, torchaudio" 2>/dev/null; then
     exit 0
 fi
 
-REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")"
-LOCK_FILE="$REPO_ROOT/uv.lock"
-
-# Read pinned versions from uv.lock — the [dependency-groups] codec group is
-# the single source of truth so these stay in sync with uv lock automatically.
-PKGS=$(python3 - "$LOCK_FILE" <<'EOF'
-import re, sys
-lock = open(sys.argv[1]).read()
-for pkg in ["opencv-python-headless", "torchvision", "torchaudio"]:
-    m = re.search(r'\nname = "' + pkg + r'"\nversion = "([^"]+)"', lock)
-    if m:
-        print(f"{pkg}=={m.group(1)}")
-EOF
-)
-
 echo "[codec-deps] Installing codec-bearing packages..."
-echo "$PKGS" | xargs uv pip install --no-config
+uv pip install --no-config \
+    "opencv-python-headless==5.0.0.93" \
+    "torchvision==0.26.0" \
+    "torchaudio==2.11.0"
 
 echo "[codec-deps] Done."
