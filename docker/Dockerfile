@@ -49,6 +49,9 @@ apt-get install -y --no-install-recommends \
     less \
     vim
 
+# The CUDA base only provides root. Use a named, fixed-ID account so the
+# release and test stages share a reproducible non-root identity with a real
+# home directory for uv's writable state.
 groupadd --gid "${NEMO_GYM_GID}" nemo-gym
 useradd --uid "${NEMO_GYM_UID}" --gid "${NEMO_GYM_GID}" --create-home --shell /bin/bash nemo-gym
 
@@ -134,6 +137,9 @@ ENTRYPOINT ["gym"]
 CMD ["--help"]
 
 
+# The build-container workflow targets this stage so its Docker build executes
+# the suites as the release image's non-root user. Keeping the assertions in
+# the build avoids loading this oversized image onto the GitHub runner.
 FROM release AS test
 
 RUN uv sync --link-mode copy --locked --reinstall --extra dev --extra sandbox --no-extra vllm && \
