@@ -8,14 +8,18 @@ the published run used. To run one, copy the two templates, fill them in, and ru
 the Gym repo root:
 
 ```bash
-cp env.yaml.example env.yaml     # policy endpoint and judges
-cp .env.example .env             # keys and paths
+cp scripts/more/env.yaml.example env.yaml   # policy endpoint and judges
+cp scripts/more/.env.example .env           # keys and paths
 set -a; source .env; set +a
-./gpqa.sh
+scripts/more/gpqa.sh
 ```
 
-Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory and
-`PARALLEL` for concurrency. Results land in `./results/<benchmark>`.
+Run from the repo root, not from this directory: each recipe resolves its dataset and
+prepare script relative to your working directory.
+
+Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
+`PARALLEL` for concurrency and `RESUME` to continue an interrupted run. Results land in
+`./results/<benchmark>`.
 
 Terminal-Bench, SWE-bench and the base-model suite are not Gym recipes — each has its
 own section below.
@@ -36,23 +40,49 @@ own section below.
 
 | Benchmark | What it measures | Run |
 |---|---|---|
-| GPQA Diamond | Graduate-level science questions | `./gpqa.sh` |
-| HLE | Humanity's Last Exam — hard, broad knowledge | `./hle.sh` |
-| AA-LCR | Long-context reasoning | `./aa-lcr.sh` |
-| AA-Omniscience | Knowledge and hallucination | `./omniscience.sh` |
-| [SciCode](#scicode) | Scientific coding, graded against numeric ground truth | `./scicode.sh` |
-| BrowseComp | Web browsing agent | `./browsecomp/browsecomp.sh` |
-| Tau3 | Tool use against a simulated customer | `./tau3.sh` |
-| [CritPt](#critpt) | Research-level physics | `./critpt.sh` |
-| [GDPval](#gdpval) | Real-world work products, judged | `./gdpval/gdpval.sh` |
-| [PinchBench](#pinchbench) | The model as the brain of an OpenClaw agent | `./pinchbench.sh` |
-| [Terminal-Bench 2.1](#terminal-bench-and-swe-bench-nel-next) | Agentic terminal use | `nel eval run nel-next/terminal-bench-2.1.yaml` |
-| [SWE-bench Verified](#terminal-bench-and-swe-bench-nel-next) | Agentic coding against a repo's tests | `nel eval run nel-next/swebench-verified.yaml` |
-| [SWE-bench Multilingual](#terminal-bench-and-swe-bench-nel-next) | The same, across languages | `nel eval run nel-next/swebench-multilingual.yaml` |
+| GPQA Diamond | Graduate-level science questions | `scripts/more/gpqa.sh` |
+| HLE | Humanity's Last Exam — hard, broad knowledge | `scripts/more/hle.sh` |
+| AA-LCR | Long-context reasoning | `scripts/more/aa-lcr.sh` |
+| AA-Omniscience | Knowledge and hallucination | `scripts/more/omniscience.sh` |
+| [SciCode](#scicode) | Scientific coding, graded against numeric ground truth | `scripts/more/scicode.sh` |
+| BrowseComp | Web browsing agent | `scripts/more/browsecomp/browsecomp.sh` |
+| Tau3 | Tool use against a simulated customer | `scripts/more/tau3.sh` |
+| [CritPt](#critpt) | Research-level physics | `scripts/more/critpt.sh` |
+| [GDPval](#gdpval) | Real-world work products, judged | `scripts/more/gdpval/gdpval.sh` |
+| [PinchBench](#pinchbench) | The model as the brain of an OpenClaw agent | `scripts/more/pinchbench.sh` |
+| [Terminal-Bench 2.1](#terminal-bench-and-swe-bench-nel-next) | Agentic terminal use | `nel eval run scripts/more/nel-next/terminal-bench-2.1.yaml` |
+| [SWE-bench Verified](#terminal-bench-and-swe-bench-nel-next) | Agentic coding against a repo's tests | `nel eval run scripts/more/nel-next/swebench-verified.yaml` |
+| [SWE-bench Multilingual](#terminal-bench-and-swe-bench-nel-next) | The same, across languages | `nel eval run scripts/more/nel-next/swebench-multilingual.yaml` |
 | [Base suite](#base-pretraining-model) | 21 pretraining benchmarks plus RULER | see [`base/`](./base/) |
 
 A linked name needs setup beyond the prerequisites above — follow the link. The rest run
 as they are.
+
+## Resuming an interrupted run
+
+Every gym-native recipe takes `RESUME=1`, which passes `--resume` and continues from what
+is on disk. Pass the same `OUT` you used before:
+
+```bash
+RESUME=1 OUT=./results/browsecomp scripts/more/browsecomp/browsecomp.sh
+```
+
+Completed rollouts are kept; rollouts still in flight when the run died are re-run.
+
+The `nel-next/` benchmarks track runs themselves:
+
+```bash
+nel eval run --resume scripts/more/nel-next/terminal-bench-2.1.yaml
+nel eval resume <run-id>
+```
+
+**GDPval** (comparison mode) records a stage as complete even if every rollout in it
+failed, so a later resume skips it forever. If an attempt ends with zero rollouts, delete
+`evaluator_rollouts_multistage_state.jsonl` before resuming — only at zero.
+
+**CritPt** resumes within the current pass. If the Artificial Analysis quota runs out,
+re-score the cached submissions instead of regenerating them:
+`python -m resources_servers.critpt.replay --cache-dir "$CRITPT_CACHE_DIR/<run-subdir>"`
 
 ## Benchmarks needing extra setup
 
@@ -69,7 +99,7 @@ save it anywhere, and point `TEST_DATA` at it:
 sha256sum /path/to/test_data.h5
 # 48b0272a88b17dbd29777c217e1b4fb2b019b92e11cc2add847409db9541b890
 
-TEST_DATA=/path/to/test_data.h5 ./scicode.sh
+TEST_DATA=/path/to/test_data.h5 scripts/more/scicode.sh
 ```
 
 It must be readable by the user running the recipe — otherwise every test case fails
@@ -83,7 +113,7 @@ its code inside an Apptainer sandbox. Three things must exist before a run.
 **1. The sandbox.** The definition ships with Gym; build the image once:
 
 ```bash
-./build-gdpval-sif.sh /abs/path/gdpval.sif
+scripts/more/gdpval/build-gdpval-sif.sh /abs/path/gdpval.sif
 export GDPVAL_CONTAINER_PATH=/abs/path/gdpval.sif
 ```
 
@@ -118,7 +148,7 @@ key rate-limits and the agent then cannot search.
 A judge scores each deliverable against its task rubric.
 
 ```bash
-./gdpval.sh
+scripts/more/gdpval/gdpval.sh
 ```
 
 #### Comparison mode
@@ -137,13 +167,13 @@ Produce each one with an execute-only run of that model — point the policy in
 `env.yaml` at it, then:
 
 ```bash
-EXECUTE_ONLY=true OUT=./tmp ./gdpval.sh && mv ./tmp/deliverables ./refs/gptoss_120b
+EXECUTE_ONLY=true OUT=./tmp scripts/more/gdpval/gdpval.sh && mv ./tmp/deliverables ./refs/gptoss_120b
 ```
 
 Then score your model against whatever you collected:
 
 ```bash
-GDPVAL_REWARD_MODE=comparison GDPVAL_REFS=./refs ./gdpval.sh
+GDPVAL_REWARD_MODE=comparison GDPVAL_REFS=./refs scripts/more/gdpval/gdpval.sh
 ```
 
 The recipe recognises these names and anchors each at the
