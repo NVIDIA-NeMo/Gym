@@ -206,6 +206,36 @@ def _load_config_yaml(config_path):
         raise ConfigError(f"Malformed YAML in '{config_path}'{location}: {problem}") from e
 
 
+def _openai_version_matches_nemo_gym_constraint(version: str) -> bool:
+    """True when `version` satisfies nemo-gym's own openai requirement.
+
+    head_server_deps normally pins the parent process's openai version into every
+    sub-venv for consistency. When the parent environment ships an openai release
+    outside nemo-gym's own constraint (e.g. openai 2.52.x preinstalled in the base
+    image while nemo-gym caps openai<=2.7.2), that pin makes every
+    sub-venv resolution unsatisfiable — and the dry-run prefetch then bakes
+    venvs that contain nothing but pip. Callers use this to fall back to
+    nemo-gym's own resolution instead of pinning an impossible version. Returns
+    True (preserving the original pin-the-parent behavior) when the constraint
+    cannot be determined.
+    """
+    try:
+        # Lazy imports: `packaging` is not a declared nemo-gym dependency; any
+        # import or lookup failure falls back to preserving the pin.
+        from importlib.metadata import requires
+
+        from packaging.requirements import Requirement
+        from packaging.version import Version
+
+        for req_str in requires("nemo-gym") or []:
+            req = Requirement(req_str)
+            if req.name == "openai" and req.marker is None:
+                return req.specifier.contains(Version(version), prereleases=True)
+        return True
+    except Exception:
+        return True
+
+
 class GlobalConfigDictParser(BaseModel):
     def parse_global_config_dict_from_cli(self) -> DictConfig:
         # We need to monkeypatch hydra here so that it doesn't use Hydra help so that we can use our own help down the line
@@ -707,13 +737,18 @@ Found global config dict yaml:
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
             # Constrain sensitive package versions
-            global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = [
+            head_server_deps = [
                 # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
                 # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
                 f"ray[default]=={ray_version}",
-                # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
-                f"openai=={openai_version}",
             ]
+            # OpenAI version is also sensitive since it changes so often and may introduce subtle
+            # incompatibilities — but only pin the parent's version when nemo-gym's own constraint
+            # accepts it; otherwise the sub-venv resolutions are unsatisfiable and the venvs come
+            # out empty (see _openai_version_matches_nemo_gym_constraint).
+            if _openai_version_matches_nemo_gym_constraint(openai_version):
+                head_server_deps.append(f"openai=={openai_version}")
+            global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()

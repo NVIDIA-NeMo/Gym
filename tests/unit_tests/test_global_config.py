@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.metadata
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
@@ -39,6 +40,7 @@ from nemo_gym.global_config import (
     USE_ABSOLUTE_IP,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    _openai_version_matches_nemo_gym_constraint,
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
@@ -1499,3 +1501,35 @@ class TestConfigLoadErrors:
         parser = GlobalConfigDictParser()
         config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
         parser.raise_on_no_server_instances(config)
+
+
+class TestOpenAIVersionMatchesNemoGymConstraint:
+    @mark.parametrize(
+        "requirements, version, expected",
+        [
+            # Parent openai satisfies nemo-gym's constraint -> keep pinning it.
+            (["openai<=2.7.2"], "2.7.2", True),
+            (["openai<=2.7.2"], "2.6.0", True),
+            # Parent openai violates the constraint -> the pin would be unsatisfiable.
+            (["openai<=2.7.2"], "2.52.0", False),
+            (["openai>=2.0,<3"], "2.52.0", True),
+            # No openai requirement at all -> preserve the pin-the-parent behavior.
+            (["ray[default]==2.49.0"], "2.52.0", True),
+            # Marker'd requirements are skipped (conservative fallback).
+            (['openai<=2.7.2; extra == "adapters"'], "2.52.0", True),
+            # importlib.metadata.requires may return None.
+            (None, "2.52.0", True),
+        ],
+    )
+    def test_constraint_matching(
+        self, monkeypatch: MonkeyPatch, requirements: list, version: str, expected: bool
+    ) -> None:
+        monkeypatch.setattr(importlib.metadata, "requires", lambda name: requirements)
+        assert _openai_version_matches_nemo_gym_constraint(version) is expected
+
+    def test_falls_back_to_pinning_when_constraint_lookup_fails(self, monkeypatch: MonkeyPatch) -> None:
+        def raise_not_found(name: str) -> None:
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "requires", raise_not_found)
+        assert _openai_version_matches_nemo_gym_constraint("2.52.0") is True
