@@ -351,8 +351,8 @@ MINIMAX_API_KEY: unused
 
 ```bash
 gym eval run \
-    --model-type vllm_model \
-    --benchmark gdpval \
+    --config benchmarks/gdpval/config.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml \
     --split benchmark \
     --output results/gdpval_minimax_judge.jsonl \
