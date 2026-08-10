@@ -9,11 +9,6 @@ MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 
-if [[ "$NUM_NODES" != 4 ]]; then
-    echo "This DP=2 prefill / DP=2 decode configuration requires NUM_NODES=4." >&2
-    exit 2
-fi
-
 command=$(cat <<EOF
 set -euo pipefail
 
