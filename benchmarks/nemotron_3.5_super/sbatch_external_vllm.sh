@@ -49,7 +49,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
-    ++policy_base_url=http://\$PREFILL_HEAD:$ROUTER_SERVER_PORT/v1 \
+    ++policy_base_url=http://\$(getent hosts "\$PREFILL_HEAD" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
     ++global_aiohttp_connector_limit_per_host=16384
