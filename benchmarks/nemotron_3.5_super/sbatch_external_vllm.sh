@@ -34,11 +34,6 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-# Wait for vLLM server spinup
-until curl -fs "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" >/dev/null; do
-    sleep 5
-done
-
 experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
@@ -53,7 +48,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
-    ++policy_base_url=http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
+    ++policy_base_url=http://\$PREFILL_HEAD:$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
     ++global_aiohttp_connector_limit_per_host=16384
@@ -99,19 +94,6 @@ common_args=(
     --max-num-batched-tokens 8192
 )
 
-wait_for_server() {
-    local pid=\$1
-    local url=\$2
-
-    while ! curl -fs "\$url/health" >/dev/null; do
-        if ! kill -0 "\$pid" 2>/dev/null; then
-            echo "vLLM at \$url exited before becoming healthy." >&2
-            wait "\$pid"
-        fi
-        sleep 5
-    done
-}
-
 this_node_hostname=\$(hostname)
 # Split nodes here by index
 if (( SLURM_PROCID == 0 )); then
@@ -135,8 +117,9 @@ if (( SLURM_PROCID == 0 )); then
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-    wait_for_server "\$prefill_pid" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT"
-
+    until curl -fs "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" >/dev/null; do
+        sleep 5
+    done
     until curl -fs "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" >/dev/null; do
         sleep 5
     done
@@ -150,15 +133,7 @@ if (( SLURM_PROCID == 0 )); then
         --host \$PREFILL_HEAD \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
-        --log-level error &
-    router_pid=\$!
-    
-    if (( $should_run_eval )); then
-        $eval_command
-    else
-        wait \$router_pid
-    fi
-
+        --log-level error
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
@@ -209,10 +184,11 @@ batch_command=$(cat <<EOF
 set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
+PREFILL_HEAD="\${nodes[0]}"
+DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}"
 
-# Do not start Ray: each Slurm task directly runs a vLLM DP rank.
-PREFILL_HEAD="\${nodes[0]}" \
-DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}" \
+PREFILL_HEAD="\$PREFILL_HEAD" \
+DECODE_HEAD="\$DECODE_HEAD" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
@@ -223,12 +199,49 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
         set -euo pipefail
         cd "\$SLURM_SUBMIT_DIR"
         exec "\$@"
-    ' bash bash -lc "\$VLLM_PD_WORKLOAD"
+    ' bash bash -lc "\$VLLM_PD_WORKLOAD" &
+server_step=\$!
+
+cleanup_server() {
+    kill "\$server_step" 2>/dev/null || true
+    wait "\$server_step" 2>/dev/null || true
+}
+trap cleanup_server EXIT INT TERM
+
+if (( $should_run_eval )); then
+    until curl -fsS "http://\$PREFILL_HEAD:$ROUTER_SERVER_PORT/health" >/dev/null; do
+        if ! kill -0 "\$server_step" 2>/dev/null; then
+            wait "\$server_step"
+        fi
+        sleep 5
+    done
+
+    eval_status=0
+    PREFILL_HEAD="\$PREFILL_HEAD" \
+    srun --overlap --exact --nodes=1 --ntasks=1 --nodelist="\$PREFILL_HEAD" --gpus=0 \
+        --container-image=$CONTAINER \
+        --container-name=eval-container-on-node \
+        --container-mounts=$MOUNTS \
+        --container-workdir="\$SLURM_SUBMIT_DIR" \
+        --no-container-mount-home \
+        bash -lc '
+            set -euo pipefail
+            cd "\$SLURM_SUBMIT_DIR"
+            exec bash -lc "\$VLLM_PD_EVAL_WORKLOAD"
+        ' || eval_status=\$?
+
+    cleanup_server
+    trap - EXIT INT TERM
+    exit "\$eval_status"
+fi
+
+wait "\$server_step"
 EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 VLLM_PD_WORKLOAD="$command" \
+VLLM_PD_EVAL_WORKLOAD="$eval_command" \
 VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
@@ -238,4 +251,5 @@ sbatch \
     --ntasks-per-node=1 \
     --exclusive \
     --segment=$NUM_NODES \
+    --export=ALL \
     --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'
