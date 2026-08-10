@@ -79,7 +79,7 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_results_fpath: str
     opencode_run_stdout: str
     opencode_run_stderr: str
-    opencode_no_export_found: bool
+    opencode_export_found: bool
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
@@ -327,9 +327,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         output = []
         usage = None
-        opencode_no_export_found = False
+        opencode_export_found = False
         if opencode_export:
-            opencode_no_export_found = True
+            opencode_export_found = True
             # Assume only one input message. May change with a system/developer message later on.
             output = self._opencode_export_to_output_items(opencode_export)[1:]
             usage = NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export))
@@ -338,7 +338,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_results_fpath": str(results_local_fpath),
             "opencode_run_stdout": (result.stdout if result else "") or "",
             "opencode_run_stderr": (result.stderr if result else "") or "",
-            "opencode_no_export_found": opencode_no_export_found,
+            "opencode_export_found": opencode_export_found,
         }
 
         return NeMoGymResponse(
