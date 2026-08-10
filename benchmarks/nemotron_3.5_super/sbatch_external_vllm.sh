@@ -32,6 +32,7 @@ common_args=(
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
     --data-parallel-backend mp
+    --data-parallel-size-local 1
     --tensor-parallel-size 4
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
@@ -67,7 +68,6 @@ if [[ "\$SLURM_PROCID" == 0 ]]; then
         --host \$prefill_host \
         --port 8001 \
         --data-parallel-size 2 \
-        --data-parallel-size-local 1 \
         --data-parallel-address \$prefill_host \
         --data-parallel-rpc-port 13345 \
         --kv-transfer-config \
@@ -97,7 +97,6 @@ elif [[ "\$SLURM_PROCID" == 1 ]]; then
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
         --data-parallel-size 2 \
-        --data-parallel-size-local 1 \
         --data-parallel-start-rank 1 \
         --data-parallel-address \${prefill_hosts[0]} \
         --data-parallel-rpc-port 13345 \
@@ -112,7 +111,6 @@ elif [[ "\$SLURM_PROCID" == 2 ]]; then
         --host \$decode_host \
         --port 8002 \
         --data-parallel-size 2 \
-        --data-parallel-size-local 1 \
         --data-parallel-address \$decode_host \
         --data-parallel-rpc-port 13346 \
         --kv-transfer-config \
@@ -125,7 +123,6 @@ elif [[ "\$SLURM_PROCID" == 3 ]]; then
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
         --data-parallel-size 2 \
-        --data-parallel-size-local 1 \
         --data-parallel-start-rank 1 \
         --data-parallel-address \${decode_hosts[0]} \
         --data-parallel-rpc-port 13346 \
