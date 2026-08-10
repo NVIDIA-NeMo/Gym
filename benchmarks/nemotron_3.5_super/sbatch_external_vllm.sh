@@ -9,15 +9,7 @@ MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 
-command=$(cat <<EOF
-set -euo pipefail
-
-PD_PREFILL_HOSTS=( \$PD_PREFILL_HOSTS )
-PD_DECODE_HOSTS=( \$PD_DECODE_HOSTS )
-
-PREFILL_HEAD=\${PD_PREFILL_HOSTS[0]}
-DECODE_HEAD=\${PD_DECODE_HOSTS[0]}
-
+# Fixed vLLM Port configurations
 PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
@@ -27,6 +19,13 @@ DECODE_SERVER_PORT=8002
 
 PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
+
+command=$(cat <<EOF
+set -euo pipefail
+
+# Input arguments and validation
+PREFILL_HEAD=\$PREFILL_HEAD
+DECODE_HEAD=\$DECODE_HEAD
 
 # Nemotron's three-read Mamba SSM state must use the dimension-sequence layout
 # when KV transfer is enabled.
@@ -51,7 +50,6 @@ common_args=(
     --tool-call-parser qwen3_coder
     --reasoning-parser nemotron_v3
     --kv-cache-dtype fp8
-    -cc.pass_config.fuse_allreduce_rms=False
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
@@ -72,27 +70,30 @@ wait_for_server() {
 }
 
 this_node_hostname=\$(hostname)
-if [[ \$this_node_hostname == \$PREFILL_HEAD ]]; then
+# Split nodes here by index
+if (( SLURM_PROCID == 0 )); then
+    # Prefill head
+
     # TODO @bxyu-nvidia: Bake into container build
     pip install vllm-router
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=\$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --host \$this_node_hostname \
-        --port \$PREFILL_SERVER_PORT \
+        --port $PREFILL_SERVER_PORT \
         --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-address \$this_node_hostname \
-        --data-parallel-rpc-port \$PREFILL_DP_RPC_PORT \
+        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
         &
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-    wait_for_server "\$prefill_pid" "http://\$PREFILL_HEAD:\$PREFILL_SERVER_PORT"
+    wait_for_server "\$prefill_pid" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT"
 
-    until curl -fsS "http://\$DECODE_HEAD:\$DECODE_SERVER_PORT/health" >/dev/null; do
+    until curl -fsS "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" >/dev/null; do
         sleep 5
     done
 
@@ -100,52 +101,51 @@ if [[ \$this_node_hostname == \$PREFILL_HEAD ]]; then
     vllm-router \
         --policy consistent_hash \
         --vllm-pd-disaggregation \
-        --prefill http://\$PREFILL_HEAD:\$PREFILL_SERVER_PORT \
-        --decode http://\$DECODE_HEAD:\$DECODE_SERVER_PORT \
+        --prefill http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
+        --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
         --host \$PREFILL_HEAD \
-        --port \$ROUTER_SERVER_PORT \
+        --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1
-elif [[ "\$SLURM_PROCID" == 1 ]]; then
-    # Prefill DP rank 1 has no API server.
+elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+    # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=\$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
         --data-parallel-size $NUM_PREFILL_NODES \
-        --data-parallel-start-rank 1 \
+        --data-parallel-start-rank \$SLURM_PROCID \
         --data-parallel-address \$PREFILL_HEAD \
-        --data-parallel-rpc-port \$PREFILL_DP_RPC_PORT \
+        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
-elif [[ "\$SLURM_PROCID" == 2 ]]; then
-    decode_host=\${PD_DECODE_HOSTS[0]}
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$decode_host \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=\$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
+    # Decode head
+
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${common_args[@]}" \
-        --host \$decode_host \
-        --port 8002 \
+        --host \$this_node_hostname \
+        --port $DECODE_SERVER_PORT \
         --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-address \$decode_host \
-        --data-parallel-rpc-port \$DECODE_DP_RPC_PORT \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-elif [[ "\$SLURM_PROCID" == 3 ]]; then
-    # Decode DP rank 1 has no API server.
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\${PD_DECODE_HOSTS[1]} \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=\$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${common_args[@]}" \
-        --headless \
-        --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-start-rank 1 \
-        --data-parallel-address \${PD_DECODE_HOSTS[0]} \
-        --data-parallel-rpc-port \$DECODE_DP_RPC_PORT \
+        --data-parallel-address \$DECODE_HEAD \
+        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 else
-    echo "Unexpected Slurm task rank: \$SLURM_PROCID" >&2
-    exit 2
+    # Decode worker
+
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+    vllm serve "$MODEL" "\${common_args[@]}" \
+        --headless \
+        --data-parallel-size $NUM_DECODE_NODES \
+        --data-parallel-start-rank (( SLURM_PROCID - $NUM_PREFILL_NODES )) \
+        --data-parallel-address \$DECODE_HEAD \
+        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
+        --kv-transfer-config \
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 fi
 EOF
 )
@@ -157,8 +157,8 @@ set -euo pipefail
 nodes=($(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
 # Do not start Ray: each Slurm task directly runs a vLLM DP rank.
-PD_PREFILL_HOSTS="\${nodes[*]:0:$NUM_PREFILL_NODES}" \
-PD_DECODE_HOSTS="\${nodes[*]:$NUM_PREFILL_NODES}" \
+PREFILL_HEAD="\${nodes[0]}" \
+DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --container-image=\$CONTAINER \
     --container-name=container-on-node \
