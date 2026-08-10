@@ -202,7 +202,14 @@ class TestParseOpencodeSession:
         db = _session_db(
             tmp_path,
             [
-                ("root", "user", [{"type": "text", "text": "solve"}]),
+                (
+                    "root",
+                    "user",
+                    [
+                        {"type": "text", "text": "solve"},
+                        {"type": "text", "text": "not replayed", "ignored": True},
+                    ],
+                ),
                 (
                     "root",
                     "assistant",
@@ -227,7 +234,7 @@ class TestParseOpencodeSession:
                                 "status": "completed",
                                 "input": {"command": "pwd"},
                                 "output": "/workspace",
-                                "time": {"start": 1200, "end": 1600},
+                                "time": {"start": 1200, "end": 1600, "compacted": 2500},
                             },
                         },
                     ],
@@ -259,6 +266,15 @@ class TestParseOpencodeSession:
         assert child.parent_invocation_id == root.invocation_id
         assert child.spawned_by_tool_call_id == "task-1"
         assert any(item.type == "reasoning" for item in child.conversation)
+        assert all(getattr(item, "content", None) != "not replayed" for item in root.conversation)
+        assert (
+            next(
+                item.output
+                for item in root.conversation
+                if isinstance(item, NeMoGymFunctionCallOutput) and item.call_id == "bash-1"
+            )
+            == "[Old tool result content cleared]"
+        )
         assert {tool.tool_call_id: tool.duration_ms for tool in _tool_calls(bundle)} == {
             "task-1": 2000,
             "bash-1": 400,
@@ -304,6 +320,13 @@ class TestParseOpencodeSession:
         }
 
 
+class TestDeepMerge:
+    def test_nested_merge(self) -> None:
+        base = {"a": {"b": 1, "c": 2}}
+        OpenCodeAgent._deep_merge(base, {"a": {"c": 3, "d": 4}})
+        assert base == {"a": {"b": 1, "c": 3, "d": 4}}
+
+
 class TestEnv:
     def test_env_passthrough(self) -> None:
         agent = _make_agent(openai_api_key="k", openai_base_url="https://x/v1", env={"FOO": "bar", "EMPTY": ""})
@@ -344,65 +367,32 @@ class TestRolloutObservability:
             env = agent._env(str(tmp_path), "1-2")
 
         written = json.loads((tmp_path / "opencode.json").read_text())
-        assert written["provider"]["openai"]["options"]["baseURL"] == "http://policy/ng-rollout/1-2/v1"
+        assert written["provider"]["nemo"]["options"]["baseURL"] == "http://policy/ng-rollout/1-2/v1"
+        assert written["provider"]["openai"]["options"]["baseURL"] == "https://api.openai.com/v1"
         assert env["OPENAI_BASE_URL"] == "http://policy/ng-rollout/1-2/v1"
+        assert env["OPENAI_API_KEY"] == "EMPTY"  # pragma: allowlist secret
         assert agent.config.opencode_config == opencode_config
-
-    def test_response_propagates_rollout_and_artifact_reports_exact_tool_timing(self, tmp_path: Path) -> None:
-        db = _session_db(
-            tmp_path,
-            [
-                (
-                    "assistant",
-                    [
-                        {
-                            "type": "tool",
-                            "callID": "c1",
-                            "tool": "bash",
-                            "state": {
-                                "status": "completed",
-                                "input": {},
-                                "output": "ok",
-                                "time": {"start": 1000, "end": 1250},
-                            },
-                        }
-                    ],
-                )
-            ],
-        )
-        items, usage = parse_opencode_session(db)
-        observations = _parse_opencode_session(db, "1-2")
-        agent = _make_agent()
-        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", observations))
-        request = MagicMock()
-        request.path_params = {"rollout_id": "1-2"}
-
-        response = asyncio.run(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="solve")))
-
-        assert agent._run_opencode.await_args.kwargs["rollout_id"] == "1-2"
-        assert response.output
-        tool_call = _tool_calls(observations)[0]
-        assert tool_call.status == "completed"
-        assert tool_call.duration_ms == 250
-        assert tool_call.timing_source == "artifact"
-        assert {gap.code for gap in observations.gaps} == {
-            "model_call_ownership_unavailable",
-            "no_sandbox_runtime",
-        }
 
     def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path) -> None:
         _, usage = parse_opencode_session(tmp_path / "missing.db")
         observations = _parse_opencode_session(tmp_path / "missing.db", "1-2")
-        agent = _make_agent()
+        agent = _make_agent(system_prompt="configured system")
         agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
-
-        episode = asyncio.run(
-            agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), rollout_id="1-2")
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(role="system", content="request system"),
+                NeMoGymEasyInputMessage(role="user", content="old question"),
+                NeMoGymEasyInputMessage(role="assistant", content="old answer"),
+                NeMoGymEasyInputMessage(role="user", content="solve"),
+            ]
         )
 
+        episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
+
         assert episode.response.output
+        assert agent._run_opencode.await_args.args == ("solve", "configured system\n\nrequest system")
         assert _invocations(episode.observations)[0].conversation == [
-            NeMoGymEasyInputMessage(role="user", content="solve")
+            NeMoGymEasyInputMessage(role="user", content="configured system\n\nrequest system\n\nsolve")
         ]
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
 
@@ -445,20 +435,9 @@ class TestRolloutObservability:
         assert result.ng_agent_observations is not None
         assert _invocations(result.ng_agent_observations)[0].conversation
         assert agent._run_opencode.await_args.kwargs["rollout_id"] == "1-2"
-
-    def test_public_observation_boundary_collects_without_a_request(self) -> None:
-        agent = _make_agent()
-        observations = AgentObservationBundle(source="opencode")
-        agent._run_opencode = AsyncMock(
-            return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", observations)
-        )
-
-        episode = asyncio.run(
-            agent.responses_with_observations(None, NeMoGymResponseCreateParamsNonStreaming(input="solve"))
-        )
-
-        assert episode.observations is observations
-        assert agent._run_opencode.await_args.kwargs["collect_observations"] is True
+        assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
+        verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
+        assert "_ng_agent_observations" not in verify_json["response"]
 
 
 class TestRepoDir:

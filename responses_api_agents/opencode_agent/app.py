@@ -159,7 +159,7 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
         if ptype == "text" and isinstance(text, str) and text.strip():
             if message_id in summary_text:
                 summary_text[message_id].append(text)
-            if role == "user":
+            if role == "user" and part.get("ignored") is not True:
                 conversation.append(NeMoGymEasyInputMessage(role="user", content=text))
             elif role == "assistant":
                 item = NeMoGymResponseOutputMessage(
@@ -197,7 +197,11 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
                 status=response_status,
             )
             conversation.append(call)
-            observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
+            native_time = state.get("time") if isinstance(state.get("time"), dict) else {}
+            if native_status == "completed" and native_time.get("compacted") is not None:
+                observed_tool_output = "[Old tool result content cleared]"
+            else:
+                observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
             if observed_tool_output is not None:
                 result = NeMoGymFunctionCallOutput(
                     type="function_call_output",
@@ -207,7 +211,6 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
                 )
                 conversation.append(result)
 
-            native_time = state.get("time") if isinstance(state.get("time"), dict) else {}
             native_start = native_time.get("start")
             native_end = native_time.get("end")
             valid_interval = (
@@ -503,6 +506,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if not command or shutil.which(command) is None:
             LOG.warning("opencode command %r is not on PATH yet", self.config.command)
 
+    @staticmethod
+    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                OpenCodeAgent._deep_merge(base[key], value)
+            else:
+                base[key] = value
+        return base
+
     def _workspace_root(self) -> Path:
         root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex[:8]}"
         if not root.is_absolute():
@@ -556,13 +568,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     def _env(self, data_home: str, rollout_id: Optional[str] = None) -> dict[str, str]:
         env = {**os.environ, "XDG_DATA_HOME": data_home}
-        base_url = self._resolve_model_base_url(rollout_id) if self.config.model_server else self.config.openai_base_url
+        base_url = (
+            self._resolve_model_base_url(rollout_id) if self.config.model_server else self.config.openai_base_url
+        )
         api_key = "EMPTY" if self.config.model_server else self.config.openai_api_key  # pragma: allowlist secret
         if base_url:
             env["OPENAI_BASE_URL"] = base_url
         if api_key:
             env["OPENAI_API_KEY"] = api_key
         env.update({k: v for k, v in self.config.env.items() if v})
+        if self.config.model_server is not None:
+            env["OPENAI_BASE_URL"] = base_url
+            env["OPENAI_API_KEY"] = "EMPTY"  # pragma: allowlist secret
         return env
 
     async def _run_opencode(
@@ -654,6 +671,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         user_message, input_system = _extract_instruction(body.input)
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
+        prompt = user_message if system_prompt is None else f"{system_prompt}\n\n{user_message}"
 
         output_items, usage, model_name, observations = await self._run_opencode(
             user_message,
@@ -676,7 +694,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if root is not None and not any(
                 getattr(item, "role", None) in {"user", "system", "developer"} for item in root.conversation
             ):
-                root.conversation = [*body.input, *root.conversation]
+                root.conversation = [NeMoGymEasyInputMessage(role="user", content=prompt), *root.conversation]
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
