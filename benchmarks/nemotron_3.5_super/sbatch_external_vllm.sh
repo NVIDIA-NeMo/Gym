@@ -165,9 +165,9 @@ nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 PREFILL_HEAD="\${nodes[0]}" \
 DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
-    --container-image=\$CONTAINER \
+    --container-image=$CONTAINER \
     --container-name=container-on-node \
-    --container-mounts=\$MOUNTS \
+    --container-mounts=$MOUNTS \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
     bash -lc '
@@ -179,8 +179,6 @@ EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
-CONTAINER=$CONTAINER \
-MOUNTS=$MOUNTS \
 VLLM_PD_WORKLOAD="$command" \
 VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
@@ -191,5 +189,4 @@ sbatch \
     --ntasks-per-node=1 \
     --exclusive \
     --segment=$NUM_NODES \
-    --export=ALL \
     --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'
