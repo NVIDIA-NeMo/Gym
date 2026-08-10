@@ -34,31 +34,33 @@ Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
   uv sync
   ```
 
-## Resuming an interrupted run
+## Serving the model
 
-Every Gym recipe takes `RESUME=1`, which passes `--resume` and continues from what is on
-disk. Pass the same `OUT` you used before:
-
-```bash
-RESUME=1 OUT=./results/browsecomp scripts/more/instruct/gym/browsecomp/browsecomp.sh
-```
-
-Completed rollouts are kept; rollouts still in flight when the run died are re-run.
-
-The NeMo Evaluator benchmarks track runs themselves:
+- **Hosted:** `https://integrate.api.nvidia.com/v1/chat/completions`, model
+  `nvidia/nemotron-3.5-lightning-30b-a3b`, key `NVIDIA_API_KEY`.
+- **Self-hosted vLLM:** serve
+  [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B)
+  — check its model card for the authoritative serving guidance; the command below is what
+  these recipes were validated with, on `vllm/vllm-openai:v0.26.0`.
 
 ```bash
-nel eval run --resume scripts/more/instruct/nemo-evaluator/terminal-bench-2.1.yaml
-nel eval resume <run-id>
+vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B \
+  --served-model-name nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B --port 8000 \
+  --tensor-parallel-size 2 --pipeline-parallel-size 1 --data-parallel-size 2 \
+  --data-parallel-backend ray --data-parallel-size-local 2 --api-server-count 1 \
+  --trust-remote-code --gpu-memory-utilization 0.85 \
+  --enable-prefix-caching --enable-chunked-prefill \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+  --reasoning-parser nemotron_v3 \
+  --kv-cache-dtype fp8 --mamba-cache-mode align \
+  --max-num-batched-tokens 131072 \
+  --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
 ```
 
-**GDPval** (comparison mode) records a stage as complete even if every rollout in it
-failed, so a later resume skips it forever. If an attempt ends with zero rollouts, delete
-`evaluator_rollouts_multistage_state.jsonl` before resuming — only at zero.
-
-**CritPt** resumes within the current pass. If the Artificial Analysis quota runs out,
-re-score the cached submissions instead of regenerating them:
-`python -m resources_servers.critpt.replay --cache-dir "$CRITPT_CACHE_DIR/<run-subdir>"`
+The NeMo Evaluator recipes were served with `--gpu-memory-utilization 0.95`,
+`--max-num-seqs 32` and an explicit `--max-model-len 262144` instead of
+`--max-num-batched-tokens` — throughput knobs rather than output ones, so one endpoint
+serves every recipe here.
 
 ## Benchmarks needing extra setup
 
@@ -172,6 +174,13 @@ against the four nearest. Supply all nine and the method matches the reference r
 `JUDGE_ONLY=true` re-scores deliverables you already have, and needs neither the
 sandbox nor a search key.
 
+One caveat on `RESUME`: a stage is journalled complete once it finishes, whether or not
+any rollout in it succeeded, and a resume then skips it for good. If a stage produces
+zero rollouts — an endpoint that was down the whole time, a bad key — delete
+`evaluator_rollouts_multistage_state.jsonl` from `OUT` before resuming, or that stage
+contributes nothing to the fit and the ELO comes out wrong with no error. Only at zero;
+a stage that partly succeeded resumes correctly.
+
 #### Reproducing our numbers
 
 We ran comparison mode: deliverables judged against all nine reference models above,
@@ -265,7 +274,7 @@ in your own AWS account, in the region you plan to run in, then point
 `sandbox.ecr_repository` in the config at that account's harbor ECR. Export
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` next to `POLICY_API_KEY`.
 
-Then run whichever config you want:
+Then run whichever config you want, adding `--resume` to continue an interrupted run:
 
 ```bash
 nel eval run scripts/more/instruct/nemo-evaluator/terminal-bench-2.1.yaml
