@@ -15,7 +15,7 @@
 import json
 from unittest.mock import MagicMock
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import FunctionToolParam
 from pytest import approx, fixture
 
 from nemo_gym.openai_utils import (
@@ -70,7 +70,7 @@ class TestApp:
         self,
         resources_server: SingleStepToolUseArgumentComparisonResourcesServer,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
-        tool: FunctionTool,
+        tool: FunctionToolParam,
         expected_action: ExpectedAction,
         response_id: str,
         output_item: NeMoGymResponseOutputItem,
@@ -100,10 +100,15 @@ class TestApp:
         assert verify_response.category == expected_reward_category
 
     async def test_verify(self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer) -> None:
-        tool = FunctionTool(
-            type="function",
-            name="set_metric_count",
-            parameters={
+        # Built as a FunctionToolParam rather than dumped from the FunctionTool model.
+        # The SDK's model and its param TypedDict disagree about optionality.
+        # FunctionTool.defer_loading is Optional[bool] = None, while FunctionToolParam declares it a plain bool.
+        # So FunctionTool(...).model_dump() emits defer_loading=None, which the params model rejects.
+        tool: FunctionToolParam = {
+            "type": "function",
+            "name": "set_metric_count",
+            "strict": None,
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "metric_name": {
@@ -118,8 +123,7 @@ class TestApp:
                     "metric_count",
                 ],
             },
-        )
-        tool_param = tool.model_dump()
+        }
         tool_call_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 NeMoGymEasyInputMessage(
@@ -127,7 +131,7 @@ class TestApp:
                     content="Set the views metric count to 75.",
                 )
             ],
-            tools=[tool_param],
+            tools=[tool],
         )
 
         expected_arguments = {
@@ -224,7 +228,7 @@ class TestApp:
                     content="This is a greeting.",
                 )
             ],
-            tools=[tool_param],
+            tools=[tool],
         )
         expected_message = MessageAction(
             type="message",

@@ -62,20 +62,31 @@ from openai.types.chat.completion_create_params import (
 from openai.types.responses import (
     FunctionToolParam,
     Response,
+    ResponseApplyPatchToolCall,
+    ResponseApplyPatchToolCallOutput,
     ResponseCodeInterpreterToolCall,
+    ResponseCompactionItem,
     ResponseComputerToolCall,
     ResponseCustomToolCall,
     ResponseFileSearchToolCall,
+    ResponseFunctionShellToolCall,
+    ResponseFunctionShellToolCallOutput,
     ResponseFunctionWebSearch,
     ResponseInputTextParam,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
 )
+from openai.types.responses.response_conversation_param_param import ResponseConversationParamParam
 from openai.types.responses.response_create_params import (
+    ContextManagement,
     Metadata,
+    Moderation,
     Reasoning,
     ResponseIncludable,
     ResponsePromptParam,
     ResponsesModel,
     ResponseTextConfigParam,
+    StreamOptions,
     ToolChoice,
     ToolParam,
 )
@@ -84,12 +95,14 @@ from openai.types.responses.response_function_call_output_item_list_param import
 )
 from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
+    CompactionTrigger,
     ComputerCallOutput,
     LocalShellCallOutput,
     McpApprovalResponse,
     ResponseCustomToolCallOutput,
 )
 from openai.types.responses.response_output_item import (
+    AdditionalTools,
     ImageGenerationCall,
     LocalShellCall,
     McpApprovalRequest,
@@ -220,6 +233,8 @@ class NeMoGymResponseOutputMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
+    # Codex models send this back on follow-up requests, so dropping it changes what they see.
+    phase: Optional[Literal["commentary", "final_answer"]] = None
 
 
 class NeMoGymInputVideoPart(TypedDict, total=False):
@@ -258,6 +273,8 @@ class NeMoGymEasyInputMessage(BaseModel):
     content: Union[str, NeMoGymResponseInputContentList]
     role: Literal["user", "assistant", "system", "developer"]
     type: Literal["message"] = "message"
+    # Codex models send this back on follow-up requests, so dropping it changes what they see.
+    phase: Optional[Literal["commentary", "final_answer"]] = None
 
 
 class NeMoGymMessage(BaseModel):
@@ -287,6 +304,8 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
     type: Literal["function_call"] = "function_call"
     id: Optional[str] = None
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
+    # The namespace a tool was exposed under. Dropping it loses which tool the call refers to.
+    namespace: Optional[str] = None
 
 
 class NeMoGymResponseMcpCall(McpCall):
@@ -371,7 +390,15 @@ class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
 # These models represent client-supplied results for the calls above.
 # The installed SDK defines them in ``response_input_item``.
 class NeMoGymComputerCallOutput(ComputerCallOutput):
-    """The client's result of a computer-use action (``computer_call_output`` item)."""
+    """The client's result of a computer-use action (``computer_call_output`` item).
+
+    ``status`` is widened past the input model's literal.
+    A provider reports a failed computer action with ``status="failed"``, which the SDK's output
+    model accepts and its input model does not, so inheriting the input literal unchanged would
+    make a failed action a 500 on the non-streaming path.
+    """
+
+    status: Optional[Literal["in_progress", "completed", "incomplete", "failed"]] = None
 
 
 class NeMoGymResponseCustomToolCallOutput(ResponseCustomToolCallOutput):
@@ -384,6 +411,61 @@ class NeMoGymLocalShellCallOutput(LocalShellCallOutput):
 
 class NeMoGymMcpApprovalResponse(McpApprovalResponse):
     """The client's answer to a hosted-MCP approval request (``mcp_approval_response`` item)."""
+
+
+# The Codex tool family and the context-management item, which ResponseOutputItem gained at the pinned SDK.
+# Gym has to represent each one.
+# An item it cannot represent is a 500 on the non-streaming path.
+# On the streaming path it is a silent drop from the replayed transcript.
+
+
+class NeMoGymResponseApplyPatchToolCall(ResponseApplyPatchToolCall):
+    """A patch the model wants applied (``apply_patch_call`` output item)."""
+
+
+class NeMoGymResponseApplyPatchToolCallOutput(ResponseApplyPatchToolCallOutput):
+    """The client's result of applying a patch (``apply_patch_call_output`` item)."""
+
+
+class NeMoGymResponseCompactionItem(ResponseCompactionItem):
+    """An opaque context-compaction record the provider emits (``compaction`` item)."""
+
+
+class NeMoGymResponseFunctionShellToolCall(ResponseFunctionShellToolCall):
+    """A shell command the model wants run (``shell_call`` output item)."""
+
+
+class NeMoGymResponseFunctionShellToolCallOutput(ResponseFunctionShellToolCallOutput):
+    """The client's result of running a shell command (``shell_call_output`` item)."""
+
+
+class NeMoGymResponseToolSearchCall(ResponseToolSearchCall):
+    """A tool-search call (``tool_search_call`` output item)."""
+
+
+class NeMoGymResponseToolSearchOutputItem(ResponseToolSearchOutputItem):
+    """The result of a tool search (``tool_search_output`` item)."""
+
+
+class NeMoGymCompactionTrigger(CompactionTrigger):
+    """A client's request that the provider compact the context (``compaction_trigger`` item).
+
+    The client-side counterpart to the ``compaction`` record.
+    Gym carries it so a Codex harness can ask for compaction without losing the item.
+    """
+
+
+# The tool carrier Codex code mode sends.
+class NeMoGymAdditionalTools(AdditionalTools):
+    """Tools carried inside an input item rather than the tools param (``additional_tools``).
+
+    ``role`` is narrowed to the input model's literal.
+    The SDK's output model accepts eight roles and its input model accepts only ``developer``, so
+    an item validated against the wider set cannot always be replayed as input, which is the one
+    thing this type exists to do.
+    """
+
+    role: Literal["developer"] = "developer"
 
 
 class NeMoGymResponseInputText(ResponseInputTextParam):
@@ -477,6 +559,16 @@ NeMoGymResponseInputItem = Annotated[
         NeMoGymResponseCustomToolCallOutput,
         NeMoGymLocalShellCallOutput,
         NeMoGymMcpApprovalResponse,
+        # Codex tool family and context management.
+        NeMoGymResponseApplyPatchToolCall,
+        NeMoGymResponseApplyPatchToolCallOutput,
+        NeMoGymResponseCompactionItem,
+        NeMoGymResponseFunctionShellToolCall,
+        NeMoGymResponseFunctionShellToolCallOutput,
+        NeMoGymResponseToolSearchCall,
+        NeMoGymResponseToolSearchOutputItem,
+        NeMoGymCompactionTrigger,
+        NeMoGymAdditionalTools,
         # Training variants.
         NeMoGymEasyInputMessageForTraining,
         NeMoGymMessageForTraining,
@@ -512,6 +604,17 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     reasoning: Optional[Reasoning] = None
     service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
     store: Optional[bool] = None
+    # Mirrored from the pinned SDK's request schema.
+    # The model forbids extras, so a field the SDK has and this does not is a 422 on the
+    # non-streaming path, and sanitize_streaming_responses_body filters it out on the streaming
+    # one, which loses it without saying so.
+    context_management: Optional[List[ContextManagement]] = None
+    conversation: Union[str, ResponseConversationParamParam, None] = None
+    moderation: Optional[Moderation] = None
+    prompt_cache_key: Optional[str] = None
+    prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
+    safety_identifier: Optional[str] = None
+    stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
     text: Optional[ResponseTextConfigParam] = None
     tool_choice: ToolChoice = "auto"  # OpenAI default

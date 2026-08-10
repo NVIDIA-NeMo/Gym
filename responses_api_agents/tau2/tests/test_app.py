@@ -43,6 +43,17 @@ from responses_api_agents.tau2.app import (
 from tau2.data_model.message import AssistantMessage, UserMessage
 from tau2.data_model.simulation import RewardInfo, SimulationRun, TerminationReason
 from tau2.utils import llm_utils as tau2_llm_utils
+
+
+def _drop_nulls(value):
+    """Recursively remove keys whose value is None."""
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
 # isort: on
 
 
@@ -356,7 +367,12 @@ class TestApp:
 
             d["duration"] = 0.0
 
-            return d
+            # NeMoGymResponse inherits the SDK's Response, so each openai release can add optional fields.
+            # They arrive here as None.
+            # Dropping nulls ignores that, while a field this fixture expects to hold a value
+            # still fails if it arrives as None.
+            # tests/unit_tests/test_openai_utils.py owns the full field set.
+            return _drop_nulls(d)
 
         assert _clean(expected_response_dict) == _clean(actual_response_dict)
 

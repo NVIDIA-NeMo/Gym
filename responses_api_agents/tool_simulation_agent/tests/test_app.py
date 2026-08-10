@@ -26,6 +26,27 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.tool_simulation_agent.app import ToolSimulationAgent, ToolSimulationAgentConfig
 
 
+def _drop_nulls(value):
+    """Recursively remove keys whose value is None.
+
+    These tests assert the exact payload sent downstream, and that payload contains a NeMoGymResponse dump.
+    NeMoGymResponse inherits the SDK's Response, so each openai release can add optional fields.
+    They arrive here as None and break a literal comparison.
+    Dropping nulls on both sides ignores that class of change.
+    A field the fixture expects to hold a value still fails if it arrives as None.
+    tests/unit_tests/test_openai_utils.py is what notices the field set moving.
+    """
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
+def _calls_without_nulls(calls):
+    return [(c.args, _drop_nulls(c.kwargs)) for c in calls]
+
+
 class TestApp:
     @fixture
     def agent_config(self) -> ToolSimulationAgentConfig:
@@ -187,7 +208,7 @@ class TestApp:
             "usage": None,
             "user": None,
         }
-        assert chat_response.json() == expected_chat_response_json
+        assert _drop_nulls(expected_chat_response_json) == _drop_nulls(chat_response.json())
         server_client_post_mock.assert_called_once_with(
             server_name="model_server",
             url_path="/v1/responses",
@@ -376,7 +397,9 @@ class TestApp:
                 },
             ),
         ]
-        assert server_client_post_mock.call_args_list == expected_invalid_verify_response_calls
+        assert _calls_without_nulls(server_client_post_mock.call_args_list) == _calls_without_nulls(
+            expected_invalid_verify_response_calls
+        )
 
         valid_verify_response_object = {
             "responses_create_params": {
@@ -446,8 +469,10 @@ class TestApp:
             "reward": 1,
             "failure_reason": None,
         }
-        assert valid_verify_response.json() == expected_valid_verify_response_json
-        assert server_client_post_mock.call_args_list == expected_invalid_verify_response_calls
+        assert _drop_nulls(expected_valid_verify_response_json) == _drop_nulls(valid_verify_response.json())
+        assert _calls_without_nulls(server_client_post_mock.call_args_list) == _calls_without_nulls(
+            expected_invalid_verify_response_calls
+        )
 
     async def test_run_skip_verification_uses_configured_reward(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()

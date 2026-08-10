@@ -38,6 +38,23 @@ from responses_api_agents.cvdp_agent.app import (
 )
 
 
+def _drop_nulls(value):
+    """Recursively remove keys whose value is None.
+
+    NeMoGymResponse and the item models under it inherit the SDK's, so each openai release can add
+    optional fields at any depth. They arrive as None and break a literal comparison.
+    Comparing only the top-level keys this test asserts does not reach a field added inside
+    `output`, where the item models live.
+    A field this fixture expects to hold a value still fails if it arrives as None.
+    tests/unit_tests/test_openai_utils.py is what notices the field set moving.
+    """
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
 class TestApp:
     def test_sanity(self) -> None:
         config = CVDPAgentConfig(
@@ -167,7 +184,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
 
 class TestAgenticSandboxSpec:
@@ -512,4 +529,4 @@ class TestAgenticSandboxSpec:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
