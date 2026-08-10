@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+# One four-GPU GB200 node is dedicated to prefill and one to decode.  The
+# client-facing vllm-router runs with prefill on the first allocated node.
 NUM_NODES=${NUM_NODES:?Set NUM_NODES=2}
 MODEL=${MODEL:?Set MODEL to the model path or ID}
 CONTAINER=${CONTAINER:?Set CONTAINER to the vLLM container image}
@@ -15,15 +17,12 @@ fi
 command=$(cat <<EOF
 set -euo pipefail
 
-# TODO: bake vllm-router into the evaluation container.
-pip install vllm-router
+prefill_host=\${PD_PREFILL_HOST:?Missing prefill node address}
+decode_host=\${PD_DECODE_HOST:?Missing decode node address}
 
-host=\$(hostname -I | awk '{print \$1}')
 common_args=(
     --gpu-memory-utilization 0.9
-    --distributed-executor-backend ray
-    --data-parallel-backend ray
-    --data-parallel-size 1
+    --distributed-executor-backend mp
     --tensor-parallel-size 4
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
@@ -35,66 +34,59 @@ common_args=(
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --max-num-batched-tokens 8192
-    --host \$host
 )
-
-# The prefill API and engine are packed on the Ray head.
-VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
-VLLM_RAY_DP_PACK_STRATEGY=fill \
-VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
-vllm serve "$MODEL" "\${common_args[@]}" \
-    --port 8001 \
-    --data-parallel-size-local 1 \
-    --data-parallel-address \$host \
-    --master-addr \$host \
-    --kv-transfer-config \
-        '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
-    &
-prefill_pid=\$!
 
 wait_for_server() {
     local pid=\$1
-    local port=\$2
+    local url=\$2
 
-    while ! curl -fsS "http://\$host:\$port/health" >/dev/null; do
+    while ! curl -fsS "\$url/health" >/dev/null; do
         if ! kill -0 "\$pid" 2>/dev/null; then
-            echo "vLLM on port \$port exited before becoming healthy." >&2
+            echo "vLLM at \$url exited before becoming healthy." >&2
             wait "\$pid"
         fi
         sleep 5
     done
 }
 
-wait_for_server "\$prefill_pid" 8001
+if [[ "\$SLURM_PROCID" == 0 ]]; then
+    # Prefill is a node-local TP=4 vLLM server on the first Slurm node.
+    pip install vllm-router
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\$prefill_host \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+    vllm serve "$MODEL" "\${common_args[@]}" \
+        --host \$prefill_host \
+        --port 8001 \
+        --kv-transfer-config \
+            '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
+        &
+    prefill_pid=\$!
+    trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-# Decode has no local engine. With fill packing, Ray skips the fully occupied
-# head node and places this TP=4 engine on the other allocated node.
-VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
-VLLM_RAY_DP_PACK_STRATEGY=fill \
-VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
-vllm serve "$MODEL" "\${common_args[@]}" \
-    --port 8002 \
-    --data-parallel-size-local 0 \
-    --data-parallel-address \$host \
-    --master-addr \$host \
-    --kv-transfer-config \
-        '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    &
-decode_pid=\$!
+    wait_for_server "\$prefill_pid" "http://\$prefill_host:8001"
 
-trap 'kill "\$prefill_pid" "\$decode_pid" 2>/dev/null || true' EXIT
-
-wait_for_server "\$decode_pid" 8002
-
-vllm-router \
-    --policy round_robin \
-    --vllm-pd-disaggregation \
-    --prefill http://\$host:8001 \
-    --decode http://\$host:8002 \
-    --host \$host \
-    --port 8000 \
-    --intra-node-data-parallel-size 1
+    vllm-router \
+        --policy round_robin \
+        --vllm-pd-disaggregation \
+        --prefill http://\$prefill_host:8001 \
+        --decode http://\$decode_host:8002 \
+        --host \$prefill_host \
+        --port 8000 \
+        --intra-node-data-parallel-size 1
+elif [[ "\$SLURM_PROCID" == 1 ]]; then
+    # Decode is a separate node-local TP=4 vLLM server on the second node.
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\$decode_host \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
+    vllm serve "$MODEL" "\${common_args[@]}" \
+        --host \$decode_host \
+        --port 8002 \
+        --kv-transfer-config \
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+else
+    echo "Unexpected Slurm task rank: \$SLURM_PROCID" >&2
+    exit 2
+fi
 EOF
 )
 
@@ -108,4 +100,4 @@ sbatch \
     --job-name=vllm-pd-disagg-$USER \
     --exclusive \
     --segment=$NUM_NODES \
-    scripts/sbatch_base.sh bash -lc "$command"
+    scripts/sbatch_pd_disagg_base.sh bash -lc "$command"
