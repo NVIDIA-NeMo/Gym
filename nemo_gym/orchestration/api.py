@@ -36,7 +36,8 @@ class BaseServiceConfig(_StrictModel):
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
     env: dict[str, str] = {}
-    # Pyxis-style bind mounts passed as --container-mounts. Each entry is "src:dst" or "src".
+    # Pyxis-style bind mounts passed as --container-mounts.
+    # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
 
 
@@ -125,7 +126,8 @@ class DriverConfig(_StrictModel):
     policy_model: str | None = None
     benchmarks: dict[str, BenchmarkRunConfig]
     env: dict[str, str] = {}
-    # Pyxis-style bind mounts passed as --container-mounts. Each entry is "src:dst" or "src".
+    # Pyxis-style bind mounts passed as --container-mounts.
+    # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
 
 

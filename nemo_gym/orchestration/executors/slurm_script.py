@@ -103,7 +103,7 @@ def _render_service_command(
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
-    mounts_flag = f" --container-mounts={','.join(mounts)}" if mounts else ""
+    mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
@@ -171,7 +171,11 @@ def build_sbatch_script(
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
-    driver_mounts_flag = f" --container-mounts={','.join(config.driver.mounts)}" if config.driver.mounts else ""
+    driver_mounts_flag = (
+        f" --container-mounts={','.join(shlex.quote(m) for m in config.driver.mounts)}"
+        if config.driver.mounts
+        else ""
+    )
     driver_command = (
         f"{gym_cmd}\n"
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_mounts_flag} --container-image={shlex.quote(config.driver.container)} "

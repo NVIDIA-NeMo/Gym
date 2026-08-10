@@ -516,6 +516,79 @@ def test_build_sbatch_script_no_mounts_by_default(submit_config, bench_dir):
 
 
 # ---------------------------------------------------------------------------
+# _validate_mounts
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock
+
+from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.slurm import _validate_mounts
+
+
+def _make_submit_config_with_mounts(driver_mounts=None, service_mounts=None):
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    **({"mounts": service_mounts} if service_mounts is not None else {}),
+                }
+            },
+            "compute": {"cluster": {"type": "slurm", "account": "acct", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {}},
+                **({"mounts": driver_mounts} if driver_mounts is not None else {}),
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+
+
+def test_validate_mounts_local_passes_when_src_exists(tmp_path):
+    src = str(tmp_path)
+    config = _make_submit_config_with_mounts(driver_mounts=[f"{src}:/data"])
+    _validate_mounts(config, LocalConnection())
+
+
+def test_validate_mounts_local_raises_for_missing_src(tmp_path):
+    src = str(tmp_path / "nonexistent")
+    config = _make_submit_config_with_mounts(driver_mounts=[f"{src}:/data"])
+    with pytest.raises(ValueError, match="driver"):
+        _validate_mounts(config, LocalConnection())
+
+
+def test_validate_mounts_local_parses_flags_format(tmp_path):
+    src = str(tmp_path)
+    config = _make_submit_config_with_mounts(driver_mounts=[f"{src}:/data:ro"])
+    _validate_mounts(config, LocalConnection())  # should check src only, not src:ro
+
+
+def test_validate_mounts_remote_passes_when_all_exist():
+    config = _make_submit_config_with_mounts(driver_mounts=["/lustre/data:/data"])
+    conn = MagicMock()
+    conn.run.return_value = ""  # no __GYM_MISSING lines
+    _validate_mounts(config, conn)
+
+
+def test_validate_mounts_remote_raises_for_missing_src():
+    config = _make_submit_config_with_mounts(service_mounts=["/lustre/missing:/data"])
+    conn = MagicMock()
+    conn.run.return_value = "__GYM_MISSING:/lustre/missing"
+    with pytest.raises(ValueError, match="services\\.vllm_model"):
+        _validate_mounts(config, conn)
+
+
+def test_validate_mounts_no_mounts_passes():
+    config = _make_submit_config_with_mounts()
+    conn = MagicMock()
+    _validate_mounts(config, conn)
+    conn.run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
