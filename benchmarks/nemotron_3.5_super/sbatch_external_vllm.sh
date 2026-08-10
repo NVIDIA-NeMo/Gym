@@ -28,7 +28,7 @@ DECODE_SERVER_PORT=8002
 PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
 
-eval_command=$(cat <<EOF
+EVAL_COMMAND=$(cat <<EOF
 # Activate environment in container and cd into Gym. The Gym path here may be mounted.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
@@ -214,7 +214,7 @@ if (( $should_run_eval )); then
         bash -lc '
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
-            exec bash -lc "\$VLLM_PD_EVAL_WORKLOAD"
+            exec bash -lc "\$EVAL_COMMAND"
         ' || eval_status=\$?
 
     cleanup_server
@@ -228,7 +228,7 @@ EOF
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 VLLM_PD_WORKLOAD="$command" \
-VLLM_PD_EVAL_WORKLOAD="$eval_command" \
+EVAL_COMMAND="$EVAL_COMMAND" \
 VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
