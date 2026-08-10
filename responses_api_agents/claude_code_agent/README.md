@@ -2,6 +2,8 @@
 
 Runs Claude Code CLI (`claude -p`) as a NeMo Gym agent server.
 
+Docs: [Anthropic Messages](https://docs.nvidia.com/nemo/gym/main/model-server/anthropic-messages) — how every Gym model server exposes `/v1/messages`, and how to wire this agent to any `model_server`.
+
 ## Quick start
 
 ### env.yaml
@@ -39,7 +41,9 @@ Every Gym model server now exposes `POST /v1/messages` (a default Messages ↔ R
 `reasoning_gym_claude_code_agent_model_server.yaml` wires the agent's `model_server` ref to `policy_model`. Compose it with any model server (here a vLLM serving `policy_model`):
 
 ```bash
-ng_run "+config_paths=[resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent_model_server.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+  --resources-server reasoning_gym/reasoning_gym_claude_code_agent_model_server \
+  --model-type vllm_model
 ```
 
 This path needs only the model server's `policy_base_url`, `policy_api_key`, and `policy_model_name` (in `env.yaml` or as `+` overrides) — no `anthropic_*` vars.
@@ -56,14 +60,14 @@ gym eval run --no-serve \
     --limit 1
 ```
 
-For the model-server config above, use `+agent_name=reasoning_gym_claude_code_agent_model_server`.
+For the model-server config above, use `--agent reasoning_gym_claude_code_agent_model_server`.
 
 ### Smoke test
 
-Check the `/v1/messages` proxy and the real-CLI seam without a full rollout. Launch a model server, then take its URL from the `ng_run` log (`'url': 'http://127.0.0.1:<port>'`):
+Check the `/v1/messages` proxy and the real-CLI seam without a full rollout. Launch a model server, then take its URL from the `gym env start` log (`'url': 'http://127.0.0.1:<port>'`):
 
 ```bash
-ng_run "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+gym env start --model-type vllm_model \
   +policy_base_url=https://integrate.api.nvidia.com/v1 \
   '+policy_api_key=${oc.env:NVIDIA_API_KEY}' +policy_model_name=meta/llama-3.1-8b-instruct
 
@@ -117,7 +121,7 @@ claude_code_agent:
 - `model`: model name. Full names like `Qwen/Qwen3-4B-Instruct-2507` are kept as-is for local endpoints; the provider prefix is stripped only when `anthropic_base_url` is not set
 - `anthropic_api_key`: Anthropic API key, or any non-empty string for local endpoints
 - `anthropic_base_url`: if set, used as `ANTHROPIC_BASE_URL`. Leave null for the real Anthropic API
-- `max_turns`: passed to `--max-turns`
+- `max_turns`: passed to `--max-turns`. Set to `null` to omit the flag entirely (unlimited turns)
 - `timeout`: per-request wall-clock seconds
 - `system_prompt`: appended to Claude Code's built-in system prompt via `--append-system-prompt`. The data's system message (if any) is also appended after this.
 - `allowed_tools`: passed to `--allowedTools` (e.g. `"Bash,Read"`)
@@ -144,7 +148,7 @@ The per-run `CLAUDE_CONFIG_DIR` is created fresh for each request and removed af
 
 ## Skills evaluation
 
-Skills are evaluated as a run-level variable, not a dataset field — the same skill-agnostic dataset is reused across skill variants (mirroring how `prompt_config` works). You point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `ng_collect_rollouts`, and the agent stages them into each request's `CLAUDE_CONFIG_DIR/skills/` so Claude Code's native discovery picks them up. When skills are present, `--bare` is forced off for that request regardless of the `bare` config.
+Skills are evaluated as a run-level variable, not a dataset field — the same skill-agnostic dataset is reused across skill variants (mirroring how `prompt_config` works). You point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `gym eval run`, and the agent stages them into each request's `CLAUDE_CONFIG_DIR/skills/` so Claude Code's native discovery picks them up. When skills are present, `--bare` is forced off for that request regardless of the `bare` config.
 
 Expected layout (each skill is a directory with a `SKILL.md`):
 
@@ -163,14 +167,14 @@ skills/variant_a/
 Compare two variants over the same dataset by changing only `skills.path`:
 
 ```bash
-ng_collect_rollouts +agent_name=reasoning_gym_claude_code_agent \
-    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=rollouts_variant_a.jsonl \
+gym eval run --agent reasoning_gym_claude_code_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output rollouts_variant_a.jsonl \
     +skills.path=skills/variant_a/
 
-ng_collect_rollouts +agent_name=reasoning_gym_claude_code_agent \
-    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
-    +output_jsonl_fpath=rollouts_variant_b.jsonl \
+gym eval run --agent reasoning_gym_claude_code_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output rollouts_variant_b.jsonl \
     +skills.path=skills/variant_b/
 ```
 
@@ -194,5 +198,6 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 ## Limitations
 
 - Eval only for now. Token IDs and logprobs are not wired up yet.
-- Does not go through Gym's model server. Token counts come from Claude Code's own usage reporting.
-- `turns_used` counts assistant messages right now, not tool calls.
+- With `model_server`, model calls go through Gym and can be captured. Direct Anthropic or
+  `anthropic_base_url` runs bypass Gym capture.
+- `turns_used` counts assistant messages, not tool calls.

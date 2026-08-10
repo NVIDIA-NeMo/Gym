@@ -1,0 +1,44 @@
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Harbor agent for BiomniBench-DA (Singularity HPC profile).
+      concurrency: 4
+
+      harbor_datasets:
+        biomnibench_da:
+          local_dataset_path: "environments/biomnibench_da/data/example_singularity"
+          workdir: "/app"
+
+      harbor_agent_name: null
+      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+      harbor_agent_kwargs:
+        max_turns: 20
+        interleaved_thinking: true
+        enable_summarize: false
+        collect_rollout_details: true
+        trajectory_config:
+          raw_content: true
+        model_info:
+          max_input_tokens: 49152
+          max_output_tokens: 49152
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+
+      harbor_environment_type: null
+      harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.singularity.singularity:SingularityEnvironment"
+      harbor_environment_kwargs:
+        singularity_image_cache_dir: "responses_api_agents/harbor_agent/singularity_cache"
+      harbor_no_delete: true
+
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      harbor_agent_override_timeout: null
+      harbor_agent_max_timeout: null
+      harbor_verifier_override_timeout: null
+      harbor_verifier_max_timeout: null
+      harbor_timeout_multiplier: null
+      harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"

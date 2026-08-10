@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prepare SciCode evaluation data for NeMo Gym.
+"""Prepare the AA-aligned SciCode evaluation data for NeMo Gym.
 
 Downloads the SciCode problems from HuggingFace and converts to Gym JSONL, one row per problem.
 Each row carries the full sub_steps list so the agent can build the per-sub-step prompts and the
 resources server can run each sub-step's test cases.
 
-The benchmark split is validation + test combined (what nemo-skills calls its "test_aai" split).
+The benchmark uses only HuggingFace's test split, matching the current AA Intelligence Index setup.
 
 This does NOT download test_data.h5 (the ~1 GB numeric test targets used for scoring). That file
 must be staged manually at the path the resources server is configured to read.
@@ -34,8 +34,8 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "scicode_benchmark.jsonl"
 
-# Evaluate on all 80 problems
-SPLITS = ["validation", "test"]
+# Keep this aligned with the current AA SciCode problem set.
+SPLITS = ["test"]
 
 
 def prepare() -> Path:

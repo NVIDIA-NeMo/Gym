@@ -6,8 +6,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import ray
-
 from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,
@@ -89,6 +87,9 @@ class DeepSWEAgent(HarborAgent):
 
     async def _run_job(self, job_config_dict: dict[str, Any]) -> str:
         runner = runner_ray_remote
+        runner_options: dict[str, Any] = {}
+        if self.config.harbor_ray_task_num_cpus is not None:
+            runner_options["num_cpus"] = self.config.harbor_ray_task_num_cpus
         _, configured_key = _provider_without_secret(self.config.sandbox_provider)
         api_key = configured_key or os.getenv(OPENSANDBOX_API_KEY_ENV)
         runtime_env_vars: dict[str, str] = {}
@@ -98,15 +99,14 @@ class DeepSWEAgent(HarborAgent):
         if policy_api_key:
             runtime_env_vars[POLICY_API_KEY_ENV] = policy_api_key
         if runtime_env_vars:
-            runner = runner.options(
-                runtime_env={
-                    "py_executable": os.sys.executable,
-                    "env_vars": runtime_env_vars,
-                }
-            )
+            runner_options["runtime_env"] = {
+                "py_executable": os.sys.executable,
+                "env_vars": runtime_env_vars,
+            }
+        if runner_options:
+            runner = runner.options(**runner_options)
         params = {"job_config_dict": job_config_dict}
-        future = runner.remote(_run_pier_job_sync, params)
-        return await asyncio.to_thread(ray.get, future)
+        return await runner.remote(_run_pier_job_sync, params)
 
     def _build_job_config(
         self,

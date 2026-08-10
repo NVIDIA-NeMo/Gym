@@ -67,4 +67,4 @@ ARC-AGI-2 example rollouts:
 gym eval run --no-serve --agent arc_agi_simple_agent --input environments/arc_agi/data/example_2.jsonl --output environments/arc_agi/data/example_2_rollouts.jsonl
 ```
 
-For training, see the [docs](https://docs.nvidia.com/nemo/gym/latest/training-tutorials/nemo-rl-grpo/index.html).
+For training, see the [docs](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo).

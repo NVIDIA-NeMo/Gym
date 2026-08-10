@@ -30,13 +30,13 @@ policy_model_name: meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
 Then reference the provider config:
 
 ```bash
-ng_run "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml,responses_api_models/inference_provider/configs/together.yaml]"
+gym env start --resources-server my_benchmark --model-type inference_provider/together
 ```
 
 Or use the generic config and set the base URL in `env.yaml`:
 
 ```bash
-ng_run "+config_paths=[resources_servers/my_benchmark/configs/my_benchmark.yaml,responses_api_models/inference_provider/configs/inference_provider.yaml]"
+gym env start --resources-server my_benchmark --model-type inference_provider
 ```
 
 ## Configuration

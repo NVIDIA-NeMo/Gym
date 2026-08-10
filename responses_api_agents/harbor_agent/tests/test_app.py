@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.harbor_agent.app import (
     HarborAgent,
@@ -282,10 +283,16 @@ def _harbor_run_mocks(
         patch.object(HarborAgent, "_build_job_config", return_value={"job_name": "mock_job"}),
     ):
         mock_gc.return_value = _GLOBAL_CONFIG
-        mock_ray.remote.return_value = MagicMock()
+
+        # The handler awaits the ray ObjectRef directly, so the mocked
+        # future must be awaitable.
+        async def _resolve_future():
+            if side_effect:
+                raise side_effect
+            return trial_dir
 
         if side_effect:
-            mock_to_thread.side_effect = side_effect
+            trial_dir = None
         else:
             trial_dir = tempfile.mkdtemp(prefix="harbor_trial_")
             (Path(trial_dir) / "result.json").write_text(json.dumps(trial_result or DEFAULT_TRIAL_RESULT))
@@ -293,7 +300,14 @@ def _harbor_run_mocks(
                 agent_dir = Path(trial_dir) / "agent"
                 agent_dir.mkdir(parents=True, exist_ok=True)
                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
-            mock_to_thread.return_value = trial_dir
+        mock_ray.remote.side_effect = lambda *a, **k: _resolve_future()
+        mock_ray.options.return_value.remote.side_effect = lambda *a, **k: _resolve_future()
+
+        # File parsing goes through asyncio.to_thread; run it inline.
+        async def _run_inline(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        mock_to_thread.side_effect = _run_inline
 
         yield
 
@@ -304,9 +318,31 @@ def _harbor_run_mocks(
 
 
 class TestApp:
-    def test_setup_webserver_includes_aggregate_metrics(self):
-        paths = {route.path for route in _make_server().setup_webserver().routes}
-        assert {"/run", "/v1/responses", "/aggregate_metrics"}.issubset(paths)
+    def test_setup_webserver_registers_aggregate_metrics_route(self):
+        # Regression test: HarborAgent.setup_webserver() replaces (rather than extends)
+        # SimpleResponsesAPIAgent.setup_webserver(), so /aggregate_metrics must be
+        # re-registered explicitly or ng_collect_rollouts's post-collection call 404s.
+        server = _make_server()
+        app = server.setup_webserver()
+        route_paths = {route.path for route in app.routes}
+        assert "/aggregate_metrics" in route_paths
+        assert "/v1/responses" in route_paths
+        assert "/run" in route_paths
+
+    async def test_aggregate_metrics_uses_default_reward_aggregation(self):
+        # HarborAgent doesn't override compute_metrics/get_key_metrics, so this exercises
+        # the inherited AggregateMetricsMixin default: mean/max/min/median/std over `reward`.
+        server = _make_server()
+        request = AggregateMetricsRequest(
+            verify_responses=[
+                {"reward": 1.0, "_ng_task_index": 0, "_ng_rollout_index": 0},
+                {"reward": 0.0, "_ng_task_index": 1, "_ng_rollout_index": 0},
+            ]
+        )
+        result = await server.aggregate_metrics(request)
+
+        assert result.agent_metrics["mean/reward"] == 0.5
+        assert result.key_metrics["mean/reward"] == 0.5
 
     async def test_run_with_token_details(self):
         server = _make_server()
@@ -495,6 +531,30 @@ class TestApp:
         assert config["datasets"][0]["name"] == "terminal-bench"
         assert config["datasets"][0]["version"] == "2.0"
         assert config["datasets"][0]["task_names"] == ["fix-git"]
+
+    def test_build_job_config_harbor_no_delete(self) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(harbor_no_delete=True, harbor_environment_type="docker")
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+        assert config["environment"]["delete"] is False
+
+        server = _make_server(harbor_no_delete=False, harbor_environment_type="docker")
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://policy-host:9000/v1",
+            job_name="test_job",
+            jobs_dir=Path("/tmp/harbor_jobs"),
+        )
+        assert config["environment"]["delete"] is True
 
     @pytest.mark.parametrize(
         "instance_id, expected_alias, expected_task",

@@ -25,7 +25,7 @@ dynamic = [
 ]
 description = "NeMo Gym is a library for building reinforcement learning environments"
 license = {file = "LICENSE"}
-requires-python = ">=3.12"
+requires-python = ">=3.13.14"
 authors = [{ name = "NVIDIA" }]
 maintainers = [{ name = "NVIDIA" }]
 
@@ -57,7 +57,7 @@ classifiers = [
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Mathematics",
@@ -117,9 +117,9 @@ dependencies = [
     "fastapi",
 
     # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
-    # Updated Tue Jun 23, 2026 with mcp>=1.27,<2
+    # Updated Tue Jul 29, 2026 with mcp>=1.28.1,<2
     # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE
-    "mcp>=1.27,<2",
+    "mcp>=1.28.1,<2",
 
     # itsdangerous: Requirement for Starlette SessionMiddleware
     # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
@@ -150,15 +150,15 @@ dependencies = [
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Sun Jun 22, 2026 with mlflow>=3.14.0 (CVE remediation)
+    # Updated Mon Aug 04, 2026 with mlflow>=3.15.1 (security bump)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.14.0",
-    "mlflow>=3.14.0",
+    "mlflow-skinny>=3.15.1",
+    "mlflow>=3.15.1",
 
     # aiohttp: async http backend
-    # Updated Mon Feb 10, 2026 with aiohttp>=3.13.3
+    # Updated Sun Jun 29, 2026 with aiohttp>=3.14.1 (CVE mitigation)
     # License: Apache 2.0 https://github.com/aio-libs/aiohttp/blob/9a2f146a12e3525b43e96723ef41584bf9cf784e/LICENSE.txt
-    "aiohttp>=3.13.3",
+    "aiohttp>=3.14.1",
 
     # yappi: profiling tool
     # Updated Mon Sep 22, 2025 with yappi==1.6.10
@@ -166,10 +166,9 @@ dependencies = [
     "yappi",
 
     # Ray: Used for distributed processing
-    # Updated Mon May 19, 2026 with ray[default]>=2.55.1
-    # Security: Requires ray>=2.55.1 (CVE remediation)
+    # Updated Tue Jul 29, 2026 with ray[default]>=2.56.1
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]>=2.55.1",
+    "ray[default]>=2.56.1",
 
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
@@ -201,15 +200,26 @@ dependencies = [
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
     "python-multipart>=0.0.22",
 
+    # pyarrow: columnar data library (transitive dependency via mlflow, pinned for security)
+    # mlflow caps pyarrow<25; versions >=23.0.1 have cp313 wheels and address use-after-free.
+    # Updated: Tue Jul 29, 2026 with pyarrow>=23.0.1
+    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
+    "pyarrow>=23.0.1",
+
     # wandb: E2E rollout collection data and metrics upload
     # Updated: Mon May 19, 2026 with wandb==0.27.0
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
     "wandb",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
-    # Updated: Mon May 19, 2026 with GitPython>=3.1.50
+    # Updated: Mon Aug 04, 2026 with GitPython>=3.1.57
     # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
-    "GitPython>=3.1.50",
+    "GitPython>=3.1.57",
+
+    # pyasn1: ASN.1 library (transitive dependency via google-auth, pinned for security)
+    # Updated: Tue Jul 29, 2026 with pyasn1>=0.6.4
+    # License: BSD 2-Clause https://pyasn1.readthedocs.io/en/latest/license.html
+    "pyasn1>=0.6.4",
 
     # gprof2dot and pydot: Used for outputting dot graphs for profiling.
     # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
@@ -219,21 +229,21 @@ dependencies = [
     "pydot",
 ]
 
-[dependency-groups]
-docs = [
-    "sphinx>=8.2.3",
-    "sphinx-autobuild>=2025.8.25",    # For live doc serving while editing docs
-    "sphinx-autodoc2>=0.5.0",         # For documenting Python API
-    "sphinx-copybutton>=0.5.2",       # Adds a copy button for code blocks
-    "myst-parser>=4.0.1",             # For our markdown docs
-    "nvidia-sphinx-theme>=0.0.8",     # Our NVIDIA theme
-    "sphinxcontrib-mermaid>=1.0.0",   # For mermaid diagrams
-    "sphinx-design>=0.6.1",           # For our design elements
-    "swagger-plugin-for-sphinx>=6.0.0", # For Swagger API documentation
-    "sphinx-reredirects>=0.1.6",      # For URL redirects when pages move
+[project.optional-dependencies]
+all = [
+    "nemo-gym[dev,sandbox]",
 ]
 
-[project.optional-dependencies]
+vllm = [
+    # Pin to the same version used by local_vllm_model / genrm_model server venvs.
+    # Updated: Mon Aug 04, 2026 with vllm==0.24.0
+    "vllm==0.24.0",
+    # Pin flashinfer to the exact version vllm 0.24.0 specifies, ensuring pre-compiled
+    # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
+    # flashinfer>=0.2 bundles compiled kernels in the python package directly.
+    "flashinfer-python==0.6.12",
+]
+
 sandbox = [
     # Tenacity: Retry helpers used by sandbox providers.
     # Updated: Sat May 09, 2026 with tenacity==9.1.4
@@ -241,9 +251,29 @@ sandbox = [
     "tenacity>=9.1.4",
 
     # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
-    # Updated: Sat May 16, 2026 with opensandbox>=0.1.9
+    # Lower bound 0.1.15: first version exposing separate `resource_requests` on Sandbox.create.
+    # Updated: Thu Jul 30, 2026 with opensandbox>=0.1.15
     # License: Apache 2.0
-    "opensandbox>=0.1.9",
+    "opensandbox>=0.1.15",
+
+    # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
+    # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
+    # lifecycle calls. Upper bound <0.1: the SDK is alpha 0.0.x and the provider also relies on
+    # its generated protos (openshell._proto), so minor bumps can break call shapes; the
+    # SDK-conformance unit test guards the raise of this ceiling.
+    # Updated: Tue Jul 14, 2026 with openshell>=0.0.92,<0.1
+    # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
+    "openshell>=0.0.92,<0.1",
+
+    # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
+    # License: Apache 2.0 https://pypi.org/project/daytona/
+    "daytona>=0.179.0",
+
+    # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
+    # CodeBuild/S3/SSM/Secrets Manager calls.
+    # Updated: Tue Jun 03, 2026 with boto3>=1.34
+    # License: Apache 2.0 https://github.com/boto/boto3/blob/develop/LICENSE
+    "boto3>=1.34",
 ]
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
@@ -298,14 +328,25 @@ required-version = ">=0.9.30"
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
 ]
+# override-dependencies overrides transitive dep version pins that conflict with
+# Python 3.13 wheel availability. Server venvs inherit this via the editable
+# nemo-gym install (uv >=0.11.24).
+override-dependencies = [
+    # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
+    "spacy>=3.8.13",
+]
+# NOTE: server venvs install nemo-gym editably and inherit this list, so anything
+# here is also silently dropped from them (uv >=0.11.24). Don't add a package any
+# server needs. Context: https://github.com/NVIDIA-NeMo/Gym/pull/1835
 exclude-dependencies = [
+    # fasttext-wheel has no cp313 wheels and fails to compile on Python 3.13
+    # (missing #include <cstdint> in src/args.cc). Excluded as a transitive dep
+    # of unbabel-comet; wmt_translation does not import fasttext at runtime.
+    "fasttext-wheel",
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",
-    "cffi",
-    "contourpy",
     "cryptography",
-    "cycler",
     "flask",
     "flask-cors",
     "graphene",
@@ -313,19 +354,15 @@ exclude-dependencies = [
     "graphql-relay",
     "gunicorn",
     "huey",
-    "joblib",
-    "kiwisolver",
-    "matplotlib",
-    "pillow",
     "prettytable",
-    "scikit-learn",
-    "scipy",
     "skops",
     "sqlalchemy",
-    "threadpoolctl",
     "wcwidth",
     "werkzeug",
     "waitress",
+    # diskcache has unfixed CVEs and is no longer a transitive dep since vllm>=0.24.0.
+    # Explicitly block it to prevent re-introduction via future transitive pulls.
+    "diskcache",
 ]
 
 [tool.setuptools.package-data]
@@ -498,6 +535,7 @@ markers = [
     "system: marks test working at the highest integration level (deselect with '-m \"not system\"')",
     "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
+    "sandbox: marks sandbox unit tests (deselect with '-m \"not sandbox\"')",
     "skipduringci: marks tests that are skipped during ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
 ]
@@ -510,7 +548,8 @@ omit = [
     "results/*",
     "/tmp/*",
     "benchmarks/*",
-    "environments/*/prepare.py",
+    "environments/*",
+    "scripts/*",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]
@@ -545,7 +584,7 @@ exclude_also = [
 [tool.ruff]
 # Line length configuration
 line-length = 119
-target-version = "py312"
+target-version = "py313"
 
 cache-dir = "cache/.ruff_cache"
 # Exclude common directories that shouldn't be linted
@@ -559,12 +598,13 @@ exclude = [
     "*.egg",
     "build",
     "dist",
-    "docs/source/conf.py",
     "setup.py",
 ]
 # Files to completely ignore
 extend-exclude = [
     "*.ipynb",
+    # Vendored apple/ToolSandbox source — kept verbatim (see its VENDORING.md).
+    "resources_servers/toolsandbox/tool_sandbox",
 ]
 [tool.ruff.lint]
 # Configure linting rules

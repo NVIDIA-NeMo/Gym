@@ -70,7 +70,7 @@ class CritPtAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_request("/v1/responses", request),
             json=body,
             cookies=request.cookies,
         )
@@ -91,10 +91,12 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_response)
         cookies = seed_response.cookies
 
+        self_responses_url_path = self.url_path_for_run("/v1/responses", body)
+
         # Turn 1: solve the problem
         turn1_response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self_responses_url_path,
             json=body.responses_create_params,
             cookies=cookies,
         )
@@ -115,7 +117,7 @@ class CritPtAgent(SimpleResponsesAPIAgent):
 
         turn2_response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self_responses_url_path,
             json=turn2_params,
             cookies=cookies,
         )

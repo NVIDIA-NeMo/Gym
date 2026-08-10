@@ -15,6 +15,7 @@
 import json
 from asyncio import sleep
 from typing import (
+    Annotated,
     Any,
     Dict,
     List,
@@ -56,6 +57,11 @@ from openai.types.chat.completion_create_params import (
 from openai.types.responses import (
     FunctionToolParam,
     Response,
+    ResponseCodeInterpreterToolCall,
+    ResponseComputerToolCall,
+    ResponseCustomToolCall,
+    ResponseFileSearchToolCall,
+    ResponseFunctionWebSearch,
     ResponseInputTextParam,
 )
 from openai.types.responses.response_create_params import (
@@ -71,6 +77,13 @@ from openai.types.responses.response_create_params import (
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
+from openai.types.responses.response_output_item import (
+    ImageGenerationCall,
+    LocalShellCall,
+    McpApprovalRequest,
+    McpCall,
+    McpListTools,
+)
 from openai.types.responses.response_output_text_param import Annotation, Logprob
 from openai.types.responses.response_reasoning_item import (
     Summary,
@@ -80,7 +93,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -97,8 +110,11 @@ from nemo_gym.server_utils import (
 # Training-specific
 ########################################
 
-# Per-token routed expert indices with shape [tokens, num_moe_layers, topk].
-RoutedExperts: TypeAlias = List[List[List[int]]]
+# Per-token routed expert indices with shape [tokens, num_moe_layers, topk], either as
+# nested int lists or as an opaque string envelope produced by the training framework
+# (e.g. NeMo-RL's "nrlre1:<dtype>:<SxLxK>:<base64>"). Gym never inspects the value; the
+# string form keeps multi-MB payloads cheap to validate and re-serialize at every hop.
+RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
 
 
 class TokenIDLogProbMixin(BaseModel):
@@ -197,6 +213,85 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymResponseMcpCall(McpCall):
+    """A hosted-MCP tool call (OpenAI Responses ``mcp_call`` output item).
+
+    Emitted when the upstream endpoint executes a tool *server-side* (e.g.
+    NVIDIA-hosted gpt-oss surfacing its built-in python tool as MCP) instead of
+    returning a client-executed ``function_call``. The ``output``/``error``
+    fields are already populated by the server, so the agent parses and passes
+    it through; there is no client-side execution and hence no training variant.
+
+    Inherits the upstream ``McpCall`` typing and only relaxes the fields
+    NVIDIA-hosted endpoints may omit or widen: ``id``/``server_label`` are made
+    optional and ``status`` accepts any string (upstream pins it to a Literal).
+    """
+
+    type: Literal["mcp_call"] = "mcp_call"
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+    status: Optional[str] = None
+
+
+class NeMoGymResponseMcpListTools(McpListTools):
+    """A hosted-MCP tool listing (OpenAI Responses ``mcp_list_tools`` output item).
+
+    Inherits the upstream ``McpListTools`` typing; only ``id``/``server_label``
+    are relaxed to optional (NVIDIA-hosted endpoints may omit them) and ``tools``
+    is widened to ``List[Any]`` so raw tool entries pass through without being
+    coerced into the upstream ``McpListToolsTool`` schema.
+    """
+
+    type: Literal["mcp_list_tools"] = "mcp_list_tools"
+    tools: List[Any] = Field(default_factory=list)
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+
+
+class NeMoGymResponseMcpApprovalRequest(McpApprovalRequest):
+    """A hosted-MCP approval request (OpenAI Responses ``mcp_approval_request`` item).
+
+    Inherits the upstream ``McpApprovalRequest`` typing; ``id``/``server_label``
+    are relaxed to optional to tolerate endpoints that omit them.
+    """
+
+    type: Literal["mcp_approval_request"] = "mcp_approval_request"
+    id: Optional[str] = None
+    server_label: Optional[str] = None
+
+
+class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
+    """A hosted file-search call (OpenAI Responses ``file_search_call`` output item).
+
+    The provider executes the search and returns the call in ``response.output``.
+    Inherits the upstream typing unchanged.
+    """
+
+
+class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
+    """A hosted web-search call (OpenAI Responses ``web_search_call`` output item)."""
+
+
+class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
+    """A computer-use action for the client to execute (``computer_call`` output item)."""
+
+
+class NeMoGymImageGenerationCall(ImageGenerationCall):
+    """A hosted image-generation call (OpenAI Responses ``image_generation_call`` output item)."""
+
+
+class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
+    """A hosted code-interpreter call (OpenAI Responses ``code_interpreter_call`` output item)."""
+
+
+class NeMoGymLocalShellCall(LocalShellCall):
+    """A local-shell command for the client to execute (``local_shell_call`` output item)."""
+
+
+class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
+    """A client-executed custom tool call (OpenAI Responses ``custom_tool_call`` output item)."""
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -237,6 +332,19 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseFunctionToolCall,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseMcpCall,
+    NeMoGymResponseMcpListTools,
+    NeMoGymResponseMcpApprovalRequest,
+    # Responses API output-call items. The upstream SDK includes these in both
+    # ResponseOutputItem and ResponseInputItemParam (outputs are echoed back as
+    # input on subsequent turns), so they belong in this shared union:
+    NeMoGymResponseFileSearchToolCall,
+    NeMoGymResponseFunctionWebSearch,
+    NeMoGymResponseComputerToolCall,
+    NeMoGymImageGenerationCall,
+    NeMoGymResponseCodeInterpreterToolCall,
+    NeMoGymLocalShellCall,
+    NeMoGymResponseCustomToolCall,
     # For training:
     NeMoGymEasyInputMessageForTraining,
     NeMoGymMessageForTraining,
@@ -287,7 +395,17 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 ########################################
 
 
-NeMoGymResponseOutputItem = NeMoGymResponseInputItem
+def _require_response_output_item_type(value: Any) -> Any:
+    """Prevent an untagged output item from being coerced into the wrong union member."""
+    if isinstance(value, dict) and "type" not in value:
+        raise ValueError("Responses API output items must include a type discriminator")
+    return value
+
+
+NeMoGymResponseOutputItem = Annotated[
+    NeMoGymResponseInputItem,
+    BeforeValidator(_require_response_output_item_type),
+]
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
@@ -301,6 +419,44 @@ class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
 class NeMoGymResponseUsage(ResponseUsage):
     input_tokens_details: NeMoGymResponseInputTokensDetails
     output_tokens_details: NeMoGymResponseOutputTokensDetails
+
+    @classmethod
+    def sum_from_list(cls, usages: "NeMoGymResponseUsage") -> "NeMoGymResponseUsage":
+        final_usage = NeMoGymResponseUsage(
+            input_tokens=0,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens=0,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=0,
+        )
+        for usage in usages:
+            final_usage.input_tokens += usage.input_tokens
+            final_usage.input_tokens_details.cached_tokens += usage.input_tokens_details.cached_tokens
+            final_usage.output_tokens += usage.output_tokens
+            final_usage.output_tokens_details.reasoning_tokens += usage.output_tokens_details.reasoning_tokens
+            final_usage.total_tokens += usage.total_tokens
+
+        return final_usage
+
+
+def accumulate_response_usage(
+    total: Optional[NeMoGymResponseUsage], additional: Optional[NeMoGymResponseUsage]
+) -> Optional[NeMoGymResponseUsage]:
+    """Accumulate top-level and detailed response token counts."""
+    if additional is None:
+        return total
+    if total is None:
+        return additional.model_copy(deep=True)
+
+    result = total.model_copy(deep=True)
+    result.input_tokens += additional.input_tokens
+    result.output_tokens += additional.output_tokens
+    result.total_tokens += additional.total_tokens
+    if result.input_tokens_details is not None and additional.input_tokens_details is not None:
+        result.input_tokens_details.cached_tokens += additional.input_tokens_details.cached_tokens
+    if result.output_tokens_details is not None and additional.output_tokens_details is not None:
+        result.output_tokens_details.reasoning_tokens += additional.output_tokens_details.reasoning_tokens
+    return result
 
 
 class NeMoGymResponse(Response):
@@ -539,6 +695,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def create_chat_completion(self, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
+
+    async def create_completion(self, **kwargs):
+        request_kwargs = dict(
+            url=f"{self.base_url}/completions",
             json=kwargs,
         )
         response = await self._request(method="POST", **request_kwargs)

@@ -16,11 +16,11 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -179,6 +179,49 @@ class TestEnv:
         assert env["XDG_DATA_HOME"] == "/tmp/data"
         assert env["FOO"] == "bar"
         assert "EMPTY" not in env
+
+    def test_model_server_builds_local_provider(self) -> None:
+        agent = _make_agent(
+            model="Qwen3.6-35B-A3B",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            env = agent._env("/tmp/data")
+            config = agent._build_opencode_config()
+
+        provider = config["provider"]["nemo"]
+        assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
+        assert env["OPENAI_BASE_URL"] == "http://model/v1"
+        assert provider["options"]["baseURL"] == "http://model/v1"
+        assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
+
+
+class TestRepoDir:
+    def test_creates_configured_repo_dir(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "nested" / "repo"
+        agent = _make_agent(repo_dir=str(repo_dir))
+
+        assert agent._repo_dir(tmp_path / "fallback") == repo_dir
+        assert repo_dir.is_dir()
+
+    async def test_preserves_configured_repo_and_cleans_workspace(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        repo_dir = tmp_path / "repo"
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        agent = _make_agent(repo_dir=str(repo_dir))
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=workspace),
+            patch(
+                "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=process),
+            ),
+        ):
+            await agent._run_opencode("fix the issue", None)
+
+        assert repo_dir.is_dir()
+        assert not workspace.exists()
 
 
 class TestConfigYaml:

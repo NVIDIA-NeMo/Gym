@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 
@@ -22,12 +22,14 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     grading_mode: Optional[
         Literal[
             "strict_single_letter_boxed",
@@ -75,26 +77,74 @@ def _extract_options_and_expected(
 
 
 CHOICE_LETTER_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])(?![A-Za-z])")
-# Strict boxed: capture a single UPPERCASE letter, allowing non-letter chars around it inside the box
-STRICT_BOXED_PATTERN = re.compile(r"\\boxed\{\s*[^A-Za-z]*([A-Z])[^A-Za-z]*\s*\}")
+# Box holds just a letter, e.g. "E", "[C]", "(B)".
+BOXED_LETTER_ONLY_PATTERN = re.compile(r"^[^A-Za-z]*([A-Z])[^A-Za-z]*$")
+# Box starts with a letter then a delimiter; ignore the option text after, e.g. "E: ...", "C) ...".
+# NOTE: ":" and ")" are unambiguous; "." and "-" are looser. We tolerate these for now,
+# but if we see new misreadings, such as "E. coli" -> "E", we can drop them.
+BOXED_LETTER_LABEL_PATTERN = re.compile(r"^\s*([A-Z])\s*[:).\-]")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
-# Markdown-aware variant: tolerates **Answer: B**, __Answer__: B, etc. Captures single letter only.
-ANSWER_COLON_MD_PATTERN = re.compile(r"(?i)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}\s*([A-Z])(?![a-zA-Z0-9])")
+# Markdown-aware variant: captures the final-answer payload after Answer:.
+ANSWER_COLON_PAYLOAD_PATTERN = re.compile(r"(?im)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}(.+)")
 
 
 def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
+    """Pull the answer letter out of the last \\boxed{...}.
+
+    Handles a bare letter, a \\text{...} wrapper (\\boxed{\\text{E}}), and a
+    leading letter with option text after it (\\boxed{E: ...}). Plain option
+    text with no leading letter is left for lenient_boxed to handle.
+    """
     parsed_text = text
-    m = STRICT_BOXED_PATTERN.search(text)
-    if not m:
+    inner = _extract_boxed_inner(text)
+    if inner is None:
         return None, parsed_text, True
-    letter = m.group(1).upper()
-    if letter not in allowed_letters:
+    inner = _strip_latex_wrappers(inner.strip())
+
+    letter: Optional[str] = None
+    m = BOXED_LETTER_ONLY_PATTERN.match(inner)
+    if m:
+        letter = m.group(1).upper()
+    else:
+        m = BOXED_LETTER_LABEL_PATTERN.match(inner)
+        if m:
+            letter = m.group(1).upper()
+
+    if letter is None or letter not in allowed_letters:
         return None, parsed_text, True
     return letter, parsed_text, False
 
 
-BOXED_CONTENT_PATTERN = re.compile(r"\\boxed\{\s*(.*?)\s*\}", re.S)
 LATEX_TEXT_WRAP_PATTERN = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
+LEADING_CHOICE_LETTER_PATTERN = re.compile(r"^([a-zA-Z])(?![a-zA-Z0-9])")
+LAST_STANDALONE_CHOICE_LETTER_PATTERN = re.compile(r"\b[A-Z]\b(?!.*\b[A-Z]\b)", re.S)
+CHOICE_LIST_SEPARATOR_PATTERN = re.compile(r"(?:\s*[/|&,;]\s*|\s+(?:or|and)\s+|\s+)", re.I)
+
+
+def _extract_boxed_inner(text: str) -> Optional[str]:
+    """Return everything inside the last \\boxed{...}, or None.
+
+    Uses the LAST \\boxed{ so CoT intermediate boxes are skipped and the
+    final answer wins (matching the convention in other resources servers,
+    e.g. math_with_code, abstention). Counts braces so a nested wrapper like
+    \\boxed{\\text{E}} returns the full "\\text{E}" instead of stopping early at
+    the first "}".
+    """
+    marker = "\\boxed{"
+    start = text.rfind(marker)
+    if start == -1:
+        return None
+    depth = 1
+    buf: list[str] = []
+    for ch in text[start + len(marker) :]:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return "".join(buf)
+        buf.append(ch)
+    return None  # no matching closing brace
 
 
 def _strip_latex_wrappers(s: str) -> str:
@@ -112,19 +162,56 @@ def _normalize_for_match(s: str) -> str:
     return " ".join(s.lower().split())
 
 
+def _contains_ambiguous_choice_list(text: str, allowed_letters: set[str]) -> bool:
+    """Return whether distinct allowed choices are presented as a list."""
+    matches = [
+        (match.group(1).upper(), match.span(1))
+        for match in CHOICE_LETTER_PATTERN.finditer(text)
+        if match.group(1).upper() in allowed_letters
+    ]
+    return any(
+        left_letter != right_letter
+        and CHOICE_LIST_SEPARATOR_PATTERN.fullmatch(text[left_span[1] : right_span[0]]) is not None
+        for (left_letter, left_span), (right_letter, right_span) in zip(matches, matches[1:])
+    )
+
+
+def _extract_choice_letter(text: str, allowed_letters: set[str]) -> Optional[str]:
+    """Extract a single valid choice letter from an answer payload."""
+    candidate = _normalize_extracted_answer(text).strip().strip("*_` \t\n\r.,;:")
+    if _contains_ambiguous_choice_list(candidate, allowed_letters):
+        return None
+
+    if len(candidate) == 1:
+        letter = candidate
+    else:
+        # Prefer a leading letter for "Answer: B because..." style payloads
+        m = LEADING_CHOICE_LETTER_PATTERN.match(candidate)
+        if m:
+            letter = m.group(1)
+        else:
+            m = LAST_STANDALONE_CHOICE_LETTER_PATTERN.search(candidate)
+            letter = m.group(0) if m else None
+    if letter:
+        up = letter.upper()
+        if up in allowed_letters:
+            return up
+    return None
+
+
 def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters: set[str]) -> Optional[str]:
     """Match boxed content against option texts and return the option letter.
 
-    - Looks ONLY inside the first \boxed{...} region; returns None if absent.
+    - Looks ONLY inside the last \boxed{...} region; returns None if absent.
     - Normalizes (lowercase, collapse whitespace) both boxed content and option texts.
     - Treats a match as substring containment of an option's text in the boxed content.
     - Returns the option letter only if EXACTLY ONE option matches; otherwise returns None.
     """
     # Only match within boxed content; if no boxed content, return None
-    boxed = BOXED_CONTENT_PATTERN.search(text)
-    if not boxed:
+    inner = _extract_boxed_inner(text)
+    if inner is None:
         return None
-    inner = boxed.group(1)
+    inner = inner.strip()
     candidate_texts = [inner, _strip_latex_wrappers(inner)]
     normalized_candidates = [_normalize_for_match(t) for t in candidate_texts]
 
@@ -309,12 +396,10 @@ class MCQAResourcesServer(SimpleResourcesServer):
                             if pred is not None:
                                 break
             elif grading_mode == "lenient_answer_colon_md":
-                # Markdown-aware Answer: extraction handles **Answer: B**, etc.
-                md_match = ANSWER_COLON_MD_PATTERN.search(text)
-                if md_match:
-                    letter_up = md_match.group(1).strip().upper()
-                    if letter_up in allowed_letters:
-                        pred = letter_up
+                for candidate in reversed(ANSWER_COLON_PAYLOAD_PATTERN.findall(text)):
+                    pred = _extract_choice_letter(candidate, allowed_letters)
+                    if pred is not None:
+                        break
 
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0

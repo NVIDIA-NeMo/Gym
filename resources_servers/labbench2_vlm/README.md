@@ -195,7 +195,8 @@ gym eval run --no-serve \
   --input resources_servers/labbench2_vlm/data/figqa2_img_validation.jsonl \
   --output results/figqa2_img_rollouts.jsonl \
   --num-repeats 1 \
-  "+responses_create_params={max_output_tokens: 2048, reasoning: {effort: high}}"
+  --max-output-tokens 2048 \
+  ++responses_create_params.reasoning.effort=high
 ```
 
 `gym eval run --no-serve` writes sidecar files next to the `--output` file:
@@ -215,7 +216,8 @@ gym eval run --no-serve \
   --input resources_servers/labbench2_vlm/data/example.jsonl \
   --output resources_servers/labbench2_vlm/data/example_rollouts.jsonl \
   --num-repeats 1 \
-  "+responses_create_params={max_output_tokens: 2048, reasoning: {effort: high}}"
+  --max-output-tokens 2048 \
+  ++responses_create_params.reasoning.effort=high
 ```
 
 `example_rollouts.jsonl` is gitignored (42MB+ due to embedded base64 in the
