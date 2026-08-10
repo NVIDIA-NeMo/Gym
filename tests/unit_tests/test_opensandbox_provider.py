@@ -1247,3 +1247,91 @@ async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: N
     await provider.connect({"sandbox_id": "sandbox-9"})
 
     assert FakeSandbox.connected_kwargs["skip_health_check"] is True
+
+
+@pytest.mark.asyncio
+async def test_exec_retries_backend_connect_502_despite_zero_command_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy 502 means the command never started; it retries even with command_retries=0."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    calls = {"n": 0}
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise Backend502Error("Failed to run command. Status code: 502")
+            return SimpleNamespace(logs=SimpleNamespace(stdout=[], stderr=[]), error=None, exit_code=0)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"retries": 3},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-flap", provider_name="opensandbox", raw=FakeRaw())
+
+    result = await provider.exec(handle, "echo ok", timeout_s=30)
+
+    assert result.return_code == 0
+    assert calls["n"] == 3  # two 502s absorbed, command never double-ran
+
+
+@pytest.mark.asyncio
+async def test_exec_persistent_502_raises_typed_backend_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """502s that outlive the budget mean a dead backend: fail fast and typed."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    calls = {"n": 0}
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            calls["n"] += 1
+            raise Backend502Error("Failed to run command. Status code: 502")
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"retries": 2},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-dead", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(opensandbox_provider.SandboxBackendUnreachableError, match="likely dead"):
+        await provider.exec(handle, "echo ok", timeout_s=30)
+
+    assert calls["n"] == 3  # operations.retries + 1 submissions, then typed failure
