@@ -22,9 +22,9 @@
 # dataset and prepare script resolve relative to your working directory. Results
 # land in ./results/browsecomp.
 #
-#   ./browsecomp.sh                          # full benchmark (1266 tasks x 1)
-#   LIMIT=3 ./browsecomp.sh                  # quick smoke
-#   OUT=<dir> PARALLEL=<n> ./browsecomp.sh   # output dir, concurrency
+#   scripts/more/instruct/gym/browsecomp/browsecomp.sh                         # full benchmark (1266 tasks x 1)
+#   LIMIT=3 scripts/more/instruct/gym/browsecomp/browsecomp.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/browsecomp/browsecomp.sh  # output dir, concurrency
 
 # Runs all 1266 problems. Unset for prepare.py's default 400-problem subset.
 export BROWSECOMP_RUN_FULL=1

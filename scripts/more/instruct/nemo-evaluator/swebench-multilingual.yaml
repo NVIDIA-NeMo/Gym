@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SWE-bench Verified (agentic coding tasks).
+# SWE-bench Multilingual (agentic coding tasks across 9 languages).
 #
 # Runs through nemo-evaluator, not Gym. Install it and apply the ECS Fargate Terraform
-# stack first (see reproducibility.md), and have .env loaded into your shell (this
+# stack first (see instruct/README.md), and have .env loaded into your shell (this
 # recipe uses POLICY_API_KEY, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY). Results land
-# in ./results/swebench-verified.
+# in ./results/swebench-multilingual.
 #
-#   nel eval run nel-next/swebench-verified.yaml                                # full benchmark (500 tasks x 5)
-#   nel eval run nel-next/swebench-verified.yaml -O benchmarks.0.max_problems=3 # quick smoke
-#   nel eval run nel-next/swebench-verified.yaml -O output.dir=<dir>            # output dir
+#   nel eval run scripts/more/instruct/nemo-evaluator/swebench-multilingual.yaml                                # full benchmark (300 tasks x 5)
+#   nel eval run scripts/more/instruct/nemo-evaluator/swebench-multilingual.yaml -O benchmarks.0.max_problems=3 # quick smoke
+#   nel eval run scripts/more/instruct/nemo-evaluator/swebench-multilingual.yaml -O output.dir=<dir>            # output dir
 #
 # Note: serve the model with --reasoning-parser=nemotron_v3 plus
 # --enable-auto-tool-choice --tool-call-parser=qwen3_coder. Without the first, <think>
@@ -51,7 +51,6 @@ services:
         chat_template_kwargs: {enable_thinking: true}
         skip_special_tokens: false
       interceptors:
-        # OpenHands' own system prompt; turn_counter matches agent_kwargs.max_iterations.
         - name: system_message
           config:
             strategy: replace
@@ -70,15 +69,17 @@ services:
             mode: think_tags
 
 output:
-  dir: ./results/swebench-verified
+  dir: ./results/swebench-multilingual
 
 benchmarks:
-- playbook: swebench_verified
+- playbook: swebench_multilingual
   repeats: 5
   # Throughput only, no effect on score. Raise together with sandbox.concurrency
   # below — the lower of the two binds.
   max_concurrent: 15
-  instruction_template: nel-next/prompts/swebench_instruction.md
+  instruction_template: scripts/more/instruct/nemo-evaluator/prompts/swebench_instruction.md
+  params:
+    keep_swebench_multilingual_hints: false
   solver:
     service: nemotron
     timeout_strategy: max
@@ -93,7 +94,8 @@ benchmarks:
     region: ${HARBOR_ECS_REGION:-us-east-2}
     ecr_repository: "<AWS_ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/harbor-swebench"  # set to your harbor ECR account
     concurrency: 15  # keep in sync with max_concurrent above
-    log_stream_prefix: swebench-verified-nemotron-local
+    scrub_git_history: true
+    log_stream_prefix: swebench-multilingual-nemotron-local
 
 cluster:
   type: local

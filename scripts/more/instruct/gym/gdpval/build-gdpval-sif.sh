@@ -18,8 +18,8 @@
 # gdpval.sh. Needs apptainer on the host; the definition ships with Gym, so run
 # this from the Gym repo root (or set GYM_ROOT).
 #
-#   ./build-gdpval-sif.sh                 # writes ./gdpval.sif
-#   ./build-gdpval-sif.sh /abs/out.sif    # writes somewhere else
+#   scripts/more/instruct/gym/gdpval/build-gdpval-sif.sh               # writes ./gdpval.sif
+#   scripts/more/instruct/gym/gdpval/build-gdpval-sif.sh /abs/out.sif  # writes somewhere else
 #
 # Then export the path gdpval.sh reads:
 #   export GDPVAL_CONTAINER_PATH=/abs/out.sif

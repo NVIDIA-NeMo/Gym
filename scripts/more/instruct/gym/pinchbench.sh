@@ -20,13 +20,13 @@
 # PINCHBENCH_MODEL_BASE_URL, PINCHBENCH_MODEL_API_KEY, PINCHBENCH_MODEL_NAME,
 # PINCHBENCH_JUDGE_MODEL, PINCHBENCH_JUDGE_BASE_URL, PINCHBENCH_JUDGE_API_KEY and
 # PINCHBENCH_TAVILY_API_KEY) and the per-task sandbox image, pointed at by
-# PINCHBENCH_SIF (see reproducibility.md). Run from the Gym repo root — the
+# PINCHBENCH_SIF (see instruct/README.md). Run from the Gym repo root — the
 # benchmark's dataset and prepare script resolve relative to your working
 # directory. Results land in ./results/pinchbench.
 #
-#   ./pinchbench.sh                          # full benchmark (147 tasks x 10)
-#   LIMIT=3 ./pinchbench.sh                  # quick smoke
-#   OUT=<dir> PARALLEL=<n> ./pinchbench.sh   # output dir, concurrency
+#   scripts/more/instruct/gym/pinchbench.sh                         # full benchmark (147 tasks x 10)
+#   LIMIT=3 scripts/more/instruct/gym/pinchbench.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/pinchbench.sh  # output dir, concurrency
 #
 # Note: OpenClaw calls the policy endpoint itself instead of going through a Gym
 # model server, so the endpoint is given here rather than in env.yaml, and the
@@ -56,6 +56,10 @@ PINCHBENCH_MODEL_NAME="${PINCHBENCH_MODEL_NAME:?export PINCHBENCH_MODEL_NAME (na
 # One key only — this field is a plain string, so [k1,k2] is taken literally. Kept
 # separate from TAVILY_API_KEY for that reason: the other recipes accept a key list.
 PINCHBENCH_TAVILY_API_KEY="${PINCHBENCH_TAVILY_API_KEY:?export PINCHBENCH_TAVILY_API_KEY (one key)}"
+
+# The published run raised Gym's rollout retry budget from its default of 3. An
+# exhausted rollout scores 0, so on a flaky endpoint this moves the result.
+export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS="${NEMO_GYM_MAX_ROLLOUT_ATTEMPTS:-10}"
 
 PB=pinchbench_agent.responses_api_agents.pinchbench
 BENCH=pinchbench_benchmark_agent.responses_api_agents.pinchbench

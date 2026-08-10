@@ -16,13 +16,13 @@
 # Terminal-Bench 2.1 (agentic terminal tasks).
 #
 # Runs through nemo-evaluator, not Gym. Install it and apply the ECS Fargate Terraform
-# stack first (see reproducibility.md), and have .env loaded into your shell (this
+# stack first (see instruct/README.md), and have .env loaded into your shell (this
 # recipe uses POLICY_API_KEY, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY). Results land
 # in ./results/terminal-bench-2.1.
 #
-#   nel eval run nel-next/terminal-bench-2.1.yaml                                # full benchmark (89 tasks x 8)
-#   nel eval run nel-next/terminal-bench-2.1.yaml -O benchmarks.0.max_problems=3 # quick smoke
-#   nel eval run nel-next/terminal-bench-2.1.yaml -O output.dir=<dir>            # output dir
+#   nel eval run scripts/more/instruct/nemo-evaluator/terminal-bench-2.1.yaml                                # full benchmark (89 tasks x 8)
+#   nel eval run scripts/more/instruct/nemo-evaluator/terminal-bench-2.1.yaml -O benchmarks.0.max_problems=3 # quick smoke
+#   nel eval run scripts/more/instruct/nemo-evaluator/terminal-bench-2.1.yaml -O output.dir=<dir>            # output dir
 #
 # Note: serve the model with --reasoning-parser=nemotron_v3, or <think> stays inline and
 # reasoning_replay feeds back a different context each turn.

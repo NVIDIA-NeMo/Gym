@@ -19,13 +19,13 @@
 # Needs an active Gym venv, ./env.yaml (copy env.yaml.example) and .env loaded
 # into your shell (copy .env.example; this recipe uses HF_TOKEN and
 # NVIDIA_API_KEY). Also needs SciCode's ~1 GB test_data.h5, pointed at by
-# TEST_DATA (see reproducibility.md). Run from the Gym repo root — the
+# TEST_DATA (see instruct/README.md). Run from the Gym repo root — the
 # benchmark's dataset and prepare script resolve relative to your working
 # directory. Results land in ./results/scicode.
 #
-#   ./scicode.sh                          # full benchmark (65 problems x 8)
-#   LIMIT=3 ./scicode.sh                  # quick smoke
-#   OUT=<dir> PARALLEL=<n> ./scicode.sh   # output dir, concurrency
+#   scripts/more/instruct/gym/scicode.sh                         # full benchmark (65 problems x 8)
+#   LIMIT=3 scripts/more/instruct/gym/scicode.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/scicode.sh  # output dir, concurrency
 #
 # Note: num_repeats 8 is set through the dataset override below — --num-repeats
 # multiplies the config default (3) instead of replacing it.

@@ -22,9 +22,9 @@
 # prepare script resolve relative to your working directory. Results land in
 # ./results/aa-lcr.
 #
-#   ./aa-lcr.sh                          # full benchmark (100 tasks x 16)
-#   LIMIT=3 ./aa-lcr.sh                  # quick smoke
-#   OUT=<dir> PARALLEL=<n> ./aa-lcr.sh   # output dir, concurrency
+#   scripts/more/instruct/gym/aa-lcr.sh                         # full benchmark (100 tasks x 16)
+#   LIMIT=3 scripts/more/instruct/gym/aa-lcr.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/aa-lcr.sh  # output dir, concurrency
 #
 # Note: top_p 1.0 overrides the 0.95 in env.yaml — intentional for this benchmark.
 

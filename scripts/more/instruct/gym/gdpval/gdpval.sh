@@ -20,17 +20,17 @@
 # into your shell (copy .env.example; this recipe uses HF_TOKEN, NVIDIA_API_KEY,
 # JUDGE_API_KEY and TAVILY_API_KEY). Also needs the Apptainer sandbox built by
 # build-gdpval-sif.sh, pointed at by GDPVAL_CONTAINER_PATH (see
-# reproducibility.md). Run from the Gym repo root — the benchmark's dataset and
+# instruct/README.md). Run from the Gym repo root — the benchmark's dataset and
 # prepare script resolve relative to your working directory. Results land in
 # ./results/gdpval.
 #
-#   ./gdpval.sh                          # full benchmark (220 tasks x 1)
-#   LIMIT=3 ./gdpval.sh                  # quick smoke
-#   OUT=<dir> PARALLEL=<n> ./gdpval.sh   # output dir, concurrency
+#   scripts/more/instruct/gym/gdpval/gdpval.sh                         # full benchmark (220 tasks x 1)
+#   LIMIT=3 scripts/more/instruct/gym/gdpval/gdpval.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/gdpval/gdpval.sh  # output dir, concurrency
 #
 # Scores each deliverable against its rubric. Comparison mode instead scores against
 # reference deliverables you generate yourself, one subdirectory per reference model;
-# see reproducibility.md for the layout and how to produce them.
+# see instruct/README.md for the layout and how to produce them.
 #
 # Note: PARALLEL is applied twice on purpose — the agent caps its own concurrent runs
 # at 32 regardless of --concurrency, so raising only one of them does nothing.

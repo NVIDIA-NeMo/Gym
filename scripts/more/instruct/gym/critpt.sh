@@ -22,9 +22,9 @@
 # and prepare script resolve relative to your working directory. Results land in
 # ./results/critpt.
 #
-#   ./critpt.sh                        # full benchmark (70 problems x 5)
-#   LIMIT=3 ./critpt.sh                # rollouts only, cannot be scored (see below)
-#   OUT=<dir> PARALLEL=<n> ./critpt.sh # output dir, concurrency
+#   scripts/more/instruct/gym/critpt.sh                         # full benchmark (70 problems x 5)
+#   LIMIT=3 scripts/more/instruct/gym/critpt.sh                 # rollouts only, cannot be scored (see below)
+#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/critpt.sh  # output dir, concurrency
 #
 # Note: num_repeats 5 is set through the dataset override below — --num-repeats
 # multiplies the config default instead of replacing it.

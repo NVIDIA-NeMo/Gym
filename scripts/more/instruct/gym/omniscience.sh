@@ -22,9 +22,9 @@
 # prepare script resolve relative to your working directory. Results land in
 # ./results/omniscience.
 #
-#   ./omniscience.sh                          # full benchmark (600 questions x 10)
-#   LIMIT=3 ./omniscience.sh                  # quick smoke
-#   OUT=<dir> PARALLEL=<n> ./omniscience.sh   # output dir, concurrency
+#   scripts/more/instruct/gym/omniscience.sh                         # full benchmark (600 questions x 10)
+#   LIMIT=3 scripts/more/instruct/gym/omniscience.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/omniscience.sh  # output dir, concurrency
 #
 # Note: num_repeats 10 is set through the dataset override below — --num-repeats
 # multiplies the config default (8) instead of replacing it.
