@@ -19,5 +19,5 @@ VLLM_COMMON_ARGS=(
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --max-num-batched-tokens 8480
-    --max-num-seqs 256
+    --max-num-seqs 512
 )
