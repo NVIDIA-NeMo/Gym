@@ -12,6 +12,7 @@ VLLM_COMMON_ARGS=(
     --enable-chunked-prefill
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
+    --block-size 128
     --enable-prefix-caching
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
