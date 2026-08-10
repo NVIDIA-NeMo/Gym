@@ -58,6 +58,7 @@ From: python:3.13-bookworm
         pandoc \
         poppler-utils \
         ghostscript \
+        ffmpeg \
         graphviz \
         imagemagick \
         chromium \
@@ -98,6 +99,7 @@ From: python:3.13-bookworm
     command -v pandoc
     command -v pdftotext
     command -v gs
+    command -v ffmpeg
     command -v dot
     command -v convert
     command -v pdflatex
