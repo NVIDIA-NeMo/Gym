@@ -1,4 +1,151 @@
-.github/ @nvidia-nemo/automation
-docker/ @nvidia-nemo/automation
-pyproject.toml @nvidia-nemo/automation
-uv.lock @nvidia-nemo/automation
+# NeMo Gym — code ownership
+#
+# Encodes the "NeMo Gym Code Component Ownership" map so GitHub auto-requests the
+# right reviewers on every PR.
+#
+# Teams (membership is the source of truth and is maintained by each team's
+# maintainers — do not list individuals here):
+#   @NVIDIA-NeMo/gym_env_benchmarks  Frontier Eval — EM Rita Neves,
+#                                    Eng PICs Michal Bien, Marta Stepniewska-Dziubinska
+#   @NVIDIA-NeMo/gym_core            Core-Arch + RL — EM Bernard Nguyen,
+#                                    Eng PIC Ananth Subramaniam
+#   @NVIDIA-NeMo/gym_architects      Advisors — backstop for anything unclaimed, and
+#                                    escalation path for cross-lane disputes
+#   @NVIDIA-NeMo/automation          CI, build, and release infrastructure
+#
+# The split follows one principle: Core owns the contracts and the substrate,
+# Frontier Eval owns the implementations and the evaluation outputs built on top of
+# them. So base_responses_api_agent.py (the interface) is Core while every harness
+# under responses_api_agents/ is Frontier Eval; rollout_collection.py (the engine) is
+# Core while reward_profile.py (what consumes rollouts to make decisions) is
+# Frontier Eval.
+#
+# Two rules this file cannot express, which still apply by policy:
+#   1. Breaking changes to shared contracts and user-facing CLI surfaces need
+#      sign-off from BOTH lanes, ideally agreed at the proposal stage.
+#   2. Well-isolated changes that do not touch core features may be reviewed by
+#      other frequent contributors without the code owner.
+#
+# GitHub applies the LAST matching pattern for a path, so rules run
+# general -> specific. Every team below has write access to this repo; a team
+# without write access is silently ignored by CODEOWNERS.
+
+# ── Global backstop ──────────────────────────────────────────────────────────
+# Anything not claimed by a more specific rule (data/, cache/, results/,
+# scripts/, top-level files) routes to the advisors. If a category of unclaimed
+# files starts generating recurring work, give it an explicit owner here rather
+# than leaning on the backstop.
+*                                       @NVIDIA-NeMo/gym_architects
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FRONTIER EVAL
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Agent servers — loop semantics, harness contract, turn policy, trajectory shape
+/responses_api_agents/                  @NVIDIA-NeMo/gym_env_benchmarks
+
+# Resource servers — verifiers, rewards, tool behavior, failure policy.
+# Servers such as code_gen and swerl_gen call the Core sandbox API, but the server
+# logic is a Frontier Eval implementation: bugs in the verifier or reward are
+# Frontier Eval, bugs in sandbox execution or isolation are Core.
+/resources_servers/                     @NVIDIA-NeMo/gym_env_benchmarks
+
+# Benchmarks & environments — environment definition, packaging, suites, onboarding
+/benchmarks/                            @NVIDIA-NeMo/gym_env_benchmarks
+/environments/                          @NVIDIA-NeMo/gym_env_benchmarks
+
+# CLI. gym env start/status/test also orchestrates environment lifecycle, which is
+# conceptually Core; it sits here because that is where the CLI lives. Loop in Core
+# when a change touches lifecycle or orchestration semantics rather than the
+# command surface.
+/nemo_gym/cli/                          @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/cli_setup_command.py          @NVIDIA-NeMo/gym_env_benchmarks
+
+# Data, datasets & decision-grade stats — reward profiling, benchmark packaging,
+# dataset registry contracts
+/nemo_gym/benchmarks.py                 @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/dataset_orchestrator.py       @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/gitlab_utils.py               @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/hf_utils.py                   @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/prompt.py                     @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/reward_profile.py             @NVIDIA-NeMo/gym_env_benchmarks
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CORE-ARCH + RL
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Model serving boundary — inference-side reliability, NeMo-RL/Dynamo alignment
+/responses_api_models/                  @NVIDIA-NeMo/gym_core
+
+# Serialization & networking — wire formats, transport, converters
+/nemo_gym/server_utils.py               @NVIDIA-NeMo/gym_core
+/nemo_gym/openai_utils.py               @NVIDIA-NeMo/gym_core
+/nemo_gym/anthropic_utils.py            @NVIDIA-NeMo/gym_core
+/nemo_gym/anthropic_converter.py        @NVIDIA-NeMo/gym_core
+/nemo_gym/responses_converter.py        @NVIDIA-NeMo/gym_core
+
+# Core runtime & contracts — base server interfaces, registries, rollout engine.
+# Breaking changes here also need Frontier Eval sign-off.
+/nemo_gym/base_resources_server.py      @NVIDIA-NeMo/gym_core
+/nemo_gym/base_responses_api_agent.py   @NVIDIA-NeMo/gym_core
+/nemo_gym/base_responses_api_model.py   @NVIDIA-NeMo/gym_core
+/nemo_gym/registry.py                   @NVIDIA-NeMo/gym_core
+/nemo_gym/agent_registry.py             @NVIDIA-NeMo/gym_core
+/nemo_gym/rollout_collection.py         @NVIDIA-NeMo/gym_core
+/nemo_gym/profiling.py                  @NVIDIA-NeMo/gym_core
+/nemo_gym/server_metadata.py            @NVIDIA-NeMo/gym_core
+/nemo_gym/server_status.py              @NVIDIA-NeMo/gym_core
+
+# NeMo-RL integration — training data substrate and shared contracts
+/nemo_gym/train_data_utils.py           @NVIDIA-NeMo/gym_core
+
+# Sandbox & execution — provider API, server hardening, isolation
+/nemo_gym/sandbox/                      @NVIDIA-NeMo/gym_core
+/nemo_gym/resources/                    @NVIDIA-NeMo/gym_core
+
+# ── Not in the ownership doc; mapped by analogy, confirm in review ────────────
+# Placed by the same contracts-vs-implementations principle used above.
+/nemo_gym/chat_streaming.py             @NVIDIA-NeMo/gym_core
+/nemo_gym/responses_streaming.py        @NVIDIA-NeMo/gym_core
+/nemo_gym/discovery.py                  @NVIDIA-NeMo/gym_core
+/nemo_gym/model_registry.py             @NVIDIA-NeMo/gym_core
+/nemo_gym/resources_server_registry.py  @NVIDIA-NeMo/gym_core
+/nemo_gym/mcp_auto_exposure.py          @NVIDIA-NeMo/gym_core
+/nemo_gym/orchestration/                @NVIDIA-NeMo/gym_core
+/nemo_gym/rollout_correlation.py        @NVIDIA-NeMo/gym_core
+/nemo_gym/rollout_observability.py      @NVIDIA-NeMo/gym_core
+/nemo_gym/decorators.py                 @NVIDIA-NeMo/gym_core
+/nemo_gym/path_utils.py                 @NVIDIA-NeMo/gym_core
+# Verification and rollout-time agent inputs sit on the evaluation side.
+/nemo_gym/judge.py                      @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/skills.py                     @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/rollout_reverification.py     @NVIDIA-NeMo/gym_env_benchmarks
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CO-OWNED
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Shared runtime contracts. Core owns the contract, Frontier Eval builds directly
+# against it, so both lanes are required reviewers.
+/nemo_gym/__init__.py                   @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/config_types.py               @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/global_config.py              @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
+/nemo_gym/package_info.py               @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
+
+# The verifiers harness is the framework side of the NeMo-RL integration: a
+# Frontier Eval harness against a Core-owned boundary.
+/responses_api_agents/verifiers_agent/  @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/gym_core
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+# Core library tests encode integration-test expectations for the Core contract.
+# Per-server tests live under each server directory and inherit that server's owner.
+/tests/                                 @NVIDIA-NeMo/gym_core
+
+# ── CI & build ───────────────────────────────────────────────────────────────
+/.github/                               @NVIDIA-NeMo/automation
+/docker/                                @NVIDIA-NeMo/automation
+/Makefile                               @NVIDIA-NeMo/automation
+/pyproject.toml                         @NVIDIA-NeMo/automation
+/uv.lock                                @NVIDIA-NeMo/automation
+/codecov.yml                            @NVIDIA-NeMo/automation
+/.pre-commit-config.yaml                @NVIDIA-NeMo/automation
