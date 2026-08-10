@@ -11,4 +11,4 @@ longmemeval_benchmark_simple_agent:
         jsonl_fpath: benchmarks/longmemeval/data/longmemeval_benchmark.jsonl
         prepare_script: benchmarks/longmemeval/prepare.py
         prompt_config: null
-        license: Creative Commons Attribution-NonCommercial 4.0
+        license: MIT

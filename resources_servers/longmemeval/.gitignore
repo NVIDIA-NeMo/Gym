@@ -1,3 +1,7 @@
-# Generated splits (rebuild with prepare_longmemeval.py); only example.jsonl is committed.
+# Generated splits (rebuild with prepare_longmemeval.py) and collate intermediates;
+# only the committed example artifacts required by `gym env test` are kept.
 data/*.jsonl
 !data/example.jsonl
+!data/example_rollouts.jsonl
+!data/example_metrics.json
+data/*_prepare.jsonl

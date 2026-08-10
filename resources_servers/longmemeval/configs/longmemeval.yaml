@@ -47,12 +47,12 @@ longmemeval_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/longmemeval/data/example.jsonl
-        license: Creative Commons Attribution-NonCommercial 4.0
+        license: MIT
       # Build with `python resources_servers/longmemeval/prepare_longmemeval.py`.
       - name: oracle
         type: validation
         jsonl_fpath: resources_servers/longmemeval/data/oracle.jsonl
-        license: Creative Commons Attribution-NonCommercial 4.0
+        license: MIT
 
 # Null defaults so OmegaConf resolves ${judge_*} without CLI overrides.
 # Recommended judge: gpt-4o-mini (upstream default). Must stay at end of file
