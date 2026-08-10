@@ -11,28 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""NeMo Gym agent wrapping the PinchBench OpenClaw benchmark.
+"""NeMo Gym agent for the PinchBench/OpenClaw benchmark.
 
-External benchmark, integrated at the agent-server level (mirrors
-`swe_agents` / `harbor_agent`): one JSONL record == one PinchBench task, and
-each `/run` launches **one self-contained sandbox per task** (via Gym's provider-neutral
-Sandbox API, PR #1377) that runs the stock PinchBench `benchmark.py` for that single task
-through OpenClaw, tars its result + transcript under the per-sandbox working mount, and exits. The
-sandbox is the per-task isolation boundary (own filesystem → own `~/.openclaw` → own
-gateway), which is how SWE-bench/Terminus avoid cross-rollout races (see README).
-
-The skill is NOT vendored: the image (Dockerfile.benchmark) clones PinchBench at a
-pinned tag (`v2.0.0`) and applies `setup_scripts/nvidia-pinchbench.patch` (the NVIDIA
-OpenAI-compatible-endpoint + judge integration), and bakes in `run_task.sh` at
-`/opt/run_task.sh` — mirroring how `harbor_agent`/`mini_swe_agent` pin a framework
-commit rather than vendoring.
-
-The sandbox provider is config-selected (`sandbox_provider`): `apptainer` (Slurm/HPC) or
-`opensandbox` (cluster), etc. Each per-task sandbox starts its OWN gateway daemon, so it
-never hits the shared-gateway WorkspaceVanishedError cliff. Results are pulled back via
-`AsyncSandbox.download` (no host bind-mount).
-
-See README.md for design + findings (skill patch, gateway, parity).
+One JSONL record per task; each /run launches a provider-neutral sandbox that runs
+the stock PinchBench benchmark.py for that task, then extracts results and transcript.
 """
 
 import asyncio
@@ -67,44 +49,32 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
 
 
+_SEARCH_KEY_MAP: dict[str, str] = {"brave": "brave_api_key", "tavily": "tavily_api_key"}
+
+
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
-    # Policy model OpenClaw runs against (streaming-capable endpoint, NOT a Gym
-    # non-streaming model server — see README).
     model_base_url: str
     model_api_key: str
     model_name: str
 
-    # Judge for hybrid / llm_judge tasks (OpenAI-compatible endpoint).
     judge_model: str
     judge_base_url: str
     judge_api_key: str
 
-    # Each task runs in its OWN sandbox with its OWN in-sandbox OpenClaw gateway, so the
-    # gateway never shares a workspace across tasks (avoids the WorkspaceVanishedError cliff
-    # a shared 147-task gateway hits). gym-nano scored 0.583 (n=3), at parity with vanilla
-    # standalone PinchBench (0.564). At openclaw 2026.6.5 `openclaw agent` needs a gateway to
-    # persist transcripts, so this is the only supported mode.
     openclaw_mode: Literal["gateway"] = "gateway"
-    gateway_token: str = "pinchbench-local"  # in-sandbox OpenClaw gateway token
+    gateway_token: str = "pinchbench-local"
 
-    # Per-task sandbox via Gym's provider-neutral Sandbox API (PR #1377), replacing direct
-    # docker/apptainer calls. `sandbox_provider` selects + configures the provider (e.g.
-    # {"apptainer": {...}} or {"opensandbox": {...}}); `sandbox_spec` carries the image
-    # (.sif path or docker:// ref), resources, ttl, etc. env + task_id metadata are injected
-    # per task.
     sandbox_provider: dict[str, Any] = {}
     sandbox_spec: dict[str, Any] = {}
-    task_timeout_s: int = 1800  # per-task exec timeout (PinchBench tasks can be long)
-    # Writable, per-sandbox-isolated working mount inside the sandbox. run_task.sh puts
-    # the skill copy, OpenClaw's $HOME, $TMPDIR and benchmark.py's run-root here, and we
-    # pull results from <base>/out/out.tgz. Default matches the apptainer provider's
-    # mount_point (/sandbox); if you override that, set this to match.
+    task_timeout_s: int = 1800
+    # Must match the provider's mount_point.
     sandbox_work_base: str = "/sandbox"
 
-    web_search_provider: str = "brave"
+    web_search_provider: Literal["brave", "tavily"] = "brave"
     brave_api_key: Optional[str] = None
     tavily_api_key: Optional[str] = None
 
@@ -112,16 +82,9 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
-    # Optional OpenClaw provider request timeout in seconds. None keeps OpenClaw's 120s default.
     openclaw_provider_timeout_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
-    # Where per-task transcripts are archived (kept on disk for inspection, like
-    # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
-    # The harness derives its OpenClaw agent id as `bench-<slug(model_name)>` and then
-    # resolves the agent's workspace by matching that id in `openclaw agents list`
-    # output. Long ids do not match, and every task then silently runs against a
-    # fallback workspace it never reads back. Refuse the run instead.
     max_agent_id_length: int = 64
 
     @model_validator(mode="after")
@@ -137,41 +100,27 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
         return self
 
     @model_validator(mode="after")
-    def _validate_search_config(self) -> "PinchBenchAgentConfig":
-        valid_providers = {"brave", "tavily"}
-        if self.web_search_provider not in valid_providers:
-            raise ValueError(
-                f"web_search_provider={self.web_search_provider!r} is not supported. "
-                f"Valid values: {sorted(valid_providers)}."
-            )
-        required_key = {"brave": "brave_api_key", "tavily": "tavily_api_key"}[self.web_search_provider]
+    def _validate_api_key_present(self) -> "PinchBenchAgentConfig":
+        required_key = _SEARCH_KEY_MAP[self.web_search_provider]
         if not getattr(self, required_key):
-            raise ValueError(
-                f"web_search_provider={self.web_search_provider!r} requires {required_key} to be set."
-            )
+            raise ValueError(f"web_search_provider={self.web_search_provider!r} requires {required_key} to be set.")
         return self
 
     @model_validator(mode="after")
     def _validate_sandbox_config(self) -> "PinchBenchAgentConfig":
         if not self.sandbox_work_base.startswith("/"):
-            raise ValueError(
-                f"sandbox_work_base={self.sandbox_work_base!r} must be an absolute path."
-            )
+            raise ValueError(f"sandbox_work_base={self.sandbox_work_base!r} must be an absolute path.")
         if self.max_tokens > self.context_window:
             raise ValueError(
                 f"max_tokens={self.max_tokens} exceeds context_window={self.context_window}. "
                 "OpenClaw would reject or misbehave with this configuration."
             )
+        if self.sandbox_provider:
+            get_provider_class(next(iter(self.sandbox_provider)))
         return self
 
 
-# The harness's agent-id prefix (`benchmark.py`: agent_id = f"bench-{model_slug}").
 _AGENT_ID_PREFIX = "bench-"
-
-# Failure-routing sentinels read by the rollout dispatcher (nemo_gym.rollout_collection).
-NG_FAILURE_CLASS_KEY = "_ng_failure_class"
-NG_NO_PERSIST_KEY = "_ng_no_persist"
-NG_TERMINAL_KEY = "_ng_failure_terminal"
 
 
 class SandboxKilledError(RuntimeError):
@@ -199,15 +148,13 @@ class PinchBenchVerifyResponse(BaseVerifyResponse):
     grading_breakdown: dict
     grading_notes: str
     status: str
-    raw_rollout: dict  # transcript archive location + compact metadata
+    raw_rollout: dict
 
 
 class PinchBenchAgent(SimpleResponsesAPIAgent):
     config: PinchBenchAgentConfig
 
     def model_post_init(self, context):
-        if self.config.sandbox_provider:
-            get_provider_class(next(iter(self.config.sandbox_provider)))
         self._sem = asyncio.Semaphore(self.config.max_concurrent)
         return super().model_post_init(context)
 
@@ -219,7 +166,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         raise NotImplementedError("PinchBench is an external benchmark; use /run.")
 
-    # --- task env ----------------------------------------------------------
     def _task_env(self, task_id: str) -> dict:
         env = {
             "TASK_ID": task_id,
@@ -235,11 +181,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             "PINCHBENCH_CONTEXT_WINDOW": str(self.config.context_window),
             "TIMEOUT_MULT": str(self.config.timeout_multiplier),
             "PINCHBENCH_WORK_BASE": self.config.sandbox_work_base,
+            "OPENCLAW_GATEWAY_TOKEN": self.config.gateway_token,
         }
-        # Each per-task container starts its OWN OpenClaw gateway daemon (per-task, so
-        # it never hits the shared-workspace WorkspaceVanishedError cliff). The client
-        # in-container picks up the token from this env var.
-        env["OPENCLAW_GATEWAY_TOKEN"] = self.config.gateway_token
         if self.config.openclaw_provider_timeout_seconds:
             env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
         if self.config.brave_api_key:
@@ -248,7 +191,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             env["TAVILY_API_KEY"] = self.config.tavily_api_key
         return env
 
-    # --- per-task sandbox (Gym Sandbox API; provider-neutral) ---------------
     def _build_spec(self, task_id: str) -> SandboxSpec:
         cfg = dict(self.config.sandbox_spec)
         return SandboxSpec(
@@ -265,8 +207,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     async def _run_in_sandbox(self, task_id: str, out_dir: Path) -> int | None:
         """Run one PinchBench task and pull its /out archive back.
 
-        Returns the apptainer exit code if the process exited non-zero but still produced
-        an archive (non-clean exit), or None for a clean run.
+        Returns the apptainer exit code when the direct_exec path exits non-zero but
+        still produced an archive (non-clean exit), or None in all other cases.
         """
         provider = self.config.sandbox_provider or {}
         apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
@@ -402,9 +344,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             raise ValueError("pinchbench sandbox_spec.image is required for direct Apptainer exec")
 
         work_base = self.config.sandbox_work_base.rstrip("/") or "/sandbox"
-        if not work_base.startswith("/"):
-            raise ValueError("pinchbench sandbox_work_base must be an absolute path")
-
         staging_dir = out_dir / "sandbox"
         staging_dir.mkdir(parents=True, exist_ok=True)
         wrapper_path = self._write_direct_exec_wrapper(staging_dir)
@@ -454,21 +393,18 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         if not archive.exists():
             raise RuntimeError(f"direct apptainer exec did not produce {archive} for task {task_id}")
 
-        non_clean_exit_rc = None
         if proc.returncode != 0:
             print(
                 f"[pinchbench] non-clean apptainer exit (rc={proc.returncode}) for task {task_id} "
                 "but archive present — continuing with result",
                 flush=True,
             )
-            non_clean_exit_rc = proc.returncode
 
         shutil.copy2(archive, out_dir / "out.tgz")
-        with tarfile.open(out_dir / "out.tgz") as tf:
+        with tarfile.open(archive) as tf:
             tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
-        return non_clean_exit_rc
+        return proc.returncode if proc.returncode != 0 else None
 
-    # --- result parsing -----------------------------------------------------
     def _parse_result(self, task_id: str, out_dir: Path) -> dict:
         results = [p for p in glob.glob(str(out_dir / "*.json")) if "transcript" not in p]
         if not results:
@@ -693,8 +629,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         return self._response_from_transcript_events(task_id, self._read_transcript_events(task_id, out_dir))
 
     def _collect_transcript(self, task_id: str, out_dir: Path, run_id: str) -> tuple[list, str]:
-        """Read the full archived transcript and persist it to transcripts_dir
-        (kept on disk for inspection, like swe_agents' persistent_dir)."""
+        """Read transcript events and copy the transcript directory to transcripts_dir."""
         tdir = out_dir / "0001_transcripts"
         events = self._read_transcript_events(task_id, out_dir)
         archive = ""
@@ -709,8 +644,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         return events, archive
 
     def _empty_response(self, task_id: str) -> NeMoGymResponse:
-        """Minimal valid response for the failure path, so /run can return 200
-        with reward 0 (never 500) even when no transcript was ever produced."""
+        """Minimal valid response for the failure path when no transcript was produced."""
         return NeMoGymResponse(
             id=task_id,
             created_at=1.0,
@@ -748,11 +682,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         non_clean_exit_rc: int | None = None
         try:
             async with self._sem:
-                non_clean_exit_rc = await self._run_in_sandbox(task_id, out_dir)  # one sandbox per task
+                non_clean_exit_rc = await self._run_in_sandbox(task_id, out_dir)
             result = self._parse_result(task_id, out_dir)
             response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
-        except Exception as exc:  # noqa: BLE001 -- never 500; one task must not abort the whole collection (ng_collect is fail-fast)
+        except Exception as exc:  # noqa: BLE001 -- one task error must not abort the batch
             failure_class = _classify_task_failure(exc)
             print(f"[pinchbench-{failure_class}] {task_id}: {type(exc).__name__}: {exc}", flush=True)
             result = {
@@ -770,6 +704,14 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
 
+        raw_rollout: dict = {
+            "transcript_event_count": len(transcript_events),
+            "archived_to": archive_path,
+            "run_id": run_id,
+        }
+        if non_clean_exit_rc is not None:
+            raw_rollout["non_clean_exit_rc"] = non_clean_exit_rc
+
         return PinchBenchVerifyResponse(
             **record,
             reward=result["reward"],
@@ -779,12 +721,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             grading_breakdown=result["breakdown"],
             grading_notes=result["notes"],
             status=result["status"],
-            raw_rollout={
-                "transcript_event_count": len(transcript_events),
-                "archived_to": archive_path,
-                "run_id": run_id,
-                **({"non_clean_exit_rc": non_clean_exit_rc} if non_clean_exit_rc is not None else {}),
-            },
+            raw_rollout=raw_rollout,
             **routing,
         )
 
