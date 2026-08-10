@@ -648,6 +648,24 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
     }
 )
 
+# Responses output-item types that are not model-generated.
+# These are tool results the client supplies, approvals it grants, and context-management bookkeeping.
+# They must stay out of the boundary set above.
+# Otherwise split_responses_input_output_items would treat a tool result as the start of the sampled segment.
+#
+# The SDK does not distinguish the two groups, so the classification lives here.
+# These reach Gym as input items at the pinned version, and openai moves them into
+# ResponseOutputItem alongside generated items in a later release.
+_RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
+    {
+        "computer_call_output",
+        "custom_tool_call_output",
+        "function_call_output",
+        "local_shell_call_output",
+        "mcp_approval_response",
+    }
+)
+
 
 def split_responses_input_output_items(
     items: List[NeMoGymResponseOutputItem],

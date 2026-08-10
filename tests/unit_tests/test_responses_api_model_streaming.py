@@ -29,6 +29,7 @@ from uuid import uuid4
 import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 from nemo_gym.openai_utils import (
@@ -36,7 +37,9 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputItem,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
     sanitize_streaming_responses_body,
@@ -86,6 +89,161 @@ def _function_call_item(name: str) -> dict:
         "arguments": "{}",
         "status": "completed",
     }
+
+
+# Minimal valid payloads, one per item type NeMoGymResponseInputItem accepts.
+# Keyed by the type tag, so a new union member without a fixture is reported by
+# test_every_union_tag_has_a_fixture rather than going untested.
+ITEM_FIXTURES: dict[str, dict] = {
+    "message": {
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+    },
+    "function_call": {
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": "{}",
+        "status": "completed",
+    },
+    "function_call_output": {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "sunny",
+        "status": "completed",
+    },
+    "reasoning": {
+        "type": "reasoning",
+        "id": "rs_1",
+        "status": "completed",
+        "summary": [{"type": "summary_text", "text": "thinking"}],
+    },
+    "web_search_call": {
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"type": "search", "query": "weather"},
+    },
+    "file_search_call": {
+        "type": "file_search_call",
+        "id": "fs_1",
+        "status": "completed",
+        "queries": ["report"],
+    },
+    "computer_call": {
+        "type": "computer_call",
+        "id": "cu_1",
+        "call_id": "call_cu_1",
+        "status": "completed",
+        "action": {"type": "screenshot"},
+        "pending_safety_checks": [],
+    },
+    "custom_tool_call": {
+        "type": "custom_tool_call",
+        "id": "ct_1",
+        "call_id": "call_ct_1",
+        "name": "my_tool",
+        "input": "payload",
+    },
+    "local_shell_call": {
+        "type": "local_shell_call",
+        "id": "ls_1",
+        "call_id": "call_ls_1",
+        "status": "completed",
+        "action": {
+            "type": "exec",
+            "command": ["ls", "-la"],
+            "env": {},
+        },
+    },
+    "image_generation_call": {
+        "type": "image_generation_call",
+        "id": "ig_1",
+        "status": "completed",
+        "result": None,
+    },
+    "code_interpreter_call": {
+        "type": "code_interpreter_call",
+        "id": "ci_1",
+        "status": "completed",
+        "code": "print(1)",
+        "container_id": "cntr_1",
+        "outputs": None,
+    },
+    "mcp_call": {
+        "type": "mcp_call",
+        "id": "mcp_1",
+        "name": "search",
+        "arguments": "{}",
+        "server_label": "my_server",
+    },
+    "mcp_list_tools": {
+        "type": "mcp_list_tools",
+        "id": "mlt_1",
+        "server_label": "my_server",
+        "tools": [],
+    },
+    "mcp_approval_request": {
+        "type": "mcp_approval_request",
+        "id": "mar_1",
+        "name": "search",
+        "arguments": "{}",
+        "server_label": "my_server",
+    },
+    "computer_call_output": {
+        "type": "computer_call_output",
+        "call_id": "call_cu_1",
+        "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,x"},
+    },
+    "custom_tool_call_output": {
+        "type": "custom_tool_call_output",
+        "call_id": "call_ct_1",
+        "output": "tool result",
+    },
+    "local_shell_call_output": {
+        "type": "local_shell_call_output",
+        "id": "lso_1",
+        "output": "total 0",
+    },
+    "mcp_approval_response": {
+        "type": "mcp_approval_response",
+        "approval_request_id": "mar_1",
+        "approve": True,
+    },
+}
+
+
+# Item types Gym can carry in a Responses transcript but that Chat Completions cannot express.
+# ResponsesConverter.responses_to_chat_completion_create_params raises NotImplementedError for these.
+# A hosted web search or an MCP call has no chat-message representation.
+#
+# Union membership and chat-convertibility are therefore two separate things.
+# openai_model passes Responses through untouched and handles all of these.
+# Model servers that downconvert to a chat backend, vllm_model and inference_provider, cannot replay them.
+# They raise inside the converter rather than rejecting the request.
+# A type added to the union belongs in one list or the other.
+CHAT_INCONVERTIBLE_TYPES = frozenset(
+    {
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "web_search_call",
+        "computer_call_output",
+        "custom_tool_call_output",
+        "local_shell_call_output",
+        "mcp_approval_response",
+    }
+)
 
 
 NAMESPACE_TOOL = {
@@ -444,3 +602,174 @@ class TestResponsesDispatchRoute:
         client, _ = _client(_FailingModel)
         with pytest.raises(RuntimeError, match="backend exploded"):
             client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+
+
+class TestUnionItemTypesThroughDispatch:
+    """Both dispatch paths must agree about which item types are legal.
+
+    A plain JSON request validates strictly.
+    A ``stream: true`` request goes through ``sanitize_streaming_responses_body`` first.
+    That validates each input item on its own, drops the ones that fail with a warning, and returns 200.
+    The drop is intended for unknown harness bookkeeping.
+    Losing one carrier item is preferable to a 422 that ends the rollout.
+    It also means an item type Gym cannot represent disappears from the transcript rather than raising.
+    """
+
+    _ADAPTER = TypeAdapter(NeMoGymResponseInputItem)
+
+    @staticmethod
+    def _union_tags() -> set[str]:
+        """The ``type`` tags NeMoGymResponseInputItem accepts."""
+        from typing import Annotated, Literal, get_args, get_origin
+
+        def unwrap(annotation):
+            while get_origin(annotation) is Annotated:
+                annotation = get_args(annotation)[0]
+            return annotation
+
+        tags: set[str] = set()
+        for member in (unwrap(a) for a in get_args(unwrap(NeMoGymResponseInputItem))):
+            field = getattr(member, "model_fields", {}).get("type")
+            if field is None:
+                continue
+            annotation = field.annotation
+            if get_origin(annotation) is Literal:
+                tags.update(str(v) for v in get_args(annotation))
+        return tags
+
+    def test_every_union_tag_has_a_fixture(self) -> None:
+        """A union member with no fixture is untested by everything below."""
+        missing = sorted(self._union_tags() - set(ITEM_FIXTURES))
+        assert not missing, (
+            f"NeMoGymResponseInputItem accepts {missing} but ITEM_FIXTURES has no payload for "
+            f"them, so the tests below skip those types. Add a minimal valid payload."
+        )
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_fixture_is_a_valid_union_member(self, tag: str) -> None:
+        """Guard the fixtures themselves: an invalid payload would make the drop tests vacuous."""
+        try:
+            self._ADAPTER.validate_python(ITEM_FIXTURES[tag])
+        except ValidationError as exc:  # pragma: no cover - only on a bad fixture
+            pytest.fail(f"ITEM_FIXTURES[{tag!r}] does not validate against the union: {exc}")
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_streaming_does_not_drop_representable_items(self, tag: str) -> None:
+        """The transcript the backend sees matches what the client sent, item for item.
+
+        Regression guard for issue #2436.
+        Before the hosted-tool wrappers existed, a ``web_search_call`` echoed back as history was
+        dropped here, at HTTP 200 with only a log line.
+        """
+        client, server = _client(_EchoModel)
+        history = [
+            {"role": "user", "content": "first turn"},
+            ITEM_FIXTURES[tag],
+            {"role": "user", "content": "second turn"},
+        ]
+        response = client.post("/v1/responses", json={"input": history, "stream": True})
+        assert response.status_code == 200
+
+        seen = server.last_params.input
+        assert len(seen) == len(history), (
+            f"a {tag!r} item was dropped from the streaming transcript: sent {len(history)} input "
+            f"items, backend received {len(seen)}. Check the warning from "
+            f"sanitize_streaming_responses_body."
+        )
+        assert getattr(seen[1], "type", None) == tag
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_both_dispatch_paths_accept_representable_items(self, tag: str) -> None:
+        """Streamed and non-streamed agree for every type Gym can represent."""
+        client, _ = _client(_EchoModel)
+        body = {"input": [{"role": "user", "content": "hi"}, ITEM_FIXTURES[tag]]}
+
+        non_streaming = client.post("/v1/responses", json=body)
+        streaming = client.post("/v1/responses", json={**body, "stream": True})
+
+        assert non_streaming.status_code == 200, (
+            f"{tag!r} is in the union but the non-streaming path rejected it: {non_streaming.text[:400]}"
+        )
+        assert streaming.status_code == 200
+
+    def test_unrepresentable_input_item_is_dropped_when_streaming_and_rejected_otherwise(self) -> None:
+        """Record the asymmetry so a change to it is deliberate.
+
+        An item type with no union member is a 422 non-streaming and a silent drop streaming.
+        The drop is intentional.
+        Making the streaming path strict, or making the drop louder, comes with a failing test
+        pointing at it.
+        """
+        client, server = _client(_EchoModel)
+        unknown = {"type": "definitely_not_a_responses_item_type", "id": "x_1"}
+        body = {"input": [{"role": "user", "content": "hi"}, unknown]}
+
+        assert client.post("/v1/responses", json=body).status_code == 422
+
+        streaming = client.post("/v1/responses", json={**body, "stream": True})
+        assert streaming.status_code == 200
+        assert len(server.last_params.input) == 1, "the unknown item should have been dropped"
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_union_type_is_chat_convertible_or_declared_inconvertible(self, tag: str) -> None:
+        """Every union type is either downconvertible to chat, or declared as not.
+
+        The union says what Gym can carry.
+        The converter says what a chat backend can express, and that is a strict subset.
+        Nothing else states where the line falls, because
+        ``responses_to_chat_completion_create_params`` ends in ``case _: raise NotImplementedError``.
+        A type added to the union would otherwise first show up as a mid-rollout failure on
+        whichever model server downconverts.
+        """
+        converter = ResponsesConverter(return_token_id_information=False)
+        params = NeMoGymResponseCreateParamsNonStreaming(input=[ITEM_FIXTURES[tag]])
+        try:
+            converter.responses_to_chat_completion_create_params(params)
+            convertible = True
+        except NotImplementedError:
+            convertible = False
+
+        if tag in CHAT_INCONVERTIBLE_TYPES:
+            assert not convertible, (
+                f"{tag!r} is listed in CHAT_INCONVERTIBLE_TYPES but the chat converter now handles "
+                f"it. Remove it from that list."
+            )
+        else:
+            assert convertible, (
+                f"{tag!r} is in the Gym union but responses_to_chat_completion_create_params "
+                f"raises NotImplementedError for it, so a model server that downconverts to Chat "
+                f"Completions (vllm_model, inference_provider) fails mid-rollout on it.\n"
+                f"Fix: add a `case {tag!r}` to responses_to_chat_completion_create_params, or add "
+                f"{tag!r} to CHAT_INCONVERTIBLE_TYPES to declare it Responses-only."
+            )
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_params_survive_a_dump_and_revalidate(self, tag: str) -> None:
+        """Anything the params model accepts, it must accept again after model_dump().
+
+        Servers forward a request by re-validating ``**body.model_dump()``.
+        A dump Gym cannot re-read breaks that hop.
+        The risk is an SDK model whose field accepts a value its matching ``*Param`` TypedDict does not.
+        Dumping emits the value, and re-validation rejects it.
+
+        Construction is the gate that keeps that from happening.
+        A tool carrying ``defer_loading: None`` is refused up front, rather than dumped into
+        something unreadable.
+        This test records that, per item type.
+        """
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[ITEM_FIXTURES[tag]],
+            tools=[{"type": "function", "name": "f", "parameters": {}, "strict": None}],
+        )
+        dumped = params.model_dump()
+        try:
+            NeMoGymResponseCreateParamsNonStreaming(**dumped)
+        except ValidationError as exc:
+            pytest.fail(
+                f"a {tag!r} item survives validation but not a dump/re-validate round trip: {exc.errors()[:2]}"
+            )
+
+    def test_chat_inconvertible_list_has_no_stale_entries(self) -> None:
+        """A declared-inconvertible type that is not in the union is a stale entry."""
+        stale = sorted(CHAT_INCONVERTIBLE_TYPES - self._union_tags())
+        assert not stale, f"CHAT_INCONVERTIBLE_TYPES names types the union does not accept: {stale}"
