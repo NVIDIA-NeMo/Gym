@@ -140,7 +140,7 @@ else
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
         --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-start-rank (( SLURM_PROCID - $NUM_PREFILL_NODES )) \
+        --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
         --data-parallel-address \$DECODE_HEAD \
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
         --kv-transfer-config \
@@ -154,7 +154,7 @@ NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
 batch_command=$(cat <<EOF
 set -euo pipefail
 
-nodes=($(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
+nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
 # Do not start Ray: each Slurm task directly runs a vLLM DP rank.
 PREFILL_HEAD="\${nodes[0]}" \
