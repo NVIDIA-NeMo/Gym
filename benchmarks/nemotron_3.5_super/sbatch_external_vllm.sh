@@ -65,8 +65,8 @@ set -euo pipefail
 PREFILL_HEAD=\$PREFILL_HEAD
 DECODE_HEAD=\$DECODE_HEAD
 
-# Nemotron's three-read Mamba SSM state must use the dimension-sequence layout
-# when KV transfer is enabled.
+# Nemotron's three-read Mamba SSM state must use the dimension-sequence layout when KV transfer is enabled.
+# Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
