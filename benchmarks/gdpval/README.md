@@ -328,12 +328,12 @@ Two pieces make this work:
 
 ### Run it
 
-First serve MiniMax-M3 yourself on your GPU node(s), using a container/runtime
-combination that is known to work for that model. In our testing, a
-**single-node TP=4** instance worked, as did independent single-node TP=4
-replicas for data-parallel throughput. Do NOT form one TP=8 group across two
-nodes unless you have validated that stack: the cross-node MXFP8 all-reduce path
-can produce *garbage logits that still start cleanly*.
+Serve MiniMax-M3 from the public vLLM image `vllm/vllm-openai:minimax-m3` and
+expose its OpenAI-compatible `/v1` endpoint. In our testing, a **single-node
+TP=4** instance worked, as did independent single-node TP=4 replicas for
+data-parallel throughput. Do NOT form one TP=8 group across two nodes unless
+you have validated that stack: the cross-node MXFP8 all-reduce path can produce
+*garbage logits that still start cleanly*.
 
 ```bash
 # Verify the self-hosted endpoint from the gym host:
