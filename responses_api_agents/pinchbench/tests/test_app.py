@@ -59,7 +59,6 @@ def make_agent(**over) -> PinchBenchAgent:
 
 def test_sanity_construct():
     agent = make_agent()
-    assert agent.config.openclaw_mode == "gateway"  # per-task gateway: proven working mode
     assert agent.config.task_timeout_s == 1800
 
 
@@ -71,10 +70,9 @@ async def test_responses_not_implemented():
 
 
 def test_task_env_gateway_mode():
-    env = make_agent(openclaw_mode="gateway")._task_env("task_x")
+    env = make_agent()._task_env("task_x")
     assert env["TASK_ID"] == "task_x"
-    assert env["OPENCLAW_GATEWAY_TOKEN"]  # gateway daemon mode
-    assert "PINCHBENCH_FORCE_LOCAL" not in env
+    assert env["OPENCLAW_GATEWAY_TOKEN"] == "pinchbench-local"
     assert env["MODEL_NAME"] == "vendor/model"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
     assert env["BRAVE_API_KEY"] == "brave-key"
@@ -145,12 +143,14 @@ def test_parse_result_hybrid(tmp_path):
 def test_parse_result_missing_task(tmp_path):
     _write_result(tmp_path, "other_task", 1.0, "automated", {}, "")
     r = make_agent()._parse_result("task_x", tmp_path)
-    assert r["reward"] == 0.0 and r["status"] == "missing_task"
+    assert r["reward"] == 0.0
+    assert r["status"] == "missing_task"
 
 
 def test_parse_result_no_output(tmp_path):
-    r = make_agent()._parse_result("task_x", tmp_path)  # empty dir
-    assert r["reward"] == 0.0 and r["status"] == "error"
+    r = make_agent()._parse_result("task_x", tmp_path)
+    assert r["reward"] == 0.0
+    assert r["status"] == "error"
 
 
 def test_response_from_transcript(tmp_path):
@@ -259,10 +259,6 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     assert "sandbox exploded" in resp.grading_notes
 
 
-# Failure routing: rows without `_ng_failure_class` land in the main jsonl, where
-# resume counts them as done forever — the pre-fix behavior these tests pin.
-
-
 def _run_body(task_id="task_x"):
     body = MagicMock()
     body.model_dump.return_value = {
@@ -273,50 +269,25 @@ def _run_body(task_id="task_x"):
 
 
 @pytest.mark.asyncio
-async def test_generic_failure_routes_to_sidecar_not_main(tmp_path, monkeypatch):
-    """A failed task must carry a failure class so it never lands in the main jsonl."""
+@pytest.mark.parametrize(
+    "exc,expected_class,no_persist,terminal",
+    [
+        (RuntimeError("sandbox exploded"), "legitimate", False, False),
+        (SandboxKilledError("direct apptainer exec killed (rc=-15)"), "kill_shaped", True, False),
+        (TimeoutError("direct apptainer exec timed out"), "timeout_exceeded", False, True),
+    ],
+)
+async def test_failure_routing_sentinels(exc, expected_class, no_persist, terminal, tmp_path, monkeypatch):
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
-        raise RuntimeError("sandbox exploded")
+    async def fail(task_id, out_dir):
+        raise exc
 
-    monkeypatch.setattr(agent, "_run_in_sandbox", boom)
-    resp = await agent.run(body=_run_body())
-    dumped = resp.model_dump()
-    assert dumped.get(NG_FAILURE_CLASS_KEY) == "legitimate"  # sidecar, bounded retry
-    assert not dumped.get(NG_NO_PERSIST_KEY)
-    assert not dumped.get(NG_TERMINAL_KEY)
-
-
-@pytest.mark.asyncio
-async def test_signal_killed_sandbox_is_kill_shaped_and_unpersisted(tmp_path, monkeypatch):
-    """Walltime SIGTERM shape: no row anywhere; resume's set-difference re-dispatches."""
-    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
-
-    async def killed(task_id, out_dir):
-        raise SandboxKilledError("direct apptainer exec killed (rc=-15) for task task_x")
-
-    monkeypatch.setattr(agent, "_run_in_sandbox", killed)
-    resp = await agent.run(body=_run_body())
-    dumped = resp.model_dump()
-    assert dumped.get(NG_FAILURE_CLASS_KEY) == "kill_shaped"
-    assert dumped.get(NG_NO_PERSIST_KEY) is True
-
-
-@pytest.mark.asyncio
-async def test_task_timeout_is_terminal_sidecar(tmp_path, monkeypatch):
-    """Per-task timeout consumed its budget: one sidecar row, never retried."""
-    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
-
-    async def slow(task_id, out_dir):
-        raise TimeoutError("direct apptainer exec timed out for task task_x")
-
-    monkeypatch.setattr(agent, "_run_in_sandbox", slow)
-    resp = await agent.run(body=_run_body())
-    dumped = resp.model_dump()
-    assert dumped.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded"
-    assert dumped.get(NG_TERMINAL_KEY) is True
-    assert not dumped.get(NG_NO_PERSIST_KEY)
+    monkeypatch.setattr(agent, "_run_in_sandbox", fail)
+    dumped = (await agent.run(body=_run_body())).model_dump()
+    assert dumped.get(NG_FAILURE_CLASS_KEY) == expected_class
+    assert bool(dumped.get(NG_NO_PERSIST_KEY)) is no_persist
+    assert bool(dumped.get(NG_TERMINAL_KEY)) is terminal
 
 
 @pytest.mark.asyncio
@@ -348,8 +319,14 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
         assert key not in dumped
 
 
-def test_classify_task_failure_mapping():
-    assert _classify_task_failure(SandboxKilledError("rc=-15")) == "kill_shaped"
-    assert _classify_task_failure(TimeoutError("timed out")) == "timeout_exceeded"
-    assert _classify_task_failure(RuntimeError("exec failed")) == "legitimate"
-    assert _classify_task_failure(FileNotFoundError("apptainer")) == "legitimate"
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (SandboxKilledError("rc=-15"), "kill_shaped"),
+        (TimeoutError("timed out"), "timeout_exceeded"),
+        (RuntimeError("exec failed"), "legitimate"),
+        (FileNotFoundError("apptainer"), "legitimate"),
+    ],
+)
+def test_classify_task_failure(exc, expected):
+    assert _classify_task_failure(exc) == expected

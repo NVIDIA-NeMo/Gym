@@ -42,7 +42,8 @@ async def _capture_launch(agent, tmp_path, apptainer_cfg):
         return proc
 
     with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-        with contextlib.suppress(Exception):
+        # RuntimeError is expected: no archive is produced by the fake process.
+        with contextlib.suppress(RuntimeError):
             await agent._run_in_apptainer_direct("task_x", tmp_path, apptainer_cfg)
     return captured
 
