@@ -108,7 +108,8 @@ if (( SLURM_PROCID == 0 )); then
         --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
         --host \$PREFILL_HEAD \
         --port $ROUTER_SERVER_PORT \
-        --intra-node-data-parallel-size 1
+        --intra-node-data-parallel-size 1 \
+        --log-level error
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
