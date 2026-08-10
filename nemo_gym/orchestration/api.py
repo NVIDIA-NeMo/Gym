@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Tag, model_validator
@@ -36,7 +35,6 @@ class BaseServiceConfig(_StrictModel):
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
-    # Values starting with "$" are resolved from the host environment at submit time.
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts. Each entry is "src:dst" or "src".
     mounts: list[str] = []
@@ -129,7 +127,6 @@ class DriverConfig(_StrictModel):
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
     benchmarks: dict[str, BenchmarkRunConfig]
-    # Values starting with "$" are resolved from the host environment at submit time.
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts. Each entry is "src:dst" or "src".
     mounts: list[str] = []
@@ -140,29 +137,11 @@ class JobConfig(_StrictModel):
     output_path: str
 
 
-def _resolve_env_refs(data: Any) -> Any:
-    if isinstance(data, dict):
-        return {k: _resolve_env_refs(v) for k, v in data.items()}
-    if isinstance(data, list):
-        return [_resolve_env_refs(v) for v in data]
-    if isinstance(data, str) and data.startswith("$"):
-        host_var = data[1:]
-        if host_var not in os.environ:
-            raise ValueError(f"Host environment variable {host_var!r} is not set (referenced as {data!r} in config).")
-        return os.environ[host_var]
-    return data
-
-
 class SubmitConfig(_StrictModel):
     services: dict[str, ServiceConfig]
     compute: dict[str, ComputeConfig]
     driver: DriverConfig
     job: JobConfig
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_host_env_vars(cls, data: Any) -> Any:
-        return _resolve_env_refs(data)
 
     @model_validator(mode="after")
     def _resolve_and_validate_placements(self) -> "SubmitConfig":

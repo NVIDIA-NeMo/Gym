@@ -29,8 +29,7 @@ vllm serve $MODEL \
     --mamba-ssm-cache-dtype float32 \
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
     --enable-expert-parallel \
-    --speculative-config '{"method": "mtp", "num_speculative_tokens": 5}' \
-    --max-num-batched-tokens 8480 \
+    --max-num-batched-tokens 32768 \
     --host \$host \
     --port 8000 &
 
@@ -57,6 +56,7 @@ gym eval run \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
     ++overwrite_metrics_conflicts=true \
     ++split=benchmark \
+    ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
     ++policy_base_url=\$ip \
     ++policy_api_key=dummy_api_key \

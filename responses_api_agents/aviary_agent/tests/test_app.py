@@ -551,7 +551,7 @@ class TestApp:
                 "env_id": env_id,
                 "group_id": "0",
                 "contains_transitions": True,
-                "output": [[{"role": "user", "content": "obs"}]],
+                "output": [[{"type": "message", "role": "user", "content": "obs"}]],
                 "parallel_tool_calls": True,
                 "tool_choice": "auto",
                 "tools": [],
