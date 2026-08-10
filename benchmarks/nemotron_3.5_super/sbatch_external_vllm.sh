@@ -131,6 +131,7 @@ if (( SLURM_PROCID == 0 )); then
     done
 
     # --intra-node-data-parallel-size must match the data-parallel-size-local above.
+    # Set a super long request timeout since some reasoning requests may take a long time to generate.
     vllm-router \
         --policy consistent_hash \
         --vllm-pd-disaggregation \
@@ -139,6 +140,7 @@ if (( SLURM_PROCID == 0 )); then
         --host \$PREFILL_HEAD \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
+        --request-timeout-secs 86400 \
         --log-level error
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
