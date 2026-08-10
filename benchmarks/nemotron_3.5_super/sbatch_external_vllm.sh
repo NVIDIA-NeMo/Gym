@@ -24,6 +24,15 @@ decode_host=\${PD_DECODE_HOST:?Missing decode node address}
 # when KV transfer is enabled.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
+# NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
+# transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
+# host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
+export UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc
+export UCX_NET_DEVICES=mlx5_0:1
+export UCX_IB_ADDR_TYPE=eth
+export UCX_RNDV_SCHEME=get_zcopy
+export UCX_RNDV_THRESH=0
+
 common_args=(
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
