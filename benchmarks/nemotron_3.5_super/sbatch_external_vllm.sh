@@ -67,7 +67,7 @@ if [[ "\$SLURM_PROCID" == 0 ]]; then
     vllm serve "$MODEL" "\${common_args[@]}" \
         --host \$prefill_host \
         --port 8001 \
-        --data-parallel-size 2 \
+        --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-address \$prefill_host \
         --data-parallel-rpc-port 13345 \
         --kv-transfer-config \
@@ -96,7 +96,7 @@ elif [[ "\$SLURM_PROCID" == 1 ]]; then
     VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
-        --data-parallel-size 2 \
+        --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-start-rank 1 \
         --data-parallel-address \${prefill_hosts[0]} \
         --data-parallel-rpc-port 13345 \
@@ -110,7 +110,7 @@ elif [[ "\$SLURM_PROCID" == 2 ]]; then
     vllm serve "$MODEL" "\${common_args[@]}" \
         --host \$decode_host \
         --port 8002 \
-        --data-parallel-size 2 \
+        --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-address \$decode_host \
         --data-parallel-rpc-port 13346 \
         --kv-transfer-config \
@@ -122,7 +122,7 @@ elif [[ "\$SLURM_PROCID" == 3 ]]; then
     VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
-        --data-parallel-size 2 \
+        --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-start-rank 1 \
         --data-parallel-address \${decode_hosts[0]} \
         --data-parallel-rpc-port 13346 \
