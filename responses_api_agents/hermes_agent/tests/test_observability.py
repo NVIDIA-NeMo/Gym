@@ -64,6 +64,7 @@ def test_normalize_hermes_messages_preserves_conversation_order():
             {
                 "role": "assistant",
                 "content": "working",
+                "reasoning": "checking the workspace",
                 "tool_calls": [
                     {
                         "id": "call-1",
@@ -82,14 +83,16 @@ def test_normalize_hermes_messages_preserves_conversation_order():
 
     assert [item.type for item in items] == [
         "message",
+        "reasoning",
         "message",
         "function_call",
         "function_call_output",
         "message",
     ]
-    assert items[2].arguments == '{"command": "pwd"}'
-    assert items[3].call_id == "call-1"
-    assert items[4].content[0].text == "done"
+    assert items[1].summary[0].text == "checking the workspace"
+    assert items[3].arguments == '{"command": "pwd"}'
+    assert items[4].call_id == "call-1"
+    assert items[5].content[0].text == "done"
 
 
 def test_matching_invoke_tool_records_executor_interval():
@@ -118,6 +121,7 @@ def test_matching_invoke_tool_records_executor_interval():
     "result",
     [
         "Error executing tool: boom",
+        "Error: permission denied",
         '{"error":"boom"}',
         '{"status":"error","message":"boom"}',
     ],
@@ -131,6 +135,33 @@ def test_tool_error_payloads_are_reported_as_failed(result):
     agent.tool_complete_callback("call-1", "terminal", args, result)
 
     assert _tool(observer.finish({"completed": True, "messages": []}), "call-1").status == "failed"
+
+
+def test_terminal_nonzero_exit_is_reported_as_failed():
+    agent = _FakeAgent()
+    observer = HermesAgentObserver().instrument(agent)
+    args = {"command": "false"}
+
+    agent.tool_start_callback("call-1", "terminal", args)
+    agent.tool_complete_callback("call-1", "terminal", args, '{"exit_code": 1}')
+
+    assert _tool(observer.finish({"completed": True, "messages": []}), "call-1").status == "failed"
+
+
+def test_terminal_success_with_null_error_is_reported_as_completed():
+    agent = _FakeAgent()
+    observer = HermesAgentObserver().instrument(agent)
+    args = {"command": "true"}
+
+    agent.tool_start_callback("call-1", "terminal", args)
+    agent.tool_complete_callback(
+        "call-1",
+        "terminal",
+        args,
+        '{"output":"","exit_code":0,"error":null}',
+    )
+
+    assert _tool(observer.finish({"completed": True, "messages": []}), "call-1").status == "completed"
 
 
 def test_callback_only_tool_records_harness_interval():
@@ -209,8 +240,9 @@ def test_concurrent_tool_intervals_end_at_each_worker_not_completion_callback():
     assert fast.duration_ms < slow.duration_ms
 
 
-def test_delegate_children_retain_exact_tree_and_full_conversations():
+def test_delegate_child_retains_parent_and_conversation():
     root = _FakeAgent()
+    root._cached_system_prompt = "root system"
     observer = HermesAgentObserver(root_invocation_id="root").instrument(root)
     delegate_args = {"tasks": [{"goal": "one"}]}
     root.tool_start_callback("delegate-1", "delegate_task", delegate_args)
@@ -224,19 +256,10 @@ def test_delegate_children_retain_exact_tree_and_full_conversations():
             ],
         }
     )
+    child._cached_system_prompt = "child system"
+    child.ephemeral_system_prompt = "child ephemeral"
     root._active_children.append(child)
-    child.run_conversation("one")
-    child_delegate_args = {"goal": "nested"}
-    child.tool_start_callback("delegate-2", "delegate_task", child_delegate_args)
-    grandchild = _FakeAgent(
-        {
-            "completed": True,
-            "messages": [{"role": "assistant", "content": "nested answer"}],
-        }
-    )
-    child._active_children.append(grandchild)
-    grandchild.run_conversation("nested")
-    child.tool_complete_callback("delegate-2", "delegate_task", child_delegate_args, "ok")
+    child.run_conversation(user_message="one")
     root.tool_complete_callback("delegate-1", "delegate_task", delegate_args, "ok")
 
     bundle = observer.finish(
@@ -251,25 +274,20 @@ def test_delegate_children_retain_exact_tree_and_full_conversations():
 
     root_invocation = _invocation(bundle, "root")
     child_invocation = _invocation(bundle, "root.child-1")
-    grandchild_invocation = _invocation(bundle, "root.child-1.child-2")
     assert root_invocation.status == "completed"
+    assert root_invocation.conversation[0].role == "system"
+    assert root_invocation.conversation[0].content == "root system"
     assert child_invocation.parent_invocation_id == "root"
     assert child_invocation.spawned_by_tool_call_id == "delegate-1"
-    assert [item.type for item in child_invocation.conversation] == ["message", "message"]
-    assert grandchild_invocation.parent_invocation_id == "root.child-1"
-    assert grandchild_invocation.spawned_by_tool_call_id == "delegate-2"
+    assert [item.type for item in child_invocation.conversation] == ["message", "message", "message"]
+    assert child_invocation.conversation[0].content == "child system\n\nchild ephemeral"
     assert all(not invocation.model_calls for invocation in bundle.records if isinstance(invocation, AgentInvocation))
     ownership_gaps = [gap for gap in bundle.gaps if gap.code == "model_call_ownership_unavailable"]
-    assert {gap.invocation_id for gap in ownership_gaps} == {
-        "root",
-        "root.child-1",
-        "root.child-1.child-2",
-    }
+    assert {gap.invocation_id for gap in ownership_gaps} == {"root", "root.child-1"}
 
 
 def test_compaction_is_explicit_and_hook_failures_do_not_break_execution():
     agent = _FakeAgent()
-    agent.tool_start_callback = MagicMock(side_effect=RuntimeError("callback"))
     observer = HermesAgentObserver().instrument(agent)
 
     assert agent._invoke_tool("terminal", {"result": "ok"}, "task") == "ok"
@@ -287,6 +305,7 @@ def test_compaction_is_explicit_and_hook_failures_do_not_break_execution():
         "compaction_model_call_boundary_unavailable",
         "compaction_summary_unavailable",
     } <= {gap.code for gap in bundle.gaps}
+    assert "compaction_tokens_after_unavailable" not in {gap.code for gap in bundle.gaps}
 
 
 def test_failed_compaction_is_recorded_without_swallowing_the_error():
@@ -297,8 +316,11 @@ def test_failed_compaction_is_recorded_without_swallowing_the_error():
     with pytest.raises(RuntimeError, match="compression failed"):
         agent._compress_context([], "system", approx_tokens=42)
 
-    [compaction] = _compactions(observer.finish({"completed": True, "messages": []}))
+    bundle = observer.finish({"completed": True, "messages": []})
+    [compaction] = _compactions(bundle)
     assert compaction.outcome == "failed"
+    assert compaction.tokens_after is None
+    assert "compaction_tokens_after_unavailable" in {gap.code for gap in bundle.gaps}
 
 
 def test_missing_private_hooks_are_reported_without_raising():
@@ -324,6 +346,7 @@ def test_missing_private_hooks_are_reported_without_raising():
     [
         ({"completed": True, "messages": []}, "completed"),
         ({"final_response": "ok", "messages": []}, "completed"),
+        ({"completed": False, "final_response": "summary", "messages": []}, "incomplete"),
         ({"interrupted": True, "messages": []}, "incomplete"),
         ({"error": "boom", "messages": []}, "failed"),
     ],

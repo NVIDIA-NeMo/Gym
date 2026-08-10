@@ -304,12 +304,12 @@ class TestRolloutCorrelation:
         assert client.post("/ng-rollout/rid/v1/responses", json={"input": "hi"}).status_code == 200
         assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
 
-        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+        direct = asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["base_url"] == "http://h:1/v1"
+        assert "_ng_agent_observations" not in direct.model_dump(mode="json")
 
         episode = asyncio.run(
-            agent.responses_with_observations(
-                request=None,
+            agent._create_episode(
                 body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
                 rollout_id="rid",
             )
@@ -320,7 +320,11 @@ class TestRolloutCorrelation:
 
 
 class TestObservability:
-    def test_observation_failure_does_not_change_response(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        ("terminal_backend", "runtime_gap"),
+        [("local", "no_sandbox_runtime"), ("docker", "sandbox_observation_unavailable")],
+    )
+    def test_observation_failure_does_not_change_response(self, monkeypatch, terminal_backend, runtime_gap) -> None:
         import nemo_gym.base_responses_api_agent as base_agent
         from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
@@ -328,7 +332,7 @@ class TestObservability:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
-        agent = HermesAgent(config=_config(), server_client=server_client)
+        agent = HermesAgent(config=_config(terminal_backend=terminal_backend), server_client=server_client)
         monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
 
         class _StubAIAgent:
@@ -352,16 +356,16 @@ class TestObservability:
             raise RuntimeError("observer failed")
 
         monkeypatch.setattr(HermesAgentObserver, "finish", fail_finish)
-        episode = asyncio.run(agent.responses_with_observations(request=None, body=body, rollout_id="rid"))
+        episode = asyncio.run(agent._create_episode(body=body, rollout_id="rid"))
 
         assert episode.response.output == baseline.output
         assert episode.response.usage == baseline.usage
         assert [gap.code for gap in episode.observations.gaps] == [
             "observation_capture_failed",
-            "no_sandbox_runtime",
+            runtime_gap,
         ]
 
-    def test_run_passes_rollout_id_to_verifier(self) -> None:
+    def test_run_returns_observations_without_leaking_internal_attachment(self) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
         agent = HermesAgent(config=_config(), server_client=server_client)
@@ -403,10 +407,14 @@ class TestObservability:
             }
         )
 
-        with patch.object(HermesAgent, "responses_with_observations", observed_response):
-            asyncio.run(agent.run(request, body))
+        with patch.object(HermesAgent, "_create_episode", observed_response):
+            result = asyncio.run(agent.run(request, body))
 
-        assert server_client.post.await_args_list[-1].kwargs["json"]["rollout_id"] == "1-2"
+        assert result.ng_agent_observations is not None
+        assert result.ng_agent_observations.source == "hermes"
+        verify_json = server_client.post.await_args_list[-1].kwargs["json"]
+        assert "_ng_agent_observations" not in verify_json["response"]
+        assert "rollout_id" not in verify_json
 
     def test_observer_failure_does_not_mask_agent_exception(self, monkeypatch) -> None:
         import nemo_gym.base_responses_api_agent as base_agent
@@ -435,8 +443,7 @@ class TestObservability:
 
         with pytest.raises(ValueError, match="agent failed"):
             asyncio.run(
-                agent.responses_with_observations(
-                    request=None,
+                agent._create_episode(
                     body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
                     rollout_id="rid",
                 )

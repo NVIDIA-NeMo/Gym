@@ -19,6 +19,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -53,6 +55,14 @@ def normalize_hermes_messages(messages: Iterable[Any], *, id_prefix: str = "herm
         if role in {"system", "user", "developer"}:
             output.append(NeMoGymEasyInputMessage(role=role, content=content))
         elif role == "assistant":
+            reasoning = message.get("reasoning")
+            if isinstance(reasoning, str) and reasoning:
+                output.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"{id_prefix}-reasoning-{index}",
+                        summary=[NeMoGymSummary(text=reasoning, type="summary_text")],
+                    )
+                )
             output.append(
                 NeMoGymResponseOutputMessage(
                     id=str(message.get("id") or f"{id_prefix}-message-{index}"),
@@ -115,6 +125,7 @@ class HermesAgentObserver:
         self._model_ref = model_ref
         self._child_index = 0
         self._agents: set[int] = set()
+        self._invocation_agents: dict[str, Any] = {}
         self._tools_by_args: dict[int, tuple[str, str]] = {}
         self._tools: dict[tuple[str, str], ToolCallObservation] = {}
         self._started_ticks: dict[tuple[str, str], float] = {}
@@ -127,9 +138,17 @@ class HermesAgentObserver:
         return self
 
     def finish(
-        self, result: dict[str, Any] | None = None, *, error: BaseException | None = None
+        self,
+        result: dict[str, Any] | None = None,
+        *,
+        error: BaseException | None = None,
     ) -> AgentObservationBundle:
-        self._record_conversation(self._root_id, result, error)
+        self._record_conversation(
+            self._root_id,
+            result,
+            error,
+            system_message=self._system_prompt(self._invocation_agents.get(self._root_id)),
+        )
         with self._lock:
             for tool in self._tools.values():
                 if tool.status == "unknown":
@@ -165,6 +184,7 @@ class HermesAgentObserver:
             if agent_id in self._agents:
                 return
             self._agents.add(agent_id)
+            self._invocation_agents[invocation_id] = agent
 
         self._chain_callback(agent, "tool_start_callback", self._tool_started, invocation_id)
         self._chain_callback(agent, "tool_complete_callback", self._tool_completed, invocation_id)
@@ -186,9 +206,19 @@ class HermesAgentObserver:
                     try:
                         child_result = original(*args, **kwargs)
                     except BaseException as exc:
-                        self._record_conversation(invocation_id, None, exc)
+                        self._record_conversation(
+                            invocation_id,
+                            None,
+                            exc,
+                            system_message=self._system_prompt(agent),
+                        )
                         raise
-                    self._record_conversation(invocation_id, child_result, None)
+                    self._record_conversation(
+                        invocation_id,
+                        child_result,
+                        None,
+                        system_message=self._system_prompt(agent),
+                    )
                     return child_result
 
                 setattr(agent, "run_conversation", run)
@@ -287,8 +317,12 @@ class HermesAgentObserver:
                 raise
             finally:
                 before = kwargs.get("approx_tokens")
-                after = getattr(getattr(agent, "context_compressor", None), "last_prompt_tokens", None)
                 try:
+                    after = None
+                    if not failed:
+                        value = getattr(getattr(agent, "context_compressor", None), "last_prompt_tokens", None)
+                        if type(value) is int and value >= 0:
+                            after = value
                     with self._lock:
                         self._compactions.append(
                             ContextCompactionObservation(
@@ -296,12 +330,14 @@ class HermesAgentObserver:
                                 observed_at=time(),
                                 trigger="context_pressure",
                                 tokens_before=before if type(before) is int else None,
-                                tokens_after=after if type(after) is int else None,
+                                tokens_after=after,
                                 outcome="failed" if failed else "completed",
                             )
                         )
                     self._gap("compaction_model_call_boundary_unavailable", invocation_id)
                     self._gap("compaction_summary_unavailable", invocation_id)
+                    if after is None:
+                        self._gap("compaction_tokens_after_unavailable", invocation_id)
                 except Exception:
                     self._gap("hermes_observer_error", invocation_id, "_compress_context")
             return result
@@ -351,7 +387,7 @@ class HermesAgentObserver:
             if key not in self._tools:
                 self._tool_started(invocation_id, call_id, name, args)
             tool = self._tools[key]
-            failed = self._failed_result(result)
+            failed = self._failed_result(name, result)
             if failed:
                 tool.status = "failed"
             if isinstance(args, dict):
@@ -388,15 +424,29 @@ class HermesAgentObserver:
         invocation_id: str,
         result: dict[str, Any] | None,
         error: BaseException | None,
+        *,
+        system_message: Any = None,
     ) -> None:
         try:
             messages = result.get("messages") if isinstance(result, dict) else []
             conversation = normalize_hermes_messages(messages or [], id_prefix=invocation_id)
+            if any(isinstance(message, dict) and message.get("reasoning_details") for message in messages or []):
+                self._gap("reasoning_details_unavailable", invocation_id)
+            if (
+                isinstance(system_message, str)
+                and system_message
+                and not (conversation and getattr(conversation[0], "role", None) == "system")
+            ):
+                conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system_message))
             status = "failed" if error or (result and result.get("error")) else "unknown"
             if isinstance(result, dict) and status != "failed":
                 if result.get("interrupted"):
                     status = "incomplete"
-                elif result.get("completed") or result.get("final_response"):
+                elif result.get("completed") is True:
+                    status = "completed"
+                elif result.get("completed") is False:
+                    status = "incomplete"
+                elif result.get("final_response"):
                     status = "completed"
                 elif messages:
                     status = "incomplete"
@@ -407,19 +457,29 @@ class HermesAgentObserver:
             self._gap("hermes_observer_error", invocation_id, f"conversation: {type(exc).__name__}")
 
     @staticmethod
-    def _failed_result(result: Any) -> bool:
+    def _system_prompt(agent: Any) -> str | None:
+        if agent is None:
+            return None
+        cached = getattr(agent, "_cached_system_prompt", None)
+        ephemeral = getattr(agent, "ephemeral_system_prompt", None)
+        parts = [value for value in (cached, ephemeral) if isinstance(value, str) and value]
+        return "\n\n".join(parts).strip() or None
+
+    @staticmethod
+    def _failed_result(tool_name: Any, result: Any) -> bool:
         if not isinstance(result, str):
             return False
         value = result.lstrip()
-        if value.lower().startswith("error executing tool"):
-            return True
         try:
             payload = json.loads(value)
         except (json.JSONDecodeError, TypeError):
+            lower = value[:500].lower()
+            return value.startswith("Error") or '"error"' in lower or '"failed"' in lower
+        if not isinstance(payload, dict):
             return False
-        return isinstance(payload, dict) and (
-            payload.get("status") in {"error", "failed"} or bool(payload.get("error"))
-        )
+        if tool_name == "terminal" and payload.get("exit_code") not in (None, 0):
+            return True
+        return payload.get("status") in {"error", "failed"} or bool(payload.get("error"))
 
     def _gap(self, code: str, invocation_id: str | None, detail: str | None = None) -> None:
         with self._lock:

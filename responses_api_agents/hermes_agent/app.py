@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 from asyncio import Semaphore
+from collections.abc import Mapping
 from time import time
 from typing import Any, Callable, Optional
 from uuid import uuid4
@@ -51,8 +52,6 @@ from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentObservationBundle,
     ObservationGap,
-    pop_response_observations,
-    response_with_observations,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver
@@ -108,6 +107,7 @@ def _trajectory_to_output_items(messages, n_input):
 
 
 LOG = logging.getLogger(__name__)
+_INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 # if ray close sys.stderr mid-request, write to the original fd
@@ -424,17 +424,20 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        rollout_id = request.path_params.get("rollout_id") if request is not None else None
-        if rollout_id is None:
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        if not isinstance(rollout_id, str):
             return await self._create_response(body)
-        return response_with_observations(await self.responses_with_observations(request, body, rollout_id=rollout_id))
+        episode = await self._create_episode(body, rollout_id=rollout_id)
+        return episode.response.model_copy(
+            update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
+        )
 
-    async def responses_with_observations(
+    async def _create_episode(
         self,
-        request: Optional[Request],
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
-        rollout_id: Optional[str] = None,
+        rollout_id: str,
     ) -> AgentEpisode:
         observations: Optional[AgentObservationBundle] = None
 
@@ -452,7 +455,20 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 source="hermes",
                 gaps=[ObservationGap(code="observation_capture_failed")],
             )
-        observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
+        observations.gaps.append(
+            ObservationGap(
+                code=(
+                    "no_sandbox_runtime"
+                    if self.config.terminal_backend == "local"
+                    else "sandbox_observation_unavailable"
+                ),
+                detail=(
+                    None
+                    if self.config.terminal_backend == "local"
+                    else f"terminal_backend={self.config.terminal_backend}"
+                ),
+            )
+        )
         return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
@@ -478,14 +494,17 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
-            observations = pop_response_observations(agent_resp_json)
+            raw_observations = (
+                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
+            )
+            observations = (
+                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
+            )
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump()
-                | {"response": agent_resp_json}
-                | ({"rollout_id": rollout_id} if rollout_id is not None else {}),
+                json=body.model_dump() | {"response": agent_resp_json},
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
