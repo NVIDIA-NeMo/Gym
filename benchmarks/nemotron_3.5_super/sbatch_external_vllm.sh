@@ -20,6 +20,10 @@ set -euo pipefail
 prefill_host=\${PD_PREFILL_HOST:?Missing prefill node address}
 decode_host=\${PD_DECODE_HOST:?Missing decode node address}
 
+# Nemotron's three-read Mamba SSM state must use the dimension-sequence layout
+# when KV transfer is enabled.
+export VLLM_SSM_CONV_STATE_LAYOUT=DS
+
 common_args=(
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
