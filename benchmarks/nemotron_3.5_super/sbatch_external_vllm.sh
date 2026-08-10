@@ -2,23 +2,23 @@
 
 set -euo pipefail
 
-# One four-GPU GB200 node is dedicated to prefill and one to decode.  The
-# client-facing vllm-router runs with prefill on the first allocated node.
-NUM_NODES=${NUM_NODES:?Set NUM_NODES=2}
+# Each phase is one two-node data-parallel vLLM deployment: two nodes for
+# prefill and two for decode. The client-facing router runs on prefill rank 0.
+NUM_NODES=${NUM_NODES:?Set NUM_NODES=4}
 MODEL=${MODEL:?Set MODEL to the model path or ID}
 CONTAINER=${CONTAINER:?Set CONTAINER to the vLLM container image}
 MOUNTS=${MOUNTS:?Set MOUNTS to the required container mounts}
 
-if [[ "$NUM_NODES" != 2 ]]; then
-    echo "This prefill/decode-disaggregated configuration requires NUM_NODES=2." >&2
+if [[ "$NUM_NODES" != 4 ]]; then
+    echo "This DP=2 prefill / DP=2 decode configuration requires NUM_NODES=4." >&2
     exit 2
 fi
 
 command=$(cat <<EOF
 set -euo pipefail
 
-prefill_host=\${PD_PREFILL_HOST:?Missing prefill node address}
-decode_host=\${PD_DECODE_HOST:?Missing decode node address}
+prefill_hosts=( \${PD_PREFILL_HOSTS:?Missing prefill node addresses} )
+decode_hosts=( \${PD_DECODE_HOSTS:?Missing decode node addresses} )
 
 # Nemotron's three-read Mamba SSM state must use the dimension-sequence layout
 # when KV transfer is enabled.
@@ -63,13 +63,19 @@ wait_for_server() {
 }
 
 if [[ "\$SLURM_PROCID" == 0 ]]; then
-    # Prefill is a node-local TP=4 vLLM server on the first Slurm node.
+    # P is one DP=2 deployment: this rank is its API-server and rank 0.
+    prefill_host=\${prefill_hosts[0]}
     pip install vllm-router
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$prefill_host \
     VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --host \$prefill_host \
         --port 8001 \
+        --data-parallel-backend mp \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-address \$prefill_host \
+        --data-parallel-rpc-port 13345 \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
         &
@@ -78,21 +84,60 @@ if [[ "\$SLURM_PROCID" == 0 ]]; then
 
     wait_for_server "\$prefill_pid" "http://\$prefill_host:8001"
 
+    until curl -fsS "http://\${decode_hosts[0]}:8002/health" >/dev/null; do
+        sleep 5
+    done
+
     vllm-router \
-        --policy round_robin \
+        --policy consistent_hash \
         --vllm-pd-disaggregation \
         --prefill http://\$prefill_host:8001 \
-        --decode http://\$decode_host:8002 \
+        --decode http://\${decode_hosts[0]}:8002 \
         --host \$prefill_host \
         --port 8000 \
         --intra-node-data-parallel-size 1
 elif [[ "\$SLURM_PROCID" == 1 ]]; then
-    # Decode is a separate node-local TP=4 vLLM server on the second node.
+    # Prefill DP rank 1 has no API server.
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\${prefill_hosts[1]} \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+    vllm serve "$MODEL" "\${common_args[@]}" \
+        --headless \
+        --data-parallel-backend mp \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-start-rank 1 \
+        --data-parallel-address \${prefill_hosts[0]} \
+        --data-parallel-rpc-port 13345 \
+        --kv-transfer-config \
+            '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+elif [[ "\$SLURM_PROCID" == 2 ]]; then
+    # D is one DP=2 deployment: this rank is its API-server and rank 0.
+    decode_host=\${decode_hosts[0]}
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$decode_host \
     VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --host \$decode_host \
         --port 8002 \
+        --data-parallel-backend mp \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-address \$decode_host \
+        --data-parallel-rpc-port 13346 \
+        --kv-transfer-config \
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+elif [[ "\$SLURM_PROCID" == 3 ]]; then
+    # Decode DP rank 1 has no API server.
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\${decode_hosts[1]} \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
+    vllm serve "$MODEL" "\${common_args[@]}" \
+        --headless \
+        --data-parallel-backend mp \
+        --data-parallel-size 2 \
+        --data-parallel-size-local 1 \
+        --data-parallel-start-rank 1 \
+        --data-parallel-address \${decode_hosts[0]} \
+        --data-parallel-rpc-port 13346 \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
