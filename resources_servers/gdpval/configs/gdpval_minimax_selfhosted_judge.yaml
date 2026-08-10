@@ -1,51 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# GDPVal judge overlay: use a LOCAL, SELF-HOSTED, MULTIMODAL MiniMax-M3 judge.
-# You run the vLLM server yourself (from the vendor's `vllm/vllm-openai:minimax-m3`
-# container); gym does NOT spawn it — gym just talks to your endpoint over its
-# OpenAI-compatible /v1 route. MiniMax-M3 reads images AND video (it has no audio
-# tower), so it scores every GDPVal deliverable modality except audio with no
-# third-party inference API.
-#
-# WHY SERVE IT YOURSELF INSTEAD OF LETTING GYM SPAWN IT?
-#   The bundled `vllm/models/minimax_m3/nvidia/` plugin hardcodes FlashInfer
-#   CuTe-DSL kernels (gemma_rmsnorm, fused MoE, MLA) with no fallback. On
-#   Blackwell/GB200 those kernels hit the nvidia-cutlass-dsl 4.5.2 JIT bug
-#   (`Expected an MLIR object (got OpResultList)`, vllm#45392) and abort engine
-#   startup during the profiling pass. The plugin is designed to run inside the
-#   vendor container, where the FlashInfer/cutlass-dsl/CUDA combo is matched and
-#   the kernels JIT cleanly. Reproducing that inside a gym-built venv is fighting
-#   its design, so Gym does not ship a MiniMax-M3 local_vllm_model config for
-#   this path; run the container yourself and point Gym at its endpoint.
-#
-# STEP 1 — serve MiniMax-M3 yourself with a compatible vLLM/container runtime.
-# Use one single-node TP=4 instance, or independent single-node TP=4 replicas
-# for data-parallel throughput. Do NOT form one TP=8 group across two nodes
-# unless you have validated that stack: the cross-node MXFP8 all-reduce path can
-# produce garbage logits despite a clean startup. Confirm the endpoint from the
-# gym host:
-#   curl -s http://<judge-host>:5000/v1/models
-#
-# STEP 2 — run GDPVal with gym pointing at your endpoint. Chain this overlay
-# AFTER the benchmark config and export the endpoint:
-#
-#   export MINIMAX_BASE_URL=http://<judge-host>:5000/v1
-#   gym eval run --benchmark gdpval --model-type vllm_model \
-#     --config resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml \
-#     --split benchmark --output results/gdpval_minimax_judge.jsonl
-#
-# What it does:
-#   1. Repoints the benchmark's existing `gdpval_judge_model` OpenAI proxy at your
-#      endpoint (no GPU used by gym for the judge — it is a thin HTTP proxy). No
-#      new model server is defined, so nothing extra boots.
-#   2. Disables the frontier panel (`judge_panel: null`) so scoring uses the
-#      single MiniMax-M3 judge, switches deliverable presentation to
-#      `images_and_text` (PDFs/Office docs → page images + extracted text, since
-#      a VLM can't decode a raw application/pdf data URL), and keeps VIDEO as
-#      native media (`judge_handles_video: true`) because M3 reads video. M3 has
-#      NO audio tower, so `judge_handles_audio` stays false and audio deliverables
-#      are dropped with a warning (video/images/text still graded).
+# GDPVal judge overlay for a self-hosted MiniMax-M3 endpoint. Gym does not spawn
+# the model; it connects to the OpenAI-compatible /v1 endpoint you run.
+# See benchmarks/gdpval/README.md for serving and run instructions.
 
 # --- Repoint the judge proxy at your self-hosted MiniMax-M3 endpoint ---------
 gdpval_judge_model:
