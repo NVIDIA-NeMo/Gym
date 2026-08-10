@@ -8,6 +8,7 @@ NUM_DECODE_NODES=$NUM_DECODE_NODES
 MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
+VLLM_CONFIG=${VLLM_CONFIG:-benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh}
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -78,22 +79,7 @@ export UCX_IB_ADDR_TYPE=eth
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
 
-common_args=(
-    --gpu-memory-utilization 0.9
-    --distributed-executor-backend mp
-    --data-parallel-backend mp
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
-    --enable-auto-tool-choice
-    --tool-call-parser qwen3_coder
-    --reasoning-parser nemotron_v3
-    --kv-cache-dtype fp8
-    --mamba-ssm-cache-dtype float32
-    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
-    --enable-expert-parallel
-    --max-num-batched-tokens 8192
-    --max-num-seqs 256
-)
+source "$VLLM_CONFIG"
 
 this_node_hostname=\$(hostname)
 # Split nodes here by index
@@ -105,7 +91,7 @@ if (( SLURM_PROCID == 0 )); then
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${common_args[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $PREFILL_SERVER_PORT \
         --data-parallel-size $NUM_PREFILL_NODES \
@@ -139,7 +125,7 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${common_args[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
         --headless \
         --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-start-rank \$SLURM_PROCID \
@@ -152,7 +138,7 @@ elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${common_args[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $DECODE_SERVER_PORT \
         --data-parallel-size $NUM_DECODE_NODES \
@@ -167,7 +153,7 @@ else
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${common_args[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
         --headless \
         --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
