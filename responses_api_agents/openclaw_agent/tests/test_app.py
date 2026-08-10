@@ -28,7 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation
+from nemo_gym.rollout_observability import AgentInvocation, ObservationGap
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.openclaw_agent.app import (
     OpenClawAgent,
@@ -487,6 +487,31 @@ class TestObservability:
             output,
         ]
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
+
+    def test_hierarchy_discovery_gap_replaces_generic_fallback(self) -> None:
+        agent = _make_agent()
+
+        async def run_openclaw(*args, observation_collector=None, **kwargs):
+            observation_collector(
+                "session-1",
+                [],
+                [],
+                [ObservationGap(code="subagent_hierarchy_unavailable", detail="root_session_not_found")],
+            )
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+
+        with patch.object(agent, "_run_openclaw", run_openclaw):
+            episode = asyncio.run(
+                agent._create_episode(
+                    NeMoGymResponseCreateParamsNonStreaming(input="solve"),
+                    rollout_id="1-2",
+                )
+            )
+
+        hierarchy_gaps = [gap for gap in episode.observations.gaps if gap.code == "subagent_hierarchy_unavailable"]
+        assert [(gap.code, gap.detail) for gap in hierarchy_gaps] == [
+            ("subagent_hierarchy_unavailable", "root_session_not_found")
+        ]
 
     def test_root_observation_uses_retained_transcript(self) -> None:
         agent = _make_agent()

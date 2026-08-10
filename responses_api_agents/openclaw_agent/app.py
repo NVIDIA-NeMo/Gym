@@ -719,6 +719,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     transcript_available=transcript_available,
                     model_ref=self.config.model_server,
                 )
+                if any(gap.code == "subagent_hierarchy_unavailable" for gap in tree_gaps):
+                    observations.gaps = [
+                        gap for gap in observations.gaps if gap.code != "subagent_hierarchy_unavailable"
+                    ]
                 observations.gaps.extend(tree_gaps)
         except Exception:
             LOG.exception("failed to build OpenClaw observations")
