@@ -67,7 +67,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
 
 
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
@@ -136,6 +136,34 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_search_config(self) -> "PinchBenchAgentConfig":
+        valid_providers = {"brave", "tavily"}
+        if self.web_search_provider not in valid_providers:
+            raise ValueError(
+                f"web_search_provider={self.web_search_provider!r} is not supported. "
+                f"Valid values: {sorted(valid_providers)}."
+            )
+        required_key = {"brave": "brave_api_key", "tavily": "tavily_api_key"}[self.web_search_provider]
+        if not getattr(self, required_key):
+            raise ValueError(
+                f"web_search_provider={self.web_search_provider!r} requires {required_key} to be set."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_sandbox_config(self) -> "PinchBenchAgentConfig":
+        if not self.sandbox_work_base.startswith("/"):
+            raise ValueError(
+                f"sandbox_work_base={self.sandbox_work_base!r} must be an absolute path."
+            )
+        if self.max_tokens > self.context_window:
+            raise ValueError(
+                f"max_tokens={self.max_tokens} exceeds context_window={self.context_window}. "
+                "OpenClaw would reject or misbehave with this configuration."
+            )
+        return self
+
 
 # The harness's agent-id prefix (`benchmark.py`: agent_id = f"bench-{model_slug}").
 _AGENT_ID_PREFIX = "bench-"
@@ -178,6 +206,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     config: PinchBenchAgentConfig
 
     def model_post_init(self, context):
+        if self.config.sandbox_provider:
+            get_provider_class(next(iter(self.config.sandbox_provider)))
         self._sem = asyncio.Semaphore(self.config.max_concurrent)
         return super().model_post_init(context)
 
@@ -232,13 +262,16 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             metadata={"task_id": task_id},
         )
 
-    async def _run_in_sandbox(self, task_id: str, out_dir: Path) -> None:
-        """Run one PinchBench task and pull its /out archive back."""
+    async def _run_in_sandbox(self, task_id: str, out_dir: Path) -> int | None:
+        """Run one PinchBench task and pull its /out archive back.
+
+        Returns the apptainer exit code if the process exited non-zero but still produced
+        an archive (non-clean exit), or None for a clean run.
+        """
         provider = self.config.sandbox_provider or {}
         apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
         if isinstance(apptainer_cfg, dict) and apptainer_cfg.get("direct_exec"):
-            await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg)
-            return
+            return await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg)
 
         if not self.config.sandbox_provider:
             raise ValueError("pinchbench requires sandbox_provider (see configs/pinchbench.yaml)")
@@ -252,6 +285,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             await sb.stop()
         with tarfile.open(out_dir / "out.tgz") as tf:
             tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
+        return None
 
     def _write_direct_exec_wrapper(self, staging_dir: Path) -> Path:
         wrapper_path = staging_dir / "run_task_efb.sh"
@@ -362,7 +396,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         wrapper_path.chmod(0o755)
         return wrapper_path
 
-    async def _run_in_apptainer_direct(self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any]) -> None:
+    async def _run_in_apptainer_direct(self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any]) -> int | None:
         image = self.config.sandbox_spec.get("image")
         if not image:
             raise ValueError("pinchbench sandbox_spec.image is required for direct Apptainer exec")
@@ -420,15 +454,30 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         if not archive.exists():
             raise RuntimeError(f"direct apptainer exec did not produce {archive} for task {task_id}")
 
+        non_clean_exit_rc = None
+        if proc.returncode != 0:
+            print(
+                f"[pinchbench] non-clean apptainer exit (rc={proc.returncode}) for task {task_id} "
+                "but archive present — continuing with result",
+                flush=True,
+            )
+            non_clean_exit_rc = proc.returncode
+
         shutil.copy2(archive, out_dir / "out.tgz")
         with tarfile.open(out_dir / "out.tgz") as tf:
             tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
+        return non_clean_exit_rc
 
     # --- result parsing -----------------------------------------------------
     def _parse_result(self, task_id: str, out_dir: Path) -> dict:
         results = [p for p in glob.glob(str(out_dir / "*.json")) if "transcript" not in p]
         if not results:
             return {"reward": 0.0, "grading_type": "unknown", "breakdown": {}, "notes": "", "status": "error"}
+        if len(results) > 1:
+            print(
+                f"[pinchbench] multiple result JSON files for task {task_id}: {results}; using {results[0]}",
+                flush=True,
+            )
         data = json.loads(Path(results[0]).read_text())
         for t in data.get("tasks", []):
             if t.get("task_id") == task_id:
@@ -696,9 +745,10 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         response = self._empty_response(task_id)
         transcript_events: list = []
         archive_path = ""
+        non_clean_exit_rc: int | None = None
         try:
             async with self._sem:
-                await self._run_in_sandbox(task_id, out_dir)  # one sandbox per task
+                non_clean_exit_rc = await self._run_in_sandbox(task_id, out_dir)  # one sandbox per task
             result = self._parse_result(task_id, out_dir)
             response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
@@ -733,6 +783,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 "transcript_event_count": len(transcript_events),
                 "archived_to": archive_path,
                 "run_id": run_id,
+                **({"non_clean_exit_rc": non_clean_exit_rc} if non_clean_exit_rc is not None else {}),
             },
             **routing,
         )
