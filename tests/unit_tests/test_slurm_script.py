@@ -15,7 +15,9 @@
 
 from pathlib import Path
 
-from nemo_gym.orchestration.api import SubmitConfig, _resolve_env_refs
+import pytest
+
+from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
@@ -295,58 +297,47 @@ def test_resolve_env_valid_keys():
     assert "KEY_123=c" in out
 
 
+def test_resolve_env_invalid_key_with_spaces():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"KEY WITH SPACE": "v"})
+
+
+def test_resolve_env_invalid_key_with_hyphen():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"KEY-NAME": "v"})
+
+
+def test_resolve_env_invalid_key_starts_with_digit():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"1KEY": "v"})
+
+
+def test_resolve_env_invalid_key_with_equals():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"KEY=BAD": "v"})
+
+
+def test_resolve_env_invalid_key_with_dollar():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"$KEY": "v"})
+
+
+def test_resolve_env_value_with_semicolons_is_quoted():
+    out = _resolve_env({"KEY": "val;rm -rf /"})
+    assert "KEY='val;rm -rf /'" in out
+
+
+def test_resolve_env_value_with_newline_is_quoted():
+    out = _resolve_env({"KEY": "line1\nline2"})
+    assert "KEY='line1\nline2'" in out
+
+
 # ---------------------------------------------------------------------------
-# _resolve_env_refs (pre-validation env var expansion)
+# build_sbatch_script — env injection
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_env_refs_literal():
-    assert _resolve_env_refs({"key": "value"}) == {"key": "value"}
-
-
-def test_resolve_env_refs_host_var(monkeypatch):
-    monkeypatch.setenv("MY_TOKEN", "secret123")
-    assert _resolve_env_refs({"TOKEN": "$MY_TOKEN"}) == {"TOKEN": "secret123"}
-
-
-def test_resolve_env_refs_missing_host_var(monkeypatch):
-    monkeypatch.delenv("UNSET_VAR", raising=False)
-    with pytest.raises(ValueError, match="'UNSET_VAR' is not set"):
-        _resolve_env_refs({"KEY": "$UNSET_VAR"})
-
-
-def test_resolve_env_refs_nested(monkeypatch):
-    monkeypatch.setenv("TP", "4")
-    result = _resolve_env_refs({"service": {"tensor_parallel_size": "$TP"}})
-    assert result == {"service": {"tensor_parallel_size": "4"}}
-
-
-def test_resolve_env_refs_list(monkeypatch):
-    monkeypatch.setenv("VAL", "x")
-    assert _resolve_env_refs(["$VAL", "literal"]) == ["x", "literal"]
-
-
-def test_resolve_env_refs_non_dollar_string_unchanged():
-    assert _resolve_env_refs({"key": "http://localhost:8000/v1"}) == {"key": "http://localhost:8000/v1"}
-
-
-def test_resolve_env_refs_dollar_not_at_start_unchanged():
-    # Only leading $ triggers resolution — embedded $ is left as-is.
-    assert _resolve_env_refs({"key": "prefix_$VAR"}) == {"key": "prefix_$VAR"}
-
-
-def test_resolve_env_refs_error_message_contains_ref(monkeypatch):
-    monkeypatch.delenv("MISSING", raising=False)
-    with pytest.raises(ValueError, match=r"\$MISSING"):
-        _resolve_env_refs({"key": "$MISSING"})
-
-
-def test_resolve_env_refs_non_string_values_unchanged():
-    assert _resolve_env_refs({"n": 42, "b": True}) == {"n": 42, "b": True}
-
-
-def test_submit_config_resolves_int_field(monkeypatch):
-    monkeypatch.setenv("TP", "2")
+def test_build_sbatch_script_resolved_tp_in_vllm_cmd(bench_dir):
     config = SubmitConfig.model_validate(
         {
             "services": {
@@ -354,96 +345,7 @@ def test_submit_config_resolves_int_field(monkeypatch):
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "tensor_parallel_size": "$TP",
-                }
-            },
-            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
-            "job": {"output_path": "/remote/jobs"},
-        }
-    )
-    assert config.services["vllm_model"].tensor_parallel_size == 2
-
-
-def test_submit_config_resolves_string_fields(monkeypatch):
-    monkeypatch.setenv("MY_MODEL", "org/llama-3")
-    monkeypatch.setenv("MY_CONTAINER", "nvcr.io/my-vllm:latest")
-    config = SubmitConfig.model_validate(
-        {
-            "services": {"vllm_model": {"type": "vllm", "container": "$MY_CONTAINER", "model": "$MY_MODEL"}},
-            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
-            "job": {"output_path": "/remote/jobs"},
-        }
-    )
-    assert config.services["vllm_model"].model == "org/llama-3"
-    assert config.services["vllm_model"].container == "nvcr.io/my-vllm:latest"
-
-
-def test_submit_config_resolves_compute_account(monkeypatch):
-    monkeypatch.setenv("SLURM_ACCOUNT", "my_team")
-    config = SubmitConfig.model_validate(
-        {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
-            "compute": {"cluster": {"type": "slurm", "account": "$SLURM_ACCOUNT", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
-            "job": {"output_path": "/remote/jobs"},
-        }
-    )
-    assert config.compute["cluster"].account == "my_team"
-
-
-def test_submit_config_resolves_output_path(monkeypatch):
-    monkeypatch.setenv("JOB_DIR", "/lustre/fsw/my-jobs")
-    config = SubmitConfig.model_validate(
-        {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
-            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
-            "job": {"output_path": "$JOB_DIR"},
-        }
-    )
-    assert config.job.output_path == "/lustre/fsw/my-jobs"
-
-
-def test_submit_config_resolves_missing_var_raises(monkeypatch):
-    from pydantic import ValidationError
-
-    monkeypatch.delenv("UNSET_MODEL", raising=False)
-    with pytest.raises(ValidationError, match="UNSET_MODEL"):
-        SubmitConfig.model_validate(
-            {
-                "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "$UNSET_MODEL"}},
-                "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-                "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
-                "job": {"output_path": "/remote/jobs"},
-            }
-        )
-
-
-def test_submit_config_resolves_benchmark_run_args(monkeypatch):
-    monkeypatch.setenv("TEMP", "0.7")
-    config = SubmitConfig.model_validate(
-        {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
-            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {"run": {"temperature": "$TEMP"}}}},
-            "job": {"output_path": "/remote/jobs"},
-        }
-    )
-    assert config.driver.benchmarks["gsm8k"].run["temperature"] == "0.7"
-
-
-def test_build_sbatch_script_resolved_tp_in_vllm_cmd(bench_dir, monkeypatch):
-    monkeypatch.setenv("TP", "8")
-    config = SubmitConfig.model_validate(
-        {
-            "services": {
-                "vllm_model": {
-                    "type": "vllm",
-                    "container": "vllm:latest",
-                    "model": "org/model",
-                    "tensor_parallel_size": "$TP",
+                    "tensor_parallel_size": 8,
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
@@ -457,9 +359,7 @@ def test_build_sbatch_script_resolved_tp_in_vllm_cmd(bench_dir, monkeypatch):
     assert "--tensor-parallel-size 8" in script
 
 
-def test_build_sbatch_script_service_env_before_driver_env(bench_dir, monkeypatch):
-    monkeypatch.setenv("SVC_TOKEN", "svc_val")
-    monkeypatch.setenv("DRV_TOKEN", "drv_val")
+def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
     config = SubmitConfig.model_validate(
         {
             "services": {
@@ -467,11 +367,11 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir, monkeypatc
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "env": {"SVC_KEY": "$SVC_TOKEN"},
+                    "env": {"SVC_KEY": "svc_val"},
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "$DRV_TOKEN"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "drv_val"}},
             "job": {"output_path": "/remote/jobs"},
         }
     )
@@ -503,8 +403,7 @@ def test_render_service_command_no_env():
     assert "export" not in out
 
 
-def test_build_sbatch_script_service_env(bench_dir, monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+def test_build_sbatch_script_service_env(bench_dir):
     config = SubmitConfig.model_validate(
         {
             "services": {
@@ -512,7 +411,7 @@ def test_build_sbatch_script_service_env(bench_dir, monkeypatch):
                     "type": "vllm",
                     "container": "vllm:latest",
                     "model": "org/model",
-                    "env": {"HF_TOKEN": "$HF_TOKEN", "LIT": "val"},
+                    "env": {"HF_TOKEN": "hf_test", "LIT": "val"},
                 }
             },
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
@@ -520,8 +419,6 @@ def test_build_sbatch_script_service_env(bench_dir, monkeypatch):
             "job": {"output_path": "/remote/jobs"},
         }
     )
-    # $HF_TOKEN resolved at parse time — env dict now has literal values
-    assert config.services["vllm_model"].env == {"HF_TOKEN": "hf_test", "LIT": "val"}
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
@@ -529,8 +426,7 @@ def test_build_sbatch_script_service_env(bench_dir, monkeypatch):
     assert "LIT=val" in script
 
 
-def test_build_sbatch_script_driver_env(bench_dir, monkeypatch):
-    monkeypatch.setenv("WANDB_KEY", "wb_secret")
+def test_build_sbatch_script_driver_env(bench_dir):
     config = SubmitConfig.model_validate(
         {
             "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
@@ -538,7 +434,7 @@ def test_build_sbatch_script_driver_env(bench_dir, monkeypatch):
             "driver": {
                 "container": "python:3.12",
                 "benchmarks": {"gsm8k": {}},
-                "env": {"WANDB_API_KEY": "$WANDB_KEY"},
+                "env": {"WANDB_API_KEY": "wb_secret"},
             },
             "job": {"output_path": "/remote/jobs"},
         }
@@ -552,8 +448,6 @@ def test_build_sbatch_script_driver_env(bench_dir, monkeypatch):
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-import pytest
 
 from nemo_gym.orchestration.api import NodePool, SlurmComputeConfig, VllmServiceConfig
 
