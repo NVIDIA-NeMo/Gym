@@ -20,6 +20,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 sys.path.insert(0, "/nemo_gym_mount")
@@ -86,7 +87,8 @@ def main() -> None:
         messages.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
     body = NeMoGymResponseCreateParamsNonStreaming(input=messages, model=model_name, **sampling)
 
-    response = asyncio.run(agent.responses(request=None, body=body))
+    request = SimpleNamespace(path_params={})
+    response = asyncio.run(agent.responses(request=request, body=body))
     Path(traj_dir, "response.json").write_text(response.model_dump_json())
     print(f"agent finished: {len(response.output)} output items", flush=True)
 
