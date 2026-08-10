@@ -194,7 +194,7 @@ class TestResponses:
 class TestRunPrimeAgent:
     def test_process_groups_with_env_finds_matching_processes(self, tmp_path: Path) -> None:
         for pid, environ in {
-            "117": b"HOME=/tmp\0PRIME_AGENT_CODING_AGENT_DIR=/tmp/agent\0",
+            "117": b"HOME=/tmp\0PRIME_AGENT_CODING_AGENT_DIR=/tmp/agent\0",  # pragma: allowlist secret
             "298": b"PRIME_AGENT_CODING_AGENT_DIR=/tmp/other\0",
         }.items():
             process_dir = tmp_path / pid
