@@ -9,6 +9,13 @@ MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 
+should_run_eval=$(( $# > 0 ))
+if (( should_run_eval )); then
+    EXPERIMENT_NAME=$EXPERIMENT_NAME
+else
+    EXPERIMENT_NAME=""
+fi
+
 # Fixed vLLM Port configurations
 PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
@@ -19,6 +26,36 @@ DECODE_SERVER_PORT=8002
 
 PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
+
+eval_command=$(cat <<EOF
+# Activate environment in container and cd into Gym. The Gym path here may be mounted.
+source /opt/Gym_venv/bin/activate
+cd /opt/Gym
+
+gym eval prepare $@ +use_cached_prepared_benchmarks=true
+
+experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
+
+# +uv_venv_dir=/opt/uv_venvs is from the container.
+# +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
+gym eval run \
+    $@ \
+    +wandb_project=$USER-gym-eval \
+    +wandb_name=\$experiment_name \
+    +uv_venv_dir=/opt/uv_venvs \
+    +skip_venv_if_present=true \
+    ++output_jsonl_fpath=results/\$experiment_name.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=benchmark \
+    ++use_absolute_ip=true \
+    ++reuse_existing_data_preparation=true \
+    ++policy_base_url=\$ip \
+    ++policy_api_key=dummy_api_key \
+    ++policy_model_name=$MODEL \
+    ++global_aiohttp_connector_limit_per_host=16384
+
+EOF
+)
 
 command=$(cat <<EOF
 #!/bin/bash
@@ -109,7 +146,15 @@ if (( SLURM_PROCID == 0 )); then
         --host \$PREFILL_HEAD \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
-        --log-level error
+        --log-level error &
+    router_pid=\$!
+    
+    if (( $should_run_eval )); then
+        $eval_command
+    else
+        wait \$router_pid
+    fi
+
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
