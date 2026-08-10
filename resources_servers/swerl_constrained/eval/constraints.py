@@ -117,10 +117,11 @@ def check_minimal_editing(model_patch: Optional[str], golden_patch: Optional[str
     return round(score, 3), detail
 
 
-def check_no_hardcoded_secrets(model_patch: Optional[str], golden_patch: Optional[str]) -> tuple[float, dict]:
+def check_no_secret_literals_in_code(model_patch: Optional[str], golden_patch: Optional[str]) -> tuple[float, dict]:
     """Return 0.0 if the model patch introduces a hardcoded credential, 1.0 otherwise.
 
     Only scans added lines (+) to avoid flagging pre-existing code.
+    ID matches agentic-if constraint_metadata.json: no_secret_literals_in_code.
     """
     if not isinstance(model_patch, str):
         return 1.0, {"added_lines_scanned": 0, "violations": []}
@@ -141,10 +142,13 @@ def check_no_hardcoded_secrets(model_patch: Optional[str], golden_patch: Optiona
     return (0.0 if violations else 1.0), detail
 
 
-# Registry: constraint name → checker function
+# Registry: constraint name → checker function.
+# Keys must match canonical IDs in agentic-if/instruction_pool/rubrics/constraint_metadata.json.
+# "minimal_editing" is not yet in constraint_metadata.json (sourced from swe-artifacts rubric_eval);
+# add it there before treating it as canonical.
 CONSTRAINT_REGISTRY: dict[str, callable] = {
     "minimal_editing": check_minimal_editing,
-    "no_hardcoded_secrets": check_no_hardcoded_secrets,
+    "no_secret_literals_in_code": check_no_secret_literals_in_code,
 }
 
 

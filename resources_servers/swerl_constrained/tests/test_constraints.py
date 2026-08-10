@@ -4,7 +4,7 @@ import pytest
 
 from resources_servers.swerl_constrained.eval.constraints import (
     check_minimal_editing,
-    check_no_hardcoded_secrets,
+    check_no_secret_literals_in_code,
     run_constraints,
 )
 
@@ -79,31 +79,31 @@ class TestMinimalEditing:
         assert 0.0 < score < 1.0
 
 
-class TestNoHardcodedSecrets:
+class TestNoSecretLiteralsInCode:
     def test_clean_patch(self):
-        score, detail = check_no_hardcoded_secrets(SMALL_PATCH, None)
+        score, detail = check_no_secret_literals_in_code(SMALL_PATCH, None)
         assert score == 1.0
         assert detail["violations"] == []
 
     def test_secret_in_added_line(self):
-        score, detail = check_no_hardcoded_secrets(SECRET_PATCH, None)
+        score, detail = check_no_secret_literals_in_code(SECRET_PATCH, None)
         assert score == 0.0
         assert len(detail["violations"]) > 0
 
     def test_env_var_read_not_flagged(self):
-        score, detail = check_no_hardcoded_secrets(ENV_PATCH, None)
+        score, detail = check_no_secret_literals_in_code(ENV_PATCH, None)
         assert score == 1.0
         assert detail["violations"] == []
 
     def test_none_patch(self):
-        score, _ = check_no_hardcoded_secrets(None, None)
+        score, _ = check_no_secret_literals_in_code(None, None)
         assert score == 1.0
 
 
 class TestRunConstraints:
     def test_all_known(self):
-        results = run_constraints(["minimal_editing", "no_hardcoded_secrets"], SMALL_PATCH, GOLDEN_PATCH)
-        assert set(results.keys()) == {"minimal_editing", "no_hardcoded_secrets"}
+        results = run_constraints(["minimal_editing", "no_secret_literals_in_code"], SMALL_PATCH, GOLDEN_PATCH)
+        assert set(results.keys()) == {"minimal_editing", "no_secret_literals_in_code"}
         for r in results.values():
             assert r["score"] is not None
 
