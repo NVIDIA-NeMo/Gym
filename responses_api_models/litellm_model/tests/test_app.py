@@ -121,7 +121,7 @@ def _make_server(max_concurrent_requests=None) -> LiteLLMModelServer:
         entrypoint="",
         name="",
     )
-    return LiteLLMModelServer(config=config, server_client=MagicMock(spec=ServerClient))
+    return LiteLLMModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
 
 # -- Unit tests for _normalize_to_response ------------------------------------
