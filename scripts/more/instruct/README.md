@@ -24,7 +24,7 @@ Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
 
 ## Prerequisites
 
-- **Python 3.13.14 or newer** — Gym does not install on 3.12.
+- **Python 3.13.14 or newer**
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/) on your `PATH`** — Gym
   builds every server's virtualenv with it, so nothing starts without it.
 - **Gym installed**, from the repo root:
@@ -36,12 +36,10 @@ Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
 
 ## Serving the model
 
-- **Hosted:** `https://integrate.api.nvidia.com/v1/chat/completions`, model
-  `nvidia/nemotron-3.5-lightning-30b-a3b`, key `NVIDIA_API_KEY`.
-- **Self-hosted vLLM:** serve
-  [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B)
-  — check its model card for the authoritative serving guidance; the command below is what
-  these recipes were validated with, on `vllm/vllm-openai:v0.26.0`.
+Reproducing these numbers depends on the model being served the right way. Check the
+[model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B) for the
+authoritative serving guidance; the command below is what these recipes were validated
+with, on `vllm/vllm-openai:v0.26.0`.
 
 ```bash
 vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B \
