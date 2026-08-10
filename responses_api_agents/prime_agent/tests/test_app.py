@@ -15,8 +15,9 @@
 
 import asyncio
 import json
+import signal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import yaml
 
@@ -34,6 +35,8 @@ from responses_api_agents.prime_agent.app import (
     PrimeAgentConfig,
     ResourcesServerRef,
     _extract_instruction,
+    _kill_prime_processes,
+    _process_groups_with_env,
     parse_prime_agent_events,
 )
 
@@ -156,12 +159,201 @@ class TestResponses:
         agent = _make_agent()
         request = MagicMock()
         request.path_params = {}
-        result = ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, "test-model")
+        result = ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, "test-model", False)
         with patch.object(PrimeAgent, "_run_prime_agent", new=AsyncMock(return_value=result)):
             response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
         assert len(response.output) == 1
         assert response.output[0].content[0].text == ""
+
+    async def test_timeout_preserves_partial_output_and_sets_metadata(self) -> None:
+        agent = _make_agent()
+        request = MagicMock()
+        request.path_params = {}
+        output = [
+            NeMoGymResponseOutputMessage(
+                id="partial",
+                content=[],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+        ]
+        usage = {"input_tokens": 7, "output_tokens": 3, "cached_tokens": 2}
+        result = (output, usage, "test-model", True)
+        with patch.object(PrimeAgent, "_run_prime_agent", new=AsyncMock(return_value=result)):
+            response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert response.output == output
+        assert response.metadata["prime_agent_timed_out"] == "true"
+        assert response.usage.input_tokens == 7
+        assert response.usage.input_tokens_details.cached_tokens == 2
+        assert response.usage.output_tokens == 3
+
+
+class TestRunPrimeAgent:
+    def test_process_groups_with_env_finds_matching_processes(self, tmp_path: Path) -> None:
+        for pid, environ in {
+            "117": b"HOME=/tmp\0PRIME_AGENT_CODING_AGENT_DIR=/tmp/agent\0",
+            "298": b"PRIME_AGENT_CODING_AGENT_DIR=/tmp/other\0",
+        }.items():
+            process_dir = tmp_path / pid
+            process_dir.mkdir()
+            (process_dir / "environ").write_bytes(environ)
+
+        with patch("responses_api_agents.prime_agent.app.os.getpgid", return_value=117):
+            groups = _process_groups_with_env("PRIME_AGENT_CODING_AGENT_DIR", "/tmp/agent", tmp_path)
+
+        assert groups == [117]
+
+    def test_kill_prime_processes_includes_daemonized_processes(self) -> None:
+        with (
+            patch("responses_api_agents.prime_agent.app._descendant_pids", return_value=[298, 117]),
+            patch("responses_api_agents.prime_agent.app.os.getpgid", side_effect={298: 117, 117: 117}.get),
+            patch("responses_api_agents.prime_agent.app._process_groups_with_env", return_value=[117, 412]),
+            patch("responses_api_agents.prime_agent.app.os.killpg") as killpg,
+        ):
+            _kill_prime_processes(99, Path("/tmp/agent"))
+
+        assert killpg.call_args_list == [
+            call(117, signal.SIGKILL),
+            call(412, signal.SIGKILL),
+            call(99, signal.SIGKILL),
+        ]
+
+    async def test_timeout_does_not_cancel_stdout_collection(self, tmp_path: Path) -> None:
+        agent = _make_agent(timeout=0)
+        release = asyncio.Event()
+        state = {"cancelled": False}
+        stdout = _message_end(
+            "assistant",
+            [{"type": "text", "text": "partial answer"}],
+            usage={"input": 7, "output": 3},
+        ).encode()
+
+        async def communicate() -> tuple[bytes, bytes]:
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+            return stdout, b""
+
+        async def wait() -> int:
+            await release.wait()
+            return -signal.SIGKILL
+
+        proc = MagicMock()
+        proc.pid = 123
+        proc.returncode = None
+        proc.communicate = AsyncMock(side_effect=communicate)
+        proc.wait = AsyncMock(side_effect=wait)
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch(
+                "responses_api_agents.prime_agent.app._kill_prime_processes",
+                side_effect=lambda *_: release.set(),
+            ) as kill_processes,
+            patch(
+                "responses_api_agents.prime_agent.app.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)
+            ) as create_subprocess,
+        ):
+            output, usage, model, timed_out = await agent._run_prime_agent("solve it", None, None)
+
+        assert state["cancelled"] is False
+        assert proc.communicate.await_count == 1
+        kill_processes.assert_called_once_with(proc.pid, tmp_path / "work/.prime-home/.prime/agent")
+        assert create_subprocess.await_args.kwargs["start_new_session"] is True
+        assert output[0].content[0].text == "partial answer"
+        assert usage == {"input_tokens": 7, "output_tokens": 3, "cached_tokens": 0}
+        assert model == agent.config.model
+        assert timed_out is True
+
+    async def test_client_exit_reaps_daemon_without_marking_timeout(self, tmp_path: Path) -> None:
+        agent = _make_agent(timeout=60)
+        release = asyncio.Event()
+        stdout = _message_end("assistant", [{"type": "text", "text": "complete answer"}]).encode()
+
+        async def communicate() -> tuple[bytes, bytes]:
+            await release.wait()
+            return stdout, b""
+
+        async def wait() -> int:
+            proc.returncode = 0
+            return 0
+
+        proc = MagicMock()
+        proc.pid = 123
+        proc.returncode = None
+        proc.communicate = AsyncMock(side_effect=communicate)
+        proc.wait = AsyncMock(side_effect=wait)
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch(
+                "responses_api_agents.prime_agent.app._kill_prime_processes",
+                side_effect=lambda *_: release.set(),
+            ) as kill_processes,
+            patch(
+                "responses_api_agents.prime_agent.app.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)
+            ),
+        ):
+            output, _, _, timed_out = await agent._run_prime_agent("solve it", None, None)
+
+        kill_processes.assert_called_once_with(proc.pid, tmp_path / "work/.prime-home/.prime/agent")
+        assert output[0].content[0].text == "complete answer"
+        assert timed_out is False
+
+    async def test_external_cancellation_kills_process_and_drains_output(self, tmp_path: Path) -> None:
+        agent = _make_agent(timeout=60)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        state = {"cancelled": False}
+
+        async def communicate() -> tuple[bytes, bytes]:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+            return b"", b""
+
+        async def wait() -> int:
+            await release.wait()
+            return -signal.SIGKILL
+
+        proc = MagicMock()
+        proc.pid = 123
+        proc.returncode = None
+        proc.communicate = AsyncMock(side_effect=communicate)
+        proc.wait = AsyncMock(side_effect=wait)
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch(
+                "responses_api_agents.prime_agent.app._kill_prime_processes",
+                side_effect=lambda *_: release.set(),
+            ) as kill_processes,
+            patch(
+                "responses_api_agents.prime_agent.app.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)
+            ) as create_subprocess,
+        ):
+            task = asyncio.create_task(agent._run_prime_agent("solve it", None, None))
+            await started.wait()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("expected Prime Agent run to be cancelled")
+
+        assert state["cancelled"] is False
+        assert proc.communicate.await_count == 1
+        kill_processes.assert_called_once_with(proc.pid, tmp_path / "work/.prime-home/.prime/agent")
+        assert create_subprocess.await_args.kwargs["start_new_session"] is True
 
 
 class TestEnvironmentAndCommand:
@@ -173,7 +365,7 @@ class TestEnvironmentAndCommand:
         assert env["HOME"] == str(home)
         assert env["PRIME_AGENT_CODING_AGENT_DIR"] == str(home / ".prime" / "agent")
         assert env["PRIME_AGENT_KERNEL_VENV"] == str(kernel_venv)
-        assert env["PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND"] == "1"
+        assert "PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND" not in env
         assert env["PI_SKIP_VERSION_CHECK"] == "1"
         assert env["NVIDIA_API_KEY"] == "k"
         assert "EMPTY" not in env

@@ -20,7 +20,9 @@ import logging
 import os
 import shlex
 import shutil
+import signal
 from asyncio import Semaphore
+from contextlib import suppress
 from pathlib import Path
 from time import time
 from typing import Any, Optional
@@ -53,6 +55,64 @@ from responses_api_agents.prime_agent.setup_prime_agent import ensure_prime_agen
 
 
 LOG = logging.getLogger(__name__)
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    descendants: list[tuple[int, int]] = []
+    pending = [(root_pid, 0)]
+    while pending:
+        parent_pid, depth = pending.pop()
+        try:
+            children = Path(f"/proc/{parent_pid}/task/{parent_pid}/children").read_text().split()
+        except OSError:
+            continue
+        for child in children:
+            child_pid = int(child)
+            descendants.append((child_pid, depth + 1))
+            pending.append((child_pid, depth + 1))
+    return [pid for pid, _ in sorted(descendants, key=lambda item: item[1], reverse=True)]
+
+
+def _process_groups_with_env(key: str, value: str, proc_root: Path = Path("/proc")) -> list[int]:
+    marker = f"{key}={value}".encode()
+    process_groups: list[int] = []
+    try:
+        entries = proc_root.iterdir()
+    except OSError:
+        return process_groups
+
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            environ = (entry / "environ").read_bytes().split(b"\0")
+            process_group = os.getpgid(int(entry.name))
+        except (OSError, ProcessLookupError):
+            continue
+        if marker in environ and process_group not in process_groups:
+            process_groups.append(process_group)
+    return process_groups
+
+
+def _kill_prime_processes(root_pid: int, agent_dir: Path) -> None:
+    process_groups: list[int] = []
+    for descendant_pid in _descendant_pids(root_pid):
+        try:
+            process_group = os.getpgid(descendant_pid)
+        except ProcessLookupError:
+            continue
+        if process_group != root_pid and process_group not in process_groups:
+            process_groups.append(process_group)
+
+    for process_group in _process_groups_with_env("PRIME_AGENT_CODING_AGENT_DIR", str(agent_dir)):
+        if process_group != root_pid and process_group not in process_groups:
+            process_groups.append(process_group)
+
+    for process_group in process_groups:
+        with suppress(ProcessLookupError):
+            os.killpg(process_group, signal.SIGKILL)
+    with suppress(ProcessLookupError):
+        os.killpg(root_pid, signal.SIGKILL)
 
 
 def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
@@ -232,7 +292,6 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             **os.environ,
             "HOME": str(home),
             "PRIME_AGENT_CODING_AGENT_DIR": str(agent_dir),
-            "PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND": "1",
             "PI_SKIP_VERSION_CHECK": "1",
         }
         kernel_venv = self._kernel_venv()
@@ -291,7 +350,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
 
     async def _run_prime_agent(
         self, instruction: str, system_prompt: Optional[str], rollout_id: Optional[str]
-    ) -> tuple[list[Any], dict[str, int], str]:
+    ) -> tuple[list[Any], dict[str, int], str, bool]:
         work_dir = self._workspace_root()
         home = work_dir / ".prime-home"
         agent_dir = home / ".prime" / "agent"
@@ -310,20 +369,36 @@ class PrimeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
+            communication = asyncio.create_task(proc.communicate())
+            process_exit = asyncio.create_task(proc.wait())
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
+                done, _ = await asyncio.wait(
+                    {communication, process_exit},
+                    timeout=self.config.timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                timed_out = not done
+                if communication not in done:
+                    _kill_prime_processes(proc.pid, agent_dir)
+                stdout, stderr = await communication
+                await process_exit
+            except asyncio.CancelledError:
+                _kill_prime_processes(proc.pid, agent_dir)
+                await asyncio.gather(communication, process_exit, return_exceptions=True)
+                raise
+
+            if timed_out:
                 LOG.warning("Prime Agent timed out after %ds", self.config.timeout)
-                return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, self.config.model
+                output_items, usage = parse_prime_agent_events(stdout.decode(errors="replace"))
+                return output_items, usage, self.config.model, True
 
             if proc.returncode not in (0, None):
                 LOG.warning("Prime Agent exited %d: %s", proc.returncode, stderr.decode(errors="replace")[-1000:])
-                return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, self.config.model
+                return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, self.config.model, False
             output_items, usage = parse_prime_agent_events(stdout.decode(errors="replace"))
-            return output_items, usage, self.config.model
+            return output_items, usage, self.config.model, False
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -341,7 +416,11 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         rollout_id = request.path_params.get("rollout_id") if request is not None else None
 
-        output_items, usage, model_name = await self._run_prime_agent(user_message, system_prompt, rollout_id)
+        output_items, usage, model_name, timed_out = await self._run_prime_agent(
+            user_message,
+            system_prompt,
+            rollout_id,
+        )
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -378,6 +457,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={"prime_agent_timed_out": str(timed_out).lower()},
         )
 
     async def run(self, request: Request, body: PrimeAgentRunRequest) -> PrimeAgentVerifyResponse:
