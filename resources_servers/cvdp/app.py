@@ -23,8 +23,8 @@ while code-generation tasks are graded by actually running the task's test
 harness (``_verify_objective``). The objective path either grades the files an
 agent already wrote (``rtl_files``) or parses RTL out of the model's text, then
 delegates execution to :class:`resources_servers.cvdp.testbench_runner.TestbenchRunner`,
-which owns the *mechanism* (docker-compose → Apptainer translation, the SIF
-cache, and the sandbox provider). Keeping execution in ``testbench_runner.py``
+which owns the *mechanism* (Compose-manifest translation and the sandbox
+provider). Keeping execution in ``testbench_runner.py``
 lets this file stay focused on the contract and scoring.
 """
 
@@ -43,7 +43,7 @@ from cvdp_lib.cvdp_constants import (
 )
 from cvdp_lib.model_helpers import ModelHelpers
 from cvdp_lib.subjective import calculate_BLEU, calculate_ROUGE
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -68,11 +68,15 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     oss_pnr_image: str = "ghcr.io/hdl/impl/pnr"
     eda_sim_image: str = ""  # Set to a commercial EDA image (e.g. Cadence Xcelium)
     container_timeout: int = 600
-    num_processes: int = 4  # Max concurrent Apptainer jobs
-    sif_cache_dir: str = ""  # Defaults to ~/.cache/nemo-gym/sif
+    num_processes: int = 4  # Max concurrent verifier sandboxes
     harness_workspace_dir: str = ""  # Optional host directory for per-rollout temp workspaces
-    container_tmp_bind_path: str = ""  # If set, redirect in-container temp (e.g. /tmp) to per-rollout host storage
-    sandbox_provider: Dict[str, Any] = {"apptainer": {}}
+    container_workspace: str = "/code"
+    container_transfer_dir: str = "/sandbox"
+    container_tmp_bind_path: str = ""  # If set, redirect temp into the uploaded per-rollout workspace
+    sandbox_provider: str | Dict[str, Any] = Field(default_factory=lambda: {"apptainer": {}})
+    sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
+    prepared_images: Dict[str, str] = Field(default_factory=dict)
+    prepared_image_manifest: str = ""
 
 
 # ----------------------------
@@ -165,9 +169,10 @@ class CVDPResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
-        # Sandbox execution (SIF cache, provider, compose translation) lives in
-        # the harness runner; this server only owns the HTTP contract + scoring.
-        self._harness = TestbenchRunner(self.config)
+        self._harness = TestbenchRunner(
+            self.config,
+            named_sandbox_configs=getattr(self.server_client, "global_config_dict", None),
+        )
 
         # Warn if commercial EDA image is not configured.
         # Categories 12, 13, 14 require a commercial EDA image (e.g. Cadence Xcelium).
