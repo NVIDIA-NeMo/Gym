@@ -30,6 +30,7 @@ common_args=(
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --max-num-batched-tokens 8192
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 5}'
     --host \$host
 )
 
