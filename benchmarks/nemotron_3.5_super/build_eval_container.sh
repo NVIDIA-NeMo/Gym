@@ -25,7 +25,7 @@ set -xeuo pipefail
 export UV_LINK_MODE=hardlink
 
 ray_dependency="ray[default]==2.55.1"
-uv pip install --system "\$ray_dependency"
+uv pip install --system "\$ray_dependency" fastokens vllm-router
 
 apt-get update
 apt-get install -y --no-install-recommends \

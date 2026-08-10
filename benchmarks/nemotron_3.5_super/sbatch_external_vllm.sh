@@ -91,8 +91,6 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
-# TODO @bxyu-nvidia: Move into build container
-pip install fastokens
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
@@ -109,9 +107,6 @@ this_node_hostname=\$(hostname)
 # Split nodes here by index
 if (( SLURM_PROCID == 0 )); then
     # Prefill head
-
-    # TODO @bxyu-nvidia: Bake into container build
-    pip install vllm-router
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
