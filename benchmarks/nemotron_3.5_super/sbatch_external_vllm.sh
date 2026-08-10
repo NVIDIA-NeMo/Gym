@@ -111,7 +111,7 @@ if (( SLURM_PROCID == 0 )); then
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=\$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
         --data-parallel-size $NUM_PREFILL_NODES \
