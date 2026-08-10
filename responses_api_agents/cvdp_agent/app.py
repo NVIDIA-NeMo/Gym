@@ -456,7 +456,11 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
     def _deps_needs_sandbox_build(self) -> bool:
         target, _python_arch, _node_arch = self._deps_target_arch()
-        return isinstance(self._sandbox_provider, dict) and "opensandbox" in self._sandbox_provider and target != host_deps_arch_label()
+        return (
+            isinstance(self._sandbox_provider, dict)
+            and "opensandbox" in self._sandbox_provider
+            and target != host_deps_arch_label()
+        )
 
     def _deps_recipe(self, key: str) -> tuple[Path, str]:
         scripts_dir = Path(__file__).parent / "setup_scripts"
