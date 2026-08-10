@@ -61,7 +61,7 @@ async def _sleeping_child(**kwargs):
 
 @pytest.mark.asyncio
 async def test_direct_exec_isolates_the_pid_namespace_by_default(tmp_path):
-    agent = make_agent(sandbox_spec={"image": "/img.sif"})
+    agent = make_agent(sandbox_spec={"image": "docker://test"})
     captured = await _capture_launch(agent, tmp_path, {"direct_exec": True})
 
     assert "--pid" in captured["argv"]
@@ -69,7 +69,7 @@ async def test_direct_exec_isolates_the_pid_namespace_by_default(tmp_path):
 
 @pytest.mark.asyncio
 async def test_explicit_direct_exec_args_are_honoured(tmp_path):
-    agent = make_agent(sandbox_spec={"image": "/img.sif"})
+    agent = make_agent(sandbox_spec={"image": "docker://test"})
     captured = await _capture_launch(agent, tmp_path, {"direct_exec": True, "direct_exec_args": ["--cleanenv"]})
 
     assert "--pid" not in captured["argv"]
@@ -77,7 +77,7 @@ async def test_explicit_direct_exec_args_are_honoured(tmp_path):
 
 @pytest.mark.asyncio
 async def test_direct_exec_args_string_is_split_into_argv(tmp_path):
-    agent = make_agent(sandbox_spec={"image": "/img.sif"})
+    agent = make_agent(sandbox_spec={"image": "docker://test"})
     captured = await _capture_launch(agent, tmp_path, {"direct_exec": True, "direct_exec_args": "--cleanenv --no-home"})
 
     assert "--cleanenv" in captured["argv"]
@@ -87,7 +87,7 @@ async def test_direct_exec_args_string_is_split_into_argv(tmp_path):
 
 @pytest.mark.asyncio
 async def test_direct_exec_launches_in_a_new_session(tmp_path):
-    agent = make_agent(sandbox_spec={"image": "/img.sif"})
+    agent = make_agent(sandbox_spec={"image": "docker://test"})
     captured = await _capture_launch(agent, tmp_path, {"direct_exec": True})
 
     assert captured["kwargs"]["start_new_session"] is True

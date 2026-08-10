@@ -88,16 +88,18 @@ def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
     assert 'agent["timeoutSeconds"] = provider_timeout_s' in wrapper_text
 
 
-def test_build_spec_from_config():
+def test_build_spec_from_config(tmp_path):
+    image = tmp_path / "pinchbench.sif"
+    image.touch()
     agent = make_agent(
         sandbox_spec={
-            "image": "/sif/pinchbench.sif",
+            "image": str(image),
             "ready_timeout_s": 600,
             "resources": {"cpu": 4, "memory_mib": 8192},
         }
     )
     spec = agent._build_spec("task_x")
-    assert spec.image == "/sif/pinchbench.sif"
+    assert spec.image == str(image)
     assert spec.ready_timeout_s == 600
     assert spec.resources.cpu == 4 and spec.resources.memory_mib == 8192
     assert spec.metadata == {"task_id": "task_x"}
@@ -394,7 +396,7 @@ async def test_non_clean_exit_rc_present_in_raw_rollout(tmp_path, monkeypatch):
 @pytest.mark.parametrize("returncode", [-15, 137, 143])
 async def test_signal_killed_apptainer_raises_sandbox_killed_error(tmp_path, returncode):
     agent = make_agent(
-        sandbox_spec={"image": "/sif/pinchbench.sif"},
+        sandbox_spec={"image": "docker://test"},
         sandbox_provider={"apptainer": {"direct_exec": True}},
     )
     proc = MagicMock()

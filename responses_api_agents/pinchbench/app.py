@@ -117,6 +117,12 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
             )
         if self.sandbox_provider:
             get_provider_class(next(iter(self.sandbox_provider)))
+        image = self.sandbox_spec.get("image")
+        if image and "://" not in str(image) and not Path(str(image)).exists():
+            raise ValueError(
+                f"sandbox_spec.image={image!r} does not exist on disk. "
+                "Verify the cache mount is configured and the image path is correct."
+            )
         return self
 
 

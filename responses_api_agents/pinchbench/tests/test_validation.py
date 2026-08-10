@@ -78,6 +78,20 @@ class TestSandboxConfigValidation:
         cfg = make_config(sandbox_provider={"apptainer": {}})
         assert "apptainer" in cfg.sandbox_provider
 
+    def test_nonexistent_sandbox_image_is_rejected(self):
+        with pytest.raises(ValueError, match="does not exist on disk"):
+            make_config(sandbox_spec={"image": "/nonexistent/pinchbench.sif"})
+
+    def test_existing_sandbox_image_is_accepted(self, tmp_path):
+        image = tmp_path / "pinchbench.sif"
+        image.touch()
+        cfg = make_config(sandbox_spec={"image": str(image)})
+        assert cfg.sandbox_spec["image"] == str(image)
+
+    def test_docker_image_uri_skips_existence_check(self):
+        cfg = make_config(sandbox_spec={"image": "docker://nvcr.io/nvidia/pinchbench:latest"})
+        assert cfg.sandbox_spec["image"].startswith("docker://")
+
 
 # ---------------------------------------------------------------------------
 # Seam 2 — _parse_result: multiple result files
@@ -134,7 +148,7 @@ def _mock_process(returncode: int) -> MagicMock:
 @pytest.mark.asyncio
 async def test_non_clean_exit_with_archive_present_returns_rc_and_logs_warning(tmp_path, capsys):
     agent = make_agent(
-        sandbox_spec={"image": "/sif/pinchbench.sif"},
+        sandbox_spec={"image": "docker://test"},
         sandbox_provider={"apptainer": {"direct_exec": True}},
     )
     _write_tgz(tmp_path / "sandbox" / "out" / "out.tgz")
@@ -151,7 +165,7 @@ async def test_non_clean_exit_with_archive_present_returns_rc_and_logs_warning(t
 @pytest.mark.asyncio
 async def test_clean_exit_returns_none_and_logs_no_warning(tmp_path, capsys):
     agent = make_agent(
-        sandbox_spec={"image": "/sif/pinchbench.sif"},
+        sandbox_spec={"image": "docker://test"},
         sandbox_provider={"apptainer": {"direct_exec": True}},
     )
     _write_tgz(tmp_path / "sandbox" / "out" / "out.tgz")
