@@ -640,6 +640,14 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+            # The SDK's execd-facing clients (health ping, commands, files)
+            # send only ConnectionConfig.headers — api_key alone never reaches
+            # proxied /proxy/* routes, so servers that enforce auth there 401
+            # every health ping and create times out at ready_timeout. Inject
+            # the key only in proxy mode: a direct sandbox endpoint runs
+            # untrusted code and must never see it.
+            if self._connection.api_key is not None:
+                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
         if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
