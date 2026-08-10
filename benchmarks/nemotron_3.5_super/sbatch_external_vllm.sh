@@ -10,7 +10,6 @@ MOUNTS=$MOUNTS
 command=$(cat <<EOF
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
 vllm serve $MODEL \
-    --served-model-name nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
     --gpu-memory-utilization 0.9 \
     --distributed-executor-backend ray \
     --data-parallel-backend ray \
@@ -26,7 +25,7 @@ vllm serve $MODEL \
     --mamba-ssm-cache-dtype float32 \
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}' \
     --enable-expert-parallel \
-    --max-num-batched-tokens 16384 \
+    --max-num-batched-tokens 32768 \
     --host \$(hostname -I | awk '{print \$1}') \
     --port 8000
 EOF

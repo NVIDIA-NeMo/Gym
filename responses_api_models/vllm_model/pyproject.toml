@@ -16,7 +16,7 @@
 [project]
 name = "vllm-model"
 version = "0.2.0rc0"
-requires-python = ">=3.12"
+requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
 ]

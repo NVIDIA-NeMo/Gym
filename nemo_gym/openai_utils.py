@@ -360,6 +360,44 @@ class NeMoGymResponseUsage(ResponseUsage):
     input_tokens_details: NeMoGymResponseInputTokensDetails
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
+    @classmethod
+    def sum_from_list(cls, usages: "NeMoGymResponseUsage") -> "NeMoGymResponseUsage":
+        final_usage = NeMoGymResponseUsage(
+            input_tokens=0,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens=0,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=0,
+        )
+        for usage in usages:
+            final_usage.input_tokens += usage.input_tokens
+            final_usage.input_tokens_details.cached_tokens += usage.input_tokens_details.cached_tokens
+            final_usage.output_tokens += usage.output_tokens
+            final_usage.output_tokens_details.reasoning_tokens += usage.output_tokens_details.reasoning_tokens
+            final_usage.total_tokens += usage.total_tokens
+
+        return final_usage
+
+
+def accumulate_response_usage(
+    total: Optional[NeMoGymResponseUsage], additional: Optional[NeMoGymResponseUsage]
+) -> Optional[NeMoGymResponseUsage]:
+    """Accumulate top-level and detailed response token counts."""
+    if additional is None:
+        return total
+    if total is None:
+        return additional.model_copy(deep=True)
+
+    result = total.model_copy(deep=True)
+    result.input_tokens += additional.input_tokens
+    result.output_tokens += additional.output_tokens
+    result.total_tokens += additional.total_tokens
+    if result.input_tokens_details is not None and additional.input_tokens_details is not None:
+        result.input_tokens_details.cached_tokens += additional.input_tokens_details.cached_tokens
+    if result.output_tokens_details is not None and additional.output_tokens_details is not None:
+        result.output_tokens_details.reasoning_tokens += additional.output_tokens_details.reasoning_tokens
+    return result
+
 
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
