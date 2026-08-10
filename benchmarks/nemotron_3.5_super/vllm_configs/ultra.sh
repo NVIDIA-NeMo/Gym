@@ -12,7 +12,6 @@ vllm serve "$MODEL" \
     --tool-call-parser qwen3_coder \
     --reasoning-parser nemotron_v3 \
     --api-server-count 1 \
-    --enable-prefix-caching \
     --enable-chunked-prefill \
     --kv-cache-dtype fp8 \
     --mamba-ssm-cache-dtype float32 \
