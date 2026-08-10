@@ -105,8 +105,8 @@ def audio_video_block(
       cannot) accepts media, including audio and video, as an ``image_url``
       **data URL** via the proxy. That is the historical GDPVal behavior and
       stays the default (*openai_native* False).
-    - **Self-hosted vLLM judges** (e.g. MiniMax-M3, which reads both audio and
-      video) only route media through the standard OpenAI content types: video as
+    - **Self-hosted vLLM judges** (e.g. MiniMax-M3 for video-capable judging)
+      only route media through the standard OpenAI content types: video as
       ``video_url`` and audio as ``input_audio`` (raw base64 + a ``format``
       token). An ``image_url``-wrapped mp4/wav is NOT sent to the model's
       video/audio tower by vLLM, so those judges need *openai_native* True.
