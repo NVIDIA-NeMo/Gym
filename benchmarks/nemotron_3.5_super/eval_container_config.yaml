@@ -89,6 +89,11 @@ genrm_model:
       openai_api_key: ${nv_inference_api_key}
       max_concurrent_requests: 16
 
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 16
+
 tau2_banking_knowledge_bm25_grep_artificial_analysis_agent:
   responses_api_agents:
     tau2:
