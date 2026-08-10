@@ -61,7 +61,7 @@ def _install_node_locally() -> Path:
 def _run_installer(version: str | None) -> None:
     with tempfile.TemporaryDirectory(prefix="prime-agent-install-") as temp_dir:
         script = Path(temp_dir) / "install.sh"
-        urllib.request.urlretrieve(_INSTALL_URL, script)  # noqa: S310
+        subprocess.run(["curl", "-fsSL", _INSTALL_URL, "-o", str(script)], check=True)
         env = {
             **os.environ,
             "PRIME_AGENT_INSTALLER_PLAIN": "1",
@@ -70,7 +70,7 @@ def _run_installer(version: str | None) -> None:
         cmd = ["sh", str(script)]
         if version:
             cmd.append(version)
-        subprocess.run(cmd, check=True, env=env)
+        subprocess.run(cmd, check=True, env=env, stdin=subprocess.DEVNULL, start_new_session=True)
 
 
 def ensure_prime_agent(version: str | None = None) -> None:

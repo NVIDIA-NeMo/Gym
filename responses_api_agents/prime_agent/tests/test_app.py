@@ -16,7 +16,7 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 
@@ -24,6 +24,7 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
@@ -78,14 +79,15 @@ class TestExtractInstruction:
         assert user == "hello"
         assert system is None
 
-    def test_system_plus_user(self) -> None:
+    def test_system_developer_and_user(self) -> None:
         items = [
             NeMoGymEasyInputMessage(role="system", content="be concise"),
+            NeMoGymEasyInputMessage(role="developer", content="use tools"),
             NeMoGymEasyInputMessage(role="user", content="hi"),
         ]
         user, system = _extract_instruction(items)
         assert user == "hi"
-        assert system == "be concise"
+        assert system == "be concise\n\nuse tools"
 
     def test_empty(self) -> None:
         user, system = _extract_instruction([])
@@ -97,7 +99,7 @@ class TestParsePrimeAgentEvents:
     def test_empty(self) -> None:
         items, usage = parse_prime_agent_events("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
 
     def test_assistant_text_and_usage(self) -> None:
         line = _message_end(
@@ -109,7 +111,7 @@ class TestParsePrimeAgentEvents:
         assert len(items) == 1
         assert isinstance(items[0], NeMoGymResponseOutputMessage)
         assert items[0].content[0].text == "the answer is 4"
-        assert usage == {"input_tokens": 105, "output_tokens": 20}
+        assert usage == {"input_tokens": 105, "output_tokens": 20, "cached_tokens": 5}
 
     def test_user_and_non_terminal_events_ignored(self) -> None:
         user = _message_end("user", [{"type": "text", "text": "hi"}])
@@ -123,7 +125,7 @@ class TestParsePrimeAgentEvents:
                     "assistant",
                     [{"type": "toolCall", "id": "c1", "name": "ipython", "arguments": {"code": "6 * 7"}}],
                 ),
-                _message_end("toolResult", [{"type": "text", "text": "42"}], toolCallId="c1"),
+                _message_end("toolResult", [{"type": "text", "text": "42"}], toolCallId="c1", isError=True),
                 _message_end("assistant", [{"type": "text", "text": "\\boxed{42}"}]),
             ]
         )
@@ -134,12 +136,32 @@ class TestParsePrimeAgentEvents:
         assert isinstance(items[1], NeMoGymFunctionCallOutput)
         assert items[1].call_id == "c1"
         assert items[1].output == "42"
+        assert items[1].status == "incomplete"
         assert isinstance(items[2], NeMoGymResponseOutputMessage)
 
     def test_malformed_lines_skipped(self) -> None:
         line = "not-json\n" + _message_end("assistant", [{"type": "text", "text": "ok"}])
         items, _ = parse_prime_agent_events(line)
         assert len(items) == 1
+
+    def test_agent_error_is_masked(self) -> None:
+        line = _message_end("assistant", [], stopReason="error", errorMessage="model failed")
+        items, usage = parse_prime_agent_events(line)
+        assert items == []
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+
+
+class TestResponses:
+    async def test_agent_failure_returns_empty_assistant(self) -> None:
+        agent = _make_agent()
+        request = MagicMock()
+        request.path_params = {}
+        result = ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, "test-model")
+        with patch.object(PrimeAgent, "_run_prime_agent", new=AsyncMock(return_value=result)):
+            response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert len(response.output) == 1
+        assert response.output[0].content[0].text == ""
 
 
 class TestEnvironmentAndCommand:
@@ -183,7 +205,7 @@ class TestModelServer:
             model="Qwen3.6-35B-A3B",
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         )
-        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+        with patch.object(PrimeAgent, "resolve_model_base_url", return_value="http://model/v1"):
             config = agent._build_models_config()
 
         provider = config["providers"]["nemo"]
@@ -222,7 +244,8 @@ class TestConfigYaml:
         for environment, agent_name in expected.items():
             data = yaml.safe_load((root / "environments" / environment / "config.yaml").read_text())
             assert agent_name in data
-            assert "prime_agent" in data[agent_name]["responses_api_agents"]
+            config = data[agent_name]["responses_api_agents"]["prime_agent"]
+            assert config["model_server"]["name"] == "policy_model"
 
     def test_environment_rollouts(self) -> None:
         root = Path(__file__).resolve().parents[3]

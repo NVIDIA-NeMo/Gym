@@ -36,7 +36,6 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -60,6 +59,7 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
 
     for line in stdout.splitlines():
         line = line.strip()
@@ -81,6 +81,14 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
             usage = message.get("usage") or {}
             input_tokens += int(usage.get("input") or 0) + int(usage.get("cacheRead") or 0)
             output_tokens += int(usage.get("output") or 0)
+            cached_tokens += int(usage.get("cacheRead") or 0)
+            if message.get("stopReason") in {"error", "aborted"}:
+                LOG.warning("Prime Agent stopped with an error: %s", message.get("errorMessage") or "unknown error")
+                return [], {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_tokens": cached_tokens,
+                }
             texts = [
                 block["text"] for block in content if isinstance(block, dict) and (block.get("text") or "").strip()
             ]
@@ -121,42 +129,42 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
                     type="function_call_output",
                     call_id=call_id,
                     output=result_text,
-                    status="completed",
+                    status="incomplete" if message.get("isError") else "completed",
                 )
             )
 
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens,
+    }
+
+
+def _content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(_content_text(item) for item in content)
+    if isinstance(content, dict):
+        return str(content.get("text") or "")
+    return str(getattr(content, "text", ""))
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
-    items = list(body_input)
-    system_message: Optional[str] = None
-
-    if items:
-        first = items[0]
-        role = getattr(first, "role", None) or (first.get("role") if isinstance(first, dict) else None)
-        if role == "system":
-            content = getattr(first, "content", None) or (first.get("content") if isinstance(first, dict) else None)
-            if isinstance(content, list):
-                content = "".join(
-                    (part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")) for part in content
-                )
-            system_message = content or ""
-            items = items[1:]
-
     user_message = ""
-    for item in reversed(items):
+    system_messages = []
+    for item in body_input:
         role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
-        if role == "user":
-            content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
-            if isinstance(content, list):
-                content = "".join(
-                    (part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")) for part in content
-                )
-            user_message = content or ""
-            break
+        content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
+        text = _content_text(content)
+        if role in {"system", "developer"} and text:
+            system_messages.append(text)
+        elif role == "user" and text:
+            user_message = text
 
-    return user_message, system_message
+    return user_message, "\n\n".join(system_messages) or None
 
 
 class PrimeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -233,26 +241,16 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         env.update({key: value for key, value in self.config.env.items() if value})
         return env
 
-    def _resolve_model_base_url(self) -> str:
-        if self.config.model_server is None:
-            return ""
-        config = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.model_server.name,
-        )
-        base_url = self.server_client._build_server_base_url(config).rstrip("/")
-        return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
-
     def _effective_model(self) -> str:
         return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
 
-    def _build_models_config(self) -> dict[str, Any]:
+    def _build_models_config(self, rollout_id: Optional[str] = None) -> dict[str, Any]:
         config = copy.deepcopy(self.config.models_config)
         if self.config.model_server is None:
             return config
         providers = config.setdefault("providers", {})
         providers["nemo"] = {
-            "baseUrl": self._resolve_model_base_url(),
+            "baseUrl": self.resolve_model_base_url(self.config.model_server.name, rollout_id),
             "api": "openai-completions",
             "apiKey": "EMPTY",  # pragma: allowlist secret
             "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
@@ -292,13 +290,13 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         return cmd
 
     async def _run_prime_agent(
-        self, instruction: str, system_prompt: Optional[str]
+        self, instruction: str, system_prompt: Optional[str], rollout_id: Optional[str]
     ) -> tuple[list[Any], dict[str, int], str]:
         work_dir = self._workspace_root()
         home = work_dir / ".prime-home"
         agent_dir = home / ".prime" / "agent"
         agent_dir.mkdir(parents=True, exist_ok=True)
-        models_config = self._build_models_config()
+        models_config = self._build_models_config(rollout_id)
         if models_config:
             (agent_dir / "models.json").write_text(json.dumps(models_config, indent=2))
         env = self._env(home)
@@ -319,14 +317,11 @@ class PrimeAgent(SimpleResponsesAPIAgent):
                 proc.kill()
                 await proc.communicate()
                 LOG.warning("Prime Agent timed out after %ds", self.config.timeout)
-                return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
+                return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, self.config.model
 
             if proc.returncode not in (0, None):
-                LOG.warning(
-                    "Prime Agent exited %d: %s",
-                    proc.returncode,
-                    stderr.decode(errors="replace")[:500],
-                )
+                LOG.warning("Prime Agent exited %d: %s", proc.returncode, stderr.decode(errors="replace")[-1000:])
+                return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, self.config.model
             output_items, usage = parse_prime_agent_events(stdout.decode(errors="replace"))
             return output_items, usage, self.config.model
         finally:
@@ -342,10 +337,11 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         user_message, input_system = _extract_instruction(body.input)
-        system_parts = [part for part in [self.config.system_prompt, input_system] if part]
+        system_parts = [part for part in [self.config.system_prompt, body.instructions, input_system] if part]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
+        rollout_id = request.path_params.get("rollout_id") if request is not None else None
 
-        output_items, usage, model_name = await self._run_prime_agent(user_message, system_prompt)
+        output_items, usage, model_name = await self._run_prime_agent(user_message, system_prompt, rollout_id)
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -364,6 +360,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
+        cached_tokens = usage.get("cached_tokens", 0)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -376,7 +373,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
@@ -398,7 +395,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
 
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path="/v1/responses",
+                url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,
             )
