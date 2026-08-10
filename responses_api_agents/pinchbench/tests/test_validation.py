@@ -74,6 +74,10 @@ class TestSandboxConfigValidation:
         with pytest.raises(Exception, match="apptaienr"):
             make_config(sandbox_provider={"apptaienr": {}})
 
+    def test_multiple_sandbox_providers_are_rejected(self):
+        with pytest.raises(ValueError, match="exactly one"):
+            make_config(sandbox_provider={"apptainer": {}, "opensandbox": {}})
+
     def test_known_sandbox_provider_is_accepted(self):
         cfg = make_config(sandbox_provider={"apptainer": {}})
         assert "apptainer" in cfg.sandbox_provider

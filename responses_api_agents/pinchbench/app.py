@@ -116,6 +116,10 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
                 "OpenClaw would reject or misbehave with this configuration."
             )
         if self.sandbox_provider:
+            if len(self.sandbox_provider) != 1:
+                raise ValueError(
+                    f"sandbox_provider must contain exactly one provider, got: {sorted(self.sandbox_provider)}"
+                )
             get_provider_class(next(iter(self.sandbox_provider)))
         image = self.sandbox_spec.get("image")
         if image and "://" not in str(image) and not Path(str(image)).exists():
