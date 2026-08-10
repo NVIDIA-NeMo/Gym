@@ -338,13 +338,17 @@ def test_classify_task_failure(exc, expected):
 
 
 def test_task_env_injects_tavily_key_when_set():
-    env = make_agent(web_search_provider="tavily", tavily_api_key="tvly-123", brave_api_key=None)._task_env("t")
-    assert env["TAVILY_API_KEY"] == "tvly-123"
+    env = make_agent(web_search_provider="tavily", tavily_api_key="test-tavily-key", brave_api_key=None)._task_env(
+        "t"
+    )  # pragma: allowlist secret
+    assert env["TAVILY_API_KEY"] == "test-tavily-key"  # pragma: allowlist secret
     assert "BRAVE_API_KEY" not in env
 
 
 def test_task_env_omits_brave_key_when_not_set():
-    env = make_agent(web_search_provider="tavily", tavily_api_key="tvly-key", brave_api_key=None)._task_env("t")
+    env = make_agent(web_search_provider="tavily", tavily_api_key="test-tavily-key", brave_api_key=None)._task_env(
+        "t"
+    )  # pragma: allowlist secret
     assert "BRAVE_API_KEY" not in env
 
 
@@ -414,7 +418,11 @@ async def test_signal_killed_apptainer_raises_sandbox_killed_error(tmp_path, ret
 def test_response_from_transcript_deduplicates_events_by_id(tmp_path):
     tdir = tmp_path / "0001_transcripts"
     tdir.mkdir()
-    event = {"id": "e1", "type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi"}]}}
+    event = {
+        "id": "e1",
+        "type": "message",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi"}]},
+    }
     (tdir / "task_x.jsonl").write_text(json.dumps(event) + "\n" + json.dumps(event))
     resp = make_agent()._response_from_transcript("task_x", tmp_path)
     assert sum(1 for item in resp.output if item.type == "message" and item.content[0].text == "Hi") == 1
@@ -450,7 +458,9 @@ def test_read_transcript_events_tolerates_malformed_json(tmp_path):
 
 
 def test_tool_call_arguments_with_dict_is_json_serialized():
-    assert json.loads(make_agent()._tool_call_arguments({"name": "search", "arguments": {"q": "AAPL"}})) == {"q": "AAPL"}
+    assert json.loads(make_agent()._tool_call_arguments({"name": "search", "arguments": {"q": "AAPL"}})) == {
+        "q": "AAPL"
+    }
 
 
 def test_tool_call_arguments_absent_returns_empty_object():

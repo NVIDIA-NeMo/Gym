@@ -78,7 +78,9 @@ async def test_explicit_direct_exec_args_are_honoured(tmp_path):
 @pytest.mark.asyncio
 async def test_direct_exec_args_string_is_split_into_argv(tmp_path):
     agent = make_agent(sandbox_spec={"image": "docker://test"})
-    captured = await _capture_launch(agent, tmp_path, {"direct_exec": True, "direct_exec_args": "--cleanenv --no-home"})
+    captured = await _capture_launch(
+        agent, tmp_path, {"direct_exec": True, "direct_exec_args": "--cleanenv --no-home"}
+    )
 
     assert "--cleanenv" in captured["argv"]
     assert "--no-home" in captured["argv"]

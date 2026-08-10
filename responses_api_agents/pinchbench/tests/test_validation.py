@@ -49,11 +49,11 @@ class TestWebSearchProviderValidation:
             make_config(web_search_provider="brave", brave_api_key=None)
 
     def test_tavily_with_key_is_accepted(self):
-        cfg = make_config(web_search_provider="tavily", tavily_api_key="tvly-key", brave_api_key=None)
+        cfg = make_config(web_search_provider="tavily", tavily_api_key="test-tavily-key", brave_api_key=None)  # pragma: allowlist secret  # fmt: skip
         assert cfg.web_search_provider == "tavily"
 
     def test_brave_with_key_is_accepted(self):
-        cfg = make_config(web_search_provider="brave", brave_api_key="brave-key")
+        cfg = make_config(web_search_provider="brave", brave_api_key="brave-key")  # pragma: allowlist secret
         assert cfg.web_search_provider == "brave"
 
 
