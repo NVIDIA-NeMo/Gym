@@ -62,7 +62,7 @@ wait_for_server() {
     local pid=\$1
     local url=\$2
 
-    while ! curl -fsS "\$url/health" >/dev/null; do
+    while ! curl -fs "\$url/health" >/dev/null; do
         if ! kill -0 "\$pid" 2>/dev/null; then
             echo "vLLM at \$url exited before becoming healthy." >&2
             wait "\$pid"
@@ -95,7 +95,7 @@ if (( SLURM_PROCID == 0 )); then
 
     wait_for_server "\$prefill_pid" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT"
 
-    until curl -fsS "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" >/dev/null; do
+    until curl -fs "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" >/dev/null; do
         sleep 5
     done
 
