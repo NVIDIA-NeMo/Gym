@@ -82,6 +82,7 @@ if [[ "\$SLURM_PROCID" == 0 ]]; then
         sleep 5
     done
 
+    # --intra-node-data-parallel-size must match the data-parallel-size-local above.
     vllm-router \
         --policy consistent_hash \
         --vllm-pd-disaggregation \
