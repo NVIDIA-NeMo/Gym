@@ -171,13 +171,15 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
         set -euo pipefail
         cd "\$SLURM_SUBMIT_DIR"
         exec "\$@"
-    ' bash "\$@"
+    ' bash bash -lc "\$VLLM_PD_WORKLOAD"
 EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 CONTAINER=$CONTAINER \
 MOUNTS=$MOUNTS \
+VLLM_PD_WORKLOAD="$command" \
+VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
     --time=04:00:00 \
@@ -186,4 +188,5 @@ sbatch \
     --ntasks-per-node=1 \
     --exclusive \
     --segment=$NUM_NODES \
-    bash -lc "$batch_command" bash bash -lc "$command"
+    --export=ALL \
+    --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'
