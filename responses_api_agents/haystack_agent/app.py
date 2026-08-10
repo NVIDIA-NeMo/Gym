@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """A NeMo Gym agent that runs a serialized Haystack pipeline as its rollout harness.
-
 The Haystack ``Pipeline`` (a YAML that contains a ``haystack.components.agents.agent.Agent`` with
 Haystack-side tools) is deserialized and warmed up **once** at startup and shared across all
 requests, so expensive component/tool initialization is paid a single time rather than per rollout.
@@ -33,6 +32,8 @@ from haystack import Pipeline
 from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     AggregateMetrics,
     AggregateMetricsRequest,
     BaseRunRequest,
@@ -45,6 +46,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -56,6 +58,11 @@ from responses_api_agents.haystack_agent.chat_generator import (
     NeMoGymResponsesChatGenerator,
     messages_to_responses_input,
     responses_input_to_messages,
+)
+from responses_api_agents.haystack_agent.mcp_toolset import (
+    close_rollout_mcp_sessions,
+    configure_mcp_url,
+    has_context_aware_mcp_toolset,
 )
 
 
@@ -98,28 +105,37 @@ class HaystackAgent(SimpleResponsesAPIAgent):
     _agent: Any = PrivateAttr(default=None)
     _generator: Any = PrivateAttr(default=None)
 
+    def _get_agent_and_generator(self, pipeline: Any) -> tuple[Any, NeMoGymResponsesChatGenerator]:
+        agent = pipeline.get_component(self.config.agent_component_name)
+        generator = getattr(agent, "chat_generator", None)
+        if not isinstance(generator, NeMoGymResponsesChatGenerator):
+            raise RuntimeError(
+                f"Component '{self.config.agent_component_name}' in {self.config.pipeline_yaml} must be a Haystack "
+                f"Agent whose chat_generator is a NeMoGymResponsesChatGenerator, got {type(generator).__name__}."
+            )
+        generator.server_name = self.config.model_server.name
+        return agent, generator
+
+    def _resources_mcp_url(self) -> str:
+        resource_config = get_first_server_config_dict(
+            self.server_client.global_config_dict, self.config.resources_server.name
+        )
+        resources_base_url = self.server_client._build_server_base_url(resource_config)
+        return f"{resources_base_url.rstrip('/')}/mcp"
+
     def model_post_init(self, context):
         pipeline_path = Path(self.config.pipeline_yaml)
         if not pipeline_path.is_absolute():
             pipeline_path = Path(__file__).parent / pipeline_path
         self._pipeline_text = pipeline_path.read_text()
 
-        # Deserialize (parse YAML + import modules + instantiate every component/tool) and warm up
-        # once, so this cost is paid at startup rather than on every rollout. The pipeline is then
-        # shared: Haystack's Agent/Pipeline keep all per-run state in locals, and the generator's
-        # per-run session state is isolated via contextvars (see chat_generator._current_run_state).
+        # Deserialize once. Haystack warms components on the first run; MCP schemas are then
+        # shared, while authenticated clients are created from each request's context.
         self._pipeline = Pipeline.loads(self._pipeline_text, unsafe=True)
-        self._agent = self._pipeline.get_component(self.config.agent_component_name)
-        generator = getattr(self._agent, "chat_generator", None)
-        if not isinstance(generator, NeMoGymResponsesChatGenerator):
-            raise RuntimeError(
-                f"Component '{self.config.agent_component_name}' in {self.config.pipeline_yaml} must be a Haystack "
-                f"Agent whose chat_generator is a NeMoGymResponsesChatGenerator, got {type(generator).__name__}."
-            )
-        # server_name is constant across requests (from config), so set it once here.
-        generator.server_name = self.config.model_server.name
-        self._generator = generator
-        self._pipeline.warm_up()  # idempotent; loads any heavy components a single time.
+        self._agent, self._generator = self._get_agent_and_generator(self._pipeline)
+        tools = getattr(self._agent, "tools", None)
+        if has_context_aware_mcp_toolset(tools):
+            configure_mcp_url(tools, self._resources_mcp_url())
         return super().model_post_init(context)
 
     async def responses(
@@ -143,14 +159,21 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         # request's cookies) so concurrent rollouts don't clobber each other's cookies/usage. The
         # generator reads/writes this state through contextvars; because Haystack awaits its
         # run_async directly in this request's event-loop task, the writes are visible here.
-        run_state = chat_generator._GenRunState(cookies=request.cookies)
+        mcp_headers = {}
+        session_token = request.headers.get(NEMO_GYM_MCP_SESSION_TOKEN_HEADER)
+        if session_token:
+            mcp_headers[NEMO_GYM_MCP_SESSION_TOKEN_HEADER] = session_token
+        run_state = chat_generator._GenRunState(cookies=request.cookies, mcp_headers=mcp_headers)
         token = chat_generator._current_run_state.set(run_state)
         try:
             result = await self._pipeline.run_async(
                 {self.config.agent_component_name: {"messages": messages, "generation_kwargs": generation_kwargs}}
             )
         finally:
-            chat_generator._current_run_state.reset(token)
+            try:
+                close_rollout_mcp_sessions(run_state)
+            finally:
+                chat_generator._current_run_state.reset(token)
         all_messages = result[self.config.agent_component_name]["messages"]
 
         # The Agent returns [<system prompt?>, <seeded input>, <generated ...>]. A configured
@@ -186,13 +209,24 @@ class HaystackAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(seed_session_response)
+        seed_session_json = await get_response_json(seed_session_response)
         cookies = seed_session_response.cookies
+
+        # MCP auto-exposure returns a signed, rollout-scoped token. Forward it only to this
+        # request; responses() installs it in the ContextVar used by the shared toolset.
+        response_headers: dict[str, str] = {}
+        mcp_metadata = seed_session_json.get(NEMO_GYM_MCP_METADATA_KEY)
+        if isinstance(mcp_metadata, dict):
+            mcp_headers = mcp_metadata.get("headers")
+            if isinstance(mcp_headers, dict):
+                response_headers = {str(key): str(value) for key, value in mcp_headers.items()}
 
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path="/v1/responses",
             json=body.responses_create_params,
             cookies=cookies,
+            headers=response_headers,
         )
         await raise_for_status(response)
         cookies = response.cookies
