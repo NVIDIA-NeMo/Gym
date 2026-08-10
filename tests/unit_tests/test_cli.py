@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import shutil
 import sys
 import tomllib
 from importlib import import_module
@@ -48,6 +47,7 @@ from nemo_gym.cli.env import (
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.registry import EnvironmentEntry
 
 
@@ -142,85 +142,77 @@ class TestCLI:
             target = getattr(import_module(module), fn)
             assert callable(target), f"{script_name} -> {import_path} is not callable"
 
-    def test_init_resources_server_includes_domain(self) -> None:
-        """Test that init_resources_server creates a config with the required domain field."""
-
+    def test_init_resources_server_includes_domain(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         server_name = "test_cli_server"
-        entrypoint = f"resources_servers/{server_name}"
-        server_path = Path(entrypoint).resolve()
+        server_path = tmp_path / "resources_servers" / server_name
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_GLOBAL_CONFIG_DICT",
+            OmegaConf.create({"entrypoint": str(server_path)}),
+        )
 
-        # Clean up any existing test server directory
-        if server_path.exists():
-            shutil.rmtree(server_path)
+        init_resources_server()
 
-        try:
-            with MonkeyPatch.context() as mp:
-                # Set up the global config to point to our test entrypoint
-                mp.setattr(
-                    nemo_gym.global_config,
-                    "_GLOBAL_CONFIG_DICT",
-                    OmegaConf.create({"entrypoint": entrypoint}),
-                )
+        config_file = server_path / "configs" / f"{server_name}.yaml"
+        config_dict = OmegaConf.load(config_file)
+        resources_server_key = f"{server_name}_resources_server"
+        server_config = config_dict[resources_server_key]["resources_servers"][server_name]
+        assert server_config["domain"] == "other"
+        assert server_config["verified"] is False
 
-                # Run init_resources_server
-                init_resources_server()
+        config_text = config_file.read_text()
+        assert "# Resources server:" in config_text
+        assert config_text.count("#") >= 10
+        from scripts.add_verified_flag import ensure_verified_flag
 
-                # Verify the generated config file exists
-                config_file = server_path / "configs" / f"{server_name}.yaml"
-                assert config_file.exists(), f"Config file not created at {config_file}"
+        assert ensure_verified_flag(config_file) is False
+        assert config_file.read_text() == config_text
 
-                # Load and verify the config
-                config_dict = OmegaConf.load(config_file)
+        full_config_dict = OmegaConf.create(
+            {
+                "name": resources_server_key,
+                "server_type_config_dict": config_dict[resources_server_key],
+                **OmegaConf.to_container(config_dict[resources_server_key]),
+            }
+        )
+        assert ResourcesServerInstanceConfig.model_validate(full_config_dict) is not None
+        assert "source:" in config_text
+        assert "gitlab_identifier" not in config_text
+        assert "huggingface_identifier" not in config_text
 
-                # Check that the domain field is present in the resources server config
-                resources_server_key = f"{server_name}_resources_server"
-                assert resources_server_key in config_dict, f"Resources server key '{resources_server_key}' not found"
+    def test_init_resources_server_preserves_existing_directory(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys
+    ) -> None:
+        server_path = tmp_path / "resources_servers" / "existing"
+        server_path.mkdir(parents=True)
+        sentinel = server_path / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_GLOBAL_CONFIG_DICT",
+            OmegaConf.create({"entrypoint": str(server_path)}),
+        )
 
-                resources_config = config_dict[resources_server_key]
-                assert "resources_servers" in resources_config
-                assert server_name in resources_config["resources_servers"]
+        with pytest.raises(SystemExit):
+            init_resources_server()
 
-                server_config = resources_config["resources_servers"][server_name]
-                assert "domain" in server_config, "Domain field missing from resources server config"
-                assert server_config["domain"] == "other", f"Expected domain 'other', got '{server_config['domain']}'"
+        assert capsys.readouterr().out == f"Folder already exists: {server_path}. Exiting init.\n"
+        assert list(server_path.iterdir()) == [sentinel]
 
-                # Generated config ships `verified: false` so the add-verified-flag pre-commit hook
-                # is a no-op and does not rewrite (and strip the comments from) the file on commit.
-                assert server_config["verified"] is False
+    def test_init_resources_server_rejects_an_invalid_python_name(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        server_path = tmp_path / "resources_servers" / "invalid-name"
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_GLOBAL_CONFIG_DICT",
+            OmegaConf.create({"entrypoint": str(server_path)}),
+        )
 
-                # The generated config is documented with inline comments (friction #7).
-                config_text = config_file.read_text()
-                assert "# Resources server:" in config_text
-                assert config_text.count("#") >= 10, "expected inline field documentation comments"
+        with pytest.raises(ScaffoldError, match="Python identifier"):
+            init_resources_server()
 
-                # The add-verified-flag hook must NOT modify the generated config (would strip comments).
-                from scripts.add_verified_flag import ensure_verified_flag
-
-                assert ensure_verified_flag(config_file) is False
-                assert config_file.read_text() == config_text, "verified-flag hook altered the generated config"
-
-                # Verify that the config can be validated (this would have failed before the fix)
-                full_config_dict = OmegaConf.create(
-                    {
-                        "name": resources_server_key,
-                        "server_type_config_dict": config_dict[resources_server_key],
-                        **OmegaConf.to_container(config_dict[resources_server_key]),
-                    }
-                )
-
-                # This should not raise an assertion error about missing domain
-                instance_config = ResourcesServerInstanceConfig.model_validate(full_config_dict)
-                assert instance_config is not None
-
-                # The generated config points users at the unified `source:` identifier, not the
-                # deprecated gitlab_identifier/huggingface_identifier.
-                assert "source:" in config_text
-                assert "gitlab_identifier" not in config_text
-                assert "huggingface_identifier" not in config_text
-        finally:
-            # Clean up the test server directory
-            if server_path.exists():
-                shutil.rmtree(server_path)
+        assert not server_path.exists()
 
     def test_run_helper_prefers_cwd_server_over_install(self, tmp_path: Path) -> None:
         """ng_run should use a local CWD server dir instead of the installed one."""

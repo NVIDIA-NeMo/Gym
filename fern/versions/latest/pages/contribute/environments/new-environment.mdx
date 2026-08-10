@@ -57,6 +57,17 @@ With synchronization enabled, it writes corrected composition mirrors atomically
 
 It does not import components, start services, execute preparation code, call a model, run an evaluation, probe model or resources endpoints, or check evaluation-output writability. Runtime pre-run readiness is a separate validation layer. Component versions and capabilities, profile inference and pinning, and `adopted_from` source resolution are deferred from this initial static validation. Scorer behavior and grading quality require the later validation layers.
 
+## Verifier Fixture Contract
+
+The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:
+
+- a full-reward case that reaches the declared upper endpoint;
+- a zero-reward case that reaches the declared lower endpoint;
+- a malformed request that fails as declared; and
+- for a seeded environment, the same request producing the same reward after an explicit reseed on fresh server instances.
+
+Fixture execution is in-process and does not start Gym services. Updating expected rewards is explicit and atomic; range, endpoint, malformed-input, and determinism checks still apply. Static discovery checks that a resources-server entrypoint declares the fixture; executing it verifies the contract. A shared fixture attests the scorer itself, so a workload that overrides `grading_mode` needs workload-specific cases.
+
 ## Guiding Principles
 
 Adding a new training environment is similar to [Adding A Benchmark](/contribute/environments/adding-a-benchmark) with respect to the reward profiling and software correctness aspects. However, for adding a new training environment, you must additionally run training with your environment in isolation in order to determine the environment functionality and correctness.
