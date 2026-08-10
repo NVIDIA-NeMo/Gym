@@ -317,9 +317,9 @@ dev = [
 
 [dependency-groups]
 # Codec-bearing packages excluded from the shipped package and container.
-# Not published to PyPI. Versions are tracked in uv.lock here as the single
-# source of truth. docker/install_codec_deps.sh reads these versions at
-# runtime so there are no hardcoded pins to maintain manually.
+# Not published to PyPI. Versions are resolved and tracked in uv.lock.
+# docker/install_codec_deps.sh pins these explicitly to their uv.lock versions;
+# update the script when uv lock bumps them.
 codec = [
     "opencv-python-headless",
     "torchvision",
