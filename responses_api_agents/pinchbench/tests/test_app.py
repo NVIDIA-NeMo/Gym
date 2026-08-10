@@ -19,7 +19,7 @@ fast and offline.
 """
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -59,7 +59,6 @@ def make_agent(**over) -> PinchBenchAgent:
 
 def test_sanity_construct():
     agent = make_agent()
-    assert agent.config.openclaw_mode == "gateway"  # per-task gateway: proven working mode
     assert agent.config.task_timeout_s == 1800
 
 
@@ -71,10 +70,9 @@ async def test_responses_not_implemented():
 
 
 def test_task_env_gateway_mode():
-    env = make_agent(openclaw_mode="gateway")._task_env("task_x")
+    env = make_agent()._task_env("task_x")
     assert env["TASK_ID"] == "task_x"
-    assert env["OPENCLAW_GATEWAY_TOKEN"]  # gateway daemon mode
-    assert "PINCHBENCH_FORCE_LOCAL" not in env
+    assert env["OPENCLAW_GATEWAY_TOKEN"] == "pinchbench-local"
     assert env["MODEL_NAME"] == "vendor/model"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
     assert env["BRAVE_API_KEY"] == "brave-key"
@@ -90,16 +88,18 @@ def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
     assert 'agent["timeoutSeconds"] = provider_timeout_s' in wrapper_text
 
 
-def test_build_spec_from_config():
+def test_build_spec_from_config(tmp_path):
+    image = tmp_path / "pinchbench.sif"
+    image.touch()
     agent = make_agent(
         sandbox_spec={
-            "image": "/sif/pinchbench.sif",
+            "image": str(image),
             "ready_timeout_s": 600,
             "resources": {"cpu": 4, "memory_mib": 8192},
         }
     )
     spec = agent._build_spec("task_x")
-    assert spec.image == "/sif/pinchbench.sif"
+    assert spec.image == str(image)
     assert spec.ready_timeout_s == 600
     assert spec.resources.cpu == 4 and spec.resources.memory_mib == 8192
     assert spec.metadata == {"task_id": "task_x"}
@@ -145,12 +145,14 @@ def test_parse_result_hybrid(tmp_path):
 def test_parse_result_missing_task(tmp_path):
     _write_result(tmp_path, "other_task", 1.0, "automated", {}, "")
     r = make_agent()._parse_result("task_x", tmp_path)
-    assert r["reward"] == 0.0 and r["status"] == "missing_task"
+    assert r["reward"] == 0.0
+    assert r["status"] == "missing_task"
 
 
 def test_parse_result_no_output(tmp_path):
-    r = make_agent()._parse_result("task_x", tmp_path)  # empty dir
-    assert r["reward"] == 0.0 and r["status"] == "error"
+    r = make_agent()._parse_result("task_x", tmp_path)
+    assert r["reward"] == 0.0
+    assert r["status"] == "error"
 
 
 def test_response_from_transcript(tmp_path):
@@ -259,10 +261,6 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     assert "sandbox exploded" in resp.grading_notes
 
 
-# Failure routing: rows without `_ng_failure_class` land in the main jsonl, where
-# resume counts them as done forever — the pre-fix behavior these tests pin.
-
-
 def _run_body(task_id="task_x"):
     body = MagicMock()
     body.model_dump.return_value = {
@@ -273,50 +271,25 @@ def _run_body(task_id="task_x"):
 
 
 @pytest.mark.asyncio
-async def test_generic_failure_routes_to_sidecar_not_main(tmp_path, monkeypatch):
-    """A failed task must carry a failure class so it never lands in the main jsonl."""
+@pytest.mark.parametrize(
+    "exc,expected_class,no_persist,terminal",
+    [
+        (RuntimeError("sandbox exploded"), "legitimate", False, False),
+        (SandboxKilledError("direct apptainer exec killed (rc=-15)"), "kill_shaped", True, False),
+        (TimeoutError("direct apptainer exec timed out"), "timeout_exceeded", False, True),
+    ],
+)
+async def test_failure_routing_sentinels(exc, expected_class, no_persist, terminal, tmp_path, monkeypatch):
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
-        raise RuntimeError("sandbox exploded")
+    async def fail(task_id, out_dir):
+        raise exc
 
-    monkeypatch.setattr(agent, "_run_in_sandbox", boom)
-    resp = await agent.run(body=_run_body())
-    dumped = resp.model_dump()
-    assert dumped.get(NG_FAILURE_CLASS_KEY) == "legitimate"  # sidecar, bounded retry
-    assert not dumped.get(NG_NO_PERSIST_KEY)
-    assert not dumped.get(NG_TERMINAL_KEY)
-
-
-@pytest.mark.asyncio
-async def test_signal_killed_sandbox_is_kill_shaped_and_unpersisted(tmp_path, monkeypatch):
-    """Walltime SIGTERM shape: no row anywhere; resume's set-difference re-dispatches."""
-    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
-
-    async def killed(task_id, out_dir):
-        raise SandboxKilledError("direct apptainer exec killed (rc=-15) for task task_x")
-
-    monkeypatch.setattr(agent, "_run_in_sandbox", killed)
-    resp = await agent.run(body=_run_body())
-    dumped = resp.model_dump()
-    assert dumped.get(NG_FAILURE_CLASS_KEY) == "kill_shaped"
-    assert dumped.get(NG_NO_PERSIST_KEY) is True
-
-
-@pytest.mark.asyncio
-async def test_task_timeout_is_terminal_sidecar(tmp_path, monkeypatch):
-    """Per-task timeout consumed its budget: one sidecar row, never retried."""
-    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
-
-    async def slow(task_id, out_dir):
-        raise TimeoutError("direct apptainer exec timed out for task task_x")
-
-    monkeypatch.setattr(agent, "_run_in_sandbox", slow)
-    resp = await agent.run(body=_run_body())
-    dumped = resp.model_dump()
-    assert dumped.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded"
-    assert dumped.get(NG_TERMINAL_KEY) is True
-    assert not dumped.get(NG_NO_PERSIST_KEY)
+    monkeypatch.setattr(agent, "_run_in_sandbox", fail)
+    dumped = (await agent.run(body=_run_body())).model_dump()
+    assert dumped.get(NG_FAILURE_CLASS_KEY) == expected_class
+    assert bool(dumped.get(NG_NO_PERSIST_KEY)) is no_persist
+    assert bool(dumped.get(NG_TERMINAL_KEY)) is terminal
 
 
 @pytest.mark.asyncio
@@ -348,8 +321,164 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
         assert key not in dumped
 
 
-def test_classify_task_failure_mapping():
-    assert _classify_task_failure(SandboxKilledError("rc=-15")) == "kill_shaped"
-    assert _classify_task_failure(TimeoutError("timed out")) == "timeout_exceeded"
-    assert _classify_task_failure(RuntimeError("exec failed")) == "legitimate"
-    assert _classify_task_failure(FileNotFoundError("apptainer")) == "legitimate"
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (SandboxKilledError("rc=-15"), "kill_shaped"),
+        (TimeoutError("timed out"), "timeout_exceeded"),
+        (RuntimeError("exec failed"), "legitimate"),
+        (FileNotFoundError("apptainer"), "legitimate"),
+    ],
+)
+def test_classify_task_failure(exc, expected):
+    assert _classify_task_failure(exc) == expected
+
+
+# --- _task_env optional injections ---
+
+
+def test_task_env_injects_tavily_key_when_set():
+    env = make_agent(web_search_provider="tavily", tavily_api_key="test-tavily-key", brave_api_key=None)._task_env(
+        "t"
+    )  # pragma: allowlist secret
+    assert env["TAVILY_API_KEY"] == "test-tavily-key"  # pragma: allowlist secret
+    assert "BRAVE_API_KEY" not in env
+
+
+def test_task_env_omits_brave_key_when_not_set():
+    env = make_agent(web_search_provider="tavily", tavily_api_key="test-tavily-key", brave_api_key=None)._task_env(
+        "t"
+    )  # pragma: allowlist secret
+    assert "BRAVE_API_KEY" not in env
+
+
+@pytest.mark.parametrize("seconds,expected", [(300, "300"), (14400, "14400")])
+def test_task_env_injects_provider_timeout_when_set(seconds, expected):
+    env = make_agent(openclaw_provider_timeout_seconds=seconds)._task_env("t")
+    assert env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] == expected
+
+
+def test_task_env_omits_provider_timeout_when_not_set():
+    assert "PINCHBENCH_PROVIDER_TIMEOUT_SECONDS" not in make_agent()._task_env("t")
+
+
+# --- run() edge cases ---
+
+
+@pytest.mark.asyncio
+async def test_run_raises_on_missing_task_id(tmp_path):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+    body = MagicMock()
+    body.model_dump.return_value = {"verifier_metadata": {}}
+    with pytest.raises(ValueError, match="task_id"):
+        await agent.run(body=body)
+
+
+@pytest.mark.asyncio
+async def test_non_clean_exit_rc_present_in_raw_rollout(tmp_path, monkeypatch):
+    agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
+
+    async def non_clean(task_id, out_dir):
+        return 1
+
+    monkeypatch.setattr(agent, "_run_in_sandbox", non_clean)
+    monkeypatch.setattr(
+        agent,
+        "_parse_result",
+        lambda *_: {"reward": 0.0, "grading_type": "unknown", "breakdown": {}, "notes": "", "status": "success"},
+    )
+    monkeypatch.setattr(agent, "_response_from_transcript", lambda *_: agent._empty_response("task_x"))
+    monkeypatch.setattr(agent, "_collect_transcript", lambda *_: ([], ""))
+    resp = await agent.run(body=_run_body())
+    assert resp.raw_rollout["non_clean_exit_rc"] == 1
+
+
+# --- signal-kill detection in _run_in_apptainer_direct ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returncode", [-15, 137, 143])
+async def test_signal_killed_apptainer_raises_sandbox_killed_error(tmp_path, returncode):
+    agent = make_agent(
+        sandbox_spec={"image": "docker://test"},
+        sandbox_provider={"apptainer": {"direct_exec": True}},
+    )
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.wait = AsyncMock(return_value=None)
+    proc.kill = MagicMock()
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(SandboxKilledError):
+            await agent._run_in_apptainer_direct("task_x", tmp_path, {"direct_exec": True})
+
+
+# --- transcript parsing edge cases ---
+
+
+def test_response_from_transcript_deduplicates_events_by_id(tmp_path):
+    tdir = tmp_path / "0001_transcripts"
+    tdir.mkdir()
+    event = {
+        "id": "e1",
+        "type": "message",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi"}]},
+    }
+    (tdir / "task_x.jsonl").write_text(json.dumps(event) + "\n" + json.dumps(event))
+    resp = make_agent()._response_from_transcript("task_x", tmp_path)
+    assert sum(1 for item in resp.output if item.type == "message" and item.content[0].text == "Hi") == 1
+
+
+def test_response_from_transcript_uses_details_when_content_empty(tmp_path):
+    tdir = tmp_path / "0001_transcripts"
+    tdir.mkdir()
+    events = [
+        {
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "call_1",
+                "content": [],
+                "details": {"status": "ok", "count": 3},
+            },
+        }
+    ]
+    (tdir / "task_x.jsonl").write_text("\n".join(json.dumps(e) for e in events))
+    resp = make_agent()._response_from_transcript("task_x", tmp_path)
+    result = next(item for item in resp.output if item.type == "function_call_output")
+    assert json.loads(result.output) == {"status": "ok", "count": 3}
+
+
+def test_read_transcript_events_tolerates_malformed_json(tmp_path):
+    tdir = tmp_path / "0001_transcripts"
+    tdir.mkdir()
+    (tdir / "task_x.jsonl").write_text('{"valid": true}\nNOT JSON\n{"also": "valid"}')
+    events = make_agent()._read_transcript_events("task_x", tmp_path)
+    assert len(events) == 3
+    assert "raw" in events[1]
+
+
+def test_tool_call_arguments_with_dict_is_json_serialized():
+    assert json.loads(make_agent()._tool_call_arguments({"name": "search", "arguments": {"q": "AAPL"}})) == {
+        "q": "AAPL"
+    }
+
+
+def test_tool_call_arguments_absent_returns_empty_object():
+    assert make_agent()._tool_call_arguments({"name": "search"}) == "{}"
+
+
+def test_collect_transcript_returns_empty_when_no_transcript_dir(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    events, archive = make_agent(transcripts_dir=str(tmp_path / "arch"))._collect_transcript("task_x", out, "run1")
+    assert events == []
+    assert archive == ""
+
+
+def test_parse_result_empty_runs_defaults_grading_type(tmp_path):
+    payload = {"tasks": [{"task_id": "task_x", "grading": {"runs": [], "mean": 0.5}}]}
+    (tmp_path / "result.json").write_text(json.dumps(payload))
+    r = make_agent()._parse_result("task_x", tmp_path)
+    assert r["reward"] == pytest.approx(0.5)
+    assert r["grading_type"] == "unknown"
+    assert r["status"] == "success"
