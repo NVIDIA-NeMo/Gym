@@ -59,3 +59,7 @@ with open(csv_fpath, "w") as f:
     writer = DictWriter(f, fieldnames=list(row))
     writer.writeheader()
     writer.writerow(row)
+
+with open(csv_fpath) as f:
+    content = f.read()
+print(f"Wrote out csv to {csv_fpath}:\n{content}")
