@@ -2,10 +2,15 @@
 
 set -euo pipefail
 
-NUM_NODES=${NUM_NODES:?Set NUM_NODES=4}
+NUM_NODES=${NUM_NODES:?Set NUM_NODES=2}
 MODEL=${MODEL:?Set MODEL to the model path or ID}
 CONTAINER=${CONTAINER:?Set CONTAINER to the vLLM container image}
 MOUNTS=${MOUNTS:?Set MOUNTS to the required container mounts}
+
+if [[ "$NUM_NODES" != 2 ]]; then
+    echo "This prefill/decode-disaggregated configuration requires NUM_NODES=2." >&2
+    exit 2
+fi
 
 command=$(cat <<EOF
 set -euo pipefail
@@ -19,6 +24,10 @@ common_args=(
     --distributed-executor-backend ray
     --data-parallel-backend ray
     --data-parallel-size 1
+    # Pin the Ray placement group's local rank to the Ray head. Without this,
+    # vLLM 0.25 defaults the DP master address to 127.0.0.1 when one paired
+    # server has --data-parallel-size-local 0.
+    --data-parallel-address \$host
     --tensor-parallel-size 4
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
@@ -33,7 +42,8 @@ common_args=(
     --host \$host
 )
 
-# Prefill pool: NIXL KV producer on the first two data-parallel replicas.
+# Prefill uses the head node. Start it first so it reserves that node before
+# the decode pool creates its placement group.
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
 vllm serve "$MODEL" "\${common_args[@]}" \
@@ -44,7 +54,23 @@ vllm serve "$MODEL" "\${common_args[@]}" \
     &
 prefill_pid=\$!
 
-# Decode pool: NIXL KV consumer on the remaining two data-parallel replicas.
+wait_for_server() {
+    local pid=\$1
+    local port=\$2
+
+    while ! curl -fsS "http://\$host:\$port/health" >/dev/null; do
+        if ! kill -0 "\$pid" 2>/dev/null; then
+            echo "vLLM on port \$port exited before becoming healthy." >&2
+            wait "\$pid"
+        fi
+        sleep 5
+    done
+}
+
+wait_for_server "\$prefill_pid" 8001
+
+# Decode has no local DP rank, so Ray places its TP=4 replica on the remaining
+# node while this API server remains on the head node.
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
 vllm serve "$MODEL" "\${common_args[@]}" \
@@ -58,12 +84,7 @@ decode_pid=\$!
 
 trap 'kill "\$prefill_pid" "\$decode_pid" 2>/dev/null || true' EXIT
 
-until curl -fsS http://\$host:8001/health >/dev/null; do
-    sleep 5
-done
-until curl -fsS http://\$host:8002/health >/dev/null; do
-    sleep 5
-done
+wait_for_server "\$decode_pid" 8002
 
 vllm-router \
     --policy round_robin \
