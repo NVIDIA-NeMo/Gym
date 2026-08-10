@@ -2,12 +2,12 @@
 
 set -euo pipefail
 
-# Each phase is one two-node data-parallel vLLM deployment: two nodes for
-# prefill and two for decode. The client-facing router runs on prefill rank 0.
-NUM_NODES=${NUM_NODES:?Set NUM_NODES=4}
-MODEL=${MODEL:?Set MODEL to the model path or ID}
-CONTAINER=${CONTAINER:?Set CONTAINER to the vLLM container image}
-MOUNTS=${MOUNTS:?Set MOUNTS to the required container mounts}
+# Input arguments and validation
+NUM_PREFILL_NODES=$NUM_PREFILL_NODES
+NUM_DECODE_NODES=$NUM_DECODE_NODES
+MODEL=$MODEL
+CONTAINER=$CONTAINER
+MOUNTS=$MOUNTS
 
 if [[ "$NUM_NODES" != 4 ]]; then
     echo "This DP=2 prefill / DP=2 decode configuration requires NUM_NODES=4." >&2
