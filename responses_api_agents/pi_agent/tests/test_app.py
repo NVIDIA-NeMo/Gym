@@ -149,7 +149,7 @@ class TestParsePiEvents:
         assert isinstance(items[2], NeMoGymResponseOutputMessage)
 
     def test_malformed_lines_skipped(self) -> None:
-        line = "not-json\nnull\n[]\n" + _msg_end("assistant", [{"type": "text", "text": "ok"}])
+        line = b"\xff\nnot-json\nnull\n[]\n" + _msg_end("assistant", [{"type": "text", "text": "ok"}]).encode()
         items, _ = parse_pi_events(line)
         assert len(items) == 1
 
@@ -386,17 +386,32 @@ class TestRolloutObservability:
             },
         }
         items, usage = parse_pi_events(json.dumps(event))
-        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+            system_prompt="configured system",
+        )
         agent._run_pi = AsyncMock(return_value=(items, usage, "model", [(1.0, event)]))
 
         episode = asyncio.run(
-            agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), rollout_id="1-2")
+            agent._create_episode(
+                NeMoGymResponseCreateParamsNonStreaming(
+                    input=[
+                        NeMoGymEasyInputMessage(role="system", content="request system"),
+                        NeMoGymEasyInputMessage(role="user", content="old question"),
+                        NeMoGymEasyInputMessage(role="assistant", content="old answer"),
+                        NeMoGymEasyInputMessage(role="user", content="solve"),
+                    ]
+                ),
+                rollout_id="1-2",
+            )
         )
 
         assert agent._run_pi.await_args.kwargs["rollout_id"] == "1-2"
+        assert agent._run_pi.await_args.args == ("solve", "configured system\n\nrequest system")
         assert episode.response.output == items
         [invocation] = _records(episode.observations, AgentInvocation)
         assert invocation.conversation == [
+            NeMoGymEasyInputMessage(role="system", content="configured system\n\nrequest system"),
             NeMoGymEasyInputMessage(role="user", content="solve"),
             *items,
         ]

@@ -66,7 +66,9 @@ LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
-def parse_pi_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
+def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(errors="replace")
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
@@ -582,6 +584,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         user_message, input_system = _extract_instruction(body.input)
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
+        conversation_input = (
+            [NeMoGymEasyInputMessage(role="system", content=system_prompt)] if system_prompt is not None else []
+        )
+        conversation_input.append(NeMoGymEasyInputMessage(role="user", content=user_message))
 
         output_items, usage, model_name, events = await self._run_pi(
             user_message,
@@ -636,7 +642,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     events,
                     invocation_id,
                     self.config.model_server,
-                    [*body.input, *observed_output_items],
+                    [*conversation_input, *observed_output_items],
                     transcript_available=bool(observed_output_items),
                 )
             except Exception:
