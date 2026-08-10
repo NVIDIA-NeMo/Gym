@@ -4,20 +4,18 @@ A NeMo Gym agent harness that runs a serialized [Haystack](https://haystack.deep
 `Pipeline` as its rollout loop. The pipeline contains a Haystack `Agent` whose
 `chat_generator` is a `NeMoGymResponsesChatGenerator` — a Haystack `ChatGenerator` that calls a
 native NeMo Gym model server's `/v1/responses` endpoint (resolved by `server_name`). Haystack's
-`Agent` drives the repeated tool-calling loop; tools live entirely on the Haystack side.
+`Agent` drives the repeated tool-calling loop. It can use Haystack-local tools and, through a
+`ContextAwareMCPToolset`, environment tools exposed by a Gym Resources Server over MCP.
 
-> [!WARNING]
-> **Env-side (resources-server) tools are not supported yet.** Tools must be defined in the
-> Haystack pipeline as executable Haystack `Tool`/`Toolset` objects. Tools served by the resources
-> server — and any `tools` passed in the request body — are ignored: the request's `tools` field is
-> not forwarded to the model, and the agent cannot invoke tools it doesn't hold locally. If your
-> environment relies on resources-server tools, this harness won't run them.
+> [!NOTE]
+> Dataset-row `responses_create_params.tools` are ignored. To use Resources Server tools,
+> configure the server with `expose_tools_over_mcp: true` and include a
+> `ContextAwareMCPToolset` in the Haystack pipeline. Gym seeds the Resources Server for each
+> rollout and places its signed MCP session token in request-local context for tool calls.
 
-The pipeline is deserialized and warmed up **once at startup** (in `model_post_init`) and shared
-across all requests, so expensive component/tool initialization is paid a single time rather than on
-every rollout. Concurrent rollouts are safe: Haystack's `Agent`/`Pipeline` keep all per-run state in
-locals, and the generator's per-request session state (cookies, usage, last response) is isolated
-via `contextvars`.
+The pipeline and MCP tool schemas are deserialized and warmed up **once at startup**. Each rollout
+opens one token-authenticated MCP connection lazily on its first tool call and closes it when the
+rollout ends. Concurrent rollouts remain isolated.
 
 ## Layout
 
@@ -53,3 +51,4 @@ Data: N/A
 Dependencies
 - nemo_gym: Apache 2.0
 - haystack-ai: Apache 2.0
+- mcp-haystack: Apache 2.0

@@ -15,6 +15,7 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 from haystack import Pipeline
 from haystack.components.agents import Agent
@@ -32,6 +33,9 @@ from responses_api_agents.haystack_agent.app import (
 )
 from responses_api_agents.haystack_agent.chat_generator import NeMoGymResponsesChatGenerator
 from responses_api_agents.haystack_agent.example_tools import get_weather
+from responses_api_agents.haystack_agent.mcp_toolset import (
+    ContextAwareMCPToolset,
+)
 
 
 SYSTEM_PROMPT = "You are a helpful assistant. Use get_weather when asked about weather, then answer."
@@ -185,6 +189,37 @@ class TestChatGenerator:
         except NotImplementedError:
             raised = True
         assert raised
+
+
+class TestContextAwareMCPToolset:
+    def test_agent_retargets_mcp_toolset_once_at_startup(self, monkeypatch: MonkeyPatch) -> None:
+        warm_up = MagicMock()
+        monkeypatch.setattr(ContextAwareMCPToolset, "warm_up", warm_up)
+        monkeypatch.setattr(HaystackAgent, "_resources_mcp_url", lambda self: "http://resources:19724/mcp")
+        config = HaystackAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="haystack_agent",
+            resources_server=ResourcesServerRef(type="resources_servers", name="res"),
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            pipeline_yaml="configs/pipeline.yaml",
+        )
+
+        agent = HaystackAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        toolset = next(tool for tool in agent._agent.tools if isinstance(tool, ContextAwareMCPToolset))
+        assert toolset.server_info.url == "http://resources:19724/mcp"
+        warm_up.assert_not_called()
+
+    def test_requires_seeded_mcp_token(self) -> None:
+        toolset = ContextAwareMCPToolset.__new__(ContextAwareMCPToolset)
+        state = chat_generator_module._GenRunState()
+        context_token = chat_generator_module._current_run_state.set(state)
+        try:
+            with pytest.raises(RuntimeError, match="X-NeMo-Gym-Session-Token"):
+                toolset._client_for_current_rollout()
+        finally:
+            chat_generator_module._current_run_state.reset(context_token)
 
 
 class TestApp:

@@ -26,7 +26,8 @@ tool-calling loop; this component is the single per-step model call.
 import asyncio
 import contextvars
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any, Optional
 
 from haystack import component
@@ -77,6 +78,9 @@ class _GenRunState:
     cookies: Any = None
     usage: Any = None
     last_response: Optional["NeMoGymResponse"] = None
+    mcp_headers: dict[str, str] = field(default_factory=dict)
+    mcp_workers: dict[int, Any] = field(default_factory=dict)
+    mcp_lock: Any = field(default_factory=Lock)
 
 
 # Request-scoped generator state. Set by ``HaystackAgent.responses`` (and left unset for standalone
