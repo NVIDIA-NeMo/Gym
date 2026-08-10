@@ -4,11 +4,27 @@ This is a resources server that is to be used to verify a single action taken by
 Data links: ?
 
 # Parallel tool calls
-Rows may also set `expected_action.type` to `function_call_batch` with a `calls` list containing the same `function_call` objects used by single-call rows. The verifier matches parallel tool calls as an unordered multiset, so response output order does not matter.
+Rows may also set `expected_action.type` to `function_call_batch` with a `calls` list containing the same `function_call` objects used by single-call rows. The verifier matches parallel tool calls as an unordered multiset, so response output order does not matter. Because argument matching is fuzzy, one actual call can satisfy several expected calls; the verifier resolves this with a maximum bipartite matching rather than pairing calls greedily.
 
-By default, matching is exact: the actual response must contain the same number of tool calls as the expected batch, and every expected call must match one actual call. The resource server config can relax the cardinality check with `tool_call_comparator_config.allow_subset: true` or `tool_call_comparator_config.allow_superset: true`. Both default to `false`.
+Scoring has two independent stages, both configured under `tool_call_comparator_config`.
 
-Rewards remain binary by default. Set `tool_call_comparator_config.parallel_tool_call_reward_mode: fractional` to return the matched-call fraction after the configured cardinality gate passes.
+## Cardinality gate: which responses are admissible
+
+`allow_subset` admits responses that make **fewer** calls than expected, and `allow_superset` admits responses that make **more**. Both default to `false`, so by default the call count must match the expected batch exactly and anything else scores zero.
+
+## Reward mode: how much credit an admissible response earns
+
+`parallel_tool_call_reward_mode` accepts:
+
+| Mode | Reward |
+| --- | --- |
+| `binary_strict` (default) | `1.0` only if every required call matched, else `0.0` |
+| `fractional` | the matched fraction of the required calls |
+| `f1` | `2 * matched / (expected + actual)` — the harmonic mean of precision and recall |
+
+The two stages are complementary. Under `binary_strict` and `fractional` the gate is a *free pass*: once a shape is admitted, surplus calls cost nothing and `allow_subset` lets a response earn full credit for emitting only the easiest call. Concretely, with `allow_superset: true` a response that makes both expected calls plus twenty junk calls still scores `1.0`.
+
+Under `f1` the gate instead decides which imperfect shapes are worth *partial* credit, and missing and surplus calls are penalized symmetrically — the same twenty-junk-call response scores `2 * 2 / (2 + 22) = 0.167`. Only an exact set of calls reaches `1.0`. Prefer `f1` for RL, where the permissive gates are otherwise reward-hacking vectors.
 
 # Example usage
 

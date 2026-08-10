@@ -37,29 +37,34 @@ from resources_servers.single_step_tool_use_with_argument_comparison.app import 
 )
 from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
     ExpectedAction,
-    ExpectedFunctionCall,
-    ExpectedFunctionCallBatch,
-    ExpectedMessage,
+    FunctionCallAction,
+    FunctionCallBatchAction,
+    MessageAction,
+    ParallelToolCallRewardMode,
     StepRewardCategory,
     ToolCallComparatorConfig,
 )
 
 
+def build_resources_server(**comparator_overrides: object) -> SingleStepToolUseArgumentComparisonResourcesServer:
+    tool_call_comparator_config = ToolCallComparatorConfig(word_count_similarity_threshold=0.1, **comparator_overrides)
+    resources_server_config = SingleStepToolUseArgumentComparisonResourcesServerConfig(
+        host="127.0.0.1",
+        port=20002,
+        entrypoint="",
+        name="tool_argument_comparison_server",
+        tool_call_comparator_config=tool_call_comparator_config,
+    )
+    return SingleStepToolUseArgumentComparisonResourcesServer(
+        config=resources_server_config,
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
 class TestApp:
     @fixture
     def resources_server(self) -> SingleStepToolUseArgumentComparisonResourcesServer:
-        tool_call_comparator_config = ToolCallComparatorConfig(word_count_similarity_threshold=0.1)
-        resources_server_config = SingleStepToolUseArgumentComparisonResourcesServerConfig(
-            host="127.0.0.1",
-            port=20002,
-            entrypoint="",
-            name="tool_argument_comparison_server",
-            tool_call_comparator_config=tool_call_comparator_config,
-        )
-        return SingleStepToolUseArgumentComparisonResourcesServer(
-            config=resources_server_config,
-            server_client=MagicMock(spec=ServerClient),
-        )
+        return build_resources_server()
 
     async def _verify_and_compare_response(
         self,
@@ -130,7 +135,7 @@ class TestApp:
             "metric_count": 75,
         }
         expected_arguments_string = json.dumps(expected_arguments)
-        expected_tool_call = ExpectedFunctionCall(
+        expected_tool_call = FunctionCallAction(
             type="function_call",
             name="set_metric_count",
             arguments=expected_arguments_string,
@@ -221,7 +226,7 @@ class TestApp:
             ],
             tools=[tool_param],
         )
-        expected_message = ExpectedMessage(
+        expected_message = MessageAction(
             type="message",
             content="This is a message.",
         )
@@ -247,10 +252,8 @@ class TestApp:
             StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE,
         )
 
-    async def test_verify_parallel_tool_calls(
-        self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer
-    ) -> None:
-        tool = FunctionTool(
+    def _search_tool(self) -> FunctionTool:
+        return FunctionTool(
             type="function",
             name="search",
             parameters={
@@ -265,6 +268,10 @@ class TestApp:
                 ],
             },
         )
+
+    def _parallel_verify_request(
+        self, tool: FunctionTool, actual_queries: list[str], expected_queries: list[str]
+    ) -> SingleStepToolUseArgumentComparisonVerifyRequest:
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 NeMoGymEasyInputMessage(
@@ -282,33 +289,65 @@ class TestApp:
             object="response",
             output=[
                 NeMoGymResponseFunctionToolCall(
-                    call_id="first",
+                    call_id=f"call_{index}",
                     name="search",
-                    arguments=json.dumps({"query": "beta"}),
-                ),
-                NeMoGymResponseFunctionToolCall(
-                    call_id="second",
-                    name="search",
-                    arguments=json.dumps({"query": "alpha"}),
-                ),
+                    arguments=json.dumps({"query": query}),
+                )
+                for index, query in enumerate(actual_queries)
             ],
             parallel_tool_calls=True,
             tool_choice="auto",
             tools=[tool],
         )
-        expected_action = ExpectedFunctionCallBatch(
+        expected_action = FunctionCallBatchAction(
             type="function_call_batch",
             calls=[
-                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "alpha"})),
-                ExpectedFunctionCall(type="function_call", name="search", arguments=json.dumps({"query": "beta"})),
+                FunctionCallAction(type="function_call", name="search", arguments=json.dumps({"query": query}))
+                for query in expected_queries
             ],
         )
-
-        verify_request = SingleStepToolUseArgumentComparisonVerifyRequest(
+        return SingleStepToolUseArgumentComparisonVerifyRequest(
             responses_create_params=responses_create_params,
             response=response,
             expected_action=expected_action,
         )
-        verify_response = await resources_server.verify(verify_request)
+
+    async def test_verify_parallel_tool_calls(
+        self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer
+    ) -> None:
+        tool = self._search_tool()
+
+        # The response emits the expected calls in the opposite order, which does not matter.
+        verify_response = await resources_server.verify(
+            self._parallel_verify_request(tool, ["beta", "alpha"], ["alpha", "beta"])
+        )
         assert verify_response.reward == approx(1.0)
         assert verify_response.category == StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
+
+        # A surplus call is disqualifying unless the cardinality gate is opened.
+        verify_response = await resources_server.verify(
+            self._parallel_verify_request(tool, ["alpha", "beta", "gamma"], ["alpha", "beta"])
+        )
+        assert verify_response.reward == approx(0.0)
+        assert verify_response.category == StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
+
+    async def test_verify_parallel_tool_calls_with_f1_reward_mode(self) -> None:
+        resources_server = build_resources_server(
+            allow_subset=True,
+            allow_superset=True,
+            parallel_tool_call_reward_mode=ParallelToolCallRewardMode.F1,
+        )
+        tool = self._search_tool()
+
+        verify_response = await resources_server.verify(
+            self._parallel_verify_request(tool, ["beta", "alpha"], ["alpha", "beta"])
+        )
+        assert verify_response.reward == approx(1.0)
+        assert verify_response.category == StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
+
+        # Both correct calls are present, but so are three junk calls: 2 * 2 / (2 + 5).
+        verify_response = await resources_server.verify(
+            self._parallel_verify_request(tool, ["alpha", "beta", "x", "y", "z"], ["alpha", "beta"])
+        )
+        assert verify_response.reward == approx(4 / 7)
+        assert verify_response.category == StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT

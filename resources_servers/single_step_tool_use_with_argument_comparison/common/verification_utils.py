@@ -16,42 +16,45 @@ import json
 from collections import Counter
 from enum import StrEnum
 from json import JSONDecodeError
-from typing import Annotated, Any, Literal, Optional, Protocol, TypeAlias, Union
+from typing import Annotated, Any, Literal, Optional, TypeAlias, Union
 
 from pydantic import BaseModel, Field
 
-from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
 
-
-class ExpectedMessage(BaseModel):
+class MessageAction(BaseModel):
     type: Literal["message"]
     content: str
 
 
-class ExpectedFunctionCall(BaseModel):
+class FunctionCallAction(BaseModel):
     type: Literal["function_call"]
     name: str
     arguments: str
 
 
-class ExpectedFunctionCallBatch(BaseModel):
+class FunctionCallBatchAction(BaseModel):
     type: Literal["function_call_batch"]
-    calls: list[ExpectedFunctionCall] = Field(min_length=1)
+    calls: list[FunctionCallAction] = Field(min_length=1)
 
 
+# Actions are canonical on both sides of a comparison: dataset rows deserialize into them, and model
+# responses are normalized into them by `response_utils.extract_action`. The alias keeps the name
+# that dataset validation tooling imports.
 ExpectedAction: TypeAlias = Annotated[
-    Union[ExpectedMessage, ExpectedFunctionCall, ExpectedFunctionCallBatch],
+    Union[MessageAction, FunctionCallAction, FunctionCallBatchAction],
     Field(discriminator="type"),
 ]
 
 
-ToolAction: TypeAlias = Union[ExpectedFunctionCall, ExpectedFunctionCallBatch, NeMoGymResponseFunctionToolCall]
+def get_tool_calls(action: ExpectedAction) -> list[FunctionCallAction]:
+    """Flatten an action into the tool calls it represents, so single and parallel calls share a path."""
+    if isinstance(action, FunctionCallBatchAction):
+        return list(action.calls)
 
+    if isinstance(action, FunctionCallAction):
+        return [action]
 
-class ToolCallLike(Protocol):
-    type: str
-    name: str
-    arguments: str
+    return []
 
 
 class StepRewardCategory(StrEnum):
@@ -74,66 +77,133 @@ class StepRewardCategory(StrEnum):
     EXPECTED_TOOL_CALL_BATCH = "A tool-call batch that matches the expected tool calls was found"
 
 
+class ParallelToolCallRewardMode(StrEnum):
+    """How an admissible parallel tool-call response converts its matched-call count into a reward."""
+
+    BINARY_STRICT = "binary_strict"
+    FRACTIONAL = "fractional"
+    F1 = "f1"
+
+
+class ActionComparisonResult(BaseModel):
+    reward: float
+    category: StepRewardCategory
+
+
 class ToolCallComparatorConfig(BaseModel):
     word_count_similarity_threshold: float
     floating_point_comparison_threshold: float = 1e-6
+
+    # Cardinality gate: whether a response that makes fewer / more tool calls than expected is
+    # admissible at all. Both default to False, so the call count must match exactly.
     allow_subset: bool = False
     allow_superset: bool = False
-    parallel_tool_call_reward_mode: Literal["binary_strict", "fractional"] = "binary_strict"
+
+    # Scoring for responses that clear the gate. See `ActionComparator.compare_tool_calls`.
+    parallel_tool_call_reward_mode: ParallelToolCallRewardMode = ParallelToolCallRewardMode.BINARY_STRICT
 
 
-class ToolCallComparator(BaseModel):
+def find_maximum_matching(candidates: list[list[int]]) -> dict[int, int]:
+    """Maximum bipartite matching between expected and actual tool calls (Kuhn's algorithm).
+
+    `candidates[expected_index]` lists the actual-call indices that expected call could match, and the
+    returned mapping goes from actual index to the expected index it was matched with. Greedy pairing
+    is not enough here: argument matching is a fuzzy relation, so one actual call can satisfy several
+    expected calls and an early arbitrary pairing can strand a later expected call that had no
+    alternative. Augmenting paths undo those pairings and recover the true maximum.
+    """
+    matching: dict[int, int] = {}
+
+    # Matching the most constrained expected calls first keeps the number of augmenting paths small.
+    for expected_index in sorted(range(len(candidates)), key=lambda index: len(candidates[index])):
+        _augment_matching(expected_index, candidates, matching, set())
+
+    return matching
+
+
+def _augment_matching(
+    expected_index: int,
+    candidates: list[list[int]],
+    matching: dict[int, int],
+    visited_actual_indices: set[int],
+) -> bool:
+    for actual_index in candidates[expected_index]:
+        if actual_index in visited_actual_indices:
+            continue
+
+        visited_actual_indices.add(actual_index)
+        is_unmatched = actual_index not in matching
+        if is_unmatched or _augment_matching(matching[actual_index], candidates, matching, visited_actual_indices):
+            matching[actual_index] = expected_index
+            return True
+
+    return False
+
+
+class ActionComparator(BaseModel):
     config: ToolCallComparatorConfig
 
-    def compare_tool_call(
-        self, expected_tool_call: ExpectedFunctionCall, actual_tool_call: ToolCallLike
-    ) -> tuple[float, StepRewardCategory]:
-        if expected_tool_call.name != actual_tool_call.name:
-            return 0.0, StepRewardCategory.UNEXPECTED_TOOL
+    def compare_action(self, expected_action: ExpectedAction, actual_action: ExpectedAction) -> ActionComparisonResult:
+        match expected_action:
+            case MessageAction():
+                # Currently, any chat message is assigned a reward of one.
+                if isinstance(actual_action, MessageAction):
+                    return ActionComparisonResult(reward=1.0, category=StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND)
 
-        # It is assumed that the expected arguments string is a string representation of a JSON object.
-        expected_arguments = json.loads(expected_tool_call.arguments)
+                return ActionComparisonResult(reward=0.0, category=StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE)
 
-        try:
-            actual_arguments = json.loads(actual_tool_call.arguments)
-        except (JSONDecodeError, UnicodeDecodeError):
-            return 0.0, StepRewardCategory.ARGUMENTS_DECODE_ERROR
+            case FunctionCallAction() | FunctionCallBatchAction():
+                if isinstance(actual_action, MessageAction):
+                    return ActionComparisonResult(reward=0.0, category=StepRewardCategory.NO_EXPECTED_TOOL_CALL)
 
-        arguments_match, category = self.compare_tool_call_arguments(expected_arguments, actual_arguments)
-        if arguments_match:
-            return 1.0, StepRewardCategory.EXPECTED_TOOL_CALL
-        else:
-            return 0.0, category
+                return self.compare_tool_calls(get_tool_calls(expected_action), get_tool_calls(actual_action))
 
-    def compare_tool_action(
-        self, expected_tool_action: ToolAction, actual_tool_action: ToolAction
-    ) -> tuple[float, StepRewardCategory]:
-        expected_calls = self.get_tool_calls(expected_tool_action)
-        actual_calls = self.get_tool_calls(actual_tool_action)
+            case _:
+                raise NotImplementedError(f"Unsupported expected action: {expected_action!r}")
 
-        if len(expected_calls) == 1 and len(actual_calls) == 1:
+    def compare_tool_calls(
+        self, expected_calls: list[FunctionCallAction], actual_calls: list[FunctionCallAction]
+    ) -> ActionComparisonResult:
+        """Score a set of tool calls against the expected set, ignoring the order they were emitted in.
+
+        Scoring happens in two independent stages. The cardinality gate (`allow_subset` / `allow_superset`)
+        decides whether a response that under- or over-calls is admissible at all; anything it rejects
+        scores zero. `parallel_tool_call_reward_mode` then decides how much credit an admissible response
+        earns:
+
+        - `binary_strict` — 1.0 only if every required call matched, else 0.0.
+        - `fractional` — the matched fraction of the required calls. Surplus calls permitted by
+          `allow_superset` are free, so this rewards recall but not precision.
+        - `f1` — the harmonic mean of precision and recall, `2 * matched / (expected + actual)`. Missing
+          and surplus calls are penalized symmetrically, so a response only reaches 1.0 by matching the
+          expected calls exactly. This is the mode to prefer for RL: the gate stops being a free pass and
+          instead just decides which imperfect shapes are worth partial credit.
+        """
+        expected_count = len(expected_calls)
+        actual_count = len(actual_calls)
+
+        if expected_count == 1 and actual_count == 1:
+            # Preserve the single-call categories that predate parallel tool-call support.
             return self.compare_tool_call(expected_calls[0], actual_calls[0])
 
-        if not self.is_call_count_allowed(len(expected_calls), len(actual_calls)):
-            return 0.0, StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
+        if not self.is_call_count_admissible(expected_count, actual_count):
+            return ActionComparisonResult(reward=0.0, category=StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT)
 
-        matched_count, failure_category = self.count_optimistic_matches(expected_calls, actual_calls)
-        required_count = self.get_required_match_count(len(expected_calls), len(actual_calls))
-        if matched_count == required_count:
-            return 1.0, StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
+        candidates, failure_categories = self.build_match_candidates(expected_calls, actual_calls)
+        matching = find_maximum_matching(candidates)
+        reward = self.score_matched_calls(len(matching), expected_count, actual_count)
+        if reward == 1.0:
+            return ActionComparisonResult(reward=reward, category=StepRewardCategory.EXPECTED_TOOL_CALL_BATCH)
 
-        if self.config.parallel_tool_call_reward_mode == "fractional" and required_count > 0:
-            return matched_count / required_count, failure_category
+        category = self.resolve_failure_category(
+            matched_expected_indices=set(matching.values()),
+            failure_categories=failure_categories,
+            expected_count=expected_count,
+            actual_count=actual_count,
+        )
+        return ActionComparisonResult(reward=reward, category=category)
 
-        return 0.0, failure_category
-
-    def get_tool_calls(self, tool_action: ToolAction) -> list[ToolCallLike]:
-        if tool_action.type == "function_call_batch":
-            return list(tool_action.calls)
-
-        return [tool_action]
-
-    def is_call_count_allowed(self, expected_count: int, actual_count: int) -> bool:
+    def is_call_count_admissible(self, expected_count: int, actual_count: int) -> bool:
         if actual_count == expected_count:
             return True
 
@@ -142,68 +212,89 @@ class ToolCallComparator(BaseModel):
 
         return self.config.allow_superset
 
-    def get_required_match_count(self, expected_count: int, actual_count: int) -> int:
-        if self.config.allow_subset and self.config.allow_superset:
+    def required_match_count(self, expected_count: int, actual_count: int) -> int:
+        """How many expected calls must match for full credit under `binary_strict` and `fractional`."""
+        if self.config.allow_subset:
             return min(expected_count, actual_count)
-
-        if self.config.allow_subset and actual_count < expected_count:
-            return actual_count
 
         return expected_count
 
-    def count_optimistic_matches(
-        self, expected_calls: list[ToolCallLike], actual_calls: list[ToolCallLike]
-    ) -> tuple[int, StepRewardCategory]:
-        adjacency: list[list[int]] = []
-        failure_category = StepRewardCategory.UNEXPECTED_TOOL
+    def score_matched_calls(self, matched_count: int, expected_count: int, actual_count: int) -> float:
+        if self.config.parallel_tool_call_reward_mode == ParallelToolCallRewardMode.F1:
+            total_count = expected_count + actual_count
+            return 2 * matched_count / total_count if total_count else 0.0
+
+        required_count = self.required_match_count(expected_count, actual_count)
+        if self.config.parallel_tool_call_reward_mode == ParallelToolCallRewardMode.FRACTIONAL:
+            return matched_count / required_count if required_count else 0.0
+
+        return 1.0 if matched_count == required_count else 0.0
+
+    def build_match_candidates(
+        self, expected_calls: list[FunctionCallAction], actual_calls: list[FunctionCallAction]
+    ) -> tuple[list[list[int]], list[StepRewardCategory]]:
+        """Pair every expected call with the actual calls it matches, keeping why the others missed."""
+        candidates: list[list[int]] = []
+        failure_categories: list[StepRewardCategory] = []
 
         for expected_call in expected_calls:
             matching_actual_indices: list[int] = []
+            failure_category = StepRewardCategory.UNEXPECTED_TOOL
+
             for actual_index, actual_call in enumerate(actual_calls):
-                reward, category = self.compare_tool_call(expected_call, actual_call)
-                if reward == 1.0:
+                result = self.compare_tool_call(expected_call, actual_call)
+                if result.reward == 1.0:
                     matching_actual_indices.append(actual_index)
-                elif (
-                    failure_category == StepRewardCategory.UNEXPECTED_TOOL
-                    or category != StepRewardCategory.UNEXPECTED_TOOL
-                ):
-                    failure_category = category
 
-            adjacency.append(matching_actual_indices)
+                elif failure_category == StepRewardCategory.UNEXPECTED_TOOL:
+                    # Keep the first reason that got past the tool name; it explains the closest near miss.
+                    failure_category = result.category
 
-        actual_to_expected: dict[int, int] = {}
-        for expected_index in sorted(range(len(expected_calls)), key=lambda index: len(adjacency[index])):
-            self.try_match_expected_call(
-                expected_index=expected_index,
-                adjacency=adjacency,
-                actual_to_expected=actual_to_expected,
-                seen_actual_indices=set(),
-            )
+            candidates.append(matching_actual_indices)
+            failure_categories.append(failure_category)
 
-        return len(actual_to_expected), failure_category
+        return candidates, failure_categories
 
-    def try_match_expected_call(
+    def resolve_failure_category(
         self,
-        expected_index: int,
-        adjacency: list[list[int]],
-        actual_to_expected: dict[int, int],
-        seen_actual_indices: set[int],
-    ) -> bool:
-        for actual_index in adjacency[expected_index]:
-            if actual_index in seen_actual_indices:
-                continue
+        matched_expected_indices: set[int],
+        failure_categories: list[StepRewardCategory],
+        expected_count: int,
+        actual_count: int,
+    ) -> StepRewardCategory:
+        unmatched_expected_indices = [
+            expected_index
+            for expected_index in range(expected_count)
+            if expected_index not in matched_expected_indices
+        ]
 
-            seen_actual_indices.add(actual_index)
-            if actual_index not in actual_to_expected or self.try_match_expected_call(
-                expected_index=actual_to_expected[actual_index],
-                adjacency=adjacency,
-                actual_to_expected=actual_to_expected,
-                seen_actual_indices=seen_actual_indices,
-            ):
-                actual_to_expected[actual_index] = expected_index
-                return True
+        # Either every expected call was matched and the only defect left is surplus calls, or every
+        # actual call was consumed and the only defect left is missing calls. Reporting an argument
+        # mismatch in those cases would point at a comparison that is not why the reward was docked.
+        if not unmatched_expected_indices or len(matched_expected_indices) == actual_count:
+            return StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
 
-        return False
+        return failure_categories[unmatched_expected_indices[0]]
+
+    def compare_tool_call(
+        self, expected_tool_call: FunctionCallAction, actual_tool_call: FunctionCallAction
+    ) -> ActionComparisonResult:
+        if expected_tool_call.name != actual_tool_call.name:
+            return ActionComparisonResult(reward=0.0, category=StepRewardCategory.UNEXPECTED_TOOL)
+
+        # It is assumed that the expected arguments string is a string representation of a JSON object.
+        expected_arguments = json.loads(expected_tool_call.arguments)
+
+        try:
+            actual_arguments = json.loads(actual_tool_call.arguments)
+        except (JSONDecodeError, UnicodeDecodeError):
+            return ActionComparisonResult(reward=0.0, category=StepRewardCategory.ARGUMENTS_DECODE_ERROR)
+
+        arguments_match, category = self.compare_tool_call_arguments(expected_arguments, actual_arguments)
+        if arguments_match:
+            return ActionComparisonResult(reward=1.0, category=StepRewardCategory.EXPECTED_TOOL_CALL)
+
+        return ActionComparisonResult(reward=0.0, category=category)
 
     def compare_tool_call_arguments(
         self, expected_value: Any, actual_value: Any

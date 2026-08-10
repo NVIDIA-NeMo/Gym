@@ -22,11 +22,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from resources_servers.single_step_tool_use_with_argument_comparison.common.response_utils import (
-    extract_tool_call_or_text,
-)
+from resources_servers.single_step_tool_use_with_argument_comparison.common.response_utils import extract_action
 from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
-    ExpectedFunctionCallBatch,
+    FunctionCallAction,
+    FunctionCallBatchAction,
+    MessageAction,
 )
 
 
@@ -43,8 +43,8 @@ class TestResponseUtils:
             tools=[],
         )
 
-    def test_extract_tool_call_or_text(self) -> None:
-        assert extract_tool_call_or_text(self._create_response([])) is None
+    def test_extract_action_finds_nothing_to_judge(self) -> None:
+        assert extract_action(self._create_response([])) is None
 
         reasoning_item = NeMoGymResponseReasoningItem(
             id="reasoning_item",
@@ -55,8 +55,17 @@ class TestResponseUtils:
                 )
             ],
         )
-        assert extract_tool_call_or_text(self._create_response([reasoning_item])) is None
+        assert extract_action(self._create_response([reasoning_item])) is None
 
+        refusal_message = NeMoGymResponseOutputMessage(
+            id="refusal",
+            content=[
+                NeMoGymResponseOutputRefusal(refusal="this is a refusal"),
+            ],
+        )
+        assert extract_action(self._create_response([reasoning_item, refusal_message])) is None
+
+    def test_extract_action_takes_the_first_assistant_text(self) -> None:
         first_output_text = NeMoGymResponseOutputText(
             annotations=[],
             text="this is the first output text",
@@ -65,7 +74,9 @@ class TestResponseUtils:
             id="single_text",
             content=[first_output_text],
         )
-        assert extract_tool_call_or_text(self._create_response([single_text_message])) is first_output_text
+        assert extract_action(self._create_response([single_text_message])) == MessageAction(
+            type="message", content="this is the first output text"
+        )
 
         second_output_text = NeMoGymResponseOutputText(
             annotations=[],
@@ -78,94 +89,59 @@ class TestResponseUtils:
                 first_output_text,
             ],
         )
-        assert (
-            extract_tool_call_or_text(
-                self._create_response(
-                    [
-                        reasoning_item,
-                        multiple_texts_message,
-                        single_text_message,
-                    ]
-                )
-            )
-            is second_output_text
+        assert extract_action(self._create_response([multiple_texts_message, single_text_message])) == MessageAction(
+            type="message", content="this is the second output text"
         )
 
+        # A refusal carries no output text, so the next message supplies the assistant text.
         refusal_message = NeMoGymResponseOutputMessage(
             id="refusal",
             content=[
                 NeMoGymResponseOutputRefusal(refusal="this is a refusal"),
             ],
         )
-        assert (
-            extract_tool_call_or_text(
-                self._create_response(
-                    [
-                        reasoning_item,
-                        refusal_message,
-                        single_text_message,
-                    ]
-                )
-            )
-            is first_output_text
+        assert extract_action(self._create_response([refusal_message, single_text_message])) == MessageAction(
+            type="message", content="this is the first output text"
         )
 
+    def test_extract_action_prefers_tool_calls_over_text(self) -> None:
         tool_call = NeMoGymResponseFunctionToolCall(
             call_id="tool_call",
             name="respond",
             arguments="",
         )
-        assert extract_tool_call_or_text(self._create_response([tool_call])) is tool_call
-        assert (
-            extract_tool_call_or_text(
-                self._create_response(
-                    [
-                        single_text_message,
-                        tool_call,
-                    ]
-                )
-            )
-            is tool_call
+        expected_action = FunctionCallAction(type="function_call", name="respond", arguments="")
+        text_message = NeMoGymResponseOutputMessage(
+            id="single_text",
+            content=[NeMoGymResponseOutputText(annotations=[], text="this is the output text")],
         )
 
+        assert extract_action(self._create_response([tool_call])) == expected_action
+        assert extract_action(self._create_response([text_message, tool_call])) == expected_action
+        assert extract_action(self._create_response([tool_call, text_message])) == expected_action
+
+    def test_extract_action_batches_parallel_tool_calls_in_order(self) -> None:
+        first_tool_call = NeMoGymResponseFunctionToolCall(
+            call_id="first_tool_call",
+            name="respond",
+            arguments="",
+        )
         second_tool_call = NeMoGymResponseFunctionToolCall(
             call_id="second_tool_call",
             name="lookup",
             arguments='{"query": "alpha"}',
         )
-        extracted_batch = extract_tool_call_or_text(
-            self._create_response(
-                [
-                    single_text_message,
-                    tool_call,
-                    second_tool_call,
-                ]
-            )
+        text_message = NeMoGymResponseOutputMessage(
+            id="single_text",
+            content=[NeMoGymResponseOutputText(annotations=[], text="this is the output text")],
         )
-        assert isinstance(extracted_batch, ExpectedFunctionCallBatch)
-        assert [call.name for call in extracted_batch.calls] == ["respond", "lookup"]
-        assert (
-            extract_tool_call_or_text(
-                self._create_response(
-                    [
-                        tool_call,
-                        single_text_message,
-                    ]
-                )
-            )
-            is tool_call
-        )
-        assert (
-            extract_tool_call_or_text(
-                self._create_response(
-                    [
-                        reasoning_item,
-                        single_text_message,
-                        refusal_message,
-                        tool_call,
-                        multiple_texts_message,
-                    ]
-                )
-            )
-            is tool_call
+
+        assert extract_action(
+            self._create_response([text_message, first_tool_call, second_tool_call])
+        ) == FunctionCallBatchAction(
+            type="function_call_batch",
+            calls=[
+                FunctionCallAction(type="function_call", name="respond", arguments=""),
+                FunctionCallAction(type="function_call", name="lookup", arguments='{"query": "alpha"}'),
+            ],
         )
