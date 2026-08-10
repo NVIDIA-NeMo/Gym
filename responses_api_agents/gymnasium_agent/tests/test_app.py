@@ -38,7 +38,7 @@ def _make_agent(max_steps=10, observability=True):
     return GymnasiumAgent(config=config, server_client=server_client)
 
 
-def _model_response(text: str, input_toks=1, output_toks=1) -> dict:
+def _model_response(text: str, input_toks=1, output_toks=1, cached_toks=0, reasoning_toks=0) -> dict:
     return {
         "id": "r",
         "created_at": 0.0,
@@ -58,9 +58,9 @@ def _model_response(text: str, input_toks=1, output_toks=1) -> dict:
         "tools": [],
         "usage": {
             "input_tokens": input_toks,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": cached_toks},
             "output_tokens": output_toks,
-            "output_tokens_details": {"reasoning_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": reasoning_toks},
             "total_tokens": input_toks + output_toks,
         },
     }
@@ -251,8 +251,8 @@ class TestRun:
             {
                 "/reset": [{"observation": None, "info": {}}],
                 "/v1/responses": [
-                    _model_response("a", input_toks=5, output_toks=7),
-                    _model_response("b", input_toks=11, output_toks=13),
+                    _model_response("a", input_toks=5, output_toks=7, cached_toks=2, reasoning_toks=3),
+                    _model_response("b", input_toks=11, output_toks=13, cached_toks=5, reasoning_toks=7),
                 ],
                 "/step": [
                     {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
@@ -268,3 +268,5 @@ class TestRun:
         assert result.response.usage.input_tokens == 16
         assert result.response.usage.output_tokens == 20
         assert result.response.usage.total_tokens == 36
+        assert result.response.usage.input_tokens_details.cached_tokens == 7
+        assert result.response.usage.output_tokens_details.reasoning_tokens == 10
