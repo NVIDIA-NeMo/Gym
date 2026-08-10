@@ -87,6 +87,7 @@ if (( SLURM_PROCID == 0 )); then
         --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-address \$this_node_hostname \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
+        --api-server-count 1 \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
         &
@@ -131,6 +132,7 @@ elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
         --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-address \$DECODE_HEAD \
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
+        --api-server-count 1 \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
