@@ -8,7 +8,7 @@ NUM_DECODE_NODES=$NUM_DECODE_NODES
 MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
-VLLM_CONFIG=${VLLM_CONFIG:-benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh}
+VLLM_CONFIG=$VLLM_CONFIG
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
