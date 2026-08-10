@@ -235,17 +235,24 @@ keys — all listed in `.env.example`.
 
 ### CritPt
 
-Scoring goes through the Artificial Analysis API, which grades **all 70 problems in one
-call**. Two consequences:
+The Artificial Analysis API scores in batches of exactly 70 distinct problems, so a full
+run — 70 problems repeated five times — costs five scoring calls.
 
-- A `LIMIT` below 70 produces rollouts that cannot be scored. `LIMIT` counts problems,
-  not rollouts.
-- Each key allows a limited number of scorings per day and a full run needs one per
-  repeat, so pass several keys to spread the quota:
-  `ARTIFICIAL_ANALYSIS_API_KEY='[key-1,key-2]'`.
+That shapes three things. `LIMIT` counts problems rather than rollouts, and below 70 no
+batch can fill, so those rollouts are never scored. Each key carries a daily scoring quota
+and rotates only once a key is rate-limited, so pass several to get through all five calls:
+`ARTIFICIAL_ANALYSIS_API_KEY='[key-1,key-2]'`. And concurrency should stay at its default
+of 350, since a rollout waiting to be scored holds its slot — lower values starve the
+batches and the run wedges until it times out.
 
-Run with concurrency comfortably above 70 — `PARALLEL=140`. A rollout waiting for its
-batch holds its slot, so at exactly 70 a single failure wedges the run permanently.
+If 350 is more than your endpoint can take, five single-repeat runs at 70 give the same
+result. Average their `mean/reward`:
+
+```bash
+for i in 1 2 3 4 5; do
+  CRITPT_REPEATS=1 PARALLEL=70 OUT=./results/critpt/run_$i scripts/more/critpt.sh
+done
+```
 
 Every submission and grader response is cached under `<OUT>/critpt_cache`. If a run dies
 on quota, re-score it once the quota resets without repeating any inference:

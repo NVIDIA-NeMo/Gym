@@ -22,50 +22,29 @@
 # and prepare script resolve relative to your working directory. Results land in
 # ./results/critpt.
 #
-#   PARALLEL=140 ./critpt.sh                  # full benchmark (70 problems x 5)
-#   LIMIT=3 ./critpt.sh                       # rollouts only, no score (see below)
-#   OUT=<dir> PARALLEL=<n> ./critpt.sh        # output dir, concurrency
+#   ./critpt.sh                        # full benchmark (70 problems x 5)
+#   LIMIT=3 ./critpt.sh                # rollouts only, cannot be scored (see below)
+#   OUT=<dir> PARALLEL=<n> ./critpt.sh # output dir, concurrency
 #
-# Note: scoring is atomic — the Artificial Analysis API grades all 70 problems in one
-# call, so a LIMIT below 70 produces rollouts that cannot be scored. LIMIT counts
-# problems, not rollouts.
+# Note: num_repeats 5 is set through the dataset override below — --num-repeats
+# multiplies the config default instead of replacing it.
 #
-# Note: keep concurrency comfortably above 70. A rollout waiting for its batch holds
-# its slot, so 70 waiters fill 70 slots; at exactly 70 one failure wedges the run for
-# good, because the freed slot goes to a repeat that cannot complete the batch. 140 is
-# two full passes, so even a whole failed pass still leaves enough to finish.
+# Note: the grader scores 70 distinct problems per call, so a LIMIT below 70 cannot be
+# scored, and concurrency stays at 350 (problems x repeats) — a rollout waiting to be
+# scored holds its slot, so lower values starve the batches and the run wedges.
 
-ARTIFICIAL_ANALYSIS_API_KEY="${ARTIFICIAL_ANALYSIS_API_KEY:?export ARTIFICIAL_ANALYSIS_API_KEY (one key, or [k1,k2] to spread the daily quota)}"
+ARTIFICIAL_ANALYSIS_API_KEY="${ARTIFICIAL_ANALYSIS_API_KEY:?export ARTIFICIAL_ANALYSIS_API_KEY (one key, or [k1,k2] to fail over when a key is rate-limited)}"
 
 AGENT=critpt_benchmark_agent.responses_api_agents.critpt_agent
 CRITPT=critpt_resources_server.resources_servers.critpt
 POLICY=policy_model.responses_api_models.vllm_model
 
-# Persist every submission and AA response. Without it a run that exhausts the daily
-# AA quota loses all of its inference; with it you can re-score once the quota resets:
+# Persist every submission and grader response. Without it a run that exhausts the daily
+# quota loses all of its inference; with it you can re-score once the quota resets:
 #   python -m resources_servers.critpt.replay --cache-dir <dir>
 export CRITPT_CACHE_DIR="${CRITPT_CACHE_DIR:-$(realpath -m "${OUT:-./results/critpt}")/critpt_cache}"
 
-# Interleave the repeats — p1..p70 five times over, rather than Gym's grouped
-# expansion (abc -> aabbcc). Scoring needs 70 DISTINCT problems in a batch, and under
-# grouping the 70th distinct problem is row 346, which would force concurrency 346+.
-# Gym keys a task on the row's content, so the five identical lines collapse into one
-# task with rollout indices 0..4 — the same 70 tasks x 5 the grouped form produces.
-CRITPT_SRC=benchmarks/critpt/data/critpt_benchmark.jsonl
-CRITPT_JSONL="$(realpath -m "${OUT:-./results/critpt}")/critpt_interleaved.jsonl"
-
 gym eval prepare --benchmark critpt
-
-mkdir -p "$(dirname "$CRITPT_JSONL")"
-python3 - "$CRITPT_SRC" "$CRITPT_JSONL" "${CRITPT_REPEATS:-5}" <<'PY'
-import sys
-src, dst, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-lines = [l if l.endswith("\n") else l + "\n" for l in open(src) if l.strip()]
-with open(dst, "w") as f:
-    for _ in range(n):          # one full pass over every problem, n times
-        f.writelines(lines)
-print(f"critpt: wrote {len(lines) * n} interleaved rows ({len(lines)} problems x {n})")
-PY
 
 gym eval run \
   --benchmark critpt \
@@ -73,7 +52,7 @@ gym eval run \
   --split benchmark \
   ${RESUME:+--resume} \
   --output "${OUT:-./results/critpt}/evaluator_rollouts.jsonl" \
-  "++$AGENT.datasets=[{name: critpt, type: benchmark, jsonl_fpath: $CRITPT_JSONL, prompt_config: benchmarks/critpt/prompts/turn1.yaml, prepare_script: benchmarks/critpt/prepare.py, num_repeats: 1}]" \
+  "++$AGENT.datasets=[{name: critpt, type: benchmark, jsonl_fpath: benchmarks/critpt/data/critpt_benchmark.jsonl, prompt_config: benchmarks/critpt/prompts/turn1.yaml, prepare_script: benchmarks/critpt/prepare.py, num_repeats: ${CRITPT_REPEATS:-5}}]" \
   "++artificial_analysis_api_key=$ARTIFICIAL_ANALYSIS_API_KEY" \
   "++$CRITPT.verify_timeout_seconds=21600" \
   "++$POLICY.chat_template_kwargs={enable_thinking: true}" \
@@ -81,4 +60,4 @@ gym eval run \
   "++$POLICY.sequential_reasoning_allowed=false" \
   "++overwrite_metrics_conflicts=true" \
   ${LIMIT:+--limit "$LIMIT"} \
-  ${PARALLEL:+--concurrency "$PARALLEL"}
+  --concurrency "${PARALLEL:-350}"
