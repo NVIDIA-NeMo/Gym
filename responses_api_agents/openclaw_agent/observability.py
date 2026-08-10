@@ -91,12 +91,13 @@ def discover_openclaw_session_tree(
 
     root = roots[0]
     selected = {root}
+    reported_parent_conflicts: set[str] = set()
     parents: dict[str, str | None] = {root: None}
     changed = True
     while changed:
         changed = False
         for key, (entry, _) in entries.items():
-            if key in selected:
+            if key in selected or key in reported_parent_conflicts:
                 continue
             spawned_by = entry.get("spawnedBy")
             parent_key = entry.get("parentSessionKey")
@@ -109,6 +110,7 @@ def discover_openclaw_session_tree(
                             invocation_id=key,
                         )
                     )
+                    reported_parent_conflicts.add(key)
                 continue
             parent = spawned_by or parent_key
             if isinstance(parent, str) and parent in selected:

@@ -111,6 +111,31 @@ def test_missing_child_transcript_is_explicit(tmp_path: Path) -> None:
     }
 
 
+def test_conflicting_parent_is_reported_once_across_tree_passes(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "main" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    _session(sessions_dir / "root.jsonl", "root")
+    _session(sessions_dir / "child.jsonl", "child")
+    (sessions_dir / "sessions.json").write_text(
+        json.dumps(
+            {
+                "root-key": {"sessionId": "root"},
+                "ambiguous-key": {
+                    "sessionId": "ambiguous",
+                    "spawnedBy": "root-key",
+                    "parentSessionKey": "child-key",
+                },
+                "child-key": {"sessionId": "child", "spawnedBy": "root-key"},
+            }
+        )
+    )
+
+    _, gaps = discover_openclaw_session_tree(tmp_path, "root")
+
+    ambiguous = [gap for gap in gaps if gap.code == "subagent_parent_ambiguous"]
+    assert [(gap.invocation_id, gap.detail) for gap in ambiguous] == [("ambiguous-key", None)]
+
+
 def test_tree_reports_missing_invocation(monkeypatch) -> None:
     monkeypatch.setattr(
         "responses_api_agents.openclaw_agent.observability.build_openclaw_observations",
