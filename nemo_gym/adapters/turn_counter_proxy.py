@@ -156,8 +156,10 @@ async def start_turn_counter_proxy(
 ) -> TurnCounterProxy:
     """Start a per-task proxy that enforces ``max_turns`` on POSTs.
 
-    ``upstream_base_url`` is the real OpenAI-compatible base (e.g. ``http://host/v1``).
-    Returned ``base_url`` mirrors that path prefix on the local listen address.
+    ``upstream_base_url`` is the real OpenAI-compatible base (e.g. ``http://host/v1``
+    or a capture-prefixed ``http://host/ng-rollout/<id>/v1``). The returned
+    ``base_url`` always advertises a bare ``/v1`` (or empty) path so OpenClaw does
+    not see the capture prefix; requests are rewritten onto the full upstream base.
     """
     if max_turns < 1:
         raise ValueError(f"max_turns must be >= 1, got {max_turns}")
@@ -166,8 +168,10 @@ async def start_turn_counter_proxy(
     upstream = urlparse(upstream_base_url.rstrip("/"))
     if not upstream.scheme or not upstream.netloc:
         raise ValueError(f"invalid upstream_base_url: {upstream_base_url!r}")
-    upstream_origin = f"{upstream.scheme}://{upstream.netloc}"
-    path_prefix = upstream.path.rstrip("/")  # e.g. "/v1"
+    upstream_path = upstream.path.rstrip("/")
+    upstream_full_base = f"{upstream.scheme}://{upstream.netloc}{upstream_path}"
+    # OpenClaw should never see /ng-rollout/<id>; only advertise the API version suffix.
+    advertise_path = "/v1" if upstream_path.endswith("/v1") else upstream_path
 
     state = {"turns_used": 0}
     session = ClientSession()
@@ -190,7 +194,15 @@ async def start_turn_counter_proxy(
                 status=429,
             )
 
-        forward_url = f"{upstream_origin}{request.path_qs}"
+        req_path = request.path
+        if advertise_path and (req_path == advertise_path or req_path.startswith(advertise_path + "/")):
+            suffix = req_path[len(advertise_path) :]
+        else:
+            suffix = req_path
+        forward_url = f"{upstream_full_base}{suffix}"
+        if request.query_string:
+            forward_url = f"{forward_url}?{request.query_string}"
+
         headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
         if api_key and "authorization" not in {k.lower() for k in headers}:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -237,7 +249,7 @@ async def start_turn_counter_proxy(
     port = sockets[0].getsockname()[1]
 
     adv = advertise_host or host
-    base_url = f"http://{adv}:{port}{path_prefix}"
+    base_url = f"http://{adv}:{port}{advertise_path}"
     return TurnCounterProxy(
         base_url=base_url,
         port=port,

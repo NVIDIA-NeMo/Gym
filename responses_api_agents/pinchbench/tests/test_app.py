@@ -258,7 +258,7 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     otherwise ng_collect_rollouts (fail-fast) aborts the whole collection."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -293,7 +293,7 @@ async def test_generic_failure_routes_to_sidecar_not_main(tmp_path, monkeypatch)
     """A failed task must carry a failure class so it never lands in the main jsonl."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -309,7 +309,7 @@ async def test_signal_killed_sandbox_is_kill_shaped_and_unpersisted(tmp_path, mo
     """Walltime SIGTERM shape: no row anywhere; resume's set-difference re-dispatches."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def killed(task_id, out_dir):
+    async def killed(task_id, out_dir, rollout_id=None):
         raise SandboxKilledError("direct apptainer exec killed (rc=-15) for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", killed)
@@ -324,7 +324,7 @@ async def test_task_timeout_is_terminal_sidecar(tmp_path, monkeypatch):
     """Per-task timeout consumed its budget: one sidecar row, never retried."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def slow(task_id, out_dir):
+    async def slow(task_id, out_dir, rollout_id=None):
         raise TimeoutError("direct apptainer exec timed out for task task_x")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", slow)
@@ -340,7 +340,7 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
     """Scored rollouts must keep landing in the main jsonl (no sentinel keys)."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def ok(task_id, out_dir):
+    async def ok(task_id, out_dir, rollout_id=None):
         return None
 
     monkeypatch.setattr(agent, "_run_in_sandbox", ok)
