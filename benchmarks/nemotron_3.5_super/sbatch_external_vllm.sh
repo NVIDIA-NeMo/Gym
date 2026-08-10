@@ -21,6 +21,8 @@ PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
 
 command=$(cat <<EOF
+#!/bin/bash
+
 set -euo pipefail
 
 # Input arguments and validation
