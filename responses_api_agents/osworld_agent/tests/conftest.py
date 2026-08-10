@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+
 # opencv-python-headless is excluded from the shipped container via
 # sys_platform == 'never'. Install it before tests via the codec install
 # script so tests that import cv2 don't fail.
