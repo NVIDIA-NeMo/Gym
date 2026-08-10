@@ -40,7 +40,6 @@ common_args=(
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
     --reasoning-parser nemotron_v3
-    --api-server-count 1
     --kv-cache-dtype fp8
     -cc.pass_config.fuse_allreduce_rms=False
     --mamba-ssm-cache-dtype float32
