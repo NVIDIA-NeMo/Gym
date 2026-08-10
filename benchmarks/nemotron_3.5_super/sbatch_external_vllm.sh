@@ -31,6 +31,7 @@ export UCX_RNDV_THRESH=0
 common_args=(
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
+    --data-parallel-backend mp
     --tensor-parallel-size 4
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
@@ -65,7 +66,6 @@ if [[ "\$SLURM_PROCID" == 0 ]]; then
     vllm serve "$MODEL" "\${common_args[@]}" \
         --host \$prefill_host \
         --port 8001 \
-        --data-parallel-backend mp \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
         --data-parallel-address \$prefill_host \
@@ -96,7 +96,6 @@ elif [[ "\$SLURM_PROCID" == 1 ]]; then
     VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
-        --data-parallel-backend mp \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
         --data-parallel-start-rank 1 \
@@ -112,7 +111,6 @@ elif [[ "\$SLURM_PROCID" == 2 ]]; then
     vllm serve "$MODEL" "\${common_args[@]}" \
         --host \$decode_host \
         --port 8002 \
-        --data-parallel-backend mp \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
         --data-parallel-address \$decode_host \
@@ -126,7 +124,6 @@ elif [[ "\$SLURM_PROCID" == 3 ]]; then
     VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
     vllm serve "$MODEL" "\${common_args[@]}" \
         --headless \
-        --data-parallel-backend mp \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
         --data-parallel-start-rank 1 \
