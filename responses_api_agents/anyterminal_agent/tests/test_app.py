@@ -302,6 +302,11 @@ class TestSafeConfigJson:
         for key in ("my_secret", "auth_token", "password"):
             assert result["agent_kwargs"][key] == "***"
 
+    def test_output_token_counts_are_not_redacted(self, tmp_path: Path) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(input="x", max_output_tokens=8192)
+        cfg = _make_instance_config(tmp_path, body=body)
+        assert json.loads(_safe_config_json(cfg))["body"]["max_output_tokens"] == 8192
+
     def test_nested_provider_api_key_redacted(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(
             tmp_path,

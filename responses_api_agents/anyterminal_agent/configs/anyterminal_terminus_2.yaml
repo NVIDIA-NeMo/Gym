@@ -1,0 +1,26 @@
+anyterminal_terminus_2:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench run by Terminus-2 natively inside the task container.
+      value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.terminus_2_agent.app
+      agent_server_class: Terminus2Agent
+      agent_config_class: Terminus2AgentConfig
+      agent_kwargs:
+        model: ${policy_model_name}
+        timeout: 12500
+
+      container_formatter: "docker://{docker_image}"
+      concurrency: 6
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
