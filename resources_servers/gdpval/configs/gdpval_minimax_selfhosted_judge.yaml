@@ -16,10 +16,8 @@
 #   startup during the profiling pass. The plugin is designed to run inside the
 #   vendor container, where the FlashInfer/cutlass-dsl/CUDA combo is matched and
 #   the kernels JIT cleanly. Reproducing that inside a gym-built venv is fighting
-#   its design, so we run the container ourselves and gym connects to it.
-#   (The gym-spawned attempt is preserved for reference in
-#   gdpval_minimax_local_judge.yaml + the standalone local_vllm_model config, but
-#   it does NOT currently start on GB200.)
+#   its design, so Gym does not ship a MiniMax-M3 local_vllm_model config for
+#   this path; run the container yourself and point Gym at its endpoint.
 #
 # STEP 1 — serve MiniMax-M3 yourself from the vendor container. NVIDIA users
 # should use the internal serving workflow maintained separately from Gym. Use

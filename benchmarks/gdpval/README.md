@@ -324,19 +324,17 @@ Two pieces make this work:
 > OpResultList)`, [vllm#45392](https://github.com/vllm-project/vllm/issues/45392))
 > and abort engine startup during the profiling pass. The plugin is designed to
 > run inside the vendor container, where the FlashInfer/cutlass-dsl/CUDA combo is
-> matched. The gym-spawned attempt is preserved for reference in
-> `gdpval_minimax_local_judge.yaml` +
-> `responses_api_models/local_vllm_model/configs/MiniMaxAI/MiniMax-M3.yaml`, but
-> it does **not** currently start on GB200 — use the self-hosted overlay instead.
+> matched. Gym does not currently ship a MiniMax-M3 `local_vllm_model` config for
+> this path; use the self-hosted overlay instead.
 
 ### Run it
 
-First serve MiniMax-M3 yourself on your GPU node(s). NVIDIA users should use
-the internal serving workflow, which is maintained separately from Gym. Use a
-**single-node TP=4** instance, or independent single-node TP=4 replicas for
-data-parallel throughput. Do NOT form one TP=8 group across two nodes: the
-cross-node MXFP8 all-reduce path on this container produces *garbage logits
-that still start cleanly*.
+First serve MiniMax-M3 yourself on your GPU node(s), using a container/runtime
+combination that is known to work for that model. In our testing, a
+**single-node TP=4** instance worked, as did independent single-node TP=4
+replicas for data-parallel throughput. Do NOT form one TP=8 group across two
+nodes unless you have validated that stack: the cross-node MXFP8 all-reduce path
+can produce *garbage logits that still start cleanly*.
 
 ```bash
 # Verify the self-hosted endpoint from the gym host:
