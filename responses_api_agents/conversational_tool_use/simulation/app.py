@@ -536,15 +536,7 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
         response_payload: Dict[str, Any],
     ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, Dict[str, Any]]:
         response = NeMoGymResponse.model_validate(response_payload)
-        has_model_output = any(
-            getattr(item, "role", None) == "assistant"
-            or getattr(item, "type", None) in {"reasoning", "reasoning_item", "function_call"}
-            for item in response.output
-        )
-        if has_model_output:
-            input_items, output_items = split_responses_input_output_items(response.output)
-        else:
-            input_items, output_items = list(response.output), []
+        input_items, output_items = split_responses_input_output_items(response.output)
         if not input_items:
             return responses_create_params, response_payload
 
