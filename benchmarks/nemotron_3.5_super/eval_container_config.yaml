@@ -89,6 +89,16 @@ genrm_model:
       openai_api_key: ${nv_inference_api_key}
       max_concurrent_requests: 16
 
+tau2_banking_knowledge_bm25_grep_artificial_analysis_agent:
+  responses_api_agents:
+    tau2:
+      num_workers: 1
+
+tau2_benchmark_agent:
+  responses_api_agents:
+    tau2:
+      num_workers: 1
+
 ########################################
 # END Nvidia-specific configs.
 ########################################
