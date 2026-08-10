@@ -40,6 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    training_variant_of,
 )
 from nemo_gym.responses_converter import (
     ResponsesConverter,
@@ -833,6 +834,28 @@ def test_split_on_assistant_message():
     assert outputs == [assistant]
 
 
+def test_a_non_message_item_with_an_assistant_role_is_not_a_boundary():
+    """The role shortcut must not decide the split for items that are not messages.
+
+    An item type outside the boundary set stays on the prompt side however its role reads.
+    No item type at the pinned SDK carries a role without being a message, so this is a guard
+    against a later version adding one rather than a fix for something reachable today.
+    A non-message item that opened the trained segment would label replayed prompt as generation.
+    """
+
+    class _RoledNonMessage:
+        type = "not_a_boundary_type"
+        role = "assistant"
+
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    carrier = _RoledNonMessage()
+
+    inputs, outputs = split_responses_input_output_items([user, carrier])
+
+    assert inputs == [user, carrier], "a non-message item must not open the trained segment"
+    assert outputs == []
+
+
 def test_split_on_function_call():
     user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
     fc = NeMoGymResponseFunctionToolCall(
@@ -870,7 +893,6 @@ def test_split_on_reasoning():
         "mcp_call",
         "mcp_list_tools",
         "reasoning",
-        "reasoning_item",
         "web_search_call",
     ],
 )
@@ -915,3 +937,63 @@ def test_round_trip_with_tool_calls(converter: ResponsesConverter):
     assert assistant_msg["role"] == "assistant"
     assert assistant_msg["content"] == "<think>thinking</think>chatting"
     assert assistant_msg["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+# ===========================================================================
+# training_variant_of
+# ===========================================================================
+
+
+def test_training_variant_of_returns_the_registered_variant():
+    assert training_variant_of(NeMoGymResponseOutputMessage) is NeMoGymResponseOutputMessageForTraining
+
+
+def test_training_variant_of_covers_everything_postprocess_can_emit():
+    """postprocess_assistant_message_dict passes response_output[-1] to training_variant_of, so
+    every class it appends must be registered."""
+    for cls in (
+        NeMoGymResponseReasoningItem,
+        NeMoGymResponseOutputMessage,
+        NeMoGymResponseFunctionToolCall,
+    ):
+        assert training_variant_of(cls) is not None
+
+
+def test_downconverting_an_unsupported_type_names_it_and_the_way_out():
+    """A Responses-only item reaching a chat backend must say which type and what to do.
+
+    This is the sibling of the training-variant error.
+    It fires mid-rollout, on whichever model server downconverts.
+    The message names the type rather than dumping the item, because an item can carry an opaque blob.
+    """
+    converter = ResponsesConverter(return_token_id_information=False)
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "file_search_call",
+                "id": "fs_1",
+                "queries": ["a-query-that-should-not-reach-the-error"],
+                "status": "completed",
+            }
+        ]
+    )
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        converter.responses_to_chat_completion_create_params(params)
+
+    message = str(excinfo.value)
+    assert "'file_search_call'" in message, "the error must name the offending type"
+    assert "Responses through" in message, "the error must point at the way out"
+    assert "a-query-that-should-not-reach-the-error" not in message, (
+        "the item payload must not be interpolated into the error"
+    )
+
+
+def test_training_variant_of_raises_a_named_error_for_an_unregistered_class():
+    """An unregistered class raises NotImplementedError, not KeyError."""
+
+    class _NotAnItem:
+        pass
+
+    with pytest.raises(NotImplementedError, match="has no ForTraining variant"):
+        training_variant_of(_NotAnItem)
