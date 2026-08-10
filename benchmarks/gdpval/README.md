@@ -340,14 +340,16 @@ you have validated that stack: the cross-node MXFP8 all-reduce path can produce
 curl -s http://<judge-host>:5000/v1/models
 ```
 
-Then point gym at that endpoint (the port and served-model name must match your
-deployment):
+Then point gym at that endpoint in repo-root `env.yaml` (the port and
+served-model name must match your deployment):
+
+```yaml
+MINIMAX_BASE_URL: http://<judge-host>:5000/v1
+MINIMAX_MODEL: minimax-m3
+MINIMAX_API_KEY: unused
+```
 
 ```bash
-export MINIMAX_BASE_URL=http://<judge-host>:5000/v1
-export MINIMAX_MODEL=minimax-m3
-export MINIMAX_API_KEY=unused
-
 gym eval run \
     --model-type vllm_model \
     --benchmark gdpval \
@@ -365,7 +367,7 @@ endpoint (a thin HTTP proxy — no GPU used by gym for the judge), sets
 
 Notes:
 
-- **Endpoint env vars**: `MINIMAX_BASE_URL` (must include `/v1`), `MINIMAX_MODEL`
+- **Endpoint config**: `MINIMAX_BASE_URL` (must include `/v1`), `MINIMAX_MODEL`
   (defaults to `MiniMaxAI/MiniMax-M3`; match the container's
   `--served-model-name`), and `MINIMAX_API_KEY` (any non-empty string; vLLM
   ignores it).

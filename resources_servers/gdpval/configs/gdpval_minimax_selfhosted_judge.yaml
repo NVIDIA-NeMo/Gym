@@ -53,11 +53,11 @@ gdpval_judge_model:
     openai_model:
       entrypoint: app.py
       # Your MiniMax-M3 server's OpenAI-compatible endpoint. Must include /v1.
-      openai_base_url: ${oc.env:MINIMAX_BASE_URL,http://127.0.0.1:8000/v1}
+      openai_base_url: ${oc.select:MINIMAX_BASE_URL,${oc.env:MINIMAX_BASE_URL,http://127.0.0.1:8000/v1}}
       # vLLM ignores the key by default; any non-empty string works.
-      openai_api_key: ${oc.env:MINIMAX_API_KEY,dummy}
+      openai_api_key: ${oc.select:MINIMAX_API_KEY,${oc.env:MINIMAX_API_KEY,dummy}}
       # Must match the server's --served-model-name (defaults to the HF id).
-      openai_model: ${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}
+      openai_model: ${oc.select:MINIMAX_MODEL,${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}}
       openai_default_headers: {}
 
 # --- Point the GDPVal resources server at that single self-hosted judge ------
@@ -72,7 +72,7 @@ gdpval_resources_server:
         name: gdpval_judge_model
       # The judge model id must match the server's served model name.
       judge_responses_create_params_overrides:
-        model: ${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}
+        model: ${oc.select:MINIMAX_MODEL,${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}}
       # Disable the frontier panel so scoring uses the single MiniMax-M3 judge
       # from judge_model_server (+ the overrides above).
       judge_panel: null
