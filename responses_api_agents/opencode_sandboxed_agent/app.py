@@ -335,7 +335,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             usage = NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export))
 
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
-            "opencode_results_fpath": str(results_local_fpath),
+            "opencode_results_fpath": str(results_local_fpath) if opencode_export_found else "",
             "opencode_run_stdout": (result.stdout if result else "") or "",
             "opencode_run_stderr": (result.stderr if result else "") or "",
             "opencode_export_found": opencode_export_found,
