@@ -47,6 +47,13 @@ class TestFernDocsLinks(unittest.TestCase):
                     self.assertIn(f'"{metric}":', guide)
                 self.assertIn("<rollout_id>.capture.jsonl", guide)
 
+    def test_model_call_capture_labels_the_raw_record_as_synthetic(self):
+        for version in ("latest", "v0.5.0"):
+            with self.subTest(version=version):
+                guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+
+                self.assertIn("The following synthetic record shows the exact persisted field shape.", guide)
+
     def test_model_call_capture_scopes_agent_observations_to_claude_code(self):
         for version in ("latest", "v0.5.0"):
             with self.subTest(version=version):

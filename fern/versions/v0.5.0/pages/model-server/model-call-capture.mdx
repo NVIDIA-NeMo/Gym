@@ -120,8 +120,9 @@ rollout tables omit `ng_trajectory` and model-call request and response payloads
 ### Raw `CaptureStore` record
 
 Each rollout has an append-only file named `<rollout_id>.capture.jsonl`. Each line contains one raw
-model-server exchange, including its request and response. The following record is formatted across
-lines for readability; it is stored as one JSONL line.
+model-server exchange, including its request and response.
+The following synthetic record shows the exact persisted field shape. It is formatted across lines
+for readability but stored as one JSONL line.
 
 ```json
 {
