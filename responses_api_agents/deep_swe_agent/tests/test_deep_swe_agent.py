@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 from asyncio import Semaphore
 from pathlib import Path
@@ -45,7 +60,11 @@ def _agent(tmp_path: Path) -> DeepSWEAgent:
         },
         harbor_agent_env={"OPENAI_BASE_URL": "https://inference-api.nvidia.com/v1"},
         harbor_jobs_dir=str(tmp_path / "jobs"),
-        sandbox_provider={"opensandbox": {"connection": {"domain": "sandbox", "api_key": "secret"}}},
+        sandbox_provider={
+            "opensandbox": {
+                "connection": {"domain": "sandbox", "api_key": "secret"}  # pragma: allowlist secret
+            }
+        },
         sandbox_spec={"provider_options": {"platform": {"os": "linux", "arch": "amd64"}}},
     )
     return DeepSWEAgent.model_construct(
@@ -95,9 +114,13 @@ def test_opensandbox_stream_timeout_exceeds_deep_swe_agent_timeout() -> None:
 
 def test_provider_secret_is_returned_separately() -> None:
     sanitized, secret = _provider_without_secret(
-        {"opensandbox": {"connection": {"domain": "sandbox", "api_key": "secret"}}}
+        {
+            "opensandbox": {
+                "connection": {"domain": "sandbox", "api_key": "secret"}  # pragma: allowlist secret
+            }
+        }
     )
-    assert secret == "secret"
+    assert secret == "secret"  # pragma: allowlist secret
     assert sanitized == {"opensandbox": {"connection": {"domain": "sandbox"}}}
 
 
