@@ -42,6 +42,23 @@ from responses_api_agents.simple_agent.app import (
 )
 
 
+def _drop_nulls(value):
+    """Recursively remove keys whose value is None.
+
+    NeMoGymResponse and the item models under it inherit the SDK's, so each openai release can add
+    optional fields at any depth. They arrive as None and break a literal comparison.
+    Comparing only the top-level keys this test asserts does not reach a field added inside
+    `output`, where the item models live.
+    A field this fixture expects to hold a value still fails if it arrives as None.
+    tests/unit_tests/test_openai_utils.py is what notices the field set moving.
+    """
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
 def _make_agent(
     observability_enabled: bool, agent_type: type[SimpleAgent] = SimpleAgent
 ) -> tuple[SimpleAgent, MagicMock]:
@@ -193,7 +210,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
         prefixed_response = client.post(
             "/ng-rollout/0-0/v1/responses", json={"input": [{"role": "user", "content": "hello"}]}
@@ -322,7 +339,7 @@ class TestApp:
         ]
         assert all(turn.timestamp > 0 for turn in turns)
         assert [turn.model_calls[0].response_id for turn in turns] == ["resp-tool", "resp-final"]
-        assert turns[0].model_dump(mode="json")["question"] == [
+        assert _drop_nulls(turns[0].model_dump(mode="json")["question"]) == [
             {"role": "user", "content": "question", "type": "message"}
         ]
         assert [item["type"] for item in turns[1].model_dump(mode="json")["question"]] == [
@@ -668,7 +685,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
@@ -897,4 +914,4 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
