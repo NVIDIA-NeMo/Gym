@@ -1,0 +1,39 @@
+{
+  "extraction": [
+    {"success": true, "result": {"data": [{"coverage_hours": "h24x7"}]}},
+    {"success": true, "result": {"data": [{"a": 1, "b": 2}]}},
+    {"success": true, "result": {"data": [{"a": 1}, {"a": 2}]}},
+    {"success": true, "result": {"data": []}},
+    {"success": true, "result": {"data": [{"COUNT(*)": 0}]}},
+    {"success": true, "result": {"rows": [{"c": 5}]}},
+    {"success": true, "result": {"rows": [[7]]}},
+    {"success": true, "result": {"rows": [[1, 2]]}},
+    {"success": true, "result": {"rows": [{"a": 1}, {"a": 2}]}},
+    {"success": true, "result": {"rows": []}},
+    {"success": true, "result": {"content": [{"type": "text", "text": "oops"}]}},
+    {"success": true, "result": {"content": "plain"}},
+    {"success": true, "result": {"result": 42}},
+    {"success": true, "result": {"other": 1}},
+    {"success": true, "result": "scalar-string"},
+    {"success": true, "result": {}},
+    {"success": false, "result": {"content": [{"type": "text", "text": "err"}]}},
+    {"success": false},
+    {}
+  ],
+  "comparison": [
+    {"actual": 0, "expected": "0", "comparison_type": "equals"},
+    {"actual": 0, "expected": 0, "comparison_type": "equals"},
+    {"actual": "h24x7", "expected": "h24x7", "comparison_type": "equals"},
+    {"actual": 1, "expected": "1", "comparison_type": "equals"},
+    {"actual": null, "expected": null, "comparison_type": "equals"},
+    {"actual": null, "expected": 0, "comparison_type": "equals"},
+    {"actual": 5, "expected": 3, "comparison_type": "greater_than"},
+    {"actual": "5", "expected": 3, "comparison_type": "greater_than"},
+    {"actual": 2, "expected": 3, "comparison_type": "less_than"},
+    {"actual": "hello world", "expected": "world", "comparison_type": "contains"},
+    {"actual": [1, 2], "expected": 1, "comparison_type": "contains"},
+    {"actual": [1, 2], "expected": "1", "comparison_type": "contains"},
+    {"actual": 5, "expected": 5, "comparison_type": "approximately"},
+    {"actual": {"a": 1}, "expected": {"a": 1}, "comparison_type": "equals"}
+  ]
+}
