@@ -13,7 +13,7 @@ should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
     EXPERIMENT_NAME=$EXPERIMENT_NAME
 else
-    EXPERIMENT_NAME="vllm_only"
+    EXPERIMENT_NAME="${EXPERIMENT_NAME:-vllm_only}"
 fi
 
 # Fixed vLLM Port configurations
