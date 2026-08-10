@@ -34,7 +34,6 @@ driver:
   #   - /lustre/datasets:/data
   benchmarks:
     gpqa:
-      output_jsonl_fpath: artifacts/rollouts_gpqa.jsonl  # default; relative to the job's working directory
       prepare:
         config_paths:
           - benchmarks/ifbench/config.yaml

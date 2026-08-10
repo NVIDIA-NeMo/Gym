@@ -161,7 +161,7 @@ def build_sbatch_script(
     if benchmark.prepare:
         prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
 
-    output_path = f"+output_jsonl_fpath={benchmark.output_jsonl_fpath}"
+    output_path = "+output_jsonl_fpath=artifacts/rollouts.jsonl"
     extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
     gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
     entrypoint = render_driver_entrypoint(

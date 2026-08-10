@@ -110,9 +110,6 @@ class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
-    # Path (relative to the job's working directory) where the rollout JSONL is written.
-    # The parent directory is pre-created in the staging area before job submission.
-    output_jsonl_fpath: str = "artifacts/rollouts.jsonl"
 
 
 class GymInstallConfig(_StrictModel):
