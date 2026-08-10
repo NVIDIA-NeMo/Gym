@@ -164,7 +164,6 @@ CONTAINER=$CONTAINER \
 MOUNTS=$MOUNTS \
 sbatch \
     --nodes=$NUM_NODES \
-    --gres=gpu:4 \
     --time=04:00:00 \
     --job-name=vllm-pd-disagg-$USER \
     --output=slurm-logs/%j-%x.log \
