@@ -701,9 +701,8 @@ Found global config dict yaml:
                 f"openai=={openai_version}",
             ]
 
-            # Constrain python version since ray is sensitive to this, unless the caller explicitly
-            # pins a compatible interpreter path/version for the target runtime.
-            global_config_dict.setdefault(PYTHON_VERSION_KEY_NAME, python_version())
+            # Constrain python version since ray is sensitive to this.
+            global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
 
             # Skip venv setup is opt-in and defaults to False.
             global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
