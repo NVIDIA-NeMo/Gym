@@ -80,6 +80,17 @@ rc=$?
 kill "$GW_PID" 2>/dev/null || true
 kill -9 "$GW_PID" 2>/dev/null || true
 
+if [ "${NEMO_GYM_OBSERVABILITY_ENABLED:-0}" = "1" ]; then
+  # Agent directories also contain credentials; retain only session metadata and transcripts.
+  for sessions_dir in "$HOME"/.openclaw/agents/*/sessions; do
+    [ -d "$sessions_dir" ] || continue
+    agent_id=$(basename "$(dirname "$sessions_dir")")
+    dest="$OUT/openclaw_sessions/agents/$agent_id"
+    mkdir -p "$dest"
+    cp -a "$sessions_dir" "$dest/" 2>/dev/null || true
+  done
+fi
+
 # Package $OUT so the host can download it (Sandbox API pulls one file). Tar to a temp
 # path then move in, so the archive never tries to include itself.
 tar czf "$TMPDIR/out.tgz" -C "$OUT" . 2>/dev/null || true

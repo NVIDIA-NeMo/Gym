@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import re
 import sys
 from argparse import ArgumentParser
 from collections import defaultdict
@@ -31,6 +32,7 @@ import rich
 import wandb
 import wandb.util
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
+from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
@@ -40,6 +42,7 @@ from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
+    ConfigInterpolationError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     InheritPathNotFoundError,
@@ -73,6 +76,7 @@ RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
+MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
@@ -107,6 +111,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
@@ -704,6 +709,10 @@ Found global config dict yaml:
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
 
+            # How long `gym env start` waits for the model endpoints named in the config to accept
+            # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
+            global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
+
             # UV related configuration
             # UV caching directory overrides to local folders.
             global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
@@ -828,7 +837,24 @@ def set_global_config_dict(
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
 ) -> None:
     global _GLOBAL_CONFIG_DICT
-    global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
+    try:
+        global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
+    except InterpolationResolutionError as e:
+        # Same class of user error as an unset '???' (see raise_on_missing_values), so report it the same
+        # way instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
+        # (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
+        # message and so is passed through as-is.
+        match = re.search(r"Interpolation key '([^']+)' not found", str(e))
+        if not match:
+            raise ConfigInterpolationError(str(e)) from e
+        key = match.group(1)
+        raise ConfigInterpolationError(
+            f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
+
+Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++{key}=<value>"""
+        ) from e
 
     _GLOBAL_CONFIG_DICT = global_config_dict
 

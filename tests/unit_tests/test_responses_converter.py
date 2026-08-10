@@ -14,8 +14,10 @@
 # limitations under the License.
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
+from types import SimpleNamespace
+
 import pytest
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -43,6 +45,7 @@ from nemo_gym.responses_converter import (
     ResponsesConverterState,
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,
+    _usage_detail,
     split_responses_input_output_items,
 )
 
@@ -72,6 +75,12 @@ def _fixed_uuid(monkeypatch: pytest.MonkeyPatch):
 def test_backwards_compatible_aliases():
     assert VLLMConverter is ResponsesConverter
     assert VLLMConverterResponsesToChatCompletionsState is ResponsesConverterState
+
+
+def test_usage_detail_ignores_ambiguous_top_level_names():
+    usage = {"cached_tokens": 99, "cached_input_tokens": 7, "reasoning_tokens": 88, "reasoning_output_tokens": 3}
+    assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 7
+    assert _usage_detail(usage, "completion_tokens_details", "reasoning_tokens", "reasoning_output_tokens") == 3
 
 
 # ===========================================================================
@@ -504,7 +513,15 @@ def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: Re
 # ===========================================================================
 
 
-def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
+@pytest.mark.parametrize(
+    ("finish_reason", "status", "incomplete_details"),
+    [
+        ("tool_calls", "completed", None),
+        ("length", "incomplete", {"reason": "max_output_tokens"}),
+        ("content_filter", "incomplete", {"reason": "content_filter"}),
+    ],
+)
+def test_chat_completion_to_response_sanity(converter: ResponsesConverter, finish_reason, status, incomplete_details):
     actual_response = converter.chat_completion_to_response(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
             model="",
@@ -523,7 +540,7 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
             choices=[
                 NeMoGymChoice(
                     index=0,
-                    finish_reason="tool_calls",
+                    finish_reason=finish_reason,
                     message=NeMoGymChatCompletionMessage(
                         role="assistant",
                         content="hi",
@@ -532,9 +549,11 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
                 )
             ],
             usage=CompletionUsage(
-                prompt_tokens=1,
-                completion_tokens=2,
-                total_tokens=3,
+                prompt_tokens=11,
+                completion_tokens=5,
+                total_tokens=19,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=7),
+                completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
             ),
         ),
     )
@@ -554,12 +573,14 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter):
             )
         ],
         parallel_tool_calls=True,
+        status=status,
+        incomplete_details=incomplete_details,
         usage=NeMoGymResponseUsage(
-            input_tokens=1,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-            output_tokens=2,
-            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-            total_tokens=3,
+            input_tokens=11,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7),
+            output_tokens=5,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=3),
+            total_tokens=19,
         ),
         tool_choice="auto",
         tools=[],
@@ -612,6 +633,40 @@ def test_split_on_reasoning():
     inputs, outputs = split_responses_input_output_items([user, reasoning])
     assert inputs == [user]
     assert outputs == [reasoning]
+
+
+@pytest.mark.parametrize(
+    "output_type",
+    [
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "function_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "reasoning",
+        "reasoning_item",
+        "web_search_call",
+    ],
+)
+def test_split_on_model_output_item_type(output_type: str):
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    output_item = SimpleNamespace(type=output_type)
+    inputs, outputs = split_responses_input_output_items([user, output_item])
+    assert inputs == [user]
+    assert outputs == [output_item]
+
+
+def test_split_input_only_items():
+    system = NeMoGymEasyInputMessage(role="system", content="policy", type="message")
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    inputs, outputs = split_responses_input_output_items([system, user])
+    assert inputs == [system, user]
+    assert outputs == []
 
 
 def test_round_trip_with_tool_calls(converter: ResponsesConverter):
