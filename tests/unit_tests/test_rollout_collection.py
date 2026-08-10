@@ -28,6 +28,45 @@ from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollecti
 
 
 class TestRolloutCollection:
+    async def test_run_examples_debug_timing_is_opt_in(self) -> None:
+        row = {"agent_ref": {"name": "my_agent"}, "value": 7}
+        response_body = orjson.dumps({"reward": 1.0})
+        response = MagicMock(ok=True)
+        response.read = AsyncMock(return_value=response_body)
+        server_client = MagicMock()
+        server_client.post = AsyncMock(return_value=response)
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return server_client
+
+        normal_future = list(MockHelper().run_examples([row]))[0]
+        assert await normal_future == (row, {"reward": 1.0})
+        assert "_debug_timing" not in server_client.post.await_args_list[0].kwargs
+
+        debug_future = list(MockHelper().run_examples([row], include_debug_timing=True))[0]
+        debug_row, debug_result, timing = await debug_future
+        assert debug_row == row
+        assert debug_result == {"reward": 1.0}
+        assert timing["client/total_s"] >= 0
+        assert timing["client/response_body_read_s"] >= 0
+        assert timing["client/response_content_length_bytes"] == len(response_body)
+        assert server_client.post.await_args_list[1].kwargs["_debug_timing"] is timing
+
+    async def test_run_examples_debug_timing_is_attached_to_failures(self) -> None:
+        row = {"agent_ref": {"name": "my_agent"}}
+        server_client = MagicMock()
+        server_client.post = AsyncMock(side_effect=RuntimeError("request failed"))
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return server_client
+
+        future = list(MockHelper().run_examples([row], include_debug_timing=True))[0]
+        with pytest.raises(RuntimeError, match="request failed") as exc_info:
+            await future
+        assert exc_info.value.nemo_gym_debug_timings_s["client/total_s"] >= 0
+
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
         prompt_path = tmp_path / "prompt.yaml"

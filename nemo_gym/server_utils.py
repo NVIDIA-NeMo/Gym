@@ -17,6 +17,7 @@ import atexit
 import json
 import resource
 import sys
+import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from logging import Filter as LoggingFilter
@@ -182,20 +183,49 @@ DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different
 
 
 async def request(
-    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _debug_timing: Optional[dict[str, Any]] = None,
+    **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
+    request_start = time.perf_counter()
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
+        serialize_start = time.perf_counter()
         kwargs["data"] = orjson.dumps(kwargs.pop("json"))
+        if _debug_timing is not None:
+            _debug_timing["client/json_serialize_s"] = (
+                time.perf_counter() - serialize_start
+            )
+            _debug_timing["client/request_body_bytes"] = float(len(kwargs["data"]))
+            # The outer agent receives this exact serialized request body.
+            _debug_timing["agent/request_content_length_bytes"] = float(len(kwargs["data"]))
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
     client = get_global_aiohttp_client()
     num_tries = 1
+    request_attempts = 0
+    saw_connection_reset = False
     while True:
+        request_attempts += 1
         try:
-            return await client.request(method=method, url=url, **kwargs)
+            response = await client.request(method=method, url=url, **kwargs)
+            if _debug_timing is not None:
+                request_to_headers_s = time.perf_counter() - request_start
+                _debug_timing["client/aiohttp_request_to_headers_s"] = (
+                    request_to_headers_s
+                )
+                _debug_timing["client/request_attempts_count"] = float(request_attempts)
+                _debug_timing["status/connection_reset"] = float(saw_connection_reset)
+                # This is the closest observable client-side approximation of
+                # the outer agent handler duration. More detailed server-side
+                # stages may be added independently without changing this API.
+                _debug_timing["agent/total_s"] = request_to_headers_s
+            return response
         except ServerDisconnectedError:
+            saw_connection_reset = True
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
@@ -205,6 +235,7 @@ async def request(
 
             await asyncio.sleep(0.5)
         except ClientOSError:
+            saw_connection_reset = True
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
@@ -214,6 +245,12 @@ async def request(
 
             await asyncio.sleep(0.5)
         except Exception as e:
+            if _debug_timing is not None:
+                _debug_timing["client/aiohttp_request_to_headers_s"] = (
+                    time.perf_counter() - request_start
+                )
+                _debug_timing["client/request_attempts_count"] = float(request_attempts)
+                _debug_timing["status/connection_reset"] = float(saw_connection_reset)
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 

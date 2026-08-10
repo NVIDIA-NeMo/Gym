@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import time
 from asyncio import Future, Semaphore
 from collections import Counter
 from contextlib import nullcontext
@@ -430,18 +431,63 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
+        include_debug_timing: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
+
+        When ``include_debug_timing`` is false, each future retains the
+        historical ``(row, result)`` shape. When enabled, each future returns
+        ``(row, result, timing_seconds)``. Exceptions carry the partial timing
+        dictionary as ``nemo_gym_debug_timings_s`` so callers can diagnose and
+        log failed requests as well as successful ones.
         """
         server_client = self.setup_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
 
-        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+        async def _post_subroutine(
+            row: Dict,
+        ) -> Tuple[Dict, Dict] | Tuple[Dict, Dict, Dict[str, float]]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                await raise_for_status(res)
-                return row, await get_response_json(res)
+                if not include_debug_timing:
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    await raise_for_status(res)
+                    return row, await get_response_json(res)
+
+                request_timing: Dict[str, float] = {}
+                request_start = time.perf_counter()
+                try:
+                    res = await server_client.post(
+                        server_name=row["agent_ref"]["name"],
+                        url_path="/run",
+                        json=row,
+                        _debug_timing=request_timing,
+                    )
+                    await raise_for_status(res)
+
+                    body_read_start = time.perf_counter()
+                    response_body = await res.read()
+                    request_timing["client/response_body_read_s"] = time.perf_counter() - body_read_start
+                    request_timing["client/response_content_length_bytes"] = float(
+                        len(response_body)
+                    )
+                    result = orjson.loads(response_body)
+                    request_timing["client/total_s"] = time.perf_counter() - request_start
+
+                    agent_total_s = request_timing.get("agent/total_s")
+                    if agent_total_s is not None:
+                        request_timing["client/outside_agent_s"] = max(
+                            0.0,
+                            request_timing["client/total_s"] - agent_total_s,
+                        )
+                    return row, result, request_timing
+                except Exception as exc:
+                    request_timing["client/total_s"] = time.perf_counter() - request_start
+                    try:
+                        setattr(exc, "nemo_gym_debug_timings_s", request_timing)
+                    except (AttributeError, TypeError):
+                        pass
+                    raise
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
