@@ -43,6 +43,12 @@ class FakeConnectionConfig:
 
 
 @dataclass(frozen=True)
+class FakeNetworkPolicy:
+    defaultAction: str = "deny"
+    egress: list[dict[str, Any]] | None = None
+
+
+@dataclass(frozen=True)
 class FakeVolume:
     name: str
 
@@ -183,7 +189,27 @@ async def test_direct_create_passes_platform_to_sdk_create(
     )
 
 
-def test_provider_validation_and_retry_helpers() -> None:
+async def test_direct_create_passes_network_policy_to_sdk_create(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(opensandbox_provider, "_to_network_policy", lambda value: FakeNetworkPolicy(**value))
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(
+        SandboxSpec(
+            image="image:tag",
+            provider_options={"network_policy": {"defaultAction": "deny"}},
+        ),
+    )
+
+    assert FakeSandbox.created_kwargs["network_policy"] == FakeNetworkPolicy(defaultAction="deny")
+
+
+async def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")
     with pytest.raises(TypeError, match="extensions"):
@@ -192,6 +218,9 @@ def test_provider_validation_and_retry_helpers() -> None:
         )
     with pytest.raises(TypeError, match="must be a bool"):
         opensandbox_provider._provider_option_bool({"skip_health_check": "true"}, "skip_health_check")
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    with pytest.raises(TypeError, match="network_policy"):
+        await provider._create_once(SandboxSpec(image="image:tag", provider_options={"network_policy": ["deny"]}))
 
     assert opensandbox_provider._resource_map(SandboxResources(cpu=2.0))["cpu"] == "2"
     assert opensandbox_provider._to_sandbox_status("starting") == SandboxStatus.STARTING

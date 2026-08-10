@@ -304,6 +304,10 @@ def _harbor_run_mocks(
 
 
 class TestApp:
+    def test_setup_webserver_includes_aggregate_metrics(self):
+        paths = {route.path for route in _make_server().setup_webserver().routes}
+        assert {"/run", "/v1/responses", "/aggregate_metrics"}.issubset(paths)
+
     async def test_run_with_token_details(self):
         server = _make_server()
         with _harbor_run_mocks(trajectory=DEFAULT_TRAJECTORY):

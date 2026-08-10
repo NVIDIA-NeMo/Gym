@@ -93,6 +93,7 @@ DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 PROVIDER_OPTION_PLATFORM = "platform"
+PROVIDER_OPTION_NETWORK_POLICY = "network_policy"
 PROVIDER_OPTION_SKIP_HEALTH_CHECK = "skip_health_check"
 PROVIDER_OPTION_SNAPSHOT_ID = "snapshot_id"
 PROVIDER_OPTION_VOLUMES = "volumes"
@@ -316,6 +317,18 @@ def _normalize_spec(spec: SandboxSpec) -> SandboxSpec:
 def _to_platform_spec(platform: dict[str, Any]) -> Any:
     _, _, _, PlatformSpec, _ = _require_opensandbox_sdk()
     return PlatformSpec(**platform)
+
+
+def _to_network_policy(network_policy: Mapping[str, Any]) -> Any:
+    try:
+        from opensandbox.models.sandboxes import NetworkPolicy
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "OpenSandbox network_policy requires an SDK version that exposes "
+            "opensandbox.models.sandboxes.NetworkPolicy."
+        ) from e
+
+    return NetworkPolicy(**dict(network_policy))
 
 
 def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
@@ -714,9 +727,14 @@ class OpenSandboxProvider:
         if spec.entrypoint is not None:
             kwargs["entrypoint"] = spec.entrypoint
         platform = spec.provider_options.get(PROVIDER_OPTION_PLATFORM)
+        network_policy = spec.provider_options.get(PROVIDER_OPTION_NETWORK_POLICY)
         volumes = _spec_volumes(spec)
         if platform is not None:
             kwargs["platform"] = _to_platform_spec(platform)
+        if network_policy is not None:
+            if not isinstance(network_policy, Mapping):
+                raise TypeError("OpenSandbox provider option 'network_policy' must be a mapping")
+            kwargs["network_policy"] = _to_network_policy(network_policy)
         if volumes is not None:
             kwargs["volumes"] = _to_volumes(volumes)
         if self._create.skip_health_check:

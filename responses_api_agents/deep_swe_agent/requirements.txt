@@ -1,0 +1,6 @@
+-e nemo-gym[dev,sandbox] @ ../../
+dirhash>=0.5.0
+litellm==1.79.3
+loguru>=0.7.3
+shortuuid>=1.0.13
+toml>=0.10.2

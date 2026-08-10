@@ -200,10 +200,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
         app = FastAPI()
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
+
+    async def _run_job(self, job_config_dict: dict[str, Any]) -> str:
+        """Run one job and return its trial directory."""
+        params = {"job_config_dict": job_config_dict}
+        future = runner_ray_remote.remote(_run_harbor_job_sync, params)
+        return await asyncio.to_thread(ray.get, future)
 
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self.sem:
@@ -237,11 +244,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             )
 
             try:
-                params = dict(
-                    job_config_dict=job_config_dict,
-                )
-                future = runner_ray_remote.remote(_run_harbor_job_sync, params)
-                trial_dir_path = await asyncio.to_thread(ray.get, future)
+                trial_dir_path = await self._run_job(job_config_dict)
                 trial_dir = Path(trial_dir_path)
 
                 # Read the trial result (summary: reward, agent_result, verifier_result)
