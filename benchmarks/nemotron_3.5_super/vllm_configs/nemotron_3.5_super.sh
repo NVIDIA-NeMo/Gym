@@ -12,6 +12,7 @@ VLLM_COMMON_ARGS=(
     --enable-chunked-prefill
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
+    --no-enable-prefix-caching
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
