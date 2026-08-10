@@ -209,7 +209,7 @@ cleanup_server() {
 trap cleanup_server EXIT INT TERM
 
 if (( $should_run_eval )); then
-    until curl -fsS "http://\$PREFILL_HEAD:$ROUTER_SERVER_PORT/health" >/dev/null; do
+    until curl -fs "http://\$PREFILL_HEAD:$ROUTER_SERVER_PORT/health" >/dev/null; do
         if ! kill -0 "\$server_step" 2>/dev/null; then
             wait "\$server_step"
         fi
@@ -246,10 +246,9 @@ VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
     --time=04:00:00 \
-    --job-name=vllm-pd-disagg-$USER \
+    --job-name=gym-vllm-eval-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \
     --exclusive \
     --segment=$NUM_NODES \
-    --export=ALL \
     --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'
