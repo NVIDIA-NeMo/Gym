@@ -147,6 +147,42 @@ fi
 EOF
 )
 
+batch_command=$(cat <<'EOF'
+set -euo pipefail
+
+if [[ "${SLURM_JOB_NUM_NODES:-}" != 4 ]]; then
+    echo "This DP=2 prefill / DP=2 decode configuration requires exactly four nodes." >&2
+    exit 2
+fi
+
+nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
+prefill_host_0=$(getent hosts "${nodes[0]}" | awk 'NR == 1 {print $1}')
+prefill_host_1=$(getent hosts "${nodes[1]}" | awk 'NR == 1 {print $1}')
+decode_host_0=$(getent hosts "${nodes[2]}" | awk 'NR == 1 {print $1}')
+decode_host_1=$(getent hosts "${nodes[3]}" | awk 'NR == 1 {print $1}')
+if [[ -z "$prefill_host_0" || -z "$prefill_host_1" ||
+      -z "$decode_host_0" || -z "$decode_host_1" ]]; then
+    echo "Could not resolve allocated prefill/decode node addresses." >&2
+    exit 1
+fi
+
+# Do not start Ray: each Slurm task directly runs a vLLM DP rank.
+PD_PREFILL_HOSTS="$prefill_host_0 $prefill_host_1" \
+PD_DECODE_HOSTS="$decode_host_0 $decode_host_1" \
+srun --nodes=4 --ntasks=4 --ntasks-per-node=1 \
+    --container-image="$CONTAINER" \
+    --container-name=container-on-node \
+    --container-mounts="$MOUNTS" \
+    --container-workdir="$SLURM_SUBMIT_DIR" \
+    --no-container-mount-home \
+    bash -lc '
+        set -euo pipefail
+        cd "$SLURM_SUBMIT_DIR"
+        exec "$@"
+    ' bash "$@"
+EOF
+)
+
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 CONTAINER=$CONTAINER \
 MOUNTS=$MOUNTS \
@@ -155,6 +191,8 @@ sbatch \
     --gres=gpu:4 \
     --time=04:00:00 \
     --job-name=vllm-pd-disagg-$USER \
+    --output=slurm-logs/%j-%x.log \
+    --ntasks-per-node=1 \
     --exclusive \
     --segment=$NUM_NODES \
-    scripts/sbatch_pd_disagg_base.sh bash -lc "$command"
+    bash -lc "$batch_command" bash bash -lc "$command"
