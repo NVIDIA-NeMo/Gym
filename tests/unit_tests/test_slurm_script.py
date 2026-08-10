@@ -434,7 +434,7 @@ def test_build_sbatch_script_driver_env(bench_dir):
             "driver": {
                 "container": "python:3.12",
                 "benchmarks": {"gsm8k": {}},
-                "env": {"WANDB_API_KEY": "wb_secret"},
+                "env": {"WANDB_API_KEY": "wb_secret"},  # pragma: allowlist secret
             },
             "job": {"output_path": "/remote/jobs"},
         }
