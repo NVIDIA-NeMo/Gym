@@ -550,6 +550,21 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             return setup_dir
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
+        # Invoke the venv through the /r2egym_setup bind: _build_apptainer_command always
+        # creates that one, while its second bind of the setup dir at the original host
+        # path needs overlay/underlay support for deep destination paths inside read-only
+        # SIFs and can fail to establish. Put both path variants of the venv
+        # site-packages and src tree on PYTHONPATH — the editable install's .pth file
+        # references the original host path, and Python silently skips entries that do
+        # not resolve — so imports work whichever binds succeeded.
+        python_path = ":".join(
+            [
+                "/r2egym_setup/R2E-Gym/venv/lib/python3.12/site-packages",
+                f"{self.config.r2e_gym_setup_dir}/R2E-Gym/venv/lib/python3.12/site-packages",
+                "/r2egym_setup/R2E-Gym/src",
+                f"{self.config.r2e_gym_setup_dir}/R2E-Gym/src",
+            ]
+        )
         r2e_gym_cmd = (
             f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{self._get_command_sleep_until_predictions_file()} && "
@@ -559,9 +574,9 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             f'export UV_INSTALL_DIR="{self.config.r2e_gym_setup_dir}/uv" && '
             f'export UV_PYTHON_INSTALL_DIR="{self.config.r2e_gym_setup_dir}/python" && '
             f'export PATH="{self.config.r2e_gym_setup_dir}/uv/bin:$PATH" && '
+            f'export PYTHONPATH="{python_path}:$PYTHONPATH" && '
             # Run with clean environment to avoid venv contamination
-            # Use the pre-built venv directly with its absolute path
-            f"env -u VIRTUAL_ENV {self.config.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
+            "env -u VIRTUAL_ENV /r2egym_setup/R2E-Gym/venv/bin/python -m r2egym.agenthub.run.run_local_evaluation "
             f"    --predictions_path {self.config.output_for_eval_mounted_path} "
             f"    --instance_id {self.config.instance_id} "
             f"    --timeout {self.config.swebench_tests_timeout} "
