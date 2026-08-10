@@ -34,8 +34,12 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
+# Wait for vLLM server spinup
+until curl -fs "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" >/dev/null; do
+    sleep 5
+done
 
+experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 gym eval run \
@@ -49,7 +53,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
-    ++policy_base_url=\$ip \
+    ++policy_base_url=http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
     ++global_aiohttp_connector_limit_per_host=16384
