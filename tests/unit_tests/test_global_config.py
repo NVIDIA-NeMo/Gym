@@ -67,6 +67,7 @@ class TestGlobalConfig:
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
+            "model_endpoint_readiness_timeout_seconds": 600,
             "uv_cache_dir": str(CACHE_DIR / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
         }
