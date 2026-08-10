@@ -89,6 +89,9 @@ DECODE_HEAD=\$DECODE_HEAD
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
+# Generic vLLM environment variables.
+export VLLM_USE_FASTOKENS=1
+
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
 # host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
