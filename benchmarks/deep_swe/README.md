@@ -34,14 +34,11 @@ ng_e2e_collect_rollouts \
 
 See <https://deepswe.datacurve.ai/run> for the upstream Pier workflow.
 
-## Reproduction
+## Result
 
 GPT-5.5 at `xhigh` with mini-swe-agent 2.4.6 scored 75/113, or 66.37%.
-This is within the published 61% to 73% interval. One infrastructure-invalid
-attempt was replaced by one run of the same task with the same configuration.
+The published range is 61% to 73%. The raw run scored 74/113. One failed
+infrastructure attempt was rerun once with the same setup and passed.
 
-- [Score and provenance](results/gpt55_xhigh_reproduction.json)
-- [Five example rollouts](results/gpt55_xhigh_example_rollouts.jsonl)
-
-The examples retain full tool trajectories and omit run-specific infrastructure
-metadata.
+See the five [inputs](data/example.jsonl) and
+[rollouts](data/example_rollouts.jsonl).
