@@ -14,6 +14,8 @@
 # limitations under the License.
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
+from types import SimpleNamespace
+
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
@@ -631,6 +633,40 @@ def test_split_on_reasoning():
     inputs, outputs = split_responses_input_output_items([user, reasoning])
     assert inputs == [user]
     assert outputs == [reasoning]
+
+
+@pytest.mark.parametrize(
+    "output_type",
+    [
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "function_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "reasoning",
+        "reasoning_item",
+        "web_search_call",
+    ],
+)
+def test_split_on_model_output_item_type(output_type: str):
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    output_item = SimpleNamespace(type=output_type)
+    inputs, outputs = split_responses_input_output_items([user, output_item])
+    assert inputs == [user]
+    assert outputs == [output_item]
+
+
+def test_split_input_only_items():
+    system = NeMoGymEasyInputMessage(role="system", content="policy", type="message")
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    inputs, outputs = split_responses_input_output_items([system, user])
+    assert inputs == [system, user]
+    assert outputs == []
 
 
 def test_round_trip_with_tool_calls(converter: ResponsesConverter):

@@ -15,6 +15,7 @@
 import json
 from asyncio import sleep
 from typing import (
+    Annotated,
     Any,
     Dict,
     List,
@@ -56,6 +57,11 @@ from openai.types.chat.completion_create_params import (
 from openai.types.responses import (
     FunctionToolParam,
     Response,
+    ResponseCodeInterpreterToolCall,
+    ResponseComputerToolCall,
+    ResponseCustomToolCall,
+    ResponseFileSearchToolCall,
+    ResponseFunctionWebSearch,
     ResponseInputTextParam,
 )
 from openai.types.responses.response_create_params import (
@@ -72,6 +78,8 @@ from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
 from openai.types.responses.response_output_item import (
+    ImageGenerationCall,
+    LocalShellCall,
     McpApprovalRequest,
     McpCall,
     McpListTools,
@@ -85,7 +93,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -252,6 +260,38 @@ class NeMoGymResponseMcpApprovalRequest(McpApprovalRequest):
     server_label: Optional[str] = None
 
 
+class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
+    """A hosted file-search call (OpenAI Responses ``file_search_call`` output item).
+
+    The provider executes the search and returns the call in ``response.output``.
+    Inherits the upstream typing unchanged.
+    """
+
+
+class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
+    """A hosted web-search call (OpenAI Responses ``web_search_call`` output item)."""
+
+
+class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
+    """A computer-use action for the client to execute (``computer_call`` output item)."""
+
+
+class NeMoGymImageGenerationCall(ImageGenerationCall):
+    """A hosted image-generation call (OpenAI Responses ``image_generation_call`` output item)."""
+
+
+class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
+    """A hosted code-interpreter call (OpenAI Responses ``code_interpreter_call`` output item)."""
+
+
+class NeMoGymLocalShellCall(LocalShellCall):
+    """A local-shell command for the client to execute (``local_shell_call`` output item)."""
+
+
+class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
+    """A client-executed custom tool call (OpenAI Responses ``custom_tool_call`` output item)."""
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -295,6 +335,16 @@ NeMoGymResponseInputItem = Union[
     NeMoGymResponseMcpCall,
     NeMoGymResponseMcpListTools,
     NeMoGymResponseMcpApprovalRequest,
+    # Responses API output-call items. The upstream SDK includes these in both
+    # ResponseOutputItem and ResponseInputItemParam (outputs are echoed back as
+    # input on subsequent turns), so they belong in this shared union:
+    NeMoGymResponseFileSearchToolCall,
+    NeMoGymResponseFunctionWebSearch,
+    NeMoGymResponseComputerToolCall,
+    NeMoGymImageGenerationCall,
+    NeMoGymResponseCodeInterpreterToolCall,
+    NeMoGymLocalShellCall,
+    NeMoGymResponseCustomToolCall,
     # For training:
     NeMoGymEasyInputMessageForTraining,
     NeMoGymMessageForTraining,
@@ -345,7 +395,17 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 ########################################
 
 
-NeMoGymResponseOutputItem = NeMoGymResponseInputItem
+def _require_response_output_item_type(value: Any) -> Any:
+    """Prevent an untagged output item from being coerced into the wrong union member."""
+    if isinstance(value, dict) and "type" not in value:
+        raise ValueError("Responses API output items must include a type discriminator")
+    return value
+
+
+NeMoGymResponseOutputItem = Annotated[
+    NeMoGymResponseInputItem,
+    BeforeValidator(_require_response_output_item_type),
+]
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
@@ -359,6 +419,24 @@ class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
 class NeMoGymResponseUsage(ResponseUsage):
     input_tokens_details: NeMoGymResponseInputTokensDetails
     output_tokens_details: NeMoGymResponseOutputTokensDetails
+
+    @classmethod
+    def sum_from_list(cls, usages: "NeMoGymResponseUsage") -> "NeMoGymResponseUsage":
+        final_usage = NeMoGymResponseUsage(
+            input_tokens=0,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens=0,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=0,
+        )
+        for usage in usages:
+            final_usage.input_tokens += usage.input_tokens
+            final_usage.input_tokens_details.cached_tokens += usage.input_tokens_details.cached_tokens
+            final_usage.output_tokens += usage.output_tokens
+            final_usage.output_tokens_details.reasoning_tokens += usage.output_tokens_details.reasoning_tokens
+            final_usage.total_tokens += usage.total_tokens
+
+        return final_usage
 
 
 def accumulate_response_usage(
