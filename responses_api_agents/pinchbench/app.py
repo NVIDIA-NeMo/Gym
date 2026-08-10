@@ -266,7 +266,12 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         sb = AsyncSandbox(self.config.sandbox_provider)
         try:
             await sb.start(self._build_spec(task_id, rollout_id))
-            await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
+            exec_result = await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
+            if exec_result.error_type == "timeout":
+                raise TimeoutError("PinchBench sandbox execution timed out")
+            if exec_result.error_type:
+                detail = exec_result.stderr or exec_result.stdout or "unknown sandbox error"
+                raise RuntimeError(f"PinchBench sandbox execution failed ({exec_result.error_type}): {detail}")
             await sb.download(archive, out_dir / "out.tgz")
         finally:
             await sb.stop()
@@ -491,6 +496,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 parts.append(item)
             elif isinstance(item, dict):
                 parts.append(item.get("text") or item.get("output") or "")
+            else:
+                parts.append(getattr(item, "text", None) or getattr(item, "output", None) or "")
         return "\n".join(p for p in parts if p)
 
     @staticmethod
@@ -521,12 +528,13 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _tool_call_arguments(block: dict) -> str:
-        partial_args = block.get("partialArgs")
-        if isinstance(partial_args, str):
-            return partial_args
         args = block.get("arguments")
         if isinstance(args, str):
             return args
+        if args is None:
+            partial_args = block.get("partialArgs")
+            if isinstance(partial_args, str):
+                return partial_args
         if args is None:
             args = {}
         return json.dumps(args, ensure_ascii=False)
@@ -545,17 +553,25 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 return 0
 
         for event in events:
-            message = event.get("message") or {}
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
             if message.get("role") != "assistant":
                 continue
-            usage = message.get("usage") or {}
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
             input_tokens += as_int(usage.get("input") or usage.get("input_tokens") or usage.get("prompt_tokens"))
             output_tokens += as_int(
                 usage.get("output") or usage.get("output_tokens") or usage.get("completion_tokens")
             )
             cached_tokens += as_int(usage.get("cacheRead"))
-            input_details = usage.get("input_tokens_details") or {}
-            output_details = usage.get("output_tokens_details") or {}
+            input_details = usage.get("input_tokens_details")
+            if not isinstance(input_details, dict):
+                input_details = {}
+            output_details = usage.get("output_tokens_details")
+            if not isinstance(output_details, dict):
+                output_details = {}
             cached_tokens += as_int(input_details.get("cached_tokens"))
             reasoning_tokens += as_int(usage.get("reasoning") or output_details.get("reasoning_tokens"))
 
@@ -574,8 +590,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         if tpath.exists():
             for line in tpath.read_text().splitlines():
                 try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
+                    event = json.loads(line)
+                    events.append(event if isinstance(event, dict) else {"raw": line})
+                except (json.JSONDecodeError, RecursionError):
                     events.append({"raw": line})
         return events
 
@@ -593,7 +610,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             if event.get("type") != "message":
                 continue
 
-            message = event.get("message") or {}
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
             role = message.get("role")
             if role == "assistant":
                 reasoning = self._reasoning_text(message)
@@ -783,9 +802,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                     model_ref=self.config.model_server,
                 )
             if any(gap.code == "subagent_hierarchy_unavailable" for gap in tree_gaps):
-                observations.gaps = [
-                    gap for gap in observations.gaps if gap.code != "subagent_hierarchy_unavailable"
-                ]
+                observations.gaps = [gap for gap in observations.gaps if gap.code != "subagent_hierarchy_unavailable"]
             observations.gaps.extend(tree_gaps)
         except Exception:
             LOG.exception("failed to build OpenClaw observations")
