@@ -13,7 +13,7 @@ should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
     EXPERIMENT_NAME=$EXPERIMENT_NAME
 else
-    EXPERIMENT_NAME=""
+    EXPERIMENT_NAME="vllm_only"
 fi
 
 # Fixed vLLM Port configurations
@@ -246,7 +246,7 @@ VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
     --time=04:00:00 \
-    --job-name=gym-vllm-eval-$EXPERIMENT_NAME-$USER \
+    --job-name=gym-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \
     --exclusive \
