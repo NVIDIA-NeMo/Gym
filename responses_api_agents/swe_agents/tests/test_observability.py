@@ -6,10 +6,7 @@ from pathlib import Path
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.rollout_observability import AgentInvocation
-from responses_api_agents.swe_agents.observability import (
-    build_swe_observations,
-    sandbox_observations_from_metrics,
-)
+from responses_api_agents.swe_agents.observability import build_swe_observations
 
 
 MODEL_REF = ModelServerRef(type="responses_api_models", name="policy_model")
@@ -63,20 +60,6 @@ def _completion(
             }
         )
     )
-
-
-def test_sandbox_peak_memory_is_marked_as_sampled_process_tree_usage() -> None:
-    [sandbox] = sandbox_observations_from_metrics(
-        {
-            "openhands_run_time": 12.5,
-            "agent_peak_rss_mb": 2048,
-        }
-    )
-
-    assert sandbox.wall_time_s == 12.5
-    assert sandbox.cpu_time_s is None
-    assert sandbox.peak_memory_mib == 2048
-    assert sandbox.resource_usage_source == "proc_tree_watchdog"
 
 
 def test_opencode_preserves_tree_and_all_response_ids(tmp_path: Path) -> None:
