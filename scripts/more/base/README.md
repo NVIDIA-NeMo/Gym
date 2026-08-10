@@ -1,12 +1,12 @@
 # Nemotron 3.5 Lightning 30B A3B Base — v0.2 evaluation recipes
 
-> **Interim location.** These files sit in `scripts/more/base/` for review only. Before
-> this merges to `main` the `more/` folder moves to **`nemotron_recipes/nano-3.5/`**.
-> Nothing in the configs depends on their path, so the move is a plain `git mv`.
->
-> **These recipes do not use Gym.** They run through `nemo-evaluator-launcher`
-> (`nel run --config ...`), not the `gym` CLI — the benchmarks are `lm-evaluation-harness`
-> and `nemo-skills` tasks, so there is no Gym environment, agent or rollout loop involved.
+> **Interim location.** Before this merges to `main` the `more/` folder moves to
+> **`nemotron_recipes/nano-3.5/`**. Nothing in the configs depends on their path, so the
+> move is a plain `git mv`.
+
+These are `nemo-evaluator-launcher` configs run with `nel run`, not Gym recipes — see
+[`../reproducibility.md`](../reproducibility.md) for how they sit alongside the instruct
+recipes.
 
 Evaluation configs for the **base (pretraining)** benchmarks of
 [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16)
@@ -14,19 +14,29 @@ on `nemo-evaluator-launcher` 0.2.6.
 
 There are two configs:
 
-- **Base suite** — [`local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml`](./local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml),
+- **Base suite** — [`base-suite.yaml`](./base-suite.yaml),
   the 21 short-context tasks across knowledge, math, code, commonsense, reading
   comprehension and multilingual. Runs against an OpenAI-compatible endpoint **you
   provide** (`deployment: none`) — see
   [Running against an existing endpoint](#running-against-an-existing-endpoint). The
   endpoint must support `echo` + `logprobs` for 9 of the tasks.
-- **Long context (RULER)** — [`local_nemotron-3.5-lightning-30b-a3b-base_ruler.yaml`](./local_nemotron-3.5-lightning-30b-a3b-base_ruler.yaml),
+- **Long context (RULER)** — [`ruler.yaml`](./ruler.yaml),
   RULER at 64k / 128k / 256k / 512k / 1M. Also endpoint-based, but it needs a
   **separately served, long-context endpoint** — a normal deployment will not do. Also
   needs a pre-generated dataset. **Results are provisional** — see [RULER](#ruler).
 
 Neither config deploys anything: you serve the model and point them at it. See
 [Serving the model](#serving-the-model) for the exact commands.
+
+**No judge is required.** Unlike several of the instruct recipes, nothing in the base
+suite is LLM-graded — every task is scored deterministically by `lm-evaluation-harness`
+(exact match, log-likelihood, or code execution) and RULER by `nemo-skills`. There is no
+`JUDGE_API_KEY` and no judge endpoint to configure. What you need is:
+
+- one OpenAI-compatible **`/v1/completions`** endpoint serving the base model, which
+  **must honour `echo` together with `logprobs`** (9 of the 21 tasks are scored by
+  log-likelihood), and
+- for RULER only, a **second** endpoint of the same model served for long context.
 
 ### Reproducing the reference numbers
 
@@ -40,9 +50,7 @@ runs, but a difference from the reference becomes ambiguous — you cannot tell 
 came from that endpoint's serving stack or from the model. That is fine for measuring a
 deployment you already have; it is not a basis for confirming published numbers.
 
-For the instruct-model recipes, see the
-[Nemotron 3 Ultra recipes](https://github.com/NVIDIA-NeMo/Evaluator/tree/main/examples/nemotron/nemotron-3-ultra/v0.2) for the equivalent
-structure.
+For the instruct-model recipes, see [`../instruct/`](../instruct/).
 
 
 ---
@@ -75,7 +83,7 @@ Two environment variables are used:
 | variable | needed for |
 |---|---|
 | `HF_TOKEN` | benchmark datasets and the tokenizer, both fetched from the Hub. Some datasets are gated — accept their terms on the Hub first, and make sure the token has access. |
-| `INFERENCE_API_KEY` | the bearer token your endpoint expects. A self-hosted vLLM usually ignores it, so any placeholder works there. |
+| `POLICY_API_KEY` | the bearer token your endpoint expects. A self-hosted vLLM usually ignores it, so any placeholder works there. |
 
 Export them, or put them in a `.env` file and pass `--env-file .env` — every example
 below does the latter:
@@ -83,7 +91,7 @@ below does the latter:
 ```bash
 # .env
 HF_TOKEN=hf_...
-INFERENCE_API_KEY=...
+POLICY_API_KEY=...
 ```
 
 The variable name for the endpoint key is set by `target.api_endpoint.api_key_name` in
@@ -161,9 +169,9 @@ short-context suite this way.
 21 pretraining tasks against your endpoint:
 
 ```bash
-nel run --config local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml --env-file .env
-nel run --config local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml --env-file .env --dry-run    # preview
-nel run --config local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml --env-file .env -t adlr_mmlu # one benchmark
+nel run --config base-suite.yaml --env-file .env
+nel run --config base-suite.yaml --env-file .env --dry-run    # preview
+nel run --config base-suite.yaml --env-file .env -t adlr_mmlu # one benchmark
 ```
 
 | Category | Tasks |
@@ -201,13 +209,13 @@ disabled for them in the config (lm-eval does its own caching).
 ### Running against an existing endpoint
 
 If you already have the model served somewhere, use
-[`local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml`](./local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml)
+[`base-suite.yaml`](./base-suite.yaml)
 — it deploys nothing. Point `target.api_endpoint.url` at your endpoint's
 `/v1/completions` route, set `model_id` to the served name, and export
-`INFERENCE_API_KEY` alongside `HF_TOKEN` (the tokenizer is still fetched from the Hub):
+`POLICY_API_KEY` alongside `HF_TOKEN` (the tokenizer is still fetched from the Hub):
 
 ```bash
-nel run --config local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml --env-file .env
+nel run --config base-suite.yaml --env-file .env
 ```
 
 **This is a base model, so the suite uses the completions API, not chat.** A chat
@@ -234,7 +242,7 @@ validated with is in the header of the endpoint config.
 A quick way to check your endpoint before running anything:
 
 ```bash
-curl -s "$URL" -H "Authorization: Bearer $INFERENCE_API_KEY" -H "Content-Type: application/json" \
+curl -s "$URL" -H "Authorization: Bearer $POLICY_API_KEY" -H "Content-Type: application/json" \
   -d '{"model":"<served-name>","prompt":"Question: how to boil water\nAnswer: Put water in a pot",
        "max_tokens":1,"logprobs":1,"echo":true,"temperature":0}' \
   | python3 -c "import json,sys; c=json.load(sys.stdin)['choices'][0]; lp=c.get('logprobs') or {}; \
@@ -275,7 +283,7 @@ a self-hosted deployment started with the serve command in
 ### RULER
 
 ```bash
-nel run --config local_nemotron-3.5-lightning-30b-a3b-base_ruler.yaml --env-file .env
+nel run --config ruler.yaml --env-file .env
 ```
 
 **Prepare the dataset — required, and not included.** RULER runs from a pre-generated

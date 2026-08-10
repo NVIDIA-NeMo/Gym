@@ -18,21 +18,21 @@
 # against an EXISTING OpenAI-compatible endpoint. Nothing is deployed by this config.
 #
 # For the variant that deploys its own local vLLM, use
-# `local_nemotron-3.5-lightning-30b-a3b-base.yaml` instead.
+# `base-suite.yaml` instead.
 #
 # How to use:
 #
 # 1. copy this file locally or clone the repository
 # 2. point target.api_endpoint.url at your endpoint's /v1/completions route and set
 #    model_id to the name it serves
-# 3. export INFERENCE_API_KEY (endpoint auth) and HF_TOKEN (tokenizer + datasets)
+# 3. export POLICY_API_KEY (endpoint auth) and HF_TOKEN (tokenizer + datasets)
 #
-#    INFERENCE_API_KEY is whatever bearer token your endpoint expects. A self-hosted
+#    POLICY_API_KEY is whatever bearer token your endpoint expects. A self-hosted
 #    vLLM usually needs no real key, so any placeholder works. For NVIDIA-hosted
 #    endpoints use a personal API key in the `nvapi-...` form — a legacy base64 NGC key
 #    authenticates management calls but returns 401 on invocation, which reads like a
 #    broken endpoint rather than a wrong credential.
-# 4. run `nemo-evaluator-launcher run --config path/to/local_nemotron-3.5-lightning-30b-a3b-base_endpoint.yaml`
+# 4. run `nemo-evaluator-launcher run --config path/to/base-suite.yaml`
 #
 # ─── ENDPOINT REQUIREMENTS — READ BEFORE RUNNING ─────────────────────────────
 #
@@ -113,9 +113,9 @@ execution:
 #          fetched from the Hub, not from the endpoint.
 target:
   api_endpoint:
-    url: "<your-endpoint>/v1/completions"        # <-- REPLACE
-    model_id: "<name-your-endpoint-serves>"      # <-- REPLACE
-    api_key_name: INFERENCE_API_KEY
+    url: https://<your-endpoint>/v1/completions
+    model_id: <your-model-id>
+    api_key_name: POLICY_API_KEY
     type: completions
 
 evaluation:
