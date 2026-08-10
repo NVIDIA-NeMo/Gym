@@ -62,7 +62,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, link_tool_calls_to_sandbox
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
 from responses_api_agents.swe_agents.observability import (
     OBSERVATIONS_FILENAME,
@@ -2397,7 +2397,6 @@ class RunOpenHandsAgent(BaseModel):
                     gaps=[
                         ObservationGap(
                             code="observation_parse_failed",
-                            source=f"swe_{self.config.agent_framework}",
                         )
                     ],
                 )
@@ -3672,12 +3671,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             for sandbox in sandbox_observations:
                 sandbox.sandbox_id = f"{params.agent_run_id}:{sandbox.role}"
             observations.records.extend(sandbox_observations)
-            agent_sandbox = next(
-                (sandbox for sandbox in sandbox_observations if sandbox.role == "agent"),
-                None,
-            )
-            if agent_sandbox is not None:
-                link_tool_calls_to_sandbox(observations, agent_sandbox.sandbox_id)
             for sandbox in sandbox_observations:
                 if sandbox.cpu_time_s is None:
                     observations.gaps.append(

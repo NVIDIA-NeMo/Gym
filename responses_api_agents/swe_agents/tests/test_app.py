@@ -379,6 +379,7 @@ class TestSWEBenchMetrics:
         assert observations[0].peak_memory_mib == 2048
         assert observations[0].sandbox_id == "test_run_123"
         assert observations[0].cpu_time_s is None
+        assert observations[0].resource_usage_source == "proc_tree_watchdog"
         assert observations[1].wall_time_s == 3.0
         assert observations[1].peak_memory_mib is None
 
@@ -872,8 +873,7 @@ class TestOpenHandsHarnessProcessor:
             assert isinstance(result, ExecuteContainerCommandArgs)
             assert result.mode == "agent"
             assert "timeout" in result.command
-            script = self._read_agent_script(config)
-            assert "run_infer.sh" in script
+            assert "run_infer.sh" in self._read_agent_script(config)
 
     def _read_agent_script(self, config) -> str:
         # The script is written at persistent_dir / agent_script_{agent_run_id}.sh
@@ -2490,6 +2490,10 @@ class TestSWEBenchWrapperRun:
     async def test_run_resolved(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         wrapper.server_client.global_config_dict = {"observability_enabled": True}
+        observations = AgentObservationBundle(
+            source="swe_opencode",
+            records=[AgentInvocation(invocation_id="main")],
+        )
 
         mock_response = NeMoGymResponse(
             id="swebench-test",
@@ -2504,6 +2508,7 @@ class TestSWEBenchWrapperRun:
                 "input": "[]",
                 "metrics": json.dumps({"resolved": True, "patch_exists": True}),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                "agent_observations": observations.model_dump_json(),
             },
         )
 
@@ -2530,6 +2535,7 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
+            assert result.ng_agent_observations == observations
             assert responses_mock.await_args.args[1] == "7-2"
 
     @pytest.mark.asyncio

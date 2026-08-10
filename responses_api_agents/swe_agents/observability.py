@@ -19,7 +19,6 @@ from nemo_gym.rollout_observability import (
     ModelCallRef,
     ObservationGap,
     SandboxObservation,
-    model_visible_tool_calls,
 )
 
 
@@ -124,8 +123,17 @@ def latest_completion_paths(completion_paths: Iterable[Path]) -> tuple[Path, ...
     return tuple(path for path, _ in latest.values())
 
 
-def _gap(_source: str, code: str, *, invocation_id: str | None = None, detail: str | None = None) -> ObservationGap:
+def _gap(code: str, *, invocation_id: str | None = None, detail: str | None = None) -> ObservationGap:
     return ObservationGap(code=code, invocation_id=invocation_id, detail=detail)
+
+
+def _tool_call_ids(conversation: Iterable[Any]) -> Iterable[str]:
+    for item in conversation:
+        if getattr(item, "type", None) not in {"function_call", "custom_tool_call"}:
+            continue
+        call_id = getattr(item, "call_id", None)
+        if isinstance(call_id, str) and call_id:
+            yield call_id
 
 
 def build_swe_observations(
@@ -148,10 +156,10 @@ def build_swe_observations(
         try:
             data = json.loads(path.read_text())
         except (OSError, UnicodeError, json.JSONDecodeError):
-            gaps.append(_gap(source, "agent_artifact_parse_failed", detail=path.name))
+            gaps.append(_gap("agent_artifact_parse_failed", detail=path.name))
             continue
         if not isinstance(data, dict):
-            gaps.append(_gap(source, "agent_artifact_parse_failed", detail=path.name))
+            gaps.append(_gap("agent_artifact_parse_failed", detail=path.name))
             continue
 
         if framework == "openhands":
@@ -159,14 +167,14 @@ def build_swe_observations(
         else:
             invocation_id = data.get("session_id")
             if not isinstance(invocation_id, str) or not invocation_id:
-                gaps.append(_gap(source, "agent_session_id_missing", detail=path.name))
+                gaps.append(_gap("agent_session_id_missing", detail=path.name))
                 continue
         artifacts[invocation_id].append((path, data))
 
     if framework == "openhands" and "root" not in artifacts:
         artifacts["root"] = []
     if not paths:
-        gaps.append(_gap(source, "agent_artifact_unavailable"))
+        gaps.append(_gap("agent_artifact_unavailable"))
 
     converter = VLLMConverter(return_token_id_information=True)
     invocations: list[AgentInvocation] = []
@@ -187,7 +195,6 @@ def build_swe_observations(
                 if owner != invocation_id:
                     gaps.append(
                         _gap(
-                            source,
                             "model_response_owner_conflict",
                             invocation_id=invocation_id,
                             detail=response_id,
@@ -197,7 +204,7 @@ def build_swe_observations(
                     response_ids.append(response_id)
                     seen_response_ids.add(response_id)
             else:
-                gaps.append(_gap(source, "model_response_id_missing", invocation_id=invocation_id, detail=path.name))
+                gaps.append(_gap("model_response_id_missing", invocation_id=invocation_id, detail=path.name))
 
             if framework == "opencode":
                 parent = data.get("parent_session_id")
@@ -206,16 +213,14 @@ def build_swe_observations(
                 elif isinstance(parent, str):
                     parent_values.add(parent)
                 else:
-                    gaps.append(
-                        _gap(source, "parent_invocation_id_invalid", invocation_id=invocation_id, detail=path.name)
-                    )
+                    gaps.append(_gap("parent_invocation_id_invalid", invocation_id=invocation_id, detail=path.name))
 
         parent: str | None = None
         if framework == "opencode":
             if len(parent_values) == 1:
                 parent = next(iter(parent_values))
             elif len(parent_values) > 1:
-                gaps.append(_gap(source, "parent_invocation_conflict", invocation_id=invocation_id))
+                gaps.append(_gap("parent_invocation_conflict", invocation_id=invocation_id))
         parents[invocation_id] = parent
 
         conversation = []
@@ -227,17 +232,15 @@ def build_swe_observations(
             except Exception as exc:
                 gaps.append(
                     _gap(
-                        source,
                         "conversation_conversion_failed",
                         invocation_id=invocation_id,
                         detail=type(exc).__name__,
                     )
                 )
 
-        for tool_call_id, _, _ in model_visible_tool_calls(conversation):
+        for tool_call_id in _tool_call_ids(conversation):
             gaps.append(
                 _gap(
-                    source,
                     "tool_timing_unavailable",
                     invocation_id=invocation_id,
                     detail=tool_call_id,
@@ -245,7 +248,6 @@ def build_swe_observations(
             )
             gaps.append(
                 _gap(
-                    source,
                     "tool_outcome_unavailable",
                     invocation_id=invocation_id,
                     detail=tool_call_id,
@@ -266,13 +268,13 @@ def build_swe_observations(
     invocation_ids = set(parents)
     for invocation_id, parent in parents.items():
         if parent is not None and parent not in invocation_ids:
-            gaps.append(_gap(source, "parent_invocation_missing", invocation_id=invocation_id, detail=parent))
+            gaps.append(_gap("parent_invocation_missing", invocation_id=invocation_id, detail=parent))
         if parent is not None:
-            gaps.append(_gap(source, "subagent_spawn_tool_unavailable", invocation_id=invocation_id))
+            gaps.append(_gap("subagent_spawn_tool_unavailable", invocation_id=invocation_id))
 
     if framework == "openhands":
-        gaps.append(_gap(source, "subagent_hierarchy_unavailable", invocation_id="root"))
-    gaps.append(_gap(source, "context_compaction_unavailable"))
+        gaps.append(_gap("subagent_hierarchy_unavailable", invocation_id="root"))
+    gaps.append(_gap("context_compaction_unavailable"))
 
     invocations.sort(key=lambda invocation: (invocation.parent_invocation_id is not None, invocation.invocation_id))
     return AgentObservationBundle(
