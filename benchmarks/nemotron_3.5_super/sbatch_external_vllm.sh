@@ -24,10 +24,6 @@ common_args=(
     --distributed-executor-backend ray
     --data-parallel-backend ray
     --data-parallel-size 1
-    # Pin the Ray placement group's local rank to the Ray head. Without this,
-    # vLLM 0.25 defaults the DP master address to 127.0.0.1 when one paired
-    # server has --data-parallel-size-local 0.
-    --data-parallel-address \$host
     --tensor-parallel-size 4
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
@@ -42,13 +38,15 @@ common_args=(
     --host \$host
 )
 
-# Prefill uses the head node. Start it first so it reserves that node before
-# the decode pool creates its placement group.
+# The prefill API and engine are packed on the Ray head.
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
+VLLM_RAY_DP_PACK_STRATEGY=fill \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
 vllm serve "$MODEL" "\${common_args[@]}" \
     --port 8001 \
     --data-parallel-size-local 1 \
+    --data-parallel-address \$host \
+    --master-addr \$host \
     --kv-transfer-config \
         '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
     &
@@ -69,13 +67,16 @@ wait_for_server() {
 
 wait_for_server "\$prefill_pid" 8001
 
-# Decode has no local DP rank, so Ray places its TP=4 replica on the remaining
-# node while this API server remains on the head node.
+# Decode has no local engine. With fill packing, Ray skips the fully occupied
+# head node and places this TP=4 engine on the other allocated node.
 VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 \
+VLLM_RAY_DP_PACK_STRATEGY=fill \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5700 \
 vllm serve "$MODEL" "\${common_args[@]}" \
     --port 8002 \
     --data-parallel-size-local 0 \
+    --data-parallel-address \$host \
+    --master-addr \$host \
     --kv-transfer-config \
         '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
