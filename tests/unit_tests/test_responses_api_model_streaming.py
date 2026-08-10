@@ -94,12 +94,19 @@ def _function_call_item(name: str) -> dict:
 # Provide one minimal valid payload for each item type in ``NeMoGymResponseInputItem``.
 # Key payloads by type tag so the fixture coverage test can detect missing entries.
 ITEM_FIXTURES: dict[str, dict] = {
+    # Items the model generates.
     "message": {
         "type": "message",
         "id": "msg_1",
         "role": "assistant",
         "status": "completed",
         "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+    },
+    "reasoning": {
+        "type": "reasoning",
+        "id": "rs_1",
+        "status": "completed",
+        "summary": [{"type": "summary_text", "text": "thinking"}],
     },
     "function_call": {
         "type": "function_call",
@@ -108,18 +115,6 @@ ITEM_FIXTURES: dict[str, dict] = {
         "name": "get_weather",
         "arguments": "{}",
         "status": "completed",
-    },
-    "function_call_output": {
-        "type": "function_call_output",
-        "call_id": "call_1",
-        "output": "sunny",
-        "status": "completed",
-    },
-    "reasoning": {
-        "type": "reasoning",
-        "id": "rs_1",
-        "status": "completed",
-        "summary": [{"type": "summary_text", "text": "thinking"}],
     },
     "web_search_call": {
         "type": "web_search_call",
@@ -193,6 +188,34 @@ ITEM_FIXTURES: dict[str, dict] = {
         "arguments": "{}",
         "server_label": "my_server",
     },
+    "shell_call": {
+        "type": "shell_call",
+        "id": "sh_1",
+        "call_id": "call_sh_1",
+        "status": "completed",
+        "action": {"type": "exec", "commands": ["ls -la"], "timeout_ms": 5000},
+    },
+    "apply_patch_call": {
+        "type": "apply_patch_call",
+        "id": "ap_1",
+        "call_id": "call_ap_1",
+        "status": "completed",
+        "operation": {"type": "create_file", "path": "a.py", "diff": "+print(1)"},
+    },
+    "tool_search_call": {
+        "type": "tool_search_call",
+        "id": "ts_1",
+        "arguments": {},
+        "execution": "server",
+        "status": "completed",
+    },
+    # Results a client hands back, and the approval it grants.
+    "function_call_output": {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "sunny",
+        "status": "completed",
+    },
     "computer_call_output": {
         "type": "computer_call_output",
         "call_id": "call_cu_1",
@@ -212,6 +235,41 @@ ITEM_FIXTURES: dict[str, dict] = {
         "type": "mcp_approval_response",
         "approval_request_id": "mar_1",
         "approve": True,
+    },
+    "shell_call_output": {
+        "type": "shell_call_output",
+        "id": "sho_1",
+        "call_id": "call_sh_1",
+        "status": "completed",
+        "output": [],
+    },
+    "apply_patch_call_output": {
+        "type": "apply_patch_call_output",
+        "id": "apo_1",
+        "call_id": "call_ap_1",
+        "status": "completed",
+    },
+    "tool_search_output": {
+        "type": "tool_search_output",
+        "id": "tso_1",
+        "execution": "server",
+        "status": "completed",
+        "tools": [],
+    },
+    "compaction_trigger": {
+        "type": "compaction_trigger",
+    },
+    "additional_tools": {
+        "type": "additional_tools",
+        "id": "at_1",
+        "role": "developer",
+        "tools": [],
+    },
+    # Context-management bookkeeping and the tool carrier Codex code mode sends.
+    "compaction": {
+        "type": "compaction",
+        "id": "cmp_1",
+        "encrypted_content": "opaque",
     },
 }
 
@@ -233,10 +291,22 @@ CHAT_INCONVERTIBLE_TYPES = frozenset(
         "mcp_call",
         "mcp_list_tools",
         "web_search_call",
+        # Codex tool family and context management (openai >= 2.25). A shell command, a patch, a
+        # tool search and an opaque compaction record have no chat-message form either.
+        "apply_patch_call",
+        "apply_patch_call_output",
+        "compaction",
+        "shell_call",
+        "shell_call_output",
+        "tool_search_call",
+        "tool_search_output",
+        # Client-supplied results, approvals and tool carriers have no chat-message form.
         "computer_call_output",
         "custom_tool_call_output",
         "local_shell_call_output",
         "mcp_approval_response",
+        "compaction_trigger",
+        "additional_tools",
     }
 )
 
@@ -262,7 +332,8 @@ class TestSanitizeStreamingBody:
         cleaned, _ = sanitize_streaming_responses_body(
             {"input": [], "stream": True, "client_metadata": {"x": 1}, "prompt_cache_key": "abc", "store": False}
         )
-        assert set(cleaned) == {"input", "store"}
+        # prompt_cache_key is part of the pinned request schema, so it survives; client_metadata is not.
+        assert set(cleaned) == {"input", "store", "prompt_cache_key"}
         # the cleaned body validates against the strict params model
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
@@ -425,11 +496,23 @@ class TestSanitizeStreamingBody:
 
 class TestValidateStreamingParams:
     def test_prunes_nested_extra_fields(self) -> None:
-        # Codex sends `reasoning.context`, which the pinned SDK's Reasoning model forbids.
+        # A nested field the SDK's Reasoning model does not know is dropped so the rest of the
+        # request still validates. Uses an invented field name rather than a real one: a field
+        # the SDK later adopts stops being pruned, which is what happened to `reasoning.context`
+        # (Codex sent it, the pinned SDK forbade it, and openai 2.44 added it).
+        params = validate_streaming_responses_params(
+            {"input": [], "reasoning": {"effort": "medium", "not_a_real_reasoning_field": "x"}}
+        )
+        assert params.reasoning == {"effort": "medium"}
+
+    def test_reasoning_context_is_forwarded_now_that_the_sdk_models_it(self) -> None:
+        # Codex sends `reasoning.context`. The pinned SDK models it, so it is passed through
+        # rather than pruned. If a later SDK drops the field this fails, which is the signal to
+        # check whether Codex requests still round-trip.
         params = validate_streaming_responses_params(
             {"input": [], "reasoning": {"effort": "medium", "context": "all_turns"}}
         )
-        assert params.reasoning == {"effort": "medium"}
+        assert params.reasoning == {"effort": "medium", "context": "all_turns"}
 
     def test_unfixable_errors_still_raise(self) -> None:
         import pydantic
@@ -474,7 +557,9 @@ class TestSynthesizeSSE:
         response = _build_response([_function_call_item("exec_command")]).model_dump(mode="json")
         events = self._events("".join(synthesize_responses_sse(response, {"other__tool": ("other", "tool")})))
         assert events[1]["item"]["name"] == "exec_command"
-        assert "namespace" not in events[1]["item"]
+        # namespace is a field on the call model now, so an unmapped call carries it unset
+        # rather than not carrying it at all.
+        assert events[1]["item"]["namespace"] is None
 
     def test_failure_stream_is_terminal_response_failed(self) -> None:
         events = self._events("".join(synthesize_responses_failure_sse("boom", code="server_error")))
@@ -483,6 +568,26 @@ class TestSynthesizeSSE:
         assert failed["status"] == "failed"
         assert failed["error"] == {"code": "server_error", "message": "boom"}
         assert failed["output"] == []
+
+
+# Item types the streaming sanitizer removes from the input on purpose, so the no-drop check
+# below must not apply to them. `additional_tools` is a Codex code-mode carrier: the sanitizer
+# hoists the function tools it contains into the `tools` param and discards the item itself.
+STREAMING_CONSUMED_TYPES = frozenset({"additional_tools"})
+
+
+def test_no_dead_entries_in_streaming_consumed_types() -> None:
+    """Every consumed type must be one the union still accepts.
+
+    The test that reads this list is parametrized over ITEM_FIXTURES, so it never visits a tag that
+    is not in it. A dead entry is then invisible: the type it was meant to name is checked as if it
+    survived the sanitizer, and the type that actually is consumed goes unchecked.
+    """
+    suspicious = sorted(STREAMING_CONSUMED_TYPES - set(ITEM_FIXTURES))
+    assert not suspicious, (
+        f"{suspicious} are in STREAMING_CONSUMED_TYPES but have no fixture, so nothing checks that "
+        f"the sanitizer consumes them. Either the tag is a typo, or the type left the union."
+    )
 
 
 class _EchoModel(SimpleResponsesAPIModel):
@@ -660,6 +765,12 @@ class TestUnionItemTypesThroughDispatch:
         assert response.status_code == 200
 
         seen = server.last_params.input
+        if tag in STREAMING_CONSUMED_TYPES:
+            assert len(seen) == len(history) - 1, (
+                f"{tag!r} is declared as consumed by the sanitizer, but it survived the streaming "
+                f"path. Remove it from STREAMING_CONSUMED_TYPES."
+            )
+            return
         assert len(seen) == len(history), (
             f"a {tag!r} item was dropped from the streaming transcript: sent {len(history)} input "
             f"items, backend received {len(seen)}. Check the warning from "

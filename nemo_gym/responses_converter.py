@@ -645,6 +645,9 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
         "mcp_list_tools",
         "reasoning",
         "web_search_call",
+        "apply_patch_call",
+        "shell_call",
+        "tool_search_call",
     }
 )
 
@@ -655,11 +658,17 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
 # The SDK unions do not distinguish generated items from client-supplied items.
 _RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
     {
+        "additional_tools",
+        "apply_patch_call_output",
+        "compaction",
+        "compaction_trigger",
         "computer_call_output",
         "custom_tool_call_output",
         "function_call_output",
         "local_shell_call_output",
         "mcp_approval_response",
+        "shell_call_output",
+        "tool_search_output",
     }
 )
 

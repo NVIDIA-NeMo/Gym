@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from types import UnionType
-from typing import Annotated, Any, Dict, List, Literal, NotRequired, Required, Union, get_args, get_origin
+from typing import Annotated, Any, Dict, List, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints
 
 import openai
 import pytest
@@ -29,6 +29,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseReasoningItem,
 )
+from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from openai.types.responses.response_input_item import (
     FunctionCallOutput as InputFunctionCallOutput,
 )
@@ -1148,4 +1149,75 @@ def test_duplicate_type_tags_are_documented() -> None:
     assert duplicates == {"message", "function_call", "reasoning"}, (
         f"duplicate type tags changed: {sorted(duplicates)}. Each duplicate widens the error "
         f"report for an unrecognised item; update this test if the change is intended."
+    )
+
+
+def test_request_model_carries_every_sdk_request_field() -> None:
+    """The strict request copy must not fall behind the SDK's request schema.
+
+    NeMoGymResponseCreateParamsNonStreaming forbids extras, so a field the SDK accepts and this
+    model does not is a 422 on the non-streaming path. On the streaming path
+    sanitize_streaming_responses_body filters against this model's fields, so the same request
+    succeeds with the field silently removed.
+    """
+    sdk_fields = set(get_type_hints(ResponseCreateParamsBase, include_extras=True))
+    missing = sorted(sdk_fields - set(NeMoGymResponseCreateParamsNonStreaming.model_fields))
+    assert not missing, (
+        f"openai {openai.__version__} accepts {missing} on a Responses request and "
+        f"NeMoGymResponseCreateParamsNonStreaming does not, so those are rejected when sent "
+        f"plainly and dropped when streaming.\n"
+        f"Fix: mirror each field with the SDK's type."
+    )
+
+
+def test_response_field_set_is_pinned() -> None:
+    """One place notices when the SDK adds a field to Response.
+
+    NeMoGymResponse inherits openai's Response, so a new SDK field appears in every model_dump() Gym produces.
+    Server tests compare only the keys they assert, which keeps them from breaking on each release.
+    This test is what makes that safe, by failing once, here, when the field set moves.
+
+    On failure, decide whether Gym should forward, default or drop the new field, then update this list.
+    """
+    expected = {
+        "background",
+        "completed_at",
+        "conversation",
+        "created_at",
+        "error",
+        "id",
+        "incomplete_details",
+        "instructions",
+        "max_output_tokens",
+        "max_tool_calls",
+        "metadata",
+        "model",
+        "moderation",
+        "object",
+        "output",
+        "parallel_tool_calls",
+        "previous_response_id",
+        "prompt",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning",
+        "safety_identifier",
+        "service_tier",
+        "status",
+        "temperature",
+        "text",
+        "tool_choice",
+        "tools",
+        "top_logprobs",
+        "top_p",
+        "truncation",
+        "usage",
+        "user",
+    }
+    actual = set(NeMoGymResponse.model_fields)
+    added = sorted(actual - expected)
+    removed = sorted(expected - actual)
+    assert not (added or removed), (
+        f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
+        f"Decide what Gym does with each, then update this list."
     )
