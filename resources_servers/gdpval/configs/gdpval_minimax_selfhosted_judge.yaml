@@ -19,12 +19,12 @@
 #   its design, so Gym does not ship a MiniMax-M3 local_vllm_model config for
 #   this path; run the container yourself and point Gym at its endpoint.
 #
-# STEP 1 — serve MiniMax-M3 yourself from the vendor container. NVIDIA users
-# should use the internal serving workflow maintained separately from Gym. Use
-# one single-node TP=4 instance, or independent single-node TP=4 replicas for
-# data-parallel throughput. Do NOT form one TP=8 group across two nodes: the
-# cross-node MXFP8 all-reduce path can produce garbage logits despite a clean
-# startup. Confirm the endpoint from the gym host:
+# STEP 1 — serve MiniMax-M3 yourself with a compatible vLLM/container runtime.
+# Use one single-node TP=4 instance, or independent single-node TP=4 replicas
+# for data-parallel throughput. Do NOT form one TP=8 group across two nodes
+# unless you have validated that stack: the cross-node MXFP8 all-reduce path can
+# produce garbage logits despite a clean startup. Confirm the endpoint from the
+# gym host:
 #   curl -s http://<judge-host>:5000/v1/models
 #
 # STEP 2 — run GDPVal with gym pointing at your endpoint. Chain this overlay

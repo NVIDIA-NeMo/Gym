@@ -65,8 +65,8 @@ gdpval_resources_server:
       # This is the ultra-v3 "9-ref no-gold" set (human_gold and gptoss_20b are
       # DELIBERATELY excluded — incomplete/missing deliverables inflate the fit).
       # Each deliverables_dir resolves to $GDPVAL_REFS_ROOT/<id>, defaulting to
-      # the NEL /gdpval/refs/<id> container mounts, and holds that reference's
-      # per-task `task_<task_id>/` deliverables. Three ways to point elsewhere:
+      # /gdpval/refs/<id>, and holds that reference's per-task `task_<task_id>/`
+      # deliverables. Three ways to point elsewhere:
       #   - refs share a parent: export GDPVAL_REFS_ROOT=/abs/path/to/refs
       #   - refs are scattered (e.g. per-run Lustre dirs, which share no parent):
       #     edit these paths directly in your local checkout, or leave the file

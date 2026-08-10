@@ -31,9 +31,8 @@ gym eval run \
 
 Required environment variables for the judge:
 
-- `JUDGE_API_KEY` — sk- key for the judge inference API (nvapi- keys 401 on
-  multimodal payloads)
-- `JUDGE_BASE_URL` — defaults to NVIDIA's internal inference API
+- `JUDGE_API_KEY` — API key for the judge inference endpoint
+- `JUDGE_BASE_URL` — OpenAI-compatible judge endpoint
 - `JUDGE_MODEL_NAME` — the single-judge fallback model (used only when the
   [multi-judge panel](#multi-judge-panel) is disabled); defaults to
   `gcp/google/gemini-3.1-pro-preview`

@@ -14,9 +14,9 @@
 #
 # What it does:
 #   1. Defines a NEW model server `gdpval_judge_model_local` that gym auto-spawns
-#      as a local vLLM engine serving Kimi-K2.6 with the VISION TOWER ENABLED
-#      (the NEL deployments run `--language-model-only`; we drop it so the judge
-#      can read rasterized deliverable pages). Serve settings mirror
+#      as a local vLLM engine serving Kimi-K2.6 with the VISION TOWER ENABLED.
+#      Do not use language-model-only mode here: the judge needs the vision tower
+#      to read rasterized deliverable pages. Serve settings mirror
 #      responses_api_models/local_vllm_model/configs/moonshotai/Kimi-K2.6.yaml.
 #   2. Repoints the GDPVal resources server's `judge_model_server` at that local
 #      engine, disables the frontier panel (`judge_panel: null`), and switches
