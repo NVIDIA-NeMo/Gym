@@ -91,6 +91,8 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
+# TODO @bxyu-nvidia: Move into build container
+pip install fastokens
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
