@@ -36,6 +36,7 @@ row = {
     "Note": "",
     "Date run": datetime.now(ZoneInfo("America/Los_Angeles")),
     "Gym commit": check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+    "Results dir": args.jsonl_fpath_base,
     "Tau3-Banking": v("tau2_banking_knowledge_bm25_grep_artificial_analysis_agent", "mean/reward"),
     "Tau3-Average": to_pct(
         sum(

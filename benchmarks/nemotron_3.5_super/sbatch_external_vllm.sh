@@ -13,8 +13,15 @@ VLLM_CONFIG=$VLLM_CONFIG
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
     EXPERIMENT_NAME=$EXPERIMENT_NAME
+
+    # 
+    EXPORT_TO_CSV=${EXPORT_TO_CSV:-0}
+    EXPORT_CSV_TO_MODEL_DIR=${EXPORT_CSV_TO_MODEL_DIR:-0}
 else
     EXPERIMENT_NAME="${EXPERIMENT_NAME:-vllm_only}"
+
+    EXPORT_TO_CSV=0
+    EXPORT_CSV_TO_MODEL_DIR=0
 fi
 
 # Fixed vLLM Port configurations
@@ -54,6 +61,16 @@ gym eval run \
     ++policy_model_name=$MODEL \
     ++upload_rollouts_to_wandb=false \
     ++global_aiohttp_connector_limit_per_host=16384
+
+if (( $EXPORT_TO_CSV )); then
+    python benchmarks/nemotron_3.5_super/export_to_csv.py \
+        --model-path $MODEL \
+        --jsonl-fpath-base \$(realpath results/\$experiment_name)
+
+    if (( $EXPORT_CSV_TO_MODEL_DIR )); then
+        cp results/\$experiment_name_export.csv $MODEL/export.csv
+    fi
+fi
 
 EOF
 )
