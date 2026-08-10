@@ -111,7 +111,7 @@ index 6207029..2fe4e1d 100644
  
      # Configure models.json for the bench agent
      bench_agent_dir = _get_agent_store_dir(agent_id) / "agent"
-@@ -312,33 +322,109 @@ def ensure_agent_exists(
+@@ -312,33 +322,110 @@ def ensure_agent_exists(
      if base_url:
          # Custom OpenAI-compatible endpoint — build a provider entry
          data: dict[str, Any] = {}
@@ -188,6 +188,7 @@ index 6207029..2fe4e1d 100644
 +                    if agent.get("id") == agent_id:
 +                        agent["model"] = agent_model
 +                        agent["params"] = runtime_params
++                        agent["timeoutSeconds"] = provider_timeout_s
 +                agents_cfg.setdefault("defaults", {}).setdefault("models", {})[agent_model] = {
 +                    "params": runtime_params
 +                }
