@@ -223,8 +223,8 @@ keys — all listed in `.env.example`.
 The Artificial Analysis API scores in batches of exactly 70 distinct problems, so a full
 run — 70 problems repeated five times — costs five scoring calls.
 
-That shapes three things. `LIMIT` counts problems rather than rollouts, and below 70 no
-batch can fill, so those rollouts are never scored. Each key carries a daily scoring quota
+That shapes three things. `LIMIT` counts rollouts and repeats are grouped, so a limited
+run never gathers 70 different problems and is never scored. Each key carries a daily scoring quota
 and rotates only once a key is rate-limited, so pass several to get through all five calls:
 `ARTIFICIAL_ANALYSIS_API_KEY='[key-1,key-2]'`. And concurrency should stay at its default
 of 350, since a rollout waiting to be scored holds its slot — lower values starve the

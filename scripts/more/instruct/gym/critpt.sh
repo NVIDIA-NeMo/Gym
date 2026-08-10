@@ -23,15 +23,17 @@
 # ./results/critpt.
 #
 #   scripts/more/instruct/gym/critpt.sh                         # full benchmark (70 problems x 5)
-#   LIMIT=3 scripts/more/instruct/gym/critpt.sh                 # rollouts only, cannot be scored (see below)
+#   LIMIT=3 scripts/more/instruct/gym/critpt.sh                 # rollouts only, never scored (see below)
 #   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/critpt.sh  # output dir, concurrency
 #
 # Note: num_repeats 5 is set through the dataset override below — --num-repeats
 # multiplies the config default instead of replacing it.
 #
-# Note: the grader scores 70 distinct problems per call, so a LIMIT below 70 cannot be
-# scored, and concurrency stays at 350 (problems x repeats) — a rollout waiting to be
-# scored holds its slot, so lower values starve the batches and the run wedges.
+# Note: the grader needs 70 different problems per call. LIMIT counts rollouts and
+# repeats are grouped, so a limited run never gets there and is never scored.
+#
+# Note: keep concurrency at 350 (problems x repeats). A rollout waiting to be scored
+# holds its slot, so anything lower wedges the run until it times out.
 
 ARTIFICIAL_ANALYSIS_API_KEY="${ARTIFICIAL_ANALYSIS_API_KEY:?export ARTIFICIAL_ANALYSIS_API_KEY (one key, or [k1,k2] to fail over when a key is rate-limited)}"
 
