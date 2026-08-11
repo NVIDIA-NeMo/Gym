@@ -152,7 +152,9 @@ if (( SLURM_PROCID == 0 )); then
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
-        --log-level error
+        --prometheus-host 0.0.0.0 \
+        --prometheus-port 9000 \
+        --log-level info
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
