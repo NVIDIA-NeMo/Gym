@@ -47,13 +47,17 @@ POLICY=policy_model.responses_api_models.vllm_model
 export CRITPT_CACHE_DIR="${CRITPT_CACHE_DIR:-$(realpath -m "${OUT:-./results/critpt}")/critpt_cache}"
 
 # Pin Gym to the commit the tech report numbers were produced with. Set PIN_GYM=0 to
-# run against your current checkout instead. `nemotron_recipes` is excluded, so this never
-# touches the recipe that is running, and HEAD does not move.
-GYM_PIN="${GYM_PIN:-e446e4f415b9cde0e95bb813c85e9e3e23f5d893}"   # v0.5.0
+# run against your current checkout instead. `nemotron_recipes` is excluded, so this
+# never touches the recipe that is running, and HEAD does not move. Undo the pin with
+# `git restore .` from the repo root.
+GYM_PIN="${GYM_PIN:-e446e4f415b9cde0e95bb813c85e9e3e23f5d893}"   # 0.5.0rc0
 if [ "${PIN_GYM:-1}" != 0 ]; then
   git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
-  git checkout "$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
-  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip)"
+  git restore --source="$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
+  # Files added after the pin would otherwise linger and mix two trees into one.
+  comm -23 <(git ls-files -- . ':(exclude)nemotron_recipes' | LC_ALL=C sort) \
+           <(git ls-tree -r --name-only "$GYM_PIN" | LC_ALL=C sort) | tr '\n' '\0' | xargs -0 -r rm -f
+  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip; git restore . to undo)"
 fi
 
 gym eval prepare --benchmark critpt

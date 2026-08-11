@@ -69,13 +69,17 @@ BENCH=pinchbench_benchmark_agent.responses_api_agents.pinchbench
 OUTDIR="$(realpath -m "${OUT:-./results/pinchbench}")"
 
 # Pin Gym to the commit the tech report numbers were produced with. Set PIN_GYM=0 to
-# run against your current checkout instead. `nemotron_recipes` is excluded, so this never
-# touches the recipe that is running, and HEAD does not move.
+# run against your current checkout instead. `nemotron_recipes` is excluded, so this
+# never touches the recipe that is running, and HEAD does not move. Undo the pin with
+# `git restore .` from the repo root.
 GYM_PIN="${GYM_PIN:-86290ee8fdc191f2d27b48bd2e957a25dcbd7fd7}"
 if [ "${PIN_GYM:-1}" != 0 ]; then
   git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
-  git checkout "$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
-  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip)"
+  git restore --source="$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
+  # Files added after the pin would otherwise linger and mix two trees into one.
+  comm -23 <(git ls-files -- . ':(exclude)nemotron_recipes' | LC_ALL=C sort) \
+           <(git ls-tree -r --name-only "$GYM_PIN" | LC_ALL=C sort) | tr '\n' '\0' | xargs -0 -r rm -f
+  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip; git restore . to undo)"
 fi
 
 gym eval prepare --benchmark pinchbench
