@@ -72,10 +72,13 @@ class _GenRunState:
     The generator is deserialized once and shared across concurrent requests (see
     ``HaystackAgent.model_post_init``), so its per-run state cannot live as plain instance
     attributes. Instead each request installs a fresh ``_GenRunState`` in ``_current_run_state``;
-    reads/writes of ``_cookies``/``_usage``/``_last_response`` resolve through it.
+    reads/writes of model cookies, usage, and the final response resolve through it. Resources
+    Server cookies live alongside—but separate from—the model cookies because HTTP environment
+    tools must retain the session seeded by ``HaystackAgent.run`` across model turns.
     """
 
-    cookies: Any = None
+    resources_server_cookies: Any = None
+    model_server_cookies: Any = None
     usage: Any = None
     last_response: Optional["NeMoGymResponse"] = None
     mcp_headers: dict[str, str] = field(default_factory=dict)
@@ -293,11 +296,11 @@ class NeMoGymResponsesChatGenerator:
 
     @property
     def _cookies(self) -> Any:
-        return self._run_state().cookies
+        return self._run_state().model_server_cookies
 
     @_cookies.setter
     def _cookies(self, value: Any) -> None:
-        self._run_state().cookies = value
+        self._run_state().model_server_cookies = value
 
     @property
     def _usage(self) -> Any:

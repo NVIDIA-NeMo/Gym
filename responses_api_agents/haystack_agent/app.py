@@ -12,23 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""A NeMo Gym agent that runs a serialized Haystack pipeline as its rollout harness.
-The Haystack ``Pipeline`` (a YAML that contains a ``haystack.components.agents.agent.Agent`` with
-Haystack-side tools) is deserialized and warmed up **once** at startup and shared across all
-requests, so expensive component/tool initialization is paid a single time rather than per rollout.
-``HaystackAgent.responses()`` drives that shared pipeline with the request's input messages. The
-Agent's ``chat_generator`` is a ``NeMoGymResponsesChatGenerator`` that calls a native NeMo Gym model
-server, so Haystack's own Agent loop is what repeatedly calls the model. Per-request session state
-(cookies, usage) is isolated across concurrent rollouts via ``contextvars`` in the generator. NeMo
-Gym contributes the model (via the generator) and verification (via the resources server); tools
-live entirely inside the Haystack pipeline.
+"""A NeMo Gym agent that runs a shared, serialized Haystack pipeline as its rollout harness.
+
+The pipeline is deserialized once and shared across requests. Haystack's ``Agent`` drives the
+model/tool loop through ``NeMoGymResponsesChatGenerator``. Configured local and MCP tools remain
+on that shared pipeline; a request may additionally supply function schemas which become ephemeral
+HTTP tools for that rollout only. Per-rollout state, including separate model-server and
+resources-server cookie jars, is stored in context variables so concurrent rollouts cannot leak
+session state into each other.
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request, Response
-from haystack import Pipeline
+from haystack import Pipeline, logging
+from haystack.tools import flatten_tools_or_toolsets, warm_up_tools
 from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import (
@@ -59,9 +59,11 @@ from responses_api_agents.haystack_agent.chat_generator import (
     messages_to_responses_input,
     responses_input_to_messages,
 )
+from responses_api_agents.haystack_agent.http_tool import HTTPTool
 from responses_api_agents.haystack_agent.mcp_toolset import (
     close_rollout_mcp_sessions,
     configure_mcp_url,
+    context_aware_mcp_tool_names,
     has_context_aware_mcp_toolset,
 )
 
@@ -73,6 +75,7 @@ __all__ = ["HaystackAgent", "NeMoGymResponsesChatGenerator"]
 # Request-body fields the Haystack pipeline owns; never forwarded to the model call. Everything
 # else the row set (temperature, max_output_tokens, ...) is forwarded as ``generation_kwargs``.
 _PIPELINE_OWNED_FIELDS = {"input", "tools", "instructions", "stream"}
+logger = logging.getLogger(__name__)
 
 
 class HaystackAgentConfig(BaseResponsesAPIAgentConfig):
@@ -123,6 +126,60 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         resources_base_url = self.server_client._build_server_base_url(resource_config)
         return f"{resources_base_url.rstrip('/')}/mcp"
 
+    def _runtime_http_tools(self, schemas: list[Any]) -> list[HTTPTool]:
+        http_tools = []
+        for schema in schemas:
+            if not isinstance(schema, Mapping):
+                raise ValueError("HTTP environment tools must be function-tool objects.")
+            http_tools.append(HTTPTool(schema, self.server_client, self.config.resources_server.name))
+
+        http_names = [tool.name for tool in http_tools]
+        if len(http_names) != len(set(http_names)):
+            raise ValueError("HTTP environment tool names must be unique within a request.")
+        return http_tools
+
+    def _tools_for_http_request(self, schemas: list[Any]) -> list[Any]:
+        """Combine configured tools with request-scoped HTTP tools, preferring MCP on collisions."""
+        http_tools = self._runtime_http_tools(schemas)
+        http_names = {tool.name for tool in http_tools}
+
+        configured_tools = getattr(self._agent, "tools", None)
+        # Haystack can flatten a toolset only after it has discovered its concrete tools. Gym's
+        # MCP toolset performs a schema-only ``tools/list`` here; authenticated MCP clients are
+        # still created lazily, per rollout, when an MCP tool is actually invoked.
+        warm_up_tools(configured_tools)
+        mcp_names = context_aware_mcp_tool_names(configured_tools)
+        mcp_overrides = http_names & mcp_names
+        if mcp_overrides:
+            http_tools = [tool for tool in http_tools if tool.name not in mcp_overrides]
+        http_names = {tool.name for tool in http_tools}
+
+        tools = []
+        for tool in flatten_tools_or_toolsets(configured_tools):
+            if tool.name in http_names:
+                logger.warning(
+                    "HTTP environment tool '{tool_name}' overrides a configured local tool with the same name.",
+                    tool_name=tool.name,
+                )
+                continue
+            tools.append(tool)
+        return [*tools, *http_tools]
+
+    def _validate_mcp_configuration(self, mcp_enabled: bool) -> None:
+        """Require the pipeline's MCP configuration to match this rollout's Resources Server."""
+        has_mcp_toolset = has_context_aware_mcp_toolset(getattr(self._agent, "tools", None))
+        if has_mcp_toolset and not mcp_enabled:
+            raise RuntimeError(
+                "The Haystack pipeline configures ContextAwareMCPToolset, but the Resources Server did not "
+                "enable MCP for this rollout. Enable expose_tools_over_mcp on the Resources Server or remove "
+                "the MCP toolset from the pipeline."
+            )
+        if mcp_enabled and not has_mcp_toolset:
+            logger.warning(
+                "The Resources Server enabled MCP for this rollout, but the Haystack pipeline has no "
+                "ContextAwareMCPToolset; MCP tools will not be available to the model."
+            )
+
     def model_post_init(self, context):
         pipeline_path = Path(self.config.pipeline_yaml)
         if not pipeline_path.is_absolute():
@@ -155,20 +212,22 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         # to the generator, where _build_params applies it after the static kwargs (so request wins).
         generation_kwargs = body.model_dump(exclude_unset=True, exclude=_PIPELINE_OWNED_FIELDS)
 
-        # Run the shared pipeline. Install a request-scoped generator state (seeded with this
-        # request's cookies) so concurrent rollouts don't clobber each other's cookies/usage. The
-        # generator reads/writes this state through contextvars; because Haystack awaits its
-        # run_async directly in this request's event-loop task, the writes are visible here.
+        # Run the shared pipeline. Keep server cookie jars separate: ``/run`` seeds the Resources
+        # Server session and its cookie must survive every model turn so direct HTTP tools operate
+        # on that same environment. Model responses may set unrelated cookies, which are only sent
+        # back to the model server on later turns.
         mcp_headers = {}
         session_token = request.headers.get(NEMO_GYM_MCP_SESSION_TOKEN_HEADER)
         if session_token:
             mcp_headers[NEMO_GYM_MCP_SESSION_TOKEN_HEADER] = session_token
-        run_state = chat_generator._GenRunState(cookies=request.cookies, mcp_headers=mcp_headers)
+        self._validate_mcp_configuration(mcp_enabled=bool(session_token))
+        run_state = chat_generator._GenRunState(resources_server_cookies=request.cookies, mcp_headers=mcp_headers)
         token = chat_generator._current_run_state.set(run_state)
         try:
-            result = await self._pipeline.run_async(
-                {self.config.agent_component_name: {"messages": messages, "generation_kwargs": generation_kwargs}}
-            )
+            agent_inputs = {"messages": messages, "generation_kwargs": generation_kwargs}
+            if body.tools:
+                agent_inputs["tools"] = self._tools_for_http_request(body.tools)
+            result = await self._pipeline.run_async({self.config.agent_component_name: agent_inputs})
         finally:
             try:
                 close_rollout_mcp_sessions(run_state)
@@ -190,11 +249,14 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         model_response.output = output_items
         model_response.usage = run_state.usage
 
-        # Propagate the incoming (resources-server session) cookies and any model-server
-        # cookies so downstream verification stays on the same session.
+        # Forward the Resources Server session so ``run()`` can verify against the same state after
+        # this internal ``/v1/responses`` call. Preserve model-server cookies separately as well,
+        # allowing a model server that uses sessions to continue them on a later request.
         for k, v in request.cookies.items():
             response.set_cookie(k, v)
-        for k, v in (run_state.cookies or {}).items():
+        for k, v in (run_state.resources_server_cookies or {}).items():
+            response.set_cookie(k, v)
+        for k, v in (run_state.model_server_cookies or {}).items():
             response.set_cookie(k, v)
 
         return model_response

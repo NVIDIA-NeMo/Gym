@@ -124,6 +124,21 @@ def has_context_aware_mcp_toolset(tools: Any) -> bool:
     )
 
 
+def context_aware_mcp_tool_names(tools: Any) -> set[str]:
+    """Return names discovered by all warmed context-aware MCP toolsets in ``tools``."""
+    if isinstance(tools, ContextAwareMCPToolset):
+        return {tool.name for tool in tools}
+    if isinstance(tools, (list, tuple, set)):
+        return set().union(*(context_aware_mcp_tool_names(tool) for tool in tools))
+    return set().union(
+        *(
+            context_aware_mcp_tool_names(nested)
+            for nested in (getattr(tools, attribute, None) for attribute in ("toolsets", "_toolsets"))
+            if isinstance(nested, (list, tuple, set))
+        )
+    )
+
+
 def close_rollout_mcp_sessions(state: chat_generator._GenRunState) -> None:
     """Release every token-authenticated session created during one rollout."""
     for worker in state.mcp_workers.values():

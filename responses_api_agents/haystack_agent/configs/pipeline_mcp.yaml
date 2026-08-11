@@ -22,6 +22,25 @@ components:
         have enough information, reply with a concise final answer and no further tool calls.
       tool_concurrency_limit: 4
       tool_streaming_callback_passthrough: false
+      tools:
+      - data:
+          connection_timeout: 30.0
+          eager_connect: false
+          inputs_from_state: null
+          invocation_timeout: 30.0
+          outputs_to_state: null
+          outputs_to_string: null
+          server_info:
+            base_delay: 1.0
+            headers: null
+            max_delay: 30.0
+            max_retries: 3
+            timeout: 30
+            token: null
+            type: haystack_integrations.tools.mcp.mcp_tool.StreamableHttpServerInfo
+            url: http://localhost:8000/mcp
+          tool_names: null
+        type: responses_api_agents.haystack_agent.mcp_toolset.ContextAwareMCPToolset
       user_prompt: null
     type: haystack.components.agents.agent.Agent
 connection_type_validation: true
