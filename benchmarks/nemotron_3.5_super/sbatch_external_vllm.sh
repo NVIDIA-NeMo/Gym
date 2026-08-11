@@ -40,6 +40,9 @@ EVAL_COMMAND=$(cat <<EOF
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
+# TODO @bxyu-nvidia: Remove this once it is baked in the Gym deps
+uv pip install httpx-aiohttp
+
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/\$SLURM_JOB_ID/\$(date +%Y%m%d_%H%M%S)
