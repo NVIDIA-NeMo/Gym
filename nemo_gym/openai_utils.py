@@ -79,6 +79,9 @@ from openai.types.responses.response_create_params import (
     ToolChoice,
     ToolParam,
 )
+from openai.types.responses.response_function_call_output_item_list_param import (
+    ResponseFunctionCallOutputItemListParam,
+)
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
@@ -231,7 +234,7 @@ class NeMoGymFunctionCallOutput(BaseModel):
     """
 
     call_id: str
-    output: str
+    output: Union[str, ResponseFunctionCallOutputItemListParam]
     type: Literal["function_call_output"] = "function_call_output"
     id: Optional[str] = None
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None

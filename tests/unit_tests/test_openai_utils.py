@@ -35,6 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessageCustomToolCall,
     NeMoGymChoice,
+    NeMoGymFunctionCallOutput,
     NeMoGymImageGenerationCall,
     NeMoGymLocalShellCall,
     NeMoGymResponse,
@@ -223,6 +224,23 @@ class TestNeMoGymChatCompletionSchemas:
 
         assert round_tripped == completion
         assert isinstance(completion.choices[0].message.tool_calls[0], NeMoGymChatCompletionMessageCustomToolCall)
+
+
+class TestNeMoGymFunctionCallOutput:
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "plain text",
+            [{"type": "input_text", "text": "structured text"}],
+            [{"type": "input_image", "image_url": "https://example.com/image.png", "detail": "high"}],
+            [{"type": "input_file", "file_id": "file_123", "filename": "result.txt"}],
+        ],
+        ids=["string", "text", "image", "file"],
+    )
+    def test_accepts_and_preserves_openai_2_7_2_payloads(self, output) -> None:
+        item = NeMoGymFunctionCallOutput(call_id="call_1", output=output)
+
+        assert item.model_dump()["output"] == output
 
 
 class TestNeMoGymResponseHostedMcpItems:
