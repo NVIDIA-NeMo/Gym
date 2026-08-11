@@ -78,6 +78,7 @@ PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
+ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
@@ -113,6 +114,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
+    ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
@@ -206,6 +208,30 @@ def _load_config_yaml(config_path):
         raise ConfigError(f"Malformed YAML in '{config_path}'{location}: {problem}") from e
 
 
+def _nemo_gym_openai_requirement() -> Optional[str]:
+    """Return nemo-gym's own openai requirement string (e.g. ``openai<=2.7.2``).
+
+    Returns ``None`` when the requirement cannot be determined (nemo-gym not
+    installed as a distribution, ``packaging`` unavailable, only marker'd
+    requirements found).
+    """
+    try:
+        # Lazy imports: `packaging` is not a declared nemo-gym dependency; any
+        # import or lookup failure means "constraint unknown".
+        from importlib.metadata import requires
+
+        from packaging.requirements import Requirement
+        from packaging.utils import canonicalize_name
+
+        for req_str in requires("nemo-gym") or []:
+            req = Requirement(req_str)
+            if canonicalize_name(req.name) == "openai" and req.marker is None:
+                return req_str
+        return None
+    except Exception:
+        return None
+
+
 def _openai_version_matches_nemo_gym_constraint(version: str) -> bool:
     """True when `version` satisfies nemo-gym's own openai requirement.
 
@@ -214,24 +240,19 @@ def _openai_version_matches_nemo_gym_constraint(version: str) -> bool:
     outside nemo-gym's own constraint (e.g. openai 2.52.x preinstalled in the base
     image while nemo-gym caps openai<=2.7.2), that pin makes every
     sub-venv resolution unsatisfiable — and the dry-run prefetch then bakes
-    venvs that contain nothing but pip. Callers use this to fall back to
-    nemo-gym's own resolution instead of pinning an impossible version. Returns
-    True (preserving the original pin-the-parent behavior) when the constraint
-    cannot be determined.
+    venvs that contain nothing but pip. The parser uses this to fail fast (or,
+    with the explicit opt-in, to fall back to nemo-gym's own resolution) instead
+    of emitting an impossible pin. Returns True (preserving the original
+    pin-the-parent behavior) when the constraint cannot be determined.
     """
+    req_str = _nemo_gym_openai_requirement()
+    if req_str is None:
+        return True
     try:
-        # Lazy imports: `packaging` is not a declared nemo-gym dependency; any
-        # import or lookup failure falls back to preserving the pin.
-        from importlib.metadata import requires
-
         from packaging.requirements import Requirement
         from packaging.version import Version
 
-        for req_str in requires("nemo-gym") or []:
-            req = Requirement(req_str)
-            if req.name == "openai" and req.marker is None:
-                return req.specifier.contains(Version(version), prereleases=True)
-        return True
+        return Requirement(req_str).specifier.contains(Version(version), prereleases=True)
     except Exception:
         return True
 
@@ -746,14 +767,27 @@ Found global config dict yaml:
             # incompatibilities — but only pin the parent's version when nemo-gym's own constraint
             # accepts it; otherwise the sub-venv resolutions are unsatisfiable and the venvs come
             # out empty (see _openai_version_matches_nemo_gym_constraint).
+            allow_openai_skew = global_config_dict.setdefault(ALLOW_OPENAI_VERSION_SKEW_KEY_NAME, False)
             if _openai_version_matches_nemo_gym_constraint(openai_version):
                 head_server_deps.append(f"openai=={openai_version}")
-            else:
-                print(
+            elif allow_openai_skew:
+                logging.warning(
                     f"Not pinning the parent process's openai=={openai_version} into server venvs: "
-                    "it does not satisfy nemo-gym's own openai constraint, so the pin would make every "
-                    "server venv resolution unsatisfiable. Server venvs will resolve openai from "
-                    "nemo-gym's constraint instead."
+                    f"it does not satisfy nemo-gym's own constraint ({_nemo_gym_openai_requirement()}). "
+                    "Server venvs resolve openai from nemo-gym's constraint instead, so the parent and "
+                    "the servers exchange requests across the HTTP boundary with different openai "
+                    f"versions ({ALLOW_OPENAI_VERSION_SKEW_KEY_NAME}=true)."
+                )
+            else:
+                raise ConfigError(
+                    f"The parent process runs openai=={openai_version}, which does not satisfy "
+                    f"nemo-gym's own openai constraint ({_nemo_gym_openai_requirement()}). Pinning it "
+                    "into the server venvs would make every server venv resolution unsatisfiable "
+                    "(and the dry-run prefetch would bake venvs containing nothing but pip). "
+                    "Install an openai version compatible with nemo-gym in the parent environment, "
+                    f"or set {ALLOW_OPENAI_VERSION_SKEW_KEY_NAME}=true to let server venvs resolve "
+                    "openai from nemo-gym's own constraint (the parent and the servers then run "
+                    "different openai versions across the HTTP boundary)."
                 )
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 

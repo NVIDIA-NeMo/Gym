@@ -72,6 +72,7 @@ class TestGlobalConfig:
             "skip_venv_if_present": False,
             "dry_run": False,
             "model_endpoint_readiness_timeout_seconds": 600,
+            "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
         }
@@ -133,6 +134,48 @@ class TestGlobalConfig:
         hostname.assert_not_called()
         wandb_init.assert_not_called()
         assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
+
+    def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
+        """Standard parser mocks (no env var, no .env.yaml, fixed hydra config)."""
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+        hydra_main_mock.return_value = lambda fn: (lambda: fn(config_dict))
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+    def _mock_openai_topology(self, monkeypatch: MonkeyPatch, parent_version: str) -> None:
+        """Parent process on `parent_version`; nemo-gym's own constraint is openai<=2.7.2."""
+        monkeypatch.setattr(nemo_gym.global_config, "openai_version", parent_version)
+        monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
+        monkeypatch.setattr(nemo_gym.global_config, "python_version", MagicMock(return_value="test python version"))
+        monkeypatch.setattr(importlib.metadata, "requires", lambda name: ["openai<=2.7.2"])
+
+    def test_head_server_deps_pins_compatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        global_config_dict = get_global_config_dict()
+        assert "openai==2.6.0" in global_config_dict["head_server_deps"]
+
+    def test_head_server_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        with raises(ConfigError, match="allow_openai_version_skew"):
+            get_global_config_dict()
+
+    def test_head_server_deps_omits_pin_with_explicit_skew_opt_in(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({"allow_openai_version_skew": True}))
+
+        global_config_dict = get_global_config_dict()
+        assert not any(dep.startswith("openai") for dep in global_config_dict["head_server_deps"])
+        assert global_config_dict["allow_openai_version_skew"] is True
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -1515,6 +1558,8 @@ class TestOpenAIVersionMatchesNemoGymConstraint:
             (["openai>=2.0,<3"], "2.52.0", True),
             # No openai requirement at all -> preserve the pin-the-parent behavior.
             (["ray[default]==2.49.0"], "2.52.0", True),
+            # Package names are case-insensitive (PEP 503): still recognized.
+            (["OpenAI<=2.7.2"], "2.52.0", False),
             # Marker'd requirements are skipped (conservative fallback).
             (['openai<=2.7.2; extra == "adapters"'], "2.52.0", True),
             # importlib.metadata.requires may return None.
