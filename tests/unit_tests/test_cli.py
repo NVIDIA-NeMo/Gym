@@ -34,8 +34,10 @@ from nemo_gym.cli.env import (
     RunConfig,
     RunHelper,
     TestConfig,
+    _delete_server_venv,
     _resolve_server_dir,
     _select_shard,
+    _test_single,
     dump_config,
     init_resources_server,
     list_environments,
@@ -79,6 +81,49 @@ class TestSelectShard:
         paths = [Path("resources_servers/s0")]
         with raises(AssertionError):
             _select_shard(paths, shard_index=4, num_shards=4)
+
+
+class TestServerJunitReports:
+    def test_disabled_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        test_config = MagicMock(entrypoint="resources_servers/example")
+        test_config.resolved_dir_path = Path("/tmp/example")
+        run = MagicMock()
+        monkeypatch.delenv("GYM_CI_JUNIT_DIR", raising=False)
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *_: "setup")
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run)
+
+        _test_single(test_config, OmegaConf.create({}))
+
+        assert run.call_args.args[0] == "setup && pytest"
+
+    def test_uses_unique_module_path_and_prefix(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        test_config = MagicMock(entrypoint="responses_api_agents/example")
+        test_config.resolved_dir_path = Path("/tmp/example")
+        run = MagicMock()
+        monkeypatch.setenv("GYM_CI_JUNIT_DIR", str(tmp_path / "reports"))
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *_: "setup")
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run)
+
+        _test_single(test_config, OmegaConf.create({}))
+
+        command = run.call_args.args[0]
+        assert f"--junitxml={tmp_path}/reports/responses_api_agents__example.xml" in command
+        assert "--junit-prefix=responses_api_agents.example" in command
+        assert (tmp_path / "reports").is_dir()
+
+
+def test_server_venv_cleanup_uses_configured_root(tmp_path: Path) -> None:
+    server_dir = tmp_path / "checkout" / "resources_servers" / "example"
+    source_venv = server_dir / ".venv"
+    custom_root = tmp_path / "node-local"
+    configured_venv = custom_root / "resources_servers" / "example" / ".venv"
+    source_venv.mkdir(parents=True)
+    configured_venv.mkdir(parents=True)
+
+    _delete_server_venv(server_dir, OmegaConf.create({"uv_venv_dir": str(custom_root)}))
+
+    assert source_venv.is_dir()
+    assert not configured_venv.exists()
 
 
 # TODO: Eventually we want to add more tests to ensure that the CLI flows do not break
