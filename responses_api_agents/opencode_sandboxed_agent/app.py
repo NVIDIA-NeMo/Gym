@@ -397,8 +397,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(verify_response)
 
-        # TODO @bxyu-nvidia: Check if sandbox stop is idempotent
-        await sandbox.stop()
+        try:
+            await sandbox.stop()
+        except:
+            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+
         self._sandbox_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
 
         # @bxyu-nvidia: This is scraped from the raw create params. Later on we can dynamically set this if OpenCode exports this :rofl:
