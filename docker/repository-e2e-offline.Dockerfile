@@ -121,7 +121,8 @@ RUN set -eu; \
     pids=""; \
     for shard in 0 1 2 3 4 5 6 7; do \
       shard_root="/tmp/repository-e2e-gym-shard-${shard}"; \
-      cp -a /tmp/repository-e2e-gym-source "${shard_root}"; \
+      cp -a --no-preserve=ownership \
+        /tmp/repository-e2e-gym-source "${shard_root}"; \
       ( \
         cd "${shard_root}"; \
         git clean -ffdx; \
