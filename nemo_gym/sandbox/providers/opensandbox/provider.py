@@ -52,6 +52,15 @@ class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
 
 
+class SandboxBackendUnreachableError(RuntimeError):
+    """Raised when the server proxy cannot open a TCP connection to a sandbox's exec daemon.
+
+    The proxy's 502 is a connect failure, so the submitted command never
+    started. Persistent 502s mean the backend is gone (e.g. the container was
+    OOM-killed and sandbox pods never restart); retrying cannot revive it.
+    """
+
+
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRYABLE_ERROR_MARKERS = (
     "all connection attempts failed",
@@ -261,13 +270,17 @@ def _log_create_retry(retry_state: Any) -> None:
     )
 
 
-def _log_operation_retry(retry_state: Any) -> None:
+def _log_operation_retry(retry_state: Any, *, operation: str = "?", sandbox_id: str = "?") -> None:
+    # operation + sandbox_id make an absorbed create-probe retry distinguishable
+    # from a failing agent exec; without them every 502 retry looks identical.
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
     LOGGER.warning(
-        "Retrying OpenSandbox SDK operation after attempt %s; next_sleep_s=%s; error=%r",
+        "Retrying OpenSandbox SDK operation after attempt %s; next_sleep_s=%s; operation=%s; sandbox_id=%s; error=%r",
         retry_state.attempt_number,
         sleep_s,
+        operation,
+        sandbox_id,
         exception,
     )
 
@@ -627,6 +640,14 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+            # The SDK's execd-facing clients (health ping, commands, files)
+            # send only ConnectionConfig.headers — api_key alone never reaches
+            # proxied /proxy/* routes, so servers that enforce auth there 401
+            # every health ping and create times out at ready_timeout. Inject
+            # the key only in proxy mode: a direct sandbox endpoint runs
+            # untrusted code and must never see it.
+            if self._connection.api_key is not None:
+                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
         if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
@@ -730,7 +751,7 @@ class OpenSandboxProvider:
         max_attempts = retry_count + 1
 
         def _before_sleep(retry_state: Any) -> None:
-            _log_operation_retry(retry_state)
+            _log_operation_retry(retry_state, operation=operation, sandbox_id=sandbox_id)
 
         retry_policy = AsyncRetrying(
             retry=retry_if_exception(_is_retryable_sdk_operation_error),
@@ -752,6 +773,57 @@ class OpenSandboxProvider:
                 )
 
         raise RuntimeError("OpenSandbox SDK operation retry loop did not run")
+
+    async def _submit_command(
+        self,
+        operation_factory: Callable[[], Awaitable[Any]],
+        *,
+        operation: str,
+        sandbox_id: str,
+        timeout_s: float | None,
+        retries: int,
+    ) -> Any:
+        """Retry backend-connect 502s that ``command_retries`` deliberately skips.
+
+        A proxy 502 is a TCP-connect failure: the command never reached execd, so
+        retrying under ``operations.retries`` cannot double-run it (unlike a real
+        command failure). When that budget is exhausted the backend is dead, so
+        raise a typed error and fail fast instead of retrying for hours.
+        """
+        attempts = self._operations.retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._await_sdk_operation(
+                    operation_factory,
+                    operation=operation,
+                    sandbox_id=sandbox_id,
+                    timeout_s=timeout_s,
+                    retries=retries,
+                )
+            except Exception as e:
+                if _exception_status_code(e) != 502:
+                    raise
+                if attempt == attempts:
+                    raise SandboxBackendUnreachableError(
+                        f"Sandbox backend unreachable through {attempts} submissions of "
+                        f"{operation!r} (proxy 502: no TCP connection to execd); the sandbox "
+                        f"is likely dead; sandbox_id={sandbox_id!r}"
+                    ) from e
+                # The execd bind window is short, so poll quickly with a small
+                # capped backoff rather than the per-operation delays (which are
+                # tuned for slow creates).
+                sleep_s = min(0.25 * 2 ** (attempt - 1), 2.0)
+                LOGGER.warning(
+                    "Backend-connect 502 on %s; retrying submission %s/%s in %.1fs; sandbox_id=%s",
+                    operation,
+                    attempt,
+                    attempts,
+                    sleep_s,
+                    sandbox_id,
+                )
+                await asyncio.sleep(sleep_s)
+
+        raise RuntimeError("OpenSandbox command submission retry loop did not run")
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
         if self._probe.command is None:
@@ -1061,7 +1133,7 @@ class OpenSandboxProvider:
                     retries=effective_retries,
                 )
 
-            execution = await self._await_sdk_operation(
+            execution = await self._submit_command(
                 lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
                 operation="command run",
                 sandbox_id=handle.sandbox_id,
@@ -1118,7 +1190,7 @@ class OpenSandboxProvider:
         background_opts = dict(opts_kwargs)
         background_opts["background"] = True
 
-        execution = await self._await_sdk_operation(
+        execution = await self._submit_command(
             lambda: handle.raw.commands.run(command, opts=RunCommandOpts(**background_opts)),
             operation="command run (background submit)",
             sandbox_id=handle.sandbox_id,

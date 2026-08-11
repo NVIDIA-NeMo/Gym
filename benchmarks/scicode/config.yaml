@@ -27,5 +27,5 @@ scicode_benchmark_agent:
         prepare_script: benchmarks/scicode/prepare.py
         # null: the agent builds per-sub-step prompts (prompt_fpath); no row-level materialization.
         prompt_config: null
-        num_repeats: 3
+        num_repeats: 8
         license: Apache 2.0
