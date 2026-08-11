@@ -187,11 +187,9 @@ class TestApp:
 
             d["duration"] = 0.0
 
-            # NeMoGymResponse inherits the SDK's Response, so each openai release can add optional fields.
-            # They arrive here as None.
-            # Dropping nulls ignores that, while a field this fixture expects to hold a value
-            # still fails if it arrives as None.
-            # tests/unit_tests/test_openai_utils.py owns the full field set.
+            # SDK releases can add optional response fields.
+            # Ignore these fields when their values are `None`.
+            # Expected non-null values remain part of the comparison.
             return _drop_nulls(d)
 
         assert _clean(expected_response_dict) == _clean(actual_response_dict)

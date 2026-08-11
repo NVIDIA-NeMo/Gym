@@ -26,14 +26,11 @@ from responses_api_agents.tool_simulation_agent.app import ToolSimulationAgent, 
 
 
 def _drop_nulls(value):
-    """Recursively remove keys whose value is None.
+    """Remove dictionary entries with a value of ``None`` recursively.
 
-    These tests assert the exact payload sent downstream, and that payload contains a NeMoGymResponse dump.
-    NeMoGymResponse inherits the SDK's Response, so each openai release can add optional fields.
-    They arrive here as None and break a literal comparison.
-    Dropping nulls on both sides ignores that class of change.
-    A field the fixture expects to hold a value still fails if it arrives as None.
-    tests/unit_tests/test_openai_utils.py is what notices the field set moving.
+    SDK releases can add optional response fields.
+    Exact payload comparisons should ignore these unset fields.
+    Expected non-null values remain part of the comparison.
     """
     if isinstance(value, dict):
         return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
