@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import subprocess
-from pathlib import Path
 
-
-# opencv-python-headless is excluded from the shipped container via
-# sys_platform == 'never'. Install it before tests via the codec install
-# script so tests that import cv2 don't fail.
-_INSTALL_SCRIPT = Path(__file__).resolve().parents[3] / "docker" / "install_codec_deps.sh"
-
-subprocess.run(["bash", str(_INSTALL_SCRIPT)], check=True)
+# opencv-python-headless is excluded from the shipped container and PyPI package
+# via sys_platform == 'never'. Install it at the version osworld was validated
+# against before test collection so imports of cv2 succeed.
+if importlib.util.find_spec("cv2") is None:
+    subprocess.run(
+        ["uv", "pip", "install", "--no-config", "opencv-python-headless==4.8.1.78"],
+        check=True,
+    )
