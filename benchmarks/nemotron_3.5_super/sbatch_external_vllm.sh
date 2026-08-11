@@ -50,7 +50,7 @@ gym eval run \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
-    +nemo_gym_log_dir=results/\$experiment_name-logs \
+    +nemo_gym_log_dir=results/\$experiment_name/logs \
     +skip_venv_if_present=true \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
     ++overwrite_metrics_conflicts=true \
