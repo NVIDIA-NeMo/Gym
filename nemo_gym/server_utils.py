@@ -431,9 +431,17 @@ Sleeping 0.5s and retrying...
             await asyncio.sleep(0.5)
 
 
-async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
+async def raise_for_status(
+    response: ClientResponse, response_content: Optional[Union[str, bytes]] = None
+) -> None:  # pragma: no cover
+    """Raise `ClientResponseError` for an error status, carrying the body on `.response_content`.
+
+    Pass `response_content` when the caller already read the body. `response.content` is a stream
+    that yields nothing on a second read, so re-reading it here would attach an empty body and lose
+    the server's explanation.
+    """
     if not response.ok:
-        content = await response.content.read()
+        content = await response.content.read() if response_content is None else response_content
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"""Request info: {response.request_info}
 Response content: {content}""")

@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 from asyncio import sleep
+from time import monotonic
 from typing import (
     Annotated,
     Any,
@@ -623,6 +624,12 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # 500 is internal server error, which may sporadically occur
 # 502 is Bad gateway (when the endpoint is overloaded)
 # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
+# Absolute bounds on one logical model call, whichever comes first. Without them a rate limit
+# raises `max_num_tries` every time it fires, so an endpoint that always answers 429 is retried
+# forever and the rollout holding this call never releases its concurrency slot.
+MODEL_RETRY_MAX_ATTEMPTS = 10
+MODEL_RETRY_DEADLINE_SECONDS = 300.0
+
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 
@@ -656,12 +663,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         max_num_tries = MAX_NUM_TRIES
         tries = 0
+        started_at = monotonic()
+        content = ""
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
+                # A rate limit raises this call's own budget, so waiting out a long throttle does
+                # not consume the allowance for server errors. The absolute ceiling and the deadline
+                # below are what stop that from running forever against an endpoint that always
+                # answers 429.
                 if response.status in RATE_LIMIT_ERROR_CODES:
                     max_num_tries += 1
 
@@ -671,13 +683,19 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
                     flush=True,
                 )
+
+                elapsed = monotonic() - started_at
+                if tries >= MODEL_RETRY_MAX_ATTEMPTS or elapsed >= MODEL_RETRY_DEADLINE_SECONDS:
+                    break
+
                 await sleep(0.5)
                 continue
             else:
                 return response
 
-        # We've exited the loop
-        await raise_for_status(response)
+        # Out of budget. `content` holds the body already read above; re-reading it here would
+        # return empty and lose the endpoint's own explanation of what went wrong.
+        await raise_for_status(response, response_content=content)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
