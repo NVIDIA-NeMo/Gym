@@ -175,26 +175,6 @@ nel run --config base-suite.yaml --env-file .env -t adlr_mmlu # one benchmark
 The `*_sampled` tasks repeat requests with the same seed, so response caching is
 disabled for them in the config (lm-eval does its own caching).
 
-> ⚠️ **Known issue — `adlr_minerva_math_nemo_4_shot` fails on
-> `lm-evaluation-harness:26.03`.** The task's `doc_to_target` does
-> `parse(doc["solution"])[1]`, and for exactly one document in the dataset
-> (`EleutherAI/hendrycks_math`, `algebra` config, `test` index 670) `math_verify.parse()`
-> returns a single-element list, so the run dies with `IndexError: list index out of
-> range` during scoring:
->
-> ```
-> lm_eval/tasks/custom/adlr_minerva_math_nemo/nemo_utils.py:41, in doc_to_target
->     return parse(doc["solution"])[1] or extract_answer(doc["solution"])
-> IndexError: list index out of range
-> ```
->
-> This is independent of the model — it is dataset/container-side, and it reproduces for
-> any model. The other 20 tasks are unaffected. Until a container ships with the guard
-> (`p = parse(...); (p[1] if len(p) > 1 else None) or extract_answer(...)`), either skip
-> this task or run it with a container where it is fixed. Note that
-> `lm-evaluation-harness:26.01` is *not* a workaround: its older `nemo-evaluator` rejects
-> this config's `required_capabilities` field outright.
-
 ### Running against an existing endpoint
 
 If you already have the model served somewhere, use
@@ -267,18 +247,6 @@ run will fail if they do not resolve.
 [Long context serving](#long-context-serving) — not at the one used for the base suite.
 Expect the 512k and 1M tasks to be substantially slower and more memory-hungry than
 everything else; budget time accordingly.
-
-> ⚠️ **Long-context numbers from this recipe are provisional.** Our 512k measurement
-> came out materially below the published long-context figure, and the discrepancy is
-> not yet explained. Treat these scores as not-yet-validated, and prefer the model card
-> for long-context claims.
->
-> The published checkpoint declares `max_position_embeddings: 262144` with
-> `rope_theta: 10000` and **no `rope_scaling`**, so the 512k and 1M tasks run 2× and 4×
-> beyond the model's trained positional range — which is why
-> `VLLM_ALLOW_LONG_MAX_MODEL_LEN` is required to serve them at all. Scores at those two
-> lengths should be read with that in mind. The 64k / 128k / 256k tasks are within
-> range and are not affected.
 
 ### Output
 
