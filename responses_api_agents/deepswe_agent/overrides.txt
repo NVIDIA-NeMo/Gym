@@ -1,8 +1,2 @@
--e nemo-gym[dev,sandbox] @ ../../
-datacurve-pier==0.3.0
-dirhash>=0.5.0
 harbor @ git+https://github.com/laude-institute/harbor.git@9dddd797b57ab8a0f9d6352a20fce73abbb29573
 litellm==1.79.3
-loguru>=0.7.3
-shortuuid>=1.0.13
-toml>=0.10.2

@@ -169,11 +169,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        install_with_prefix = f"{install_cmd}{prefix_cmd}"
-        post_install_fpath = dir_path / "post_install.sh"
-        if post_install_fpath.exists():
-            install_with_prefix += f" && bash post_install.sh {venv_python_fpath}{prefix_cmd}"
-        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_with_prefix}"
+        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
 
     return f"cd {dir_path} && {env_setup_cmd}"
 
