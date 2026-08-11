@@ -6,9 +6,13 @@ FROM ${BASE_IMAGE}
 
 ARG GYM_SOURCE_SHA=5346c8ffc9e4438959955e5b958a12733ed9abc0
 ARG HERMES_AGENT_SHA=26bb847a88493342ca1b194e0455b479073ae21d
+ARG HUMAN_EVAL_INFILLING_SHA=e0a239b08710e3fea48b03f4e326b3161bd650f0
+ARG LLM_AZURE_OPENAI_SHA=48045f787f5480734711029d99a47973c38a5a46
+ARG LLM_SHA=6de2c7ba5c5f53e95834915814c4d91a3797eeae
 ARG OPENENV_SHA=5359534c6f003f81f375482ec783e80dd48b46d4
 ARG TALE_SUITE_SHA=ef349ba7cfdebf339e9aedcd09d89d6c917f86e5
 ARG TAU2_SHA=346f74d9752f80af8ca3e083467bafcee961bd74
+ARG VECALIGN_SHA=f37262758955133d0c9ef1fdff45eba25842a62c
 ARG VERIFIABLE_INSTRUCTIONS_SHA=f46a5ac87b1400a4f8973039844b6be9b56e3faf
 ARG VERIFIERS_SHA=2fbd2b7fab0236cb039c4aa5afb25ad9c5f17134
 ARG RUNTIME_UID=65532
@@ -56,17 +60,29 @@ RUN set -eu; \
     install -d /opt/repository-e2e-gym/git-sources; \
     fetch_source hermes-agent https://github.com/cmunley1/hermes-agent \
       "${HERMES_AGENT_SHA}"; \
+    fetch_source human-eval-infilling \
+      https://github.com/wasiahmad/human-eval-infilling.git \
+      "${HUMAN_EVAL_INFILLING_SHA}"; \
+    fetch_source llm https://github.com/MarcCote/llm.git \
+      "${LLM_SHA}"; \
+    fetch_source llm-azure-openai https://github.com/MarcCote/llm-azure-openai.git \
+      "${LLM_AZURE_OPENAI_SHA}"; \
     fetch_source openenv https://github.com/meta-pytorch/OpenEnv.git \
       "${OPENENV_SHA}"; \
     fetch_source tale-suite https://github.com/microsoft/tale-suite.git \
       "${TALE_SUITE_SHA}"; \
     fetch_source tau2 https://github.com/bxyu-nvidia/tau2-bench \
       "${TAU2_SHA}"; \
+    fetch_source vecalign https://github.com/thompsonb/vecalign \
+      "${VECALIGN_SHA}"; \
     fetch_source verifiable-instructions \
       https://github.com/abukharin-nv/verifiable-instructions.git \
       "${VERIFIABLE_INSTRUCTIONS_SHA}"; \
     fetch_source verifiers https://github.com/PrimeIntellect-ai/verifiers.git \
-      "${VERIFIERS_SHA}"
+      "${VERIFIERS_SHA}"; \
+    git config --file /opt/repository-e2e-gym/gitconfig \
+      url."file:///opt/repository-e2e-gym/git-sources/human-eval-infilling/".insteadOf \
+      https://github.com/wasiahmad/human-eval-infilling.git
 
 COPY docker/repository-e2e-constraints.txt /opt/repository-e2e-gym/constraints.txt
 COPY docker/repository-e2e-overrides.txt /opt/repository-e2e-gym/overrides.txt
@@ -77,7 +93,8 @@ RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/nemo-gym /workspace 
       /opt/repository-e2e-gym /tmp/repository-e2e-gym-source
 
 ENV UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt \
-    UV_OVERRIDE=/opt/repository-e2e-gym/overrides.txt
+    UV_OVERRIDE=/opt/repository-e2e-gym/overrides.txt \
+    GIT_CONFIG_GLOBAL=/opt/repository-e2e-gym/gitconfig
 
 USER ${RUNTIME_UID}:${RUNTIME_GID}
 
