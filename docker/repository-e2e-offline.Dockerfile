@@ -94,7 +94,11 @@ RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/nemo-gym /workspace 
 
 ENV UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt \
     UV_OVERRIDE=/opt/repository-e2e-gym/overrides.txt \
-    GIT_CONFIG_GLOBAL=/opt/repository-e2e-gym/gitconfig
+    GIT_CONFIG_GLOBAL=/opt/repository-e2e-gym/gitconfig \
+    HOME=/opt/repository-e2e-gym/home \
+    XDG_CACHE_HOME=/opt/repository-e2e-gym/home/.cache \
+    XDG_CONFIG_HOME=/opt/repository-e2e-gym/home/.config \
+    XDG_DATA_HOME=/opt/repository-e2e-gym/home/.local/share
 
 USER ${RUNTIME_UID}:${RUNTIME_GID}
 
