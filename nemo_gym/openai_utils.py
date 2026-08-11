@@ -131,6 +131,34 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     routed_experts: NotRequired[RoutedExperts]
 
 
+_REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
+    {
+        "prompt_token_ids",
+        "generation_token_ids",
+        "generation_log_probs",
+    }
+)
+_TOKEN_METADATA_FIELDS = _REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
+
+
+def _validate_atomic_token_metadata(value: Any) -> Any:
+    """Require complete token metadata when any token field is present."""
+    if not isinstance(value, dict):
+        return value
+
+    present_fields = _TOKEN_METADATA_FIELDS.intersection(value)
+    if not present_fields:
+        return value
+
+    missing_fields = _REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
+    if missing_fields:
+        missing = ", ".join(sorted(missing_fields))
+        raise ValueError(f"Token metadata must include all required fields; missing: {missing}")
+
+    TokenIDLogProbMixin.model_validate({field: value[field] for field in present_fields})
+    return value
+
+
 ########################################
 # Responses API inputs
 ########################################
@@ -325,32 +353,34 @@ RESPONSES_TO_TRAIN = {
 }
 
 
-NeMoGymResponseInputItem = Union[
-    NeMoGymEasyInputMessage,
-    NeMoGymMessage,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymFunctionCallOutput,
-    NeMoGymResponseReasoningItem,
-    NeMoGymResponseMcpCall,
-    NeMoGymResponseMcpListTools,
-    NeMoGymResponseMcpApprovalRequest,
-    # Responses API output-call items. The upstream SDK includes these in both
-    # ResponseOutputItem and ResponseInputItemParam (outputs are echoed back as
-    # input on subsequent turns), so they belong in this shared union:
-    NeMoGymResponseFileSearchToolCall,
-    NeMoGymResponseFunctionWebSearch,
-    NeMoGymResponseComputerToolCall,
-    NeMoGymImageGenerationCall,
-    NeMoGymResponseCodeInterpreterToolCall,
-    NeMoGymLocalShellCall,
-    NeMoGymResponseCustomToolCall,
-    # For training:
-    NeMoGymEasyInputMessageForTraining,
-    NeMoGymMessageForTraining,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseReasoningItemForTraining,
+NeMoGymResponseInputItem = Annotated[
+    Union[
+        NeMoGymEasyInputMessage,
+        NeMoGymMessage,
+        NeMoGymResponseOutputMessage,
+        NeMoGymResponseFunctionToolCall,
+        NeMoGymFunctionCallOutput,
+        NeMoGymResponseReasoningItem,
+        NeMoGymResponseMcpCall,
+        NeMoGymResponseMcpListTools,
+        NeMoGymResponseMcpApprovalRequest,
+        # The SDK includes these items in both response output and request input.
+        # Outputs are replayed as input on subsequent turns.
+        NeMoGymResponseFileSearchToolCall,
+        NeMoGymResponseFunctionWebSearch,
+        NeMoGymResponseComputerToolCall,
+        NeMoGymImageGenerationCall,
+        NeMoGymResponseCodeInterpreterToolCall,
+        NeMoGymLocalShellCall,
+        NeMoGymResponseCustomToolCall,
+        # Training variants.
+        NeMoGymEasyInputMessageForTraining,
+        NeMoGymMessageForTraining,
+        NeMoGymResponseOutputMessageForTraining,
+        NeMoGymResponseFunctionToolCallForTraining,
+        NeMoGymResponseReasoningItemForTraining,
+    ],
+    BeforeValidator(_validate_atomic_token_metadata),
 ]
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
@@ -486,8 +516,14 @@ class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, Toke
     pass
 
 
+NeMoGymChatCompletionOutputMessage: TypeAlias = Annotated[
+    Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining],
+    BeforeValidator(_validate_atomic_token_metadata),
+]
+
+
 class NeMoGymChoice(Choice):
-    message: Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining]
+    message: NeMoGymChatCompletionOutputMessage
 
 
 class NeMoGymChatCompletion(ChatCompletion):
@@ -566,16 +602,19 @@ class NeMoGymFunctionToolParam(FunctionToolParam):
     pass
 
 
-NeMoGymChatCompletionMessageParam: TypeAlias = Union[
-    NeMoGymChatCompletionDeveloperMessageParam,
-    NeMoGymChatCompletionSystemMessageParam,
-    NeMoGymChatCompletionUserMessageParam,
-    NeMoGymChatCompletionAssistantMessageParam,
-    NeMoGymChatCompletionToolMessageParam,
-    # Don't add deprecated.
-    # NeMoGymChatCompletionFunctionMessageParam,
-    # Training:
-    NeMoGymChatCompletionAssistantMessageForTrainingParam,
+NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
+    Union[
+        NeMoGymChatCompletionDeveloperMessageParam,
+        NeMoGymChatCompletionSystemMessageParam,
+        NeMoGymChatCompletionUserMessageParam,
+        NeMoGymChatCompletionAssistantMessageParam,
+        NeMoGymChatCompletionToolMessageParam,
+        # Keep deprecated function messages out of this union.
+        # NeMoGymChatCompletionFunctionMessageParam,
+        # Training variants.
+        NeMoGymChatCompletionAssistantMessageForTrainingParam,
+    ],
+    BeforeValidator(_validate_atomic_token_metadata),
 ]
 
 

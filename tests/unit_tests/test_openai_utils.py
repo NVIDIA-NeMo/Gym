@@ -31,6 +31,8 @@ from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChoice,
     NeMoGymImageGenerationCall,
     NeMoGymLocalShellCall,
     NeMoGymResponse,
@@ -83,6 +85,44 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_unknown_field_still_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponseCreateParamsNonStreaming(input="hello", not_a_real_field=1)
+
+
+class TestTokenMetadataValidation:
+    @pytest.mark.parametrize(
+        "token_metadata",
+        [
+            {"generation_token_ids": [2], "generation_log_probs": [-0.1]},
+            {
+                "prompt_token_ids": [1],
+                "generation_token_ids": {"invalid": "shape"},
+                "generation_log_probs": [-0.1],
+            },
+        ],
+        ids=["partial", "malformed"],
+    )
+    def test_chat_request_rejects_invalid_metadata_instead_of_falling_back(self, token_metadata: dict) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[
+                    {
+                        "role": "assistant",
+                        "content": "answer",
+                        **token_metadata,
+                    }
+                ]
+            )
+
+    def test_chat_response_rejects_partial_metadata_instead_of_falling_back(self) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymChoice(
+                index=0,
+                finish_reason="stop",
+                message={
+                    "role": "assistant",
+                    "content": "answer",
+                    "prompt_token_ids": [1],
+                },
+            )
 
 
 class TestNeMoGymResponseHostedMcpItems:
