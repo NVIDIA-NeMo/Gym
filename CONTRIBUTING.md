@@ -30,7 +30,7 @@ Refer to the [RL Framework Integration Guide](https://docs.nvidia.com/nemo/gym/l
 
 ## Use of AI and LLM Tools
 
-We encourage contributors to use AI coding assistants (Cursor, Claude, Codex, OpenCode)
+We encourage contributors to use AI coding assistants (Cursor, Claude, Codex, OpenCode, and similar)
 where they genuinely help, but AI assistance does not replace human understanding, judgment, and
 accountability.
 
@@ -38,8 +38,9 @@ accountability.
 maintainer review burden. You are responsible for every line of code you submit, regardless of
 whether you or an AI tool wrote it.
 
-Refer to [Use of AI and LLM Tools](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup#use-of-ai-and-llm-tools)
-for the quality bar, and to [`AGENTS.md`](./AGENTS.md) for agent-facing guidance.
+Refer to [`AGENTS.md`](./AGENTS.md) for the quality bar (shared by humans and coding agents), and to
+[Use of AI and LLM Tools](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup#use-of-ai-and-llm-tools)
+for how maintainers handle low-effort submissions.
 
 ## Licensing of Contributions
 
@@ -67,7 +68,7 @@ submitting a contribution, you agree that:
 
 ## Development Setup
 
-For complete development setup, CI/CD requirements, commit signing, and troubleshooting, refer to the [Development Setup Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup.html).
+For complete development setup, CI/CD requirements, DCO sign-off, and troubleshooting, refer to the [Development Setup Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup.html).
 
 **Quick Start:**
 

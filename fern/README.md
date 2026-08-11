@@ -40,7 +40,7 @@ make docs-check
 
 You do **not** need Fern `nvidia` org membership to contribute documentation. Edit MDX under `fern/versions/latest/pages/` (update [`fern/versions/main.yml`](./versions/main.yml) only when a new page is not auto-discovered), open a PR, and use CI (`fern check` + the automatic preview comment), which authenticates with the repository `DOCS_FERN_TOKEN`.
 
-Fern `nvidia` org membership is only needed for local library autodoc generation (`make docs` / `fern docs md generate`) when you hit that 403. To request access, [open a GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) asking to be added to the Fern `nvidia` organization. Maintainers triage the request.
+Fern `nvidia` org membership is only needed for local library autodoc generation (`make docs` / `fern docs md generate`) when you hit that 403. To request access, [open a GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) with a title like `Fern nvidia org access request` (label `community-request` if available). Maintainers triage the request.
 
 **NVIDIA employees:** if you have NVIDIA Slack, you can also ask in `#fern`. Slack is not required for external contributors.
 

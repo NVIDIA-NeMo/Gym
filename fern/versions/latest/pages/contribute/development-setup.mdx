@@ -50,7 +50,7 @@ All contributions must pass these automated checks:
 - **Unit Tests**: All existing tests must pass
 - **Build Docs**: Documentation must build without errors
 - **Copyright Check**: All files must have proper copyright headers
-- **DCO Signing**: All commits must be signed off
+- **DCO Sign-off**: All commits must include `Signed-off-by` (`git commit -s`)
 - **Pre-commit Hooks**: Code formatting and linting
 
 **Test Requirements**:
@@ -84,7 +84,7 @@ You do **not** need Fern dashboard org membership to contribute docs.
 
 Optional local preview follows the Fern README. Full `make docs` / library autodoc (`fern docs md generate`) may require membership in the Fern `nvidia` organization if you hit `HTTP 403: User does not belong to organization`.
 
-**Requesting Fern `nvidia` org access (optional):** open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) on NVIDIA-NeMo/Gym asking to be added to the Fern `nvidia` organization. Maintainers triage the request.
+**Requesting Fern `nvidia` org access (optional):** open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) on NVIDIA-NeMo/Gym. Suggested title: `Fern nvidia org access request`. Add the `community-request` label if you can, and say you need Fern dashboard membership for local autodoc (`make docs` / `fern docs md generate`). Maintainers triage the request.
 
 **NVIDIA employees:** if you already have NVIDIA Slack, you can also ask in `#fern` for org access or docs help. Slack `#fern` is not required for external contributors.
 
@@ -114,89 +114,29 @@ Optional local preview follows the Fern README. Full `make docs` / library autod
 
 ## DCO and Commit Signing
 
-All NeMo Gym contributions require **commit signing** and **DCO sign-off**.
+All NeMo Gym contributions require **DCO sign-off** (`git commit -s`). Cryptographic commit signing (SSH/GPG `-S`) is **optional** and not enforced by CI.
 
-### Quick Setup
+### Quick Setup (required)
 
-**1. Configure Git Signing (Required)**
 ```bash
 # Set your identity (use your GitHub email)
 git config --global user.name "Your Name"
 git config --global user.email "your@github-email.com"
-
-# Enable commit signing
-git config --global commit.gpgsign true
-
-# Use SSH signing (recommended - simpler than GPG)
-git config --global gpg.format ssh
-git config --global user.signingkey ~/.ssh/id_ed25519.pub
 ```
 
-**2. Add Signing Key to GitHub**
-1. Go to [GitHub Settings → SSH and GPG keys](https://github.com/settings/keys)
-2. Under "SSH keys" section, find "Signing keys" subsection
-3. Click "New SSH key" → Set type to "Signing Key"
-4. Copy your public key: `cat ~/.ssh/id_ed25519.pub`
-5. Paste the **entire output** (including `ssh-ed25519` prefix)
+**Every commit must be signed off** with `-s`:
 
-**3. Test Your Setup**
 ```bash
-# Test commit signing
-git commit --allow-empty -s -m "Test commit signing"
-
-# Verify it's signed (should show "S" for signed)
-git log --show-signature -1
-```
-
-### IDE Integration
-
-**VSCode Setup**
-
-Create/update `.vscode/settings.json` in your project:
-```json
-{
-    "git.enableCommitSigning": true,
-    "git.alwaysSignOff": true
-}
-```
-
-**Other IDEs**: Enable "Git commit signing" and "Always sign-off" in your Git settings.
-
-### Making Signed Commits
-
-**Every commit must be signed off** using the `-s` flag:
-```bash
-# Standard workflow
 git add .
 git commit -s -m "Your commit message"
 
 # The -s flag adds this line automatically:
-# Signed-off-by: Your Name [your@email.com](mailto:your@email.com)
+# Signed-off-by: Your Name <your@email.com>
 ```
 
-### Troubleshooting
+In VS Code / Cursor, you can set `"git.alwaysSignOff": true` so the IDE adds the trailer for you.
 
-**Problem**: `error: gpg failed to sign the data`
-```bash
-# Check if key exists and is correct format
-ls -la ~/.ssh/id_ed25519.pub
-
-# Verify git config
-git config --list | grep -E "(user|gpg|signingkey)"
-
-# Test SSH key
-ssh-add -l
-```
-
-**Problem**: "Signing key not found on GitHub"
-- Ensure you copied the complete public key including the `ssh-ed25519` prefix
-- Add the key as a **Signing Key** (not Authentication Key) on GitHub
-- Wait a few minutes for GitHub to process the new key
-
-**Problem**: IDE not signing commits
-- Restart your IDE after configuring Git
-- Check IDE Git settings match the command line configuration
-- Try committing through the command line first to validate setup
+### Troubleshooting DCO
 
 **Problem**: "DCO sign-off missing"
 
@@ -231,27 +171,20 @@ git push --force-with-lease
 
 **Tip:** Always use `git commit -s` when creating commits to avoid this issue.
 
-### Alternative: GPG Signing
+### Optional: Cryptographic commit signing (SSH or GPG)
 
-If you prefer GPG over SSH signing:
+Not required for merge. If you want GitHub to show commits as "Verified":
 
 ```bash
-# Generate GPG key (if you don't have one)
-gpg --full-generate-key
-
-# List keys and copy the key ID
-gpg --list-secret-keys --keyid-format=long
-
-# Configure Git to use GPG
-git config --global user.signingkey YOUR_GPG_KEY_ID
-# Do not set gpg.format (defaults to gpg)
-
-# Add GPG key to GitHub
-gpg --armor --export YOUR_GPG_KEY_ID
-# Copy output to GitHub Settings → SSH and GPG keys → GPG keys
+# SSH signing (recommended)
+git config --global commit.gpgsign true
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
 ```
 
----
+Add the same public key in [GitHub Settings → SSH and GPG keys](https://github.com/settings/keys) as a **Signing Key**, then commit with `-s` as usual (add `-S` only if you want to force a signed commit from the CLI).
+
+For GPG instead of SSH: generate a key, set `user.signingkey` to the key ID, leave `gpg.format` unset, and upload the public key under GitHub GPG keys.
 
 ## Common Issues
 
@@ -285,22 +218,11 @@ pre-commit autoupdate             # Update hook versions
 
 ## Use of AI and LLM Tools
 
-We encourage contributors to use AI coding assistants (Cursor, Claude, Codex, OpenCode) where they genuinely help. However, AI assistance does not replace human understanding, judgment, and accountability.
+We encourage contributors to use AI coding assistants (Cursor, Claude, Codex, OpenCode, and similar) where they genuinely help. However, AI assistance does not replace human understanding, judgment, and accountability.
 
-Guidance for coding agents lives in [`AGENTS.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/AGENTS.md) at the repo root (and in the [Agent Skills](/contribute/agent-skills)). The notes below are the human-facing quality bar for any PR, with or without AI help.
+**Guiding principle:** Prefer contributions where your review and ownership clearly outweigh the maintainer review burden. You are responsible for every line of code you submit, regardless of whether you or an AI tool wrote it.
 
-### Guiding Principle
-
-Prefer contributions where your review and ownership clearly outweigh the maintainer review burden. Low-effort, unreviewed dumps shift work onto reviewers and usually need substantial rework.
-
-You are responsible for every line of code you submit, regardless of whether you or an AI tool wrote it.
-
-### What We Expect
-
-- **Understand your changes**: You must be able to explain and debug every line in your PR. Treat AI output as code from an untrusted source that requires your review.
-- **Self-review with real behavior**: Before requesting review, read the diff carefully. For environment or agent changes, run real rollouts with a model and inspect agent and verifier behavior — do not treat green unit tests alone as proof the change is correct. Also run the local checks that mirror CI (tests, pre-commit, DCO sign-off) so automated gates stay green.
-- **Keep PRs focused**: AI tools sometimes make "drive-by improvements" to unrelated code. Strip out any changes that are not directly relevant to the task at hand. If a drive-by change is worth keeping, [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to track it so it can be reviewed on its own merits. Intentional synthetic scaling of environments is welcome when scoped and tracked via an issue or focused PR; what we discourage is unreviewed bulk diffs with no discussion.
-- **Verify correctness of AI-generated tests**: AI-generated tests can appear to pass while testing nothing meaningful. Ensure assertions are substantive and cover the intended behavior.
+The quality bar for PRs (focused diffs, real rollouts for env/agent work, CI-aligned local checks, substantive tests) lives in [`AGENTS.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/AGENTS.md) so coding agents and humans share one source of truth. See also [Agent Skills](/contribute/agent-skills).
 
 ### When We Request Changes
 

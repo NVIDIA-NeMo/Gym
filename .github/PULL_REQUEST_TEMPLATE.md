@@ -8,6 +8,6 @@
 
 - [ ] I have read the [contributing guidelines](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup).
 - [ ] The change is focused; unrelated "drive-by" edits are tracked as separate issues/PRs.
-- [ ] Tests added or updated, and the suite passes locally (so CI unit/server checks pass).
+- [ ] Tests added or updated and pass locally, or N/A for docs-only / non-code changes (so CI unit/server checks pass when applicable).
 - [ ] Pre-commit checks pass locally (`pre-commit run --all-files`) (so CI lint/format/copyright pass).
 - [ ] All commits have DCO sign-off (`git commit -s`) (so the DCO check passes).
