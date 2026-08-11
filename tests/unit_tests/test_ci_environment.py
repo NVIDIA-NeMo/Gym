@@ -119,6 +119,7 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
     repo_root = tmp_path / "repo"
     ci_dir = repo_root / "scripts" / "ci"
     shutil.copytree(REPO_ROOT / "scripts" / "ci", ci_dir)
+    shutil.copy2(REPO_ROOT / ".python-version", repo_root / ".python-version")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     capture_path = tmp_path / "ng-test-all.args"
@@ -133,7 +134,7 @@ cat > "${UV_UNMANAGED_INSTALL}/uv" <<'UV'
 #!/usr/bin/env bash
 set -eu
 case "${1:-}" in
-    --version) printf '%s\\n' 'uv 0.11.19' ;;
+    --version) printf '%s\\n' 'uv 0.11.29' ;;
     cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
     venv)
         venv_dir="${@: -1}"
