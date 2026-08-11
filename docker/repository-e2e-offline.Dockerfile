@@ -122,11 +122,11 @@ RUN set -eu; \
     pids=""; \
     for shard in 0 1 2 3 4 5 6 7; do \
       shard_root="/tmp/repository-e2e-gym-shard-${shard}"; \
-      cp -R --no-preserve=all \
+      git clone --shared --no-checkout \
         /tmp/repository-e2e-gym-source "${shard_root}"; \
+      git -C "${shard_root}" checkout --detach "${GYM_SOURCE_SHA}"; \
       ( \
         cd "${shard_root}"; \
-        git clean -ffdx; \
         UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
           GYM_CI_UV_VENV_DIR="/tmp/repository-e2e-gym-venvs-${shard}" \
           bash scripts/ci/server_tests.sh "${shard}" 8 \
