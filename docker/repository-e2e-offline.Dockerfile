@@ -11,12 +11,6 @@ ARG RUNTIME_UID=65532
 ARG RUNTIME_GID=65532
 
 USER root
-RUN export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && \
-    apt-get install --yes --no-install-recommends \
-      bash ca-certificates curl git && \
-    rm -rf /var/lib/apt/lists/*
-
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/repository-e2e-gym/bin && \
     /usr/bin/curl --fail --location --silent --show-error \
       https://astral.sh/uv/0.11.19/install.sh --output /tmp/uv-install.sh && \
