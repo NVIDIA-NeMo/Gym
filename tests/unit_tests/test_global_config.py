@@ -206,6 +206,8 @@ class TestGlobalConfig:
         global_config_dict = get_global_config_dict()
         assert global_config_dict["results_dir"] == "/shared/results"
         assert global_config_dict["cache_dir"] == "/local/cache"
+        # uv_cache_dir defaults under the (overridden) cache root.
+        assert global_config_dict["uv_cache_dir"] == str(Path("/local/cache") / "uv")
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.

@@ -843,16 +843,6 @@ Found global config dict yaml:
             # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
             global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
 
-            # UV related configuration
-            # UV caching directory overrides to local folders.
-            global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
-            # Runtime subprocesses inherit the configured cache directory.
-            if not parse_config.offline:
-                environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
-            # By default, build the directories in their individual folders using the root repository
-            # e.g. WORKING_DIR/responses_api_models/my_server
-            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
-
             # Artifact roots. `results_dir` is where servers write run artifacts;
             # `cache_dir` is where they keep reusable setup trees (clones, venvs,
             # toolchains). Overridable independently, so a run can point results at
@@ -860,6 +850,18 @@ Found global config dict yaml:
             # container) storage.
             global_config_dict.setdefault(RESULTS_DIR_KEY_NAME, str(RESULTS_DIR))
             global_config_dict.setdefault(CACHE_DIR_KEY_NAME, str(CACHE_DIR))
+
+            # UV related configuration
+            # UV caching directory overrides to local folders, under the cache root.
+            global_config_dict.setdefault(
+                UV_CACHE_DIR_KEY_NAME, str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv")
+            )
+            # Runtime subprocesses inherit the configured cache directory.
+            if not parse_config.offline:
+                environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # By default, build the directories in their individual folders using the root repository
+            # e.g. WORKING_DIR/responses_api_models/my_server
+            global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
             self._recursively_hide_secrets(global_config_dict)
@@ -873,7 +875,7 @@ Found global config dict yaml:
             _WANDB_RUN = wandb.init(
                 project=wandb_config.wandb_project,
                 name=wandb_config.wandb_name,
-                dir=str(RESULTS_DIR / "wandb"),
+                dir=str(Path(global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
             )
 
             # Log params
