@@ -14,6 +14,9 @@ RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/repository-e2e-gym/b
       env UV_UNMANAGED_INSTALL=/opt/repository-e2e-gym/bin sh && \
     test "$(/opt/repository-e2e-gym/bin/uv --version | awk '{print $2}')" = 0.11.19
 
+COPY docker/repository-e2e-constraints.txt /opt/repository-e2e-gym/constraints.txt
+ENV UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt
+
 RUN git init /tmp/repository-e2e-gym-source && \
     git -C /tmp/repository-e2e-gym-source remote add origin https://github.com/ko3n1g/Gym.git && \
     git -c credential.helper= -c http.https://github.com/.extraheader= \
