@@ -1639,6 +1639,19 @@ wheels = [
 ]
 
 [[package]]
+name = "httpx-aiohttp"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/87/3b2df9732a497403e5f4bbf2ec9f25427d53cec797e83070c503649863ef/httpx_aiohttp-0.2.0.tar.gz", hash = "sha256:d4796b981f04734f1d1db9b4d9326ea16bc994f126460b93b69036262cd4a9d8", size = 195714, upload-time = "2026-07-25T07:34:12.17Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/e2/74b6bad3a6d342aee12d8b8d825456c02d21d72319c924326d17444c5ff7/httpx_aiohttp-0.2.0-py3-none-any.whl", hash = "sha256:ccd6eb19ba18805476096e8ef0b369a6beda3955db145a538979eface2fce7ff", size = 9732, upload-time = "2026-07-25T07:34:10.939Z" },
+]
+
+[[package]]
 name = "httpx-sse"
 version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2578,6 +2591,7 @@ all = [
     { name = "daytona" },
     { name = "defusedxml" },
     { name = "gprof2dot" },
+    { name = "httpx-aiohttp" },
     { name = "mypy" },
     { name = "opensandbox" },
     { name = "openshell" },
@@ -2606,6 +2620,7 @@ dev = [
 sandbox = [
     { name = "boto3" },
     { name = "daytona" },
+    { name = "httpx-aiohttp" },
     { name = "opensandbox" },
     { name = "openshell" },
     { name = "tenacity" },
@@ -2637,6 +2652,7 @@ requires-dist = [
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", specifier = ">=3.1.57" },
     { name = "gprof2dot", marker = "extra == 'dev'" },
+    { name = "httpx-aiohttp", marker = "extra == 'sandbox'", specifier = ">=0.2.0" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
     { name = "mcp", specifier = ">=1.28.1,<2" },
