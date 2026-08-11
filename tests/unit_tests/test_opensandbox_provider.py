@@ -384,6 +384,13 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     short_timeout_config = provider._connection_config(request_timeout_s=3)
     assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
 
+    # Direct-endpoint mode must NOT carry the key: the sandbox runs untrusted
+    # code and would be able to read it.
+    direct = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "api_key": "key"}  # pragma: allowlist secret
+    )
+    assert "headers" not in direct._connection_config().kwargs
+
 
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
     # Default backend is httpx, with the configured keepalive expiry on the pool.

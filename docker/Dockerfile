@@ -40,6 +40,21 @@ apt-get install -y --no-install-recommends \
     less \
     vim
 
+apt-get purge -y \
+    ffmpeg \
+    libavcodec* \
+    libavformat* \
+    libavutil* \
+    libswscale* \
+    libswresample* \
+    libx264* \
+    libx265* \
+    libfdk-aac* \
+    libmp3lame* \
+    2>/dev/null || true
+
+apt-get autoremove -y
+
 # Install enroot for the EnrootProvider sandbox backend.
 # GitHub releases provide signed .debs for amd64 and arm64.
 arch=$(dpkg --print-architecture)

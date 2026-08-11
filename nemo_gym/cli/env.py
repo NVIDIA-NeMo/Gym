@@ -38,7 +38,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.cli.setup_command import run_command, setup_env_command
+from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -839,7 +839,17 @@ def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Pop
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     prefix = test_config.entrypoint.replace("/", "\\/")
     resolved_dir = test_config.resolved_dir_path
-    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest"""
+    pytest_args = ""
+    junit_dir_value = os.environ.get("GYM_CI_JUNIT_DIR", "").strip()
+    if junit_dir_value:
+        junit_dir = Path(junit_dir_value).expanduser().resolve()
+        junit_dir.mkdir(parents=True, exist_ok=True)
+        entrypoint = test_config.entrypoint.replace("\\", "/").strip("/")
+        report_name = f"{entrypoint.replace('/', '__')}.xml"
+        junit_path = junit_dir / report_name
+        junit_prefix = entrypoint.replace("/", ".")
+        pytest_args = f" --junitxml={shlex.quote(str(junit_path))} --junit-prefix={shlex.quote(junit_prefix)}"
+    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest{pytest_args}"""
     # Generated server tests import `resources_servers.<name>...`, so the project root (the dir
     # holding the server-type dirs) must be on PYTHONPATH when running from outside a repo checkout.
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
@@ -922,6 +932,12 @@ def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> L
     return sorted(dir_paths, key=str)[shard_index::num_shards]
 
 
+def _delete_server_venv(dir_path: Path, global_config_dict: DictConfig) -> None:
+    venv_path = get_venv_path(dir_path, global_config_dict)
+    print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
+    rmtree(venv_path, ignore_errors=True)
+
+
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
@@ -989,9 +1005,7 @@ def test_all():  # pragma: no cover
             data_validation_failed.append(dir_path)
 
         if test_all_config.delete_venvs_after_each_test:
-            venv_path = _resolve_server_dir(dir_path) / ".venv"
-            print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
-            rmtree(venv_path, ignore_errors=True)
+            _delete_server_venv(_resolve_server_dir(dir_path), global_config_dict)
 
         times_taken.append((time() - start_time, dir_path))
 
