@@ -223,12 +223,7 @@ cleanup_server() {
 trap cleanup_server EXIT INT TERM
 
 if (( $should_run_eval )); then
-    until curl -fs "http://\$PREFILL_HEAD:$ROUTER_SERVER_PORT/health" >/dev/null; do
-        if ! kill -0 "\$server_step" 2>/dev/null; then
-            wait "\$server_step"
-        fi
-        sleep 5
-    done
+    # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
 
     eval_status=0
     PREFILL_HEAD="\$PREFILL_HEAD" \
