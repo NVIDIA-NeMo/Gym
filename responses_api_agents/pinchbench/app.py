@@ -83,6 +83,11 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_tokens: int = 16384
     context_window: int = 131072
     openclaw_provider_timeout_seconds: Optional[int] = None
+    # No-progress age before OpenClaw abort-drains a stalled run (`diagnostics.stuckSessionAbortMs`).
+    # None keeps OpenClaw's default of at least 5 minutes and 3x the warn threshold; under a
+    # saturated endpoint that default cuts merely-slow sessions, which grades as a task failure
+    # rather than surfacing as a timeout.
+    openclaw_stuck_session_abort_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
     max_agent_id_length: int = 64
@@ -195,6 +200,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         }
         if self.config.openclaw_provider_timeout_seconds:
             env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
+        if self.config.openclaw_stuck_session_abort_seconds:
+            env["PINCHBENCH_STUCK_SESSION_ABORT_SECONDS"] = str(self.config.openclaw_stuck_session_abort_seconds)
         if self.config.brave_api_key:
             env["BRAVE_API_KEY"] = self.config.brave_api_key
         if self.config.tavily_api_key:
@@ -269,6 +276,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "65536"))
             context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "131072"))
             provider_timeout_s = int(os.environ["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"]) if os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS") else None
+            stuck_abort_s = (
+                int(os.environ["PINCHBENCH_STUCK_SESSION_ABORT_SECONDS"])
+                if os.environ.get("PINCHBENCH_STUCK_SESSION_ABORT_SECONDS")
+                else None
+            )
             runtime_params = {
                 "temperature": 1,
                 "top_p": 0.95,
@@ -317,6 +329,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 for agent in agents.get("list", []):
                     if isinstance(agent, dict):
                         agent["timeoutSeconds"] = provider_timeout_s
+            if stuck_abort_s is not None:
+                cfg.setdefault("diagnostics", {})["stuckSessionAbortMs"] = stuck_abort_s * 1000
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), "utf-8")
             PYCFG
 
