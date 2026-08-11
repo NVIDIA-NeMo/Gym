@@ -92,7 +92,8 @@ RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/nemo-gym /workspace 
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" \
       /opt/repository-e2e-gym /tmp/repository-e2e-gym-source
 
-ENV UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt \
+ENV PATH=/opt/repository-e2e-gym/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt \
     UV_OVERRIDE=/opt/repository-e2e-gym/overrides.txt \
     GIT_CONFIG_GLOBAL=/opt/repository-e2e-gym/gitconfig \
     HOME=/opt/repository-e2e-gym/home \
@@ -142,8 +143,7 @@ RUN set -eu; \
       /tmp/repository-e2e-gym-source; \
     test "${status}" -eq 0
 
-ENV PATH=/opt/repository-e2e-gym/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
+ENV PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
     UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
     UV_OFFLINE=1
 
