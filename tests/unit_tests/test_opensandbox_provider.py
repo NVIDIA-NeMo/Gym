@@ -352,9 +352,20 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
         "protocol": "https",
         "request_timeout": timedelta(seconds=10),
         "use_server_proxy": True,
+        # The API key must also travel as a header: the SDK's execd clients
+        # (health ping, commands, files) send only ConnectionConfig.headers,
+        # and proxied /proxy/* routes may enforce auth.
+        "headers": {"OPEN-SANDBOX-API-KEY": "key"},  # pragma: allowlist secret
     }
     short_timeout_config = provider._connection_config(request_timeout_s=3)
     assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
+
+    # Direct-endpoint mode must NOT carry the key: the sandbox runs untrusted
+    # code and would be able to read it.
+    direct = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "api_key": "key"}  # pragma: allowlist secret
+    )
+    assert "headers" not in direct._connection_config().kwargs
 
 
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
