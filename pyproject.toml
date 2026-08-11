@@ -365,6 +365,11 @@ override-dependencies = [
     "opencv-python-headless; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
+    # pycountry (LGPL-2.1) is pulled in by mistral-common via pydantic-extra-types[pycountry]
+    # but is never imported by Gym code. Suppressed here to avoid the LGPL obligation in the
+    # main package. Servers that genuinely need it (e.g. toolsandbox via ccy) re-enable it
+    # via their overrides.txt.
+    "pycountry; sys_platform == 'never'",
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Servers that need a
@@ -395,9 +400,6 @@ exclude-dependencies = [
     # diskcache has unfixed CVEs and is no longer a transitive dep since vllm>=0.24.0.
     # Explicitly block it to prevent re-introduction via future transitive pulls.
     "diskcache",
-    # pycountry (LGPL-2.1) arrives transitively via mistral-common -> pydantic-extra-types[pycountry].
-    # Gym never imports it; excluding avoids the LGPL obligation entirely.
-    "pycountry",
 ]
 
 [tool.setuptools.package-data]
