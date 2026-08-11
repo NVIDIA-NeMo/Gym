@@ -61,7 +61,10 @@ gym eval run \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
     ++upload_rollouts_to_wandb=false \
-    ++global_aiohttp_connector_limit_per_host=16384
+    ++global_aiohttp_connector_limit_per_host=16384 \
+    ++port_range_low=63000 \
+    ++port_range_high=64000
+
 
 if (( $EXPORT_TO_CSV )); then
     python benchmarks/nemotron_3.5_super/export_to_csv.py \
