@@ -49,6 +49,42 @@ def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
     return row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]
 
 
+# Two-tailed t critical values for 95% CI indexed by degrees of freedom.
+_T95_CRIT: Dict[int, float] = {
+    1: 12.706,
+    2: 4.303,
+    3: 3.182,
+    4: 2.776,
+    5: 2.571,
+    6: 2.447,
+    7: 2.365,
+    8: 2.306,
+    9: 2.262,
+    10: 2.228,
+    15: 2.131,
+    20: 2.086,
+    25: 2.060,
+    30: 2.042,
+    40: 2.021,
+    60: 2.000,
+    120: 1.980,
+}
+
+
+def _t_crit_95(df: int) -> float:
+    """Two-tailed t critical value for a 95% CI at the given degrees of freedom."""
+    if df <= 0:
+        return float("nan")
+    if df in _T95_CRIT:
+        return _T95_CRIT[df]
+    keys = sorted(_T95_CRIT)
+    for i in range(len(keys) - 1):
+        lo, hi = keys[i], keys[i + 1]
+        if lo < df < hi:
+            return _T95_CRIT[lo] + (_T95_CRIT[hi] - _T95_CRIT[lo]) * (df - lo) / (hi - lo)
+    return 1.960  # df >= 120, approximates z
+
+
 class RewardProfiler:
     def _index_by_rollout_key(self, rows: List[Dict[str, Any]], name: str) -> Dict[Tuple[int, int], Dict[str, Any]]:
         indexed: Dict[Tuple[int, int], Dict[str, Any]] = {}
@@ -199,12 +235,58 @@ class RewardProfiler:
             {k: v for k, v in group_metrics.items() if v is not None and notna(v)} for group_metrics in grouped_metrics
         ]
 
+    def _compute_repeat_level_metrics(self, df: DataFrame) -> List[Dict[str, Any]]:
+        """Per-rollout-index summary stats across all tasks. Returns [] when num_repeats < 2."""
+        rollout_indices = sorted(df[ROLLOUT_INDEX_KEY_NAME].unique())
+        if len(rollout_indices) < 2:
+            return []
+
+        total_tasks = int(df[TASK_INDEX_KEY_NAME].nunique())
+        skip_cols = {"agent_name", TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME}
+        numeric_cols = [c for c in df.columns if c not in skip_cols]
+
+        repeat_metrics = []
+        for rollout_idx in rollout_indices:
+            group = df[df[ROLLOUT_INDEX_KEY_NAME] == rollout_idx]
+            present_tasks = int(group[TASK_INDEX_KEY_NAME].nunique())
+            entry: Dict[str, Any] = {
+                ROLLOUT_INDEX_KEY_NAME: int(rollout_idx),
+                "sample_count": present_tasks,
+                "missing_count": total_tasks - present_tasks,
+            }
+            for col in numeric_cols:
+                col_data = group[col].dropna()
+                n = len(col_data)
+                if n == 0:
+                    continue
+                mean = float(col_data.mean())
+                std = float(col_data.std(ddof=1)) if n > 1 else 0.0
+                entry.update(
+                    {
+                        f"mean/{col}": mean,
+                        f"median/{col}": float(col_data.median()),
+                        f"std/{col}": std,
+                        f"min/{col}": float(col_data.min()),
+                        f"max/{col}": float(col_data.max()),
+                        f"p25/{col}": float(col_data.quantile(0.25)),
+                        f"p75/{col}": float(col_data.quantile(0.75)),
+                    }
+                )
+                if n > 1:
+                    sem = std / n**0.5
+                    t = _t_crit_95(n - 1)
+                    entry[f"sem/{col}"] = sem
+                    entry[f"ci_lower/{col}"] = mean - t * sem
+                    entry[f"ci_upper/{col}"] = mean + t * sem
+            repeat_metrics.append(entry)
+        return repeat_metrics
+
     def profile_from_data(
         self,
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
         allow_partial_rollouts: bool = False,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         aligned_rows_and_results = self.align_rows_and_results(
             rows, results, allow_partial_rollouts=allow_partial_rollouts
         )
@@ -236,7 +318,7 @@ class RewardProfiler:
             task_idx_to_row.setdefault(task_idx, row)
 
         if not filtered_results:
-            return [], []
+            return [], [], []
 
         df = DataFrame.from_records(filtered_results)
 
@@ -269,7 +351,9 @@ class RewardProfiler:
         for agent_metrics in agent_level_metrics:
             agent_metrics[AGENT_REF_KEY_NAME] = {"name": agent_metrics.pop("agent_name")}
 
-        return group_level_metrics, agent_level_metrics
+        repeat_level_metrics = self._compute_repeat_level_metrics(df)
+
+        return group_level_metrics, agent_level_metrics, repeat_level_metrics
 
     def prepare_for_serialization(self, metrics: List[Dict]) -> List[Dict]:
         """
@@ -653,7 +737,7 @@ def compute_aggregate_metrics(
         )
         results.append(vr if "response" in vr else {**vr, "response": {}})
 
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+    group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(rows, results)
 
     # Flatten agent_level_metrics (one entry since we use a single agent name)
     agent_metrics: Dict[str, Any] = {}
@@ -699,6 +783,7 @@ def compute_aggregate_metrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
+        repeat_level_metrics=repeat_level_metrics,
     )
 
 

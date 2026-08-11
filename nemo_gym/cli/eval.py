@@ -463,7 +463,7 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(
+    group_level_metrics, agent_level_metrics, _ = rp.profile_from_data(
         rows, results, allow_partial_rollouts=config.allow_partial_rollouts
     )
     completion_summary = rp.profile_completion_summary(rows, results)

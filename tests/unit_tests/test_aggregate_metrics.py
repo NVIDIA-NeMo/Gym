@@ -455,6 +455,82 @@ class TestComputeSubsetMetrics:
         assert m == {}
 
 
+class TestRepeatLevelMetrics:
+    def test_absent_for_single_repeat(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=1)
+        result = compute_aggregate_metrics(responses)
+        assert result.repeat_level_metrics == []
+
+    def test_present_for_multi_repeat(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=3)
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 3
+
+    def test_repeat_entry_structure(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=2)
+        result = compute_aggregate_metrics(responses)
+        for i, entry in enumerate(result.repeat_level_metrics):
+            assert entry[ROLLOUT_INDEX_KEY_NAME] == i
+            assert entry["sample_count"] == 4
+            assert entry["missing_count"] == 0
+            for stat in ("mean", "median", "std", "sem", "ci_lower", "ci_upper", "min", "max", "p25", "p75"):
+                assert f"{stat}/reward" in entry, f"{stat}/reward missing from repeat entry"
+
+    def test_known_values(self) -> None:
+        """Spot-check mean and std for a controlled 2-repeat case."""
+        # repeat 0 rewards: task 0→0, 1→1, 2→0, 3→1  ⟹ mean=0.5, std≈0.577
+        responses = [
+            {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: r, "reward": float((t + r) % 2)}
+            for t in range(4)
+            for r in range(2)
+        ]
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 2
+        r0 = next(e for e in result.repeat_level_metrics if e[ROLLOUT_INDEX_KEY_NAME] == 0)
+        assert r0["mean/reward"] == pytest.approx(0.5)
+        assert r0["std/reward"] == pytest.approx((1 / 3) ** 0.5, rel=1e-3)
+        assert r0["sample_count"] == 4
+
+    def test_ci_narrower_with_more_samples(self) -> None:
+        """Wider sample set → narrower CI (same reward variance)."""
+        small = _make_verify_responses(tasks=3, rollouts_per_task=2)
+        large = _make_verify_responses(tasks=20, rollouts_per_task=2)
+
+        def ci_width(metrics):
+            return metrics[0]["ci_upper/reward"] - metrics[0]["ci_lower/reward"]
+
+        assert ci_width(compute_aggregate_metrics(small).repeat_level_metrics) > ci_width(
+            compute_aggregate_metrics(large).repeat_level_metrics
+        )
+
+    def test_missing_count(self) -> None:
+        """Tasks absent for a rollout_index are reflected in missing_count."""
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5},
+        ]
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 2
+        by_idx = {e[ROLLOUT_INDEX_KEY_NAME]: e for e in result.repeat_level_metrics}
+        assert by_idx[0]["sample_count"] == 2
+        assert by_idx[0]["missing_count"] == 0
+        assert by_idx[1]["sample_count"] == 1
+        assert by_idx[1]["missing_count"] == 1
+
+    def test_no_sem_ci_with_one_sample(self) -> None:
+        """With only 1 task per repeat, sem/CI are not emitted."""
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.5},
+        ]
+        result = compute_aggregate_metrics(responses)
+        for entry in result.repeat_level_metrics:
+            assert "sem/reward" not in entry
+            assert "ci_lower/reward" not in entry
+            assert "ci_upper/reward" not in entry
+
+
 class TestAddAvgSampleStdDev:
     def test_adds_stats(self) -> None:
         tasks = [
