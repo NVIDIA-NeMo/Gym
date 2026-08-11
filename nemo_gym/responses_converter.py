@@ -98,6 +98,19 @@ class ResponsesConverterState(BaseModel):
     token_information: Optional[TokenIDLogProbMixin] = None
 
     def flush_assistant(self) -> None:
+        # `token_information` describes exactly one assistant turn, so consume it here rather than
+        # letting it persist. It is cleared on EVERY path, including the empty-buffer early return
+        # (an assistant item can carry ids while producing no content and no tool calls, e.g. a
+        # zero-token generation, and that message is dropped below).
+        #
+        # Without this, a later assistant message that carries no ids of its own silently inherits
+        # this turn's -- attributing one turn's generated tokens to another turn's text in the
+        # training data. Harnesses hit this whenever they inject or rewrite an assistant message
+        # without token ids (canned turns, compacted history, agents that stamp ids onto only the
+        # most recent assistant message).
+        token_information = self.token_information
+        self.token_information = None
+
         if not (self.content_buffer or self.tool_calls_buffer):
             return
 
@@ -107,10 +120,10 @@ class ResponsesConverterState(BaseModel):
             tool_calls=self.tool_calls_buffer,
         )
 
-        if self.return_token_id_information and self.token_information:
+        if self.return_token_id_information and token_information:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
-                **self.token_information.model_dump(exclude_none=True),
+                **token_information.model_dump(exclude_none=True),
             )
         else:
             message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)

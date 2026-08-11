@@ -1,0 +1,23 @@
+# SGLang-backed policy model server for RL training.
+# Mirrors responses_api_models/vllm_model/configs/vllm_model_for_training.yaml.
+#
+# transport: chat (the default) REQUIRES sglang >= 0.5.13. It drives SGLang's
+# OpenAI-compatible /v1/chat/completions and reads the training token ids and logprobs from
+# the native `meta_info` / `prompt_token_ids` response extensions.
+#
+# IMPORTANT: `base_url` must END IN /v1 here, exactly like vllm_model. This differs from
+# transport=generate, where it must be the BARE server url -- pointing a bare url at the
+# chat transport 404s.
+#
+# For SGLang builds/forks that predate chat-side TITO, use
+# configs/sglang_model_for_training_generate.yaml instead.
+policy_model:
+  responses_api_models:
+    sglang_model:
+      entrypoint: app.py
+      transport: chat
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: true
+      uses_reasoning_parser: false

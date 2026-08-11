@@ -692,64 +692,76 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self.config.return_token_id_information and "prompt_token_ids" not in choice_dict["message"]:
-            # Check vLLM honored the logprobs request.
-            # It returns choice.logprobs=None when it computed none.
-            # That happens when a null top_logprobs reached it, or the contract changed across versions.
-            # Without this check the code below raises a TypeError or emits empty token ids that zero the loss mask.
-            # An empty content list is a valid zero-token generation and passes through.
-            logprobs_block = choice_dict.get("logprobs")
-            if not logprobs_block or logprobs_block.get("content") is None:
-                raise RuntimeError(
-                    f"`{self.config.name}` requested per-token logprobs from vLLM "
-                    f"(return_token_id_information=True, logprobs=True, top_logprobs=0), but the response "
-                    f"had none (choice.logprobs={logprobs_block!r}). Cannot extract token ids or logprobs."
-                )
-            log_probs = logprobs_block["content"]
-            generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
-
-            """
-            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            """
-            # Looks like `"token_id:151667"`
-            generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
-
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            #
-            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
-            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
-            # `prompt_str`) can be built with different chat template settings than
-            # the actual generation request.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
-
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-            """
-            END
-            """
-
-            message_dict = choice_dict["message"]
-            message_dict.update(
-                dict(
-                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
-                    generation_token_ids=generation_token_ids,
-                    generation_log_probs=generation_log_probs,
-                )
-            )
-
-            # Clean the duplicated information
-            choice_dict.pop("logprobs")
-            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            # chat_completion_dict.pop("prompt_token_ids")
-            # choice_dict.pop("token_ids")
+            await self._attach_token_id_information(choice_dict, body_dict, client)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def _attach_token_id_information(
+        self, choice_dict: Dict[str, Any], body_dict: Dict[str, Any], client: NeMoGymAsyncOpenAI
+    ) -> None:
+        """Attach the training token fields to ``choice_dict["message"]`` in place.
+
+        Sets ``prompt_token_ids``, ``generation_token_ids`` and ``generation_log_probs``.
+        Split out from ``chat_completions`` so a backend whose server returns this
+        information natively (e.g. SGLang's ``meta_info``) can override this one step
+        rather than reimplementing the whole endpoint.
+        """
+        # Check vLLM honored the logprobs request.
+        # It returns choice.logprobs=None when it computed none.
+        # That happens when a null top_logprobs reached it, or the contract changed across versions.
+        # Without this check the code below raises a TypeError or emits empty token ids that zero the loss mask.
+        # An empty content list is a valid zero-token generation and passes through.
+        logprobs_block = choice_dict.get("logprobs")
+        if not logprobs_block or logprobs_block.get("content") is None:
+            raise RuntimeError(
+                f"`{self.config.name}` requested per-token logprobs from vLLM "
+                f"(return_token_id_information=True, logprobs=True, top_logprobs=0), but the response "
+                f"had none (choice.logprobs={logprobs_block!r}). Cannot extract token ids or logprobs."
+            )
+        log_probs = logprobs_block["content"]
+        generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
+
+        """
+        START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+        """
+        # Looks like `"token_id:151667"`
+        generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
+
+        # The tokenize endpoint doesn't accept any sampling parameters
+        # The only relevant params are model, messages, and tools.
+        #
+        # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
+        # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
+        # `prompt_str`) can be built with different chat template settings than
+        # the actual generation request.
+        tokenize_body_dict = dict()
+        for key in ("model", "messages", "tools", "chat_template_kwargs"):
+            if key in body_dict:
+                tokenize_body_dict[key] = body_dict[key]
+
+        # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
+        tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+        """
+        END
+        """
+
+        message_dict = choice_dict["message"]
+        message_dict.update(
+            dict(
+                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+                # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
+                prompt_token_ids=tokenize_response["tokens"],
+                # generation_token_ids=choice_dict["token_ids"],
+                generation_token_ids=generation_token_ids,
+                generation_log_probs=generation_log_probs,
+            )
+        )
+
+        # Clean the duplicated information
+        choice_dict.pop("logprobs")
+        # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
+        # chat_completion_dict.pop("prompt_token_ids")
+        # choice_dict.pop("token_ids")
 
     async def _chat_completions_via_completions_api(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
