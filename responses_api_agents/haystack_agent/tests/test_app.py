@@ -33,7 +33,11 @@ from responses_api_agents.haystack_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
 )
-from responses_api_agents.haystack_agent.chat_generator import NeMoGymResponsesChatGenerator
+from responses_api_agents.haystack_agent.chat_generator import (
+    NeMoGymResponsesChatGenerator,
+    chat_messages_to_responses,
+    response_to_chat_messages,
+)
 from responses_api_agents.haystack_agent.example_tools import get_weather
 from responses_api_agents.haystack_agent.http_tool import HTTPTool
 from responses_api_agents.haystack_agent.mcp_toolset import (
@@ -87,6 +91,24 @@ def _text_item(text: str = "It is sunny in San Francisco.") -> dict:
         "role": "assistant",
         "status": "completed",
         "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def _reasoning_item(text: str = "I should call the tool.") -> dict:
+    return {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [{"type": "summary_text", "text": text}],
+    }
+
+
+def _with_training_metadata(item: dict, *, offset: int = 0) -> dict:
+    return {
+        **item,
+        "prompt_token_ids": [10 + offset, 11 + offset],
+        "generation_token_ids": [20 + offset, 21 + offset],
+        "generation_log_probs": [-0.1, -0.2],
+        "routed_experts": [[[offset]]],
     }
 
 
@@ -190,6 +212,25 @@ class TestChatGenerator:
         assert body.tools[0]["name"] == "get_weather"
         # Usage was captured on the generator for later aggregation.
         assert gen._usage.total_tokens == 15
+
+    def test_round_trips_training_metadata_on_the_terminal_output_item(self) -> None:
+        response = chat_generator_module.NeMoGymResponse.model_validate(
+            _envelope(
+                [_reasoning_item(), _with_training_metadata(_function_call_item())],
+                _USAGE,
+            )
+        )
+
+        messages = response_to_chat_messages(response)
+        assert messages[0].meta["__ng_training__"]["generation_token_ids"] == [20, 21]
+        assert messages[0].meta["__ng_usage__"]["total_tokens"] == 15
+
+        output = chat_messages_to_responses(messages, output=True)
+        assert [item.type for item in output] == ["reasoning", "function_call"]
+        assert not hasattr(output[0], "generation_token_ids")
+        assert output[1].generation_token_ids == [20, 21]
+        assert output[1].generation_log_probs == [-0.1, -0.2]
+        assert output[1].routed_experts == [[[0]]]
 
     async def test_run_async_does_not_replace_resource_cookies(self, monkeypatch: MonkeyPatch) -> None:
         client = MagicMock()
@@ -387,6 +428,33 @@ class TestApp:
         assert "22 degrees" in weather_output
         # Usage summed across the two model calls.
         assert body["usage"]["total_tokens"] == 30
+
+    async def test_responses_preserves_training_metadata_through_agent_loop(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        server, client = _build_agent(
+            tmp_path,
+            monkeypatch,
+            model_responses=[
+                _envelope([_with_training_metadata(_function_call_item(), offset=0)], _USAGE),
+                _envelope([_with_training_metadata(_text_item("Done."), offset=100)], _USAGE),
+            ],
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "weather in SF?"})
+        model_response = await server.responses(
+            request=MagicMock(headers={}, cookies={}), response=MagicMock(), body=body
+        )
+
+        function_call = next(item for item in model_response.output if item.type == "function_call")
+        final_message = next(item for item in model_response.output if item.type == "message")
+        assert function_call.generation_token_ids == [20, 21]
+        assert final_message.generation_token_ids == [120, 121]
+        assert final_message.routed_experts == [[[100]]]
+        assert model_response.usage.total_tokens == 30
+
+        second_model_request = client.post.call_args_list[1].kwargs["json"].model_dump(mode="json")
+        assert "__ng_training__" not in json.dumps(second_model_request)
+        assert "__ng_usage__" not in json.dumps(second_model_request)
 
     async def test_responses_tool_failure_does_not_crash(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         # Malformed tool-call arguments -> the Haystack tool invocation fails, but with
