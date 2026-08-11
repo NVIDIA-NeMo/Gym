@@ -244,7 +244,7 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
     otherwise ng_collect_rollouts (fail-fast) aborts the whole collection."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def boom(task_id, out_dir):
+    async def boom(task_id, out_dir, rollout_id=None):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
@@ -282,7 +282,7 @@ def _run_body(task_id="task_x"):
 async def test_failure_routing_sentinels(exc, expected_class, no_persist, terminal, tmp_path, monkeypatch):
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def fail(task_id, out_dir):
+    async def fail(task_id, out_dir, rollout_id=None):
         raise exc
 
     monkeypatch.setattr(agent, "_run_in_sandbox", fail)
@@ -297,7 +297,7 @@ async def test_successful_task_carries_no_routing_sentinels(tmp_path, monkeypatc
     """Scored rollouts must keep landing in the main jsonl (no sentinel keys)."""
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def ok(task_id, out_dir):
+    async def ok(task_id, out_dir, rollout_id=None):
         return None
 
     monkeypatch.setattr(agent, "_run_in_sandbox", ok)
@@ -378,7 +378,7 @@ async def test_run_raises_on_missing_task_id(tmp_path):
 async def test_non_clean_exit_rc_present_in_raw_rollout(tmp_path, monkeypatch):
     agent = make_agent(work_root=str(tmp_path / "work"), transcripts_dir=str(tmp_path / "arch"))
 
-    async def non_clean(task_id, out_dir):
+    async def non_clean(task_id, out_dir, rollout_id=None):
         return 1
 
     monkeypatch.setattr(agent, "_run_in_sandbox", non_clean)

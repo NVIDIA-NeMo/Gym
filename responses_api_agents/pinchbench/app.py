@@ -51,6 +51,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
+from nemo_gym.server_utils import apply_rollout_prefix
 
 
 _SEARCH_KEY_MAP: dict[str, str] = {"brave": "brave_api_key", "tavily": "tavily_api_key"}
@@ -91,6 +92,11 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     work_root: str = "/tmp/pinchbench_gym"
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
     max_agent_id_length: int = 64
+    # Address the model server under `/ng-rollout/<rollout_id>` so model-call capture can
+    # attribute each call. The prefix is applied only when observability is enabled, which is
+    # also the only time it is needed; set this to False for a model_base_url that is not a
+    # Gym model server, since a direct endpoint has no such route and would 404.
+    rollout_scoped_model_url: bool = True
 
     @model_validator(mode="after")
     def _reject_unresolvable_agent_id(self) -> "PinchBenchAgentConfig":
@@ -181,11 +187,27 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         raise NotImplementedError("PinchBench is an external benchmark; use /run.")
 
-    def _task_env(self, task_id: str) -> dict:
+    def _rollout_scoped_model_base_url(self, rollout_id: Optional[str]) -> str:
+        """Model URL for one rollout, optionally carrying the capture correlation prefix.
+
+        Model-call capture only records calls that arrive under ``/ng-rollout/<id>``; without it
+        the middleware forwards them unattributed, so an agent talking to a Gym model server on a
+        bare URL is invisible to observability. Only valid against a Gym model server -- any other
+        endpoint has no such route and would 404, hence ``rollout_scoped_model_url``.
+        """
+        base = self.config.model_base_url.rstrip("/")
+        if not self.config.rollout_scoped_model_url or not rollout_id:
+            return base
+        root, sep, suffix = base.rpartition("/v1")
+        if not sep:
+            return apply_rollout_prefix(base, rollout_id)
+        return f"{apply_rollout_prefix(root, rollout_id)}/v1{suffix}"
+
+    def _task_env(self, task_id: str, rollout_id: Optional[str] = None) -> dict:
         env = {
             "TASK_ID": task_id,
             "MODEL_NAME": self.config.model_name,
-            "MODEL_BASE_URL": self.config.model_base_url,
+            "MODEL_BASE_URL": self._rollout_scoped_model_base_url(rollout_id),
             "MODEL_API_KEY": self.config.model_api_key,
             "JUDGE_MODEL": self.config.judge_model,
             "JUDGE_BASE_URL": self.config.judge_base_url,
@@ -208,7 +230,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             env["TAVILY_API_KEY"] = self.config.tavily_api_key
         return env
 
-    def _build_spec(self, task_id: str) -> SandboxSpec:
+    def _build_spec(self, task_id: str, rollout_id: Optional[str] = None) -> SandboxSpec:
         cfg = dict(self.config.sandbox_spec)
         return SandboxSpec(
             image=cfg.get("image"),
@@ -217,11 +239,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             workdir=cfg.get("workdir"),
             resources=SandboxResources.from_mapping(cfg.get("resources", {})),
             provider_options=cfg.get("provider_options", {}),
-            env=self._task_env(task_id),
+            env=self._task_env(task_id, rollout_id),
             metadata={"task_id": task_id},
         )
 
-    async def _run_in_sandbox(self, task_id: str, out_dir: Path) -> int | None:
+    async def _run_in_sandbox(self, task_id: str, out_dir: Path, rollout_id: Optional[str] = None) -> int | None:
         """Run one PinchBench task and pull its /out archive back.
 
         Returns the apptainer exit code when the direct_exec path exits non-zero but
@@ -230,14 +252,14 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         provider = self.config.sandbox_provider or {}
         apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
         if isinstance(apptainer_cfg, dict) and apptainer_cfg.get("direct_exec"):
-            return await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg)
+            return await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg, rollout_id)
 
         if not self.config.sandbox_provider:
             raise ValueError("pinchbench requires sandbox_provider (see configs/pinchbench.yaml)")
         archive = f"{self.config.sandbox_work_base.rstrip('/')}/out/out.tgz"
         sb = AsyncSandbox(self.config.sandbox_provider)
         try:
-            await sb.start(self._build_spec(task_id))
+            await sb.start(self._build_spec(task_id, rollout_id))
             await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
             await sb.download(archive, out_dir / "out.tgz")
         finally:
@@ -362,7 +384,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         wrapper_path.chmod(0o755)
         return wrapper_path
 
-    async def _run_in_apptainer_direct(self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any]) -> int | None:
+    async def _run_in_apptainer_direct(
+        self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any], rollout_id: Optional[str] = None
+    ) -> int | None:
         image = self.config.sandbox_spec.get("image")
         if not image:
             raise ValueError("pinchbench sandbox_spec.image is required for direct Apptainer exec")
@@ -379,7 +403,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         elif isinstance(direct_args, str):
             direct_args = direct_args.split()
 
-        task_env = self._task_env(task_id)
+        task_env = self._task_env(task_id, rollout_id)
         argv = ["apptainer", "exec", *[str(arg) for arg in direct_args]]
         argv += ["--bind", f"{staging_dir}:{work_base}"]
         for key, value in task_env.items():
@@ -696,6 +720,12 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             raise ValueError("record is missing verifier_metadata.task_id")
 
         run_id = uuid.uuid4().hex
+        # The capture prefix must carry Gym's rollout id -- the task/rollout indices that key
+        # `<rollout_id>.capture.jsonl` and appear as `ng_model_call_capture.rollout_id` on the
+        # collected rollout. `run_id` is a fresh uuid naming this invocation's work and transcript
+        # directories; using it here would write capture files no rollout can be matched back to.
+        # Returns None when observability is off, which leaves the URL unprefixed.
+        rollout_id = self.rollout_id_from_run(body)
         out_dir = Path(self.config.work_root) / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
         result = {"reward": 0.0, "grading_type": "unknown", "breakdown": {}, "notes": "", "status": "error"}
@@ -706,7 +736,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         non_clean_exit_rc: int | None = None
         try:
             async with self._sem:
-                non_clean_exit_rc = await self._run_in_sandbox(task_id, out_dir)
+                non_clean_exit_rc = await self._run_in_sandbox(task_id, out_dir, rollout_id)
             result = self._parse_result(task_id, out_dir)
             response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
