@@ -266,6 +266,51 @@ class TestResolveServerDir:
         assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
 
 
+class TestRunHelperDryRunSpinup:
+    """A dry run that fails to build a venv must not report success.
+
+    uv creates the venv before installing into it, so a failed install still leaves an interpreter
+    and an activate script behind.
+    That venv satisfies skip_venv_if_present on the next run, so a swallowed exit code here shows up
+    much later as an ImportError from a server.
+    """
+
+    def _runner(self, processes: dict) -> RunHelper:
+        runner = RunHelper()
+        runner._processes = processes
+        return runner
+
+    def _process(self, returncodes: list) -> MagicMock:
+        process = MagicMock()
+        process.poll.side_effect = returncodes
+        return process
+
+    def test_returns_when_every_process_succeeds(self) -> None:
+        runner = self._runner({"a": self._process([0]), "b": self._process([None, 0])})
+
+        runner.wait_for_dry_run_spinup()
+
+    def test_raises_naming_each_failed_server(self) -> None:
+        runner = self._runner(
+            {"good": self._process([0]), "bad": self._process([1]), "worse": self._process([None, 2])}
+        )
+
+        with raises(RuntimeError) as excinfo:
+            runner.wait_for_dry_run_spinup()
+
+        message = str(excinfo.value)
+        assert "`bad` exited with 1" in message
+        assert "`worse` exited with 2" in message
+        assert "good" not in message
+        assert "2 servers" in message
+
+    def test_a_single_failure_reads_as_one_server(self) -> None:
+        runner = self._runner({"only": self._process([3])})
+
+        with raises(RuntimeError, match="1 server"):
+            runner.wait_for_dry_run_spinup()
+
+
 class TestRunHelperShutdownReap:
     """RunHelper.shutdown must reap every server subprocess on every exit path."""
 

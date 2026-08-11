@@ -505,16 +505,38 @@ Process `{process_name}` stderr:
                 raise RuntimeError(print_str)
 
     def wait_for_dry_run_spinup(self) -> None:
+        """Wait for every dry-run process to finish, and fail if any of them did.
+
+        A dry run builds each server's venv and exits, so unlike poll() a finished process is the
+        expected outcome here and only the exit code separates success from failure.
+        The code has to be checked: uv creates the venv before installing into it, so a failed
+        install still leaves an interpreter and an activate script behind.
+        That venv then satisfies skip_venv_if_present on the next run, and the first symptom is an
+        ImportError from a server long after the install that caused it.
+        """
         sleep_interval = 3
 
-        remaining_processes = list(self._processes.values())
+        failures: List[Tuple[str, int]] = []
+        remaining_processes = list(self._processes.items())
         while remaining_processes:
             for i in reversed(range(len(remaining_processes))):
-                process = remaining_processes[i]
-                if process.poll() is not None:
+                process_name, process = remaining_processes[i]
+                returncode = process.poll()
+                if returncode is not None:
+                    if returncode != 0:
+                        failures.append((process_name, returncode))
                     remaining_processes.pop(i)
 
-            sleep(sleep_interval)
+            if remaining_processes:
+                sleep(sleep_interval)
+
+        if failures:
+            raise RuntimeError(
+                "Dry run failed to set up "
+                + ("1 server" if len(failures) == 1 else f"{len(failures)} servers")
+                + ". Each server's output is above, prefixed with its name:\n"
+                + "\n".join(f"  `{name}` exited with {code}" for name, code in failures)
+            )
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
