@@ -15,6 +15,7 @@
 import importlib.util
 import subprocess
 
+
 # opencv-python-headless is excluded from the shipped container and PyPI package
 # via sys_platform == 'never'. Install it at the version osworld was validated
 # against before test collection so imports of cv2 succeed.
