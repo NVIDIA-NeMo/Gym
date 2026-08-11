@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import re
 import sys
 from argparse import ArgumentParser
 from collections import defaultdict
@@ -31,15 +32,17 @@ import rich
 import wandb
 import wandb.util
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
+from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 from wandb import Run
 
-from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR, WORKING_DIR
+from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
+    ConfigInterpolationError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     InheritPathNotFoundError,
@@ -73,6 +76,7 @@ RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
+MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
@@ -87,6 +91,9 @@ NEMO_GYM_LOG_DIR_KEY_NAME = "nemo_gym_log_dir"
 VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
+OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
+MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+COMPONENT_NAME_KEY_NAME = "component_name"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -104,6 +111,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
@@ -112,11 +120,17 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     VERBOSE_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
+    OBSERVABILITY_ENABLED_KEY_NAME,
+    MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    COMPONENT_NAME_KEY_NAME,
 ]
 
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+# Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
+# (task, rollout) so their captured model calls stay separable.
+ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
@@ -244,14 +258,12 @@ class GlobalConfigDictParser(BaseModel):
         for config_path in config_paths:
             original_entry = config_path
             config_path = Path(config_path)
-            # Check cwd first for user's local configs, then install location
-            searched_locations = [config_path]
-            if not config_path.is_absolute():
-                cwd_path = Path.cwd() / config_path
-                install_path = PARENT_DIR / config_path
-                # cwd and the install root coincide when run from the repo; list each location once.
-                searched_locations = [cwd_path] if cwd_path == install_path else [cwd_path, install_path]
-                config_path = cwd_path if cwd_path.exists() else install_path
+            # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root (see _resolve_under_cwd_or_install).
+            if config_path.is_absolute():
+                searched_locations = [config_path]
+            else:
+                searched_locations = [root / config_path for root in component_search_roots()]
+            config_path = _resolve_under_cwd_or_install(original_entry)
 
             try:
                 extra_config = _load_config_yaml(config_path)
@@ -260,7 +272,8 @@ class GlobalConfigDictParser(BaseModel):
                 raise ConfigPathNotFoundError(
                     f"""config_paths entry '{original_entry}' was not found. Looked in:
 {searched}
-Check the path is spelled correctly and is relative to your working directory or the Gym install root."""
+Check the path is spelled correctly and is relative to your working directory, an extra root
+(NEMO_GYM_EXTRA_ROOTS / --search-dir), or the Gym install root."""
                 ) from e
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
@@ -554,12 +567,11 @@ For example, on the command line:
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
-        # Check cwd first for user's local env.yaml, then fall back to PARENT_DIR
+        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
         if parse_config.dotenv_path:
             dotenv_path = parse_config.dotenv_path
         else:
-            cwd_env_yaml = Path.cwd() / "env.yaml"
-            dotenv_path = cwd_env_yaml if cwd_env_yaml.exists() else PARENT_DIR / "env.yaml"
+            dotenv_path = _resolve_under_cwd_or_install("env.yaml")
 
         dotenv_extra_config = DictConfig({})
         if dotenv_path.exists() and not parse_config.skip_load_from_dotenv:
@@ -578,6 +590,9 @@ Pass each config with --config (it builds the list for you), e.g.:
             ) from e
 
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
+
+        # Reverse here so the "inner" configs (appended to the list) are ovreridden by the outer configs.
+        extra_configs.reverse()
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
@@ -696,6 +711,10 @@ Found global config dict yaml:
             global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # How long `gym env start` waits for the model endpoints named in the config to accept
+            # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
+            global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
 
             # UV related configuration
             # UV caching directory overrides to local folders.
@@ -821,7 +840,24 @@ def set_global_config_dict(
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
 ) -> None:
     global _GLOBAL_CONFIG_DICT
-    global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
+    try:
+        global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
+    except InterpolationResolutionError as e:
+        # Same class of user error as an unset '???' (see raise_on_missing_values), so report it the same
+        # way instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
+        # (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
+        # message and so is passed through as-is.
+        match = re.search(r"Interpolation key '([^']+)' not found", str(e))
+        if not match:
+            raise ConfigInterpolationError(str(e)) from e
+        key = match.group(1)
+        raise ConfigInterpolationError(
+            f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
+
+Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++{key}=<value>"""
+        ) from e
 
     _GLOBAL_CONFIG_DICT = global_config_dict
 

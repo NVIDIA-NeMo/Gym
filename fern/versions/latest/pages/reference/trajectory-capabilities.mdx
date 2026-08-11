@@ -1,0 +1,83 @@
+---
+title: "Trajectory capability matrix"
+description: "Standardized trajectory support by criterion and producer"
+position: 5
+---
+
+# Trajectory capability matrix
+
+`ng_trajectory` schema version `1.0` combines available model-call capture and agent observations in a rollout record. It
+contains task and rollout identity, model calls and token usage, semantic turns, invocation-scoped model-visible histories,
+tool attempts, resolution, step count, and explicit evidence gaps. Source attachments remain under `ng_model_call_capture` and
+`ng_agent_observations`; aggregate-metrics requests omit all three attachments.
+
+Enable model-call evidence with `observability_enabled: true` and `model_call_capture_dir: /data/model-calls`. Calls must use
+a `/ng-rollout/<rollout_id>` Gym Model Server prefix. See [Model-call capture](/model-server/model-call-capture).
+Captured request and response payloads are included in `ng_trajectory`. LabBench rows that report the
+`multimodal_history_redacted` gap omit those payload copies; direct provider calls are not captured. See
+[Model-call capture](/model-server/model-call-capture) for payload retention and access-control requirements. Token fields are
+`prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`. The fields are nullable, and
+provider-reported details are preserved when available.
+
+## Acceptance criteria
+
+| ID | Criterion |
+|---|---|
+| C1 | Standard schema for per-model-call token statistics and response metadata |
+| C2 | Prompt, completion, reasoning, total, and cached token counts when available |
+| C3 | Task and rollout identity, turn number, timestamp, question, answer, reasoning, resolution, and step count per turn |
+| C4 | Model-visible input and output history can be reconstructed from persisted rollout JSONL |
+| C5 | Tool output, status, start and completion timestamps, and duration |
+| C6 | Independent timing for parallel tool calls |
+| C7 | Resource-server-backed and custom or sandbox-backed benchmarks |
+
+## Agent coverage
+
+- `V`: complete for the evaluated path under the documented observability configuration.
+- `O`: currently partial or path-dependent.
+- `X`: currently unavailable.
+
+For C1, C2, and C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternatives are outside capture.
+
+| Agent | C1 | C2 | C3 | C4 | C5 | C6 | C7 |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `anyswe_agent` | X | X | X | X | X | X | X |
+| `anyterminal_agent` | V | V | X | V | X | X | X |
+| `aviary_agent` | V | V | X | V | X | X | X |
+| `browsecomp_agent` | V | V | X | V | X | X | X |
+| `claude_code_agent` | V | V | X | V | V | V | V |
+| `codex_agent` | V | V | X | V | X | X | X |
+| `critpt_agent` | V | V | X | V | X | X | X |
+| `cvdp_agent` | O | O | X | O | X | X | X |
+| `finance_agent` | X | O | X | X | X | X | X |
+| `gymnasium_agent` | V | V | X | V | X | X | X |
+| `harbor_agent` | X | X | X | X | X | X | X |
+| `hermes_agent` | V | V | X | V | V | V | V |
+| `kilocode_agent` | V | V | X | V | X | X | X |
+| `labbench2_vlm_agent` | V | V | O | O | O | X | V |
+| `langgraph_agent` | X | X | X | X | X | X | X |
+| `mini_swe_agent` | X | X | X | X | X | X | X |
+| `mini_swe_agent_2` | V | V | X | V | X | X | X |
+| `non_executing_simple_agent` | V | V | X | V | X | X | X |
+| `openclaw_agent` | V | V | X | O | V | V | V |
+| `opencode_agent` | X | X | X | X | X | X | X |
+| `osworld_agent` | O | O | X | O | X | X | X |
+| `pi_agent` | V | V | X | V | V | V | V |
+| `proof_refinement_agent` | V | V | X | V | X | X | X |
+| `remote_agent` | X | O | X | X | X | X | X |
+| `scicode_agent` | X | X | X | X | X | X | X |
+| `simple_agent` | V | V | O | V | O | X | V |
+| `speed_bench_agent` | V | V | X | V | X | X | X |
+| `stirrup_agent` | O | O | X | O | X | X | X |
+| `swe_agents` | X | X | X | X | X | X | X |
+| `tau2` | V | V | X | V | X | X | X |
+| `tool_simulation_agent` | V | V | X | V | X | X | X |
+| `toolsandbox_agent` | V | V | X | V | X | X | X |
+| `verifiers_agent` | X | X | X | X | X | X | X |
+
+Simple and LabBench C3 support is partial because verifier responses may omit resolution status. Current `O` values reflect the
+CVDP Simple path, Finance and Remote aggregate usage, LabBench image redaction, OSWorld M3 and Pointer direct-provider routes,
+omitted raised failures in Simple-derived agents, and Stirrup calls outside its policy path. The matrix reports producer output,
+not schema capacity.
+OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox benchmark path.
+C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.

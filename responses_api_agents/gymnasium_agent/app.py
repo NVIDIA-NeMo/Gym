@@ -29,6 +29,7 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    accumulate_response_usage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
@@ -74,6 +75,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
         env_cookies = request.cookies
+        model_url_path = self.url_path_for_run("/v1/responses", body)
 
         reset_resp = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -106,7 +108,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
             model_resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path="/v1/responses",
+                url_path=model_url_path,
                 json=new_body,
                 cookies=model_server_cookies,
             )
@@ -117,15 +119,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
             new_outputs.extend(model_response.output)
 
-            if model_response.usage:
-                if usage is None:
-                    usage = model_response.usage.model_copy(deep=True)
-                else:
-                    usage.input_tokens += model_response.usage.input_tokens
-                    usage.output_tokens += model_response.usage.output_tokens
-                    usage.total_tokens += model_response.usage.total_tokens
-                    usage.input_tokens_details.cached_tokens = 0
-                    usage.output_tokens_details.reasoning_tokens = 0
+            usage = accumulate_response_usage(usage, model_response.usage)
 
             step_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,

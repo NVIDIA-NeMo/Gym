@@ -15,7 +15,10 @@ over the older Docker/Singularity mini-SWE integration.
   - [Overview](#overview)
   - [Dataset Information](#dataset-information)
   - [Configuration](#configuration)
+    - [How sandboxes are configured](#how-sandboxes-are-configured)
     - [Agent Configuration](#agent-configuration)
+    - [Sandbox Provider Configuration](#sandbox-provider-configuration)
+    - [Advanced: multiple sandboxes](#advanced-multiple-sandboxes)
     - [Model Parameters](#model-parameters)
   - [Quick Start](#quick-start)
     - [Prerequisites](#prerequisites)
@@ -24,6 +27,7 @@ over the older Docker/Singularity mini-SWE integration.
     - [Run One-Example Smoke](#run-one-example-smoke)
     - [Expected Outputs](#expected-outputs)
     - [Repeated Rollouts](#repeated-rollouts)
+  - [Running with Enroot (local / HPC)](#running-with-enroot-local--hpc)
   - [Running SWE-bench on ECS Fargate](#running-swe-bench-on-ecs-fargate)
   - [Sandbox Environment Adapter](#sandbox-environment-adapter)
     - [Environment Lifecycle](#environment-lifecycle)
@@ -217,8 +221,10 @@ sandbox:                      # name referenced by the agent's sandbox_provider
       use_server_proxy: true
     create:
       request_timeout_s: 1200
-      timeout_s: 1200
-      skip_health_check: true
+      # Must exceed ready_timeout_s above: this bounds the whole create call,
+      # which includes the readiness wait.
+      timeout_s: 1500
+      skip_health_check: false
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0
@@ -484,6 +490,103 @@ The agent writes per-instance mini-swe-agent configs and result artifacts under
 Use the agent's `step_timeout` and `eval_timeout` config values or CLI overrides
 to bound tool and verification execution. If you launch from a custom
 Kubernetes wrapper, add any outer per-sample guard there.
+
+## Running with Enroot (local / HPC)
+
+Swap OpenSandbox for the local enroot provider when you are on a single machine
+or HPC node where [enroot](https://github.com/NVIDIA/enroot) is the supported
+container runtime (common on NVIDIA/Slurm clusters). No API key or network
+service is required — the provider shells out to the `enroot` binary directly.
+
+### Prerequisites
+
+- `enroot` installed and on `PATH` (including the `enroot+caps` package for the
+  privileged helper binaries `enroot-mount`, `enroot-nsenter`, etc.).
+- Unprivileged user namespaces enabled (`unprivileged_userns_clone=1`).
+- The `scripts/enroot_prefetch_sqsh.py` helper in this repo (see below).
+
+### Step 1 — Pre-fetch sqsh files (one-time)
+
+`enroot import` pulls and converts Docker images to squashfs on first use, which
+is slow at scale. Pre-fetch the images up front with the bundled helper so every
+sandbox create is an instant cache hit:
+
+```bash
+python scripts/enroot_prefetch_sqsh.py \
+    --sqsh-dir /path/to/enroot_sqshs \
+    --jobs 4 \
+    'docker.io/swebench/sweb.eval.x86_64.django_1776_django-10973:latest' \
+    'docker.io/swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-8595:latest' \
+    'docker.io/swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-14141:latest' \
+    'docker.io/swebench/sweb.eval.x86_64.sympy_1776_sympy-20916:latest' \
+    'docker.io/swebench/sweb.eval.x86_64.pylint-dev_1776_pylint-4551:latest'
+```
+
+The helper uses the same SHA-256 cache key as the enroot provider, so sqsh files
+written here are picked up automatically at runtime without re-importing.
+
+To derive image names for other instances, apply the rule from
+[Dataset Information](#dataset-information):
+- `subset: verified` → `docker.io/swebench/sweb.eval.x86_64.<id>:latest` with
+  `__` → `_1776_`
+- Other subsets → `docker.io/xingyaoww/sweb.eval.x86_64.<id>:latest` with
+  `__` → `_s_`
+
+### Step 2 — Activate the venv and start the servers
+
+```bash
+source .venv/bin/activate
+
+gym env start \
+    --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+    --config nemo_gym/sandbox/providers/enroot/configs/enroot.yaml \
+    --model-type local_vllm_model \
+    --model Qwen/Qwen3.6-27B-FP8 \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=2' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_env_vars.VLLM_RAY_DP_PACK_STRATEGY=strict' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.enable_auto_tool_choice=true' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tool_call_parser=qwen3_coder' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.reasoning_parser=qwen3' \
+    '++policy_model.responses_api_models.local_vllm_model.uses_reasoning_parser=true' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.quantization=fp8' \
+    '++sandbox.enroot.create.sqsh_cache_dir=/path/to/enroot_sqshs' \
+    '++sandbox.enroot.create.bypass_entrypoint=false' &
+```
+
+Replace `/path/to/enroot_sqshs` with the directory used in Step 1. Adjust
+`tensor_parallel_size` to match the number of GPUs available. The
+`tool_call_parser=qwen3_coder` and `reasoning_parser=qwen3` flags are required
+for Qwen3-family models; use `tool_call_parser=hermes` for other models.
+
+### Step 3 — Run the eval
+
+```bash
+gym eval run --no-serve \
+    --agent mini_swe_agent_2 \
+    --input responses_api_agents/mini_swe_agent_2/data/example.jsonl \
+    --output results/mini_swe_agent_2_enroot.jsonl \
+    --limit 5 \
+    --num-repeats 1 \
+    --temperature 0.5 \
+    --max-output-tokens 8192
+```
+
+### Notes
+
+- The sqsh cache dir must be the same path in both Step 1 and the
+  `++sandbox.enroot.create.sqsh_cache_dir` override. If they differ the provider
+  will re-import the images from Docker Hub.
+- `bypass_entrypoint` (default `true`) passes `--rc /dev/null` to `enroot start`
+  to suppress Docker `ENTRYPOINT` interference. Enroot resolves this path inside
+  the container's namespace before `/dev` is set up, so it fails with
+  `No such file or directory: /dev/null` for SWE-bench images. Always set
+  `'++sandbox.enroot.create.bypass_entrypoint=false'` for SWE-bench tasks —
+  these images use a plain shell entrypoint that does not interfere with the
+  sandbox init.
+- The NVIDIA enroot hook (`/etc/enroot/hooks.d/98-nvidia.sh`) requires
+  `nvidia-container-cli` to inject GPUs into sandbox containers. SWE-bench
+  evaluation containers do not need GPUs; if you see hook errors inside Docker,
+  remove the hook with `rm /etc/enroot/hooks.d/98-nvidia.sh`.
 
 ## Running SWE-bench on ECS Fargate
 
