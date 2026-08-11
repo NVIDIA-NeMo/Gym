@@ -25,7 +25,7 @@ set -xeuo pipefail
 export UV_LINK_MODE=hardlink
 
 ray_dependency="ray[default]==2.55.1"
-uv pip install --system "\$ray_dependency"
+uv pip install --system "\$ray_dependency" fastokens vllm-router
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -51,6 +51,19 @@ python benchmarks/nemotron_3.5_super/downgrade_python.py
 
 uv sync --active
 uv pip install "\$ray_dependency"
+
+########################################
+# START Benchmark specific preparation
+########################################
+
+# See benchmarks/scicode/README.md
+uv pip install gdown
+gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
+    -O benchmarks/scicode/data
+
+########################################
+# END Benchmark specific preparation
+########################################
 
 gym eval prepare --config $GYM_CONFIG
 

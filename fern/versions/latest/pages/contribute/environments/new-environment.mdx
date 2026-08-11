@@ -11,6 +11,36 @@ For a guide to building your first resources server, refer to [Single Step Envir
 
 </Tip>
 
+## Environment Manifest
+
+Each newly onboarded environment or benchmark has a `manifest.yaml`. The manifest gives contributors, reviewers, and tooling one versioned description of authored metadata and mirrored composition without replacing Gym configuration. Gym defines this contract as a Pydantic model and can emit JSON Schema from it when another tool needs a language-neutral representation.
+
+The manifest is the place to read this declaration, but not every field is authored there:
+
+| Field group | Authority |
+| --- | --- |
+| Identity and catalog metadata: `name`, `version`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
+| Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
+| Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
+| Benchmark protocol: `canonical_split` and `standard_prompt_config` | Manifest |
+
+When composition changes, edit the Gym config and update its manifest mirror. The runtime continues to resolve and execute the config; it does not use the manifest as a second wiring system. `version` follows Semantic Versioning and identifies the resolved composition rather than the text of the manifest alone.
+
+### Integration Profiles
+
+`integration_profile` classifies where the episode is driven. `custom-gym-verifier` is the default path; the other profiles describe three existing extension points.
+
+| Profile | Use when | Additional component requirement |
+| --- | --- | --- |
+| `custom-gym-verifier` | Gym drives the standard agent loop and only the model's answers are measured | `model_server` |
+| `custom-gym-agent-loop` | Authored agent behavior, such as browsing or planning strategy, is part of the measurement | `model_server` |
+| `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None |
+| `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` |
+
+Every profile also requires a `resources_server`, an `agent_server`, and at least one dataset. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split`, `standard_prompt_config`, and at least one benchmark dataset with `prepare_script`; its dataset-level `prompt_config` remains optional.
+
+The profile is an authored classification, not a runtime dispatcher. This initial contract does not infer a profile from configuration, resolve concrete component versions, declare capabilities, derive which components are pinned or swappable, enforce component swaps, or validate `grading_mode` against a resources server's vocabulary. Runtime behavior remains config-driven.
+
 ## Guiding Principles
 
 Adding a new training environment is similar to [Adding A Benchmark](/contribute/environments/adding-a-benchmark) with respect to the reward profiling and software correctness aspects. However, for adding a new training environment, you must additionally run training with your environment in isolation in order to determine the environment functionality and correctness.

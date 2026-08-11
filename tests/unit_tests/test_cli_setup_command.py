@@ -23,6 +23,7 @@ import nemo_gym.cli.setup_command
 from nemo_gym.cli.setup_command import (
     _get_nemo_gym_install_flags,
     _get_nemo_gym_version_spec,
+    get_venv_path,
     run_command,
     setup_env_command,
 )
@@ -177,6 +178,17 @@ class TestCLISetupCommandSetupEnvCommand:
         )
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {uv_venv_dir}/first_level/second_level/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
+
+    def test_uv_venv_dir_path_is_shared_with_cleanup(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        uv_venv_dir = tmp_path / "uv_venv_dir"
+
+        actual_path = get_venv_path(
+            server_dir,
+            self._debug_global_config_dict(tmp_path) | {"uv_venv_dir": str(uv_venv_dir)},
+        )
+
+        assert actual_path == uv_venv_dir / "first_level/second_level/.venv"
 
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
     def test_installs_from_pypi_when_not_editable(

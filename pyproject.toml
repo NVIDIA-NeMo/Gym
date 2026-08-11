@@ -111,6 +111,11 @@ dependencies = [
     "pydantic_core",
     "devtools",
 
+    # Packaging: Validates SPDX license expressions in environment manifests.
+    # Updated Tue Aug 11, 2026 with packaging==25.0
+    # License: Apache-2.0 OR BSD-2-Clause https://github.com/pypa/packaging/tree/25.0
+    "packaging>=24.2",
+
     # FastAPI: Used for server infrastructure
     # Updated Thu Mar 26, 2026 with fastapi==0.135.2
     # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE
@@ -308,6 +313,10 @@ dev = [
     "pytest-xdist",
     "pytest",
     "pytest-asyncio",
+
+    # DefusedXML: Hardened XML parsing for the GitLab JUnit relay receiver.
+    # License: Python Software Foundation License
+    "defusedxml>=0.7.1",
 
     # Requests-mock: Used for mocking HTTP requests in tests
     # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
