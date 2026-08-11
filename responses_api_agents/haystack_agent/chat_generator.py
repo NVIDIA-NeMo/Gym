@@ -35,6 +35,7 @@ from haystack.core.serialization import allow_deserialization_module, default_fr
 from haystack.dataclasses import ChatMessage, ChatRole, ToolCall
 
 from nemo_gym.openai_utils import (
+    RESPONSES_TO_TRAIN,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -43,7 +44,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
+    accumulate_response_usage,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
@@ -92,6 +95,13 @@ class _GenRunState:
 _current_run_state: contextvars.ContextVar[Optional[_GenRunState]] = contextvars.ContextVar(
     "nemogym_gen_run_state", default=None
 )
+
+# Haystack preserves arbitrary JSON-compatible values in ChatMessage.meta. Keep NeMo Gym's
+# per-generation training data there while the Agent owns the tool loop, then restore it only
+# when converting the completed trajectory back into Responses output items.
+_TRAINING_META_KEY = "__ng_training__"
+_USAGE_META_KEY = "__ng_usage__"
+_TRAINING_META_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
 
 
 def _stringify(value: Any) -> str:
@@ -173,7 +183,7 @@ def _tool_to_responses_param(tool: Any, tools_strict: bool) -> dict[str, Any]:
     }
 
 
-def messages_to_responses_input(messages: list[ChatMessage], *, output: bool = False) -> list[Any]:
+def chat_messages_to_responses(messages: list[ChatMessage], *, output: bool = False) -> list[Any]:
     """Convert Haystack ``ChatMessage``s to NeMo Gym Responses input/output items.
 
     :param output: When ``True``, assistant text is emitted as ``NeMoGymResponseOutputMessage``
@@ -183,6 +193,7 @@ def messages_to_responses_input(messages: list[ChatMessage], *, output: bool = F
     """
     items: list[Any] = []
     for index, message in enumerate(messages):
+        item_start = len(items)
         # Tool result messages carry one or more ToolCallResults.
         if message.tool_call_results:
             for result in message.tool_call_results:
@@ -228,11 +239,30 @@ def messages_to_responses_input(messages: list[ChatMessage], *, output: bool = F
                         arguments=json.dumps(tool_call.arguments or {}),
                     )
                 )
+
+            # One Haystack assistant message represents one model completion. Its token stream
+            # covers every item reconstructed above (including parsed reasoning), so attach it to
+            # only the final item just as the native Responses converter does.
+            training_metadata = message.meta.get(_TRAINING_META_KEY)
+            if output and training_metadata and len(items) > item_start:
+                train_cls = RESPONSES_TO_TRAIN.get(items[-1].__class__)
+                if train_cls is not None:
+                    items[-1] = train_cls(**items[-1].model_dump(), **training_metadata)
         else:
             # user / system / developer (developer is preserved via meta since Haystack has no such role)
             ng_role = message.meta.get("__ng_role__", role.value)
             items.append(NeMoGymEasyInputMessage(type="message", role=ng_role, content=message.text or ""))
     return items
+
+
+def chat_messages_usage(messages: list[ChatMessage]) -> Optional[NeMoGymResponseUsage]:
+    """Accumulate per-model-call usage retained in generated Haystack messages."""
+    usage: Optional[NeMoGymResponseUsage] = None
+    for message in messages:
+        usage_metadata = message.meta.get(_USAGE_META_KEY)
+        if usage_metadata is not None:
+            usage = accumulate_response_usage(usage, NeMoGymResponseUsage.model_validate(usage_metadata))
+    return usage
 
 
 def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]:
@@ -263,6 +293,18 @@ def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]
     meta: dict[str, Any] = {}
     if reasoning_id is not None:
         meta["__ng_reasoning_id__"] = reasoning_id
+    training_item = next(
+        (item for item in reversed(ng_response.output) if hasattr(item, "prompt_token_ids")),
+        None,
+    )
+    if training_item is not None:
+        meta[_TRAINING_META_KEY] = {
+            field: getattr(training_item, field)
+            for field in _TRAINING_META_FIELDS
+            if getattr(training_item, field, None) is not None
+        }
+    if ng_response.usage is not None:
+        meta[_USAGE_META_KEY] = ng_response.usage.model_dump(mode="json")
 
     message = ChatMessage.from_assistant(
         text="".join(text_parts) or None,
@@ -331,7 +373,7 @@ class NeMoGymResponsesChatGenerator:
     def _build_params(
         self, messages: list[ChatMessage], tools: Any, generation_kwargs: Optional[dict[str, Any]], tools_strict: bool
     ) -> NeMoGymResponseCreateParamsNonStreaming:
-        params: dict[str, Any] = {"input": messages_to_responses_input(messages, output=False)}
+        params: dict[str, Any] = {"input": chat_messages_to_responses(messages, output=False)}
         if tools:
             params["tools"] = [_tool_to_responses_param(tool, tools_strict) for tool in tools]
         params.update(self.generation_kwargs)
@@ -339,18 +381,7 @@ class NeMoGymResponsesChatGenerator:
         return NeMoGymResponseCreateParamsNonStreaming(**params)
 
     def _accumulate_usage(self, ng_response: NeMoGymResponse) -> None:
-        usage = ng_response.usage
-        if usage is None:
-            return
-        if self._usage is None:
-            self._usage = usage.model_copy(deep=True)
-            return
-        self._usage.input_tokens += usage.input_tokens
-        self._usage.output_tokens += usage.output_tokens
-        self._usage.total_tokens += usage.total_tokens
-        # TODO support more advanced token details.
-        self._usage.input_tokens_details.cached_tokens = 0
-        self._usage.output_tokens_details.reasoning_tokens = 0
+        self._usage = accumulate_response_usage(self._usage, ng_response.usage)
 
     @component.output_types(replies=list[ChatMessage])
     def run(

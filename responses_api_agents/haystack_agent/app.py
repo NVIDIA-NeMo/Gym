@@ -56,7 +56,8 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.haystack_agent import chat_generator
 from responses_api_agents.haystack_agent.chat_generator import (
     NeMoGymResponsesChatGenerator,
-    messages_to_responses_input,
+    chat_messages_to_responses,
+    chat_messages_usage,
     responses_input_to_messages,
 )
 from responses_api_agents.haystack_agent.http_tool import HTTPTool
@@ -240,14 +241,14 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         # generated trajectory is everything after that prefix.
         system_offset = 1 if getattr(self._agent, "system_prompt", None) else 0
         generated = all_messages[system_offset + len(messages) :]
-        output_items = messages_to_responses_input(generated, output=True)
+        output_items = chat_messages_to_responses(generated, output=True)
 
         if run_state.last_response is None:
             raise RuntimeError("The Haystack Agent completed without any NeMo Gym model call.")
 
         model_response = run_state.last_response
         model_response.output = output_items
-        model_response.usage = run_state.usage
+        model_response.usage = chat_messages_usage(generated)
 
         # Forward the Resources Server session so ``run()`` can verify against the same state after
         # this internal ``/v1/responses`` call. Preserve model-server cookies separately as well,
