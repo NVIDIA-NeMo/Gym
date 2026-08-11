@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Annotated, Any, Dict, List, Literal, get_args, get_origin
+from types import UnionType
+from typing import Annotated, Any, Dict, List, Literal, NotRequired, Required, Union, get_args, get_origin
 
 import openai
 import pytest
@@ -69,6 +70,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseMcpApprovalRequest,
     NeMoGymResponseMcpCall,
     NeMoGymResponseMcpListTools,
+    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
@@ -538,26 +540,20 @@ def test_accumulate_response_usage_tolerates_missing_detail_objects() -> None:
     assert result.output_tokens_details.reasoning_tokens == 1
 
 
-# ===========================================================================
-# Responses item coverage against the installed openai SDK
+# Responses item coverage against the installed OpenAI SDK.
 #
-# Gym declares its own NeMoGym* item classes rather than using the SDK's.
-# It also keeps three hand-maintained lists derived from the same SDK union:
-#   NeMoGymResponseInputItem, which types Gym can represent
-#   _RESPONSE_OUTPUT_BOUNDARY_TYPES, which types start the model's generation
-#   RESPONSES_TO_TRAIN, which types can carry sampled token IDs
+# Gym defines its own item classes.
+# It also maintains three lists that correspond to SDK union members:
+# - ``NeMoGymResponseInputItem`` lists the item types Gym can represent.
+# - ``_RESPONSE_OUTPUT_BOUNDARY_TYPES`` lists model-generated item types.
+# - ``RESPONSES_TO_TRAIN`` maps item types that can carry sampled token IDs.
 #
-# ResponseOutputItem gains members with most openai releases.
-# None of the three lists is derived from it, so nothing else fails when they fall behind.
-# Drift shows up as a 500 on the non-streaming path.
-# On the streaming path it shows up as a silently truncated transcript.
-#
-# Run these against every version in the supported openai window, not only the pinned one.
-# ===========================================================================
+# An outdated list can cause non-streaming requests to fail.
+# It can also cause streaming requests to omit transcript items.
 
 
-# `message` is covered by split_responses_input_output_items' `role == "assistant"` check.
-# The type set does not carry it, so it is exempt from the boundary classification.
+# ``split_responses_input_output_items`` detects assistant messages by role.
+# The boundary type set therefore excludes ``message``.
 _BOUNDARY_EXEMPT = frozenset({"message"})
 
 
@@ -566,7 +562,8 @@ def _unwrap(annotation: Any) -> Any:
 
     ``ResponseOutputItem`` is ``Annotated[Union[...], PropertyInfo]``.
     Gym's output item is ``Annotated[Union[...], BeforeValidator]``.
-    Without unwrapping, ``get_args`` returns the two ``Annotated`` arguments instead of the union members.
+    Without unwrapping, ``get_args`` returns the ``Annotated`` arguments.
+    It does not return the union members.
     """
     while get_origin(annotation) is Annotated:
         annotation = get_args(annotation)[0]
@@ -579,52 +576,98 @@ def _union_members(annotation: Any) -> List[type]:
     return [_unwrap(arg) for arg in args] if args else [annotation]
 
 
+def _literal_domain(annotation: Any) -> frozenset[Any] | None:
+    """Return a finite top-level Literal domain after removing transparent wrappers.
+
+    Return ``None`` when the annotation is not bounded by Literals.
+    Do not descend into containers or nested models.
+    """
+    origin = get_origin(annotation)
+    if origin in (Annotated, Required, NotRequired):
+        return _literal_domain(get_args(annotation)[0])
+    if origin is Literal:
+        return frozenset(get_args(annotation))
+    if origin in (Union, UnionType):
+        domain: set[Any] = set()
+        for member in get_args(annotation):
+            if member is type(None):
+                continue
+            member_domain = _literal_domain(member)
+            if member_domain is None:
+                return None
+            domain.update(member_domain)
+        return frozenset(domain) if domain else None
+    return None
+
+
+def _field_annotations(model: type) -> Dict[str, Any]:
+    """Read fields from either an SDK/Gym Pydantic model or SDK TypedDict."""
+    model_fields = getattr(model, "model_fields", None)
+    if model_fields is not None:
+        return {name: field.annotation for name, field in model_fields.items()}
+    return dict(getattr(model, "__annotations__", {}))
+
+
 def _type_tags(model: type) -> List[str]:
     """The ``Literal`` values of a pydantic model's ``type`` field."""
-    field = getattr(model, "model_fields", {}).get("type")
-    if field is None:
+    annotation = _field_annotations(model).get("type")
+    if annotation is None:
         return []
-    annotation = field.annotation
-    if get_origin(annotation) is Literal:
-        return [str(value) for value in get_args(annotation)]
-    return [str(value) for arg in get_args(annotation) if get_origin(arg) is Literal for value in get_args(arg)]
+    domain = _literal_domain(annotation)
+    return [] if domain is None else [str(value) for value in domain]
 
 
-def _sdk_tags(union: Any) -> Dict[str, type]:
-    tags: Dict[str, type] = {}
-    for member in _union_members(union):
-        for tag in _type_tags(member):
-            tags.setdefault(tag, member)
-    return tags
-
-
-def _gym_tag_owners() -> Dict[str, List[type]]:
+def _tag_owners(union: Any) -> Dict[str, List[type]]:
     owners: Dict[str, List[type]] = {}
-    for member in _union_members(NeMoGymResponseInputItem):
+    for member in _union_members(union):
         for tag in _type_tags(member):
             owners.setdefault(tag, []).append(member)
     return owners
 
 
-# ResponseInputItem is the source of truth rather than ResponseOutputItem.
-# Gym has to carry every type a client can send, which is the wider set:
-# test_sdk_output_types_are_a_subset_of_input_types keeps that relationship honest.
-# An item type Gym cannot represent is a 500 on the non-streaming path either way.
-SDK_INPUT_TAGS = _sdk_tags(ResponseInputItem)
-SDK_OUTPUT_TAGS = _sdk_tags(ResponseOutputItem)
-GYM_TAG_OWNERS = _gym_tag_owners()
+def _literal_fields(owners: List[type]) -> Dict[str, frozenset[Any] | None]:
+    """Aggregate Literal domains accepted by all same-tag union alternatives.
+
+    A ``None`` value means at least one owner accepts an unbounded annotation.
+    Missing fields are omitted.
+    """
+    fields: Dict[str, frozenset[Any] | None] = {}
+    for owner in owners:
+        for field, annotation in _field_annotations(owner).items():
+            domain = _literal_domain(annotation)
+            if field not in fields:
+                fields[field] = domain
+            elif fields[field] is not None and domain is not None:
+                fields[field] = fields[field] | domain
+            else:
+                fields[field] = None
+    return fields
+
+
+# Input and output ownership must remain independent.
+# Some fields with the same type tag have different input and output ``Literal`` domains.
+SDK_INPUT_TAG_OWNERS = _tag_owners(ResponseInputItem)
+SDK_OUTPUT_TAG_OWNERS = _tag_owners(ResponseOutputItem)
+GYM_INPUT_TAG_OWNERS = _tag_owners(NeMoGymResponseInputItem)
+GYM_OUTPUT_TAG_OWNERS = _tag_owners(NeMoGymResponseOutputItem)
+SDK_INPUT_TAGS = frozenset(SDK_INPUT_TAG_OWNERS)
+SDK_OUTPUT_TAGS = frozenset(SDK_OUTPUT_TAG_OWNERS)
+
+# Gym accepts provider-specific MCP status strings.
+# Each exemption must identify a finite SDK ``Literal`` field.
+_UNBOUNDED_GYM_INPUT_LITERAL_FIELDS = {
+    ("mcp_call", "status"): "NVIDIA-hosted MCP endpoints may return statuses outside the SDK Literal.",
+}
 
 # Types Gym deliberately does not represent.
-# item_reference is a pointer to an item held server-side.
-# Gym replays transcripts in full and keeps no item store, so it cannot resolve one.
-# Rejecting the request is better than accepting a reference that resolves to nothing.
+# ``item_reference`` points to an item held by the server.
+# Gym keeps no item store.
+# It cannot resolve the reference while replaying a transcript.
 GYM_UNREPRESENTABLE_TYPES = frozenset({"item_reference"})
 
 
-# The SDK model each hand-written Gym model mirrors.
-# Only the pairing is declared here: which models are hand-written is derived from the union by
-# _derived_hand_written_models(), and test_hand_written_model_list_is_complete fails if this list
-# and that derivation disagree. Nothing here has to be remembered when a model is added.
+# Pair each manually defined Gym model with the SDK model it mirrors.
+# ``_derived_hand_written_models`` identifies which Gym models require a pairing.
 _HAND_WRITTEN_MODELS = [
     (NeMoGymEasyInputMessage, EasyInputMessage),
     (NeMoGymMessage, InputMessage),
@@ -634,35 +677,43 @@ _HAND_WRITTEN_MODELS = [
     (NeMoGymResponseReasoningItem, ResponseReasoningItem),
 ]
 
-# Fields left out of a hand-written model on purpose, with the reason.
-# `NeMoGymResponseReasoningItem.status` is commented out at its definition: the OpenAI API returns
-# None for it and then rejects the field when it is sent back on a later call in the same rollout.
+# Fields intentionally omitted from manually defined models.
+# The OpenAI API can return ``None`` for ``NeMoGymResponseReasoningItem.status``.
+# It rejects that field when Gym sends it in a later request.
 _DELIBERATE_FIELD_OMISSIONS = {("NeMoGymResponseReasoningItem", "status")}
 
 
-def _derived_hand_written_models() -> List[type]:
-    """Union members that copy an SDK model instead of subclassing one.
+def _deliberately_omitted_tag_fields() -> set[tuple[str, str]]:
+    models = {gym.__name__: gym for gym, _ in _HAND_WRITTEN_MODELS}
+    return {
+        (tag, field) for model_name, field in _DELIBERATE_FIELD_OMISSIONS for tag in _type_tags(models[model_name])
+    }
 
-    A member with an openai class in its MRO inherits new SDK fields, so it cannot fall behind.
-    A member that subclasses another Gym copy is covered by whatever that copy declares.
-    What is left declares its own fields against no SDK model, which is what can drift.
+
+def _derived_hand_written_models() -> List[type]:
+    """Return union members that define SDK fields without subclassing an SDK model.
+
+    A member with an OpenAI class in its MRO inherits SDK fields.
+    A member that subclasses another Gym model inherits that model's fields.
+    The remaining members define their own fields and require explicit parity checks.
     """
+    union_members = set(_union_members(NeMoGymResponseInputItem)) | set(_union_members(NeMoGymResponseOutputItem))
     copies = [
         member
-        for member in _union_members(NeMoGymResponseInputItem)
+        for member in union_members
         if not any(base.__module__.startswith("openai.") for base in member.__mro__[1:])
     ]
-    # A ForTraining variant subclasses the Gym model it adds token fields to, so it inherits
-    # whatever that model declares and is covered by checking the model it derives from.
+    # A training variant inherits the fields of its base Gym model.
+    # Checking the base model therefore covers the variant.
     return [model for model in copies if not any(other in model.__mro__[1:] for other in copies)]
 
 
 def test_hand_written_model_list_is_complete() -> None:
     """Every hand-written union member must be paired with the SDK model it mirrors.
 
-    _HAND_WRITTEN_MODELS is what the parity test iterates, so a hand-written model missing from it
-    is simply never checked. The membership half is derived rather than remembered; only the
-    pairing to an SDK model has to be written down, because nothing in the code records it.
+    The parity test iterates over ``_HAND_WRITTEN_MODELS``.
+    It derives the Gym model set independently.
+    Each SDK model pairing must be declared explicitly.
     """
     derived = {model.__name__ for model in _derived_hand_written_models()}
     declared = {gym.__name__ for gym, _ in _HAND_WRITTEN_MODELS}
@@ -685,9 +736,9 @@ def test_hand_written_model_list_is_complete() -> None:
 def test_hand_written_models_carry_every_sdk_field(gym_model: type, sdk_model: type) -> None:
     """A copied model must not fall behind the SDK model it copies.
 
-    The union tests above match on the `type` discriminator, so a Gym model keeps owning its tag
-    however far its fields drift. A field the SDK adds and Gym omits is dropped during validation
-    without an error: the request is accepted, and the value is gone from everything downstream.
+    Union membership depends on the ``type`` discriminator.
+    It does not verify field parity.
+    Validation drops SDK fields that the corresponding Gym model omits.
     """
     missing = sorted(
         field
@@ -703,8 +754,10 @@ def test_hand_written_models_carry_every_sdk_field(gym_model: type, sdk_model: t
 
 
 def test_deliberate_omissions_are_still_real_sdk_fields() -> None:
-    """An omission recorded for a field the SDK no longer has hides the next real one."""
+    """Require each deliberate omission to identify an existing SDK field."""
     by_name = {gym.__name__: sdk for gym, sdk in _HAND_WRITTEN_MODELS}
+    unknown_models = sorted(model for model, _ in _DELIBERATE_FIELD_OMISSIONS if model not in by_name)
+    assert not unknown_models, f"Deliberate omissions name unknown Gym models: {unknown_models}"
     stale = sorted(
         f"{model}.{field}"
         for model, field in _DELIBERATE_FIELD_OMISSIONS
@@ -714,10 +767,9 @@ def test_deliberate_omissions_are_still_real_sdk_fields() -> None:
 
 
 def test_sdk_union_is_introspectable() -> None:
-    """Guard the introspection itself.
+    """Verify that the SDK union introspection returns members.
 
-    If a future SDK restructures either union so the helpers above find no members, every other
-    test in this file would pass vacuously.
+    The other parity tests would pass vacuously if this introspection returned no members.
     """
     for name, tags in (("ResponseInputItem", SDK_INPUT_TAGS), ("ResponseOutputItem", SDK_OUTPUT_TAGS)):
         assert len(tags) >= 13, (
@@ -729,11 +781,164 @@ def test_sdk_union_is_introspectable() -> None:
         assert "function_call" in tags
 
 
-def test_sdk_output_types_are_a_subset_of_input_types() -> None:
-    """The input union is used as the source of truth, which relies on it being the wider set.
+def test_gym_unions_are_introspectable_independently() -> None:
+    """Verify input and output union introspection independently."""
+    for name, owners in (
+        ("NeMoGymResponseInputItem", GYM_INPUT_TAG_OWNERS),
+        ("NeMoGymResponseOutputItem", GYM_OUTPUT_TAG_OWNERS),
+    ):
+        assert len(owners) >= 12, (
+            f"Only found {len(owners)} tagged members in {name}. Its union shape probably changed "
+            f"and this file's introspection needs updating -- do not point both sides at one alias."
+        )
+        assert all(tag and tagged_owners for tag, tagged_owners in owners.items())
 
-    A type the provider can return but a client cannot send would go unchecked.
-    Gym would then 500 on replaying that item back as history, which is how issue #2436 happened.
+
+def test_sdk_literal_domains_are_introspectable() -> None:
+    """Verify that field introspection returns ``Literal`` domains."""
+    for name, owners in (
+        ("ResponseInputItem", SDK_INPUT_TAG_OWNERS),
+        ("ResponseOutputItem", SDK_OUTPUT_TAG_OWNERS),
+        ("NeMoGymResponseInputItem", GYM_INPUT_TAG_OWNERS),
+        ("NeMoGymResponseOutputItem", GYM_OUTPUT_TAG_OWNERS),
+    ):
+        literal_fields = {
+            (tag, field)
+            for tag, tag_owners in owners.items()
+            for field, domain in _literal_fields(tag_owners).items()
+            if domain is not None
+        }
+        assert len(literal_fields) >= 20, (
+            f"Only found {len(literal_fields)} top-level Literal fields in {name}; "
+            f"the structural parity checks would be mostly vacuous."
+        )
+        assert ("message", "role") in literal_fields
+        assert ("function_call", "type") in literal_fields
+
+
+def test_literal_domain_unwraps_transparent_typing_layers() -> None:
+    wrapped = Annotated[
+        Union[Required[Literal["first"]], NotRequired[Literal["second"]], None],
+        "metadata",
+    ]
+    assert _literal_domain(wrapped) == frozenset({"first", "second"})
+    assert _literal_domain(Union[Literal["bounded"], str]) is None
+
+
+@pytest.mark.parametrize("tag", sorted(SDK_OUTPUT_TAGS))
+def test_gym_output_accepts_every_sdk_output_literal(tag: str) -> None:
+    """Provider output Literal values must survive Gym response validation."""
+    sdk_fields = _literal_fields(SDK_OUTPUT_TAG_OWNERS[tag])
+    gym_fields = _literal_fields(GYM_OUTPUT_TAG_OWNERS.get(tag, []))
+    for field, sdk_domain in sdk_fields.items():
+        if sdk_domain is None:
+            continue
+        if (tag, field) in _deliberately_omitted_tag_fields():
+            continue
+        assert field in gym_fields, (
+            f"openai {openai.__version__} output {tag}.{field} has Literal domain "
+            f"{sorted(sdk_domain, key=repr)}, but no Gym output owner declares that field."
+        )
+        gym_domain = gym_fields[field]
+        if gym_domain is None:  # An unbounded annotation accepts every provider value.
+            continue
+        missing = sdk_domain - gym_domain
+        assert not missing, (
+            f"openai {openai.__version__} can output {tag}.{field} values "
+            f"{sorted(missing, key=repr)} that Gym rejects. SDK={sorted(sdk_domain, key=repr)}, "
+            f"Gym output={sorted(gym_domain, key=repr)}."
+        )
+
+
+@pytest.mark.parametrize("tag", sorted(SDK_INPUT_TAGS))
+def test_gym_input_literal_domains_match_sdk_input(tag: str) -> None:
+    """Gym must accept the SDK input domain without admitting unsendable Literals."""
+    if tag in GYM_UNREPRESENTABLE_TYPES:
+        return
+    sdk_fields = _literal_fields(SDK_INPUT_TAG_OWNERS[tag])
+    gym_fields = _literal_fields(GYM_INPUT_TAG_OWNERS.get(tag, []))
+    for field, sdk_domain in sdk_fields.items():
+        if sdk_domain is None:
+            continue
+        if (tag, field) in _deliberately_omitted_tag_fields():
+            continue
+        assert field in gym_fields, (
+            f"openai {openai.__version__} input {tag}.{field} has Literal domain "
+            f"{sorted(sdk_domain, key=repr)}, but no Gym input owner declares that field."
+        )
+        gym_domain = gym_fields[field]
+        if gym_domain is None:
+            assert (tag, field) in _UNBOUNDED_GYM_INPUT_LITERAL_FIELDS, (
+                f"Gym input {tag}.{field} is unbounded while the SDK domain is "
+                f"{sorted(sdk_domain, key=repr)}. Narrow it to the SDK domain or explicitly "
+                f"document the provider-tolerance widening."
+            )
+            continue
+        missing = sdk_domain - gym_domain
+        extra = gym_domain - sdk_domain
+        assert not missing, f"Gym rejects SDK-supported input values for {tag}.{field}: {sorted(missing, key=repr)}."
+        assert not extra, (
+            f"Gym input {tag}.{field} accepts {sorted(extra, key=repr)}, but openai "
+            f"{openai.__version__} input accepts only {sorted(sdk_domain, key=repr)}. "
+            f"This usually means one Gym class is shared with a wider SDK output model. "
+            f"Split the Gym input/output owners and normalize provider output before input validation."
+        )
+    gym_only_literals = {
+        field: domain for field, domain in gym_fields.items() if domain is not None and field not in sdk_fields
+    }
+    assert not gym_only_literals, (
+        f"Gym input {tag!r} declares Literal fields absent from the SDK input model: "
+        f"{gym_only_literals}. These are usually output-only fields leaking through a shared owner."
+    )
+
+
+def test_shared_gym_owners_do_not_hide_unreplayable_output_literals() -> None:
+    """A shared class cannot model output values that the SDK rejects as input."""
+    for tag in sorted(SDK_OUTPUT_TAGS & SDK_INPUT_TAGS):
+        output_fields = _literal_fields(SDK_OUTPUT_TAG_OWNERS[tag])
+        input_fields = _literal_fields(SDK_INPUT_TAG_OWNERS[tag])
+        shared_owners = set(GYM_OUTPUT_TAG_OWNERS.get(tag, [])) & set(GYM_INPUT_TAG_OWNERS.get(tag, []))
+        for field, output_domain in output_fields.items():
+            input_domain = input_fields.get(field, frozenset())
+            if output_domain is None or input_domain is None:
+                continue
+            unreplayable = output_domain - input_domain
+            if not unreplayable:
+                continue
+            unsafe_shared = [
+                owner.__name__
+                for owner in shared_owners
+                if (domain := _literal_domain(_field_annotations(owner).get(field))) is None
+                or bool(domain & unreplayable)
+            ]
+            assert not unsafe_shared, (
+                f"openai {openai.__version__} output {tag}.{field} adds "
+                f"{sorted(unreplayable, key=repr)}, which its input schema rejects, while Gym shares "
+                f"{unsafe_shared} between input and output. Split the Gym owners, then normalize "
+                f"provider output before validating replay input."
+            )
+
+
+def test_unbounded_input_literal_exemptions_are_live() -> None:
+    """Require each exemption to match bounded SDK and unbounded Gym fields."""
+    for tag, field in _UNBOUNDED_GYM_INPUT_LITERAL_FIELDS:
+        assert tag in SDK_INPUT_TAG_OWNERS and tag in GYM_INPUT_TAG_OWNERS, (
+            f"Unbounded input exemption {(tag, field)} names a tag absent from one input union."
+        )
+        sdk_domain = _literal_fields(SDK_INPUT_TAG_OWNERS[tag]).get(field)
+        gym_domain = _literal_fields(GYM_INPUT_TAG_OWNERS[tag]).get(field, frozenset())
+        assert sdk_domain is not None, (
+            f"Unbounded input exemption {(tag, field)} is dead: SDK has no finite Literal domain."
+        )
+        assert gym_domain is None, f"Unbounded input exemption {(tag, field)} is dead: Gym is no longer unbounded."
+
+
+def test_sdk_output_types_are_a_subset_of_input_types() -> None:
+    """Verify that the input union includes every output item type.
+
+    The tests use the input union as the source of item types.
+    An output-only type would otherwise go unchecked.
+    Gym could then fail when replaying that item as history.
     """
     emitted_but_not_sendable = sorted(set(SDK_OUTPUT_TAGS) - set(SDK_INPUT_TAGS))
     assert not emitted_but_not_sendable, (
@@ -745,19 +950,18 @@ def test_sdk_output_types_are_a_subset_of_input_types() -> None:
 
 @pytest.mark.parametrize("tag", sorted(SDK_INPUT_TAGS))
 def test_gym_union_represents_every_sdk_item_type(tag: str) -> None:
-    """Every type a client can send needs a Gym union member, or an explicit decision not to.
+    """Require a Gym union member or explicit exclusion for each SDK input type.
 
     Without one, ``NeMoGymResponse.model_validate`` returns a 500 on the non-streaming path.
-    On the streaming path, ``sanitize_streaming_responses_body`` drops the item from the replayed
-    transcript with a warning and returns 200.
+    ``sanitize_streaming_responses_body`` drops the item on the streaming path.
     """
     if tag in GYM_UNREPRESENTABLE_TYPES:
-        assert tag not in GYM_TAG_OWNERS, (
+        assert tag not in GYM_INPUT_TAG_OWNERS, (
             f"{tag!r} is listed in GYM_UNREPRESENTABLE_TYPES but NeMoGymResponseInputItem now has "
             f"a member for it. Remove it from that list."
         )
         return
-    assert tag in GYM_TAG_OWNERS, (
+    assert tag in GYM_INPUT_TAG_OWNERS, (
         f"openai {openai.__version__} accepts a {tag!r} item and "
         f"NeMoGymResponseInputItem has no member for it.\n"
         f"Fix: add a NeMoGym* wrapper in nemo_gym/openai_utils.py and list it in "
@@ -770,10 +974,10 @@ def test_gym_union_represents_every_sdk_item_type(tag: str) -> None:
 
 @pytest.mark.parametrize("tag", sorted(SDK_INPUT_TAGS))
 def test_every_sdk_item_type_is_classified(tag: str) -> None:
-    """Each type Gym can carry is either a generation boundary or explicitly not one.
+    """Classify each represented SDK item type by whether the model generated it.
 
     The classification cannot be read off the SDK.
-    Later versions put tool results in ``ResponseOutputItem`` alongside generated items.
+    ``ResponseOutputItem`` can contain tool results and generated items.
     An unclassified type falls to the "not a boundary" side by default.
     That labels sampled tokens as prompt.
     """
@@ -799,11 +1003,10 @@ def test_boundary_sets_are_disjoint() -> None:
 
 
 def test_message_is_not_in_the_boundary_set() -> None:
-    """A user or system message must not open the trained segment.
+    """Keep user and system messages out of the generated output segment.
 
     ``split_responses_input_output_items`` handles assistant messages through its ``role == "assistant"`` check.
-    Adding "message" to the type set would make the first prompt message a boundary.
-    That classifies the whole prompt as generation.
+    Adding ``message`` to the type set would classify prompt messages as generated output.
     """
     assert "message" not in _RESPONSE_OUTPUT_BOUNDARY_TYPES
 
@@ -818,18 +1021,10 @@ def test_message_is_not_in_the_boundary_set() -> None:
     ],
 )
 def test_no_dead_entries_in_any_type_list(set_name: str, tags: frozenset) -> None:
-    """Every tag named in any of these lists must be a Responses item type at the installed SDK.
+    """Require every listed tag to be an item type in the installed SDK.
 
-    A tag that is not one never matches anything.
-    It also makes the list look more complete than it is.
-    Naming a type the pinned SDK lacks has the same effect, since nothing exercises the entry, so a
-    type is added in the change that raises the pin far enough to introduce it.
-
-    Every list is checked, because each one goes stale silently and in its own way:
-    a dead entry in the classification sets leaves its intended type unclassified, and a dead entry
-    in an exemption list leaves its intended type checked when it was meant to be skipped, or the
-    reverse. In both cases the tests that would notice are parametrized over the SDK's tags, so they
-    never visit a tag the SDK does not have.
+    An unknown tag never matches an item.
+    The SDK-based parameterization also cannot exercise an unknown tag.
     """
     suspicious = tags - set(SDK_INPUT_TAGS)
     assert not suspicious, (
@@ -840,12 +1035,10 @@ def test_no_dead_entries_in_any_type_list(set_name: str, tags: frozenset) -> Non
 
 
 def _classes_the_converter_can_emit() -> List[str]:
-    """Every class that can end up in postprocess_assistant_message_dict's output list.
+    """Return classes that can enter the converter's response output list.
 
     ``training_variant_of`` has one production caller, which passes it ``response_output[-1].__class__``.
-    That list is local to the function.
-    The classes that can reach the lookup are exactly those appended to it, which the AST can enumerate.
-    This is derived rather than hard-coded, so adding a fourth ``append`` fails this test.
+    The AST identifies classes appended to that local list.
     """
     import ast
     import inspect
@@ -860,7 +1053,7 @@ def _classes_the_converter_can_emit() -> List[str]:
         and node.name == "postprocess_assistant_message_dict"
     )
 
-    # name -> class it is constructed from, for locals appended by reference
+    # Map each local variable to the class used to construct it.
     local_classes = {}
     for node in ast.walk(func):
         if isinstance(node, ast.Assign):
@@ -883,18 +1076,16 @@ def _classes_the_converter_can_emit() -> List[str]:
                 emitted.add(arg.func.id)
             elif isinstance(arg, ast.Name) and arg.id in local_classes:
                 emitted.add(local_classes[arg.id])
-            else:  # pragma: no cover - a shape this analysis does not model
+            else:  # pragma: no cover - an unsupported AST expression
                 emitted.add(f"<unresolved: {ast.dump(arg)[:60]}>")
     return sorted(emitted)
 
 
 def test_every_item_the_converter_can_emit_has_a_training_variant() -> None:
-    """Whatever can reach ``training_variant_of`` must be registered in RESPONSES_TO_TRAIN.
+    """Require a training variant for each class passed to ``training_variant_of``.
 
-    Note this is not "every model-emitted type has a variant".
-    Each variant is another member of the ``NeMoGymResponseInputItem`` smart union.
-    An unrecognised item reports every member's errors.
-    So a type gets a variant once a converter can emit it carrying sampled token IDs.
+    Each variant is a member of ``NeMoGymResponseInputItem``.
+    A type needs a variant when the converter can attach sampled token IDs to it.
     """
     emitted = _classes_the_converter_can_emit()
     unresolved = [name for name in emitted if name.startswith("<unresolved")]
@@ -916,7 +1107,7 @@ def test_every_item_the_converter_can_emit_has_a_training_variant() -> None:
 
 
 def test_training_variants_actually_carry_token_fields() -> None:
-    """A registered variant must really add the token payload, not just be a distinct class."""
+    """Require each registered variant to define the token payload fields."""
     for base, variant in RESPONSES_TO_TRAIN.items():
         assert issubclass(variant, base), f"{variant.__name__} must subclass {base.__name__}"
         assert issubclass(variant, TokenIDLogProbMixin), f"{variant.__name__} must mix in TokenIDLogProbMixin"
@@ -925,14 +1116,20 @@ def test_training_variants_actually_carry_token_fields() -> None:
 
 
 def test_training_variants_are_in_the_union() -> None:
-    """A variant absent from the union cannot round-trip: it serializes but fails to validate."""
+    """Require each training variant to belong to the input union.
+
+    A variant outside the union serializes but fails validation.
+    """
     union_members = set(_union_members(NeMoGymResponseInputItem))
     missing = sorted(v.__name__ for v in RESPONSES_TO_TRAIN.values() if v not in union_members)
     assert not missing, f"ForTraining variants missing from NeMoGymResponseInputItem: {missing}"
 
 
 def test_training_variant_lookup_fails_with_a_named_error() -> None:
-    """An unregistered class must not surface as a bare KeyError (a 500 with no explanation)."""
+    """Require a descriptive error for an unregistered class.
+
+    A bare ``KeyError`` would produce an unexplained server error.
+    """
 
     class _Unregistered:
         pass
@@ -942,13 +1139,12 @@ def test_training_variant_lookup_fails_with_a_named_error() -> None:
 
 
 def test_duplicate_type_tags_are_documented() -> None:
-    """Record which tags map to several union members.
+    """Require explicit coverage for tags that map to several union members.
 
-    These are why ``Field(discriminator="type")`` cannot be used.
-    They are also why one unrecognised item produces errors from every union member.
-    Pinning the expected set makes a new collision a deliberate change.
+    Duplicate tags prevent use of ``Field(discriminator="type")``.
+    They also make an unrecognized item report errors from every union member.
     """
-    duplicates = {tag for tag, owners in GYM_TAG_OWNERS.items() if len(owners) > 1}
+    duplicates = {tag for tag, owners in GYM_INPUT_TAG_OWNERS.items() if len(owners) > 1}
     assert duplicates == {"message", "function_call", "reasoning"}, (
         f"duplicate type tags changed: {sorted(duplicates)}. Each duplicate widens the error "
         f"report for an unrecognised item; update this test if the change is intended."
