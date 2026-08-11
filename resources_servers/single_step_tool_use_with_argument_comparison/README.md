@@ -12,6 +12,8 @@ Scoring has two independent stages, both configured under `tool_call_comparator_
 
 `allow_subset` admits responses that make **fewer** calls than expected, and `allow_superset` admits responses that make **more**. Both default to `false`, so by default the call count must match the expected batch exactly and anything else scores zero.
 
+The gate applies to `function_call_batch` rows only. A plain `function_call` row asks whether the model made *that call*, not how many calls it made, so surplus calls never reduce its reward. Chat templates do not render differently for `parallel_tool_calls` — the Nemotron template never references the flag — so a model is never told that only one call is allowed, and charging it for an extra call would penalize behaviour it had no signal to avoid. This also keeps parallel tool-call support a **no-op for every existing single-call dataset**. Set `parallel_tool_call_reward_mode: f1` if you do want surplus calls charged for on single-call rows.
+
 ## Reward mode: how much credit an admissible response earns
 
 `parallel_tool_call_reward_mode` accepts:

@@ -156,13 +156,21 @@ class ActionComparator(BaseModel):
                 if isinstance(actual_action, MessageAction):
                     return ActionComparisonResult(reward=0.0, category=StepRewardCategory.NO_EXPECTED_TOOL_CALL)
 
-                return self.compare_tool_calls(get_tool_calls(expected_action), get_tool_calls(actual_action))
+                return self.compare_tool_calls(
+                    get_tool_calls(expected_action),
+                    get_tool_calls(actual_action),
+                    # Only a batch pins down how many calls the model may make; see below.
+                    constrain_call_count=isinstance(expected_action, FunctionCallBatchAction),
+                )
 
             case _:
                 raise NotImplementedError(f"Unsupported expected action: {expected_action!r}")
 
     def compare_tool_calls(
-        self, expected_calls: list[FunctionCallAction], actual_calls: list[FunctionCallAction]
+        self,
+        expected_calls: list[FunctionCallAction],
+        actual_calls: list[FunctionCallAction],
+        constrain_call_count: bool = True,
     ) -> ActionComparisonResult:
         """Score a set of tool calls against the expected set, ignoring the order they were emitted in.
 
@@ -176,8 +184,16 @@ class ActionComparator(BaseModel):
           `allow_superset` are free, so this rewards recall but not precision.
         - `f1` — the harmonic mean of precision and recall, `2 * matched / (expected + actual)`. Missing
           and surplus calls are penalized symmetrically, so a response only reaches 1.0 by matching the
-          expected calls exactly. This is the mode to prefer for RL: the gate stops being a free pass and
-          instead just decides which imperfect shapes are worth partial credit.
+          expected calls exactly.
+
+        `constrain_call_count` is False when the expected action is a single `function_call` rather than a
+        `function_call_batch`. A single expected call asks "did the model make this call?", not "did it
+        make exactly this many": surplus calls were never penalized before parallel tool-call support, and
+        the chat templates these datasets are collected with do not render differently for
+        `parallel_tool_calls` — the model is never told that only one call is allowed, so an extra call is
+        not something it had any signal to avoid. A batch does constrain the count, because there the
+        expected *set* is the thing being verified. `f1` still charges for surplus calls in both cases,
+        which is the mode to reach for when precision matters.
         """
         expected_count = len(expected_calls)
         actual_count = len(actual_calls)
@@ -186,14 +202,20 @@ class ActionComparator(BaseModel):
             # Preserve the single-call categories that predate parallel tool-call support.
             return self.compare_tool_call(expected_calls[0], actual_calls[0])
 
-        if not self.is_call_count_admissible(expected_count, actual_count):
+        if not self.is_call_count_admissible(expected_count, actual_count, constrain_call_count):
             return ActionComparisonResult(reward=0.0, category=StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT)
 
         candidates, failure_categories = self.build_match_candidates(expected_calls, actual_calls)
         matching = find_maximum_matching(candidates)
         reward = self.score_matched_calls(len(matching), expected_count, actual_count)
         if reward == 1.0:
-            return ActionComparisonResult(reward=reward, category=StepRewardCategory.EXPECTED_TOOL_CALL_BATCH)
+            # A single expected call keeps the category it had before parallel support existed.
+            category = (
+                StepRewardCategory.EXPECTED_TOOL_CALL
+                if expected_count == 1
+                else StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
+            )
+            return ActionComparisonResult(reward=reward, category=category)
 
         category = self.resolve_failure_category(
             matched_expected_indices=set(matching.values()),
@@ -203,14 +225,16 @@ class ActionComparator(BaseModel):
         )
         return ActionComparisonResult(reward=reward, category=category)
 
-    def is_call_count_admissible(self, expected_count: int, actual_count: int) -> bool:
+    def is_call_count_admissible(
+        self, expected_count: int, actual_count: int, constrain_call_count: bool = True
+    ) -> bool:
         if actual_count == expected_count:
             return True
 
         if actual_count < expected_count:
             return self.config.allow_subset
 
-        return self.config.allow_superset
+        return self.config.allow_superset or not constrain_call_count
 
     def required_match_count(self, expected_count: int, actual_count: int) -> int:
         """How many expected calls must match for full credit under `binary_strict` and `fractional`."""

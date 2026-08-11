@@ -153,6 +153,62 @@ class TestActionComparator:
             StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
         )
 
+    def test_a_single_expected_call_does_not_constrain_the_call_count(
+        self, action_comparator: ActionComparator
+    ) -> None:
+        """A `function_call` row asks "did the model make this call?", not "how many did it make?".
+
+        Surplus calls were never penalized before parallel tool-call support, and the chat templates
+        these datasets are collected with do not render differently for `parallel_tool_calls`, so the
+        model is never told that only one call is allowed. Keeping this at 1.0 is what makes the
+        change a no-op for every pre-existing non-batch dataset.
+        """
+        expected_call = call("alpha")
+
+        for surplus in range(1, 4):
+            actual = batch(expected_call, *[call(f"junk{index}") for index in range(surplus)])
+            assert outcome(action_comparator.compare_action(expected_call, actual)) == (
+                1.0,
+                StepRewardCategory.EXPECTED_TOOL_CALL,
+            ), f"{surplus} surplus call(s) should not change the reward"
+
+        # Order is irrelevant: the expected call may appear anywhere in the response.
+        assert outcome(action_comparator.compare_action(expected_call, batch(call("junk"), expected_call))) == (
+            1.0,
+            StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
+
+        # It still has to be there.
+        assert outcome(action_comparator.compare_action(expected_call, batch(call("junk"), call("other")))) == (
+            0.0,
+            StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
+        )
+
+        # Under-calling is still nothing: a response with no tool call cannot match one.
+        assert outcome(
+            action_comparator.compare_action(expected_call, MessageAction(type="message", content="hi"))
+        ) == (0.0, StepRewardCategory.NO_EXPECTED_TOOL_CALL)
+
+    def test_a_batch_does_constrain_the_call_count(self, action_comparator: ActionComparator) -> None:
+        """The contrast with the test above: a batch verifies the expected *set*, so surplus is rejected."""
+        expected_batch = batch(call("alpha"))
+        actual = batch(call("alpha"), call("junk"))
+
+        assert outcome(action_comparator.compare_action(expected_batch, actual)) == (
+            0.0,
+            StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
+        )
+
+    def test_f1_still_charges_for_surplus_on_a_single_expected_call(self) -> None:
+        """`f1` is the opt-in for precision, and it applies even where the gate does not."""
+        comparator = build_comparator(parallel_tool_call_reward_mode=ParallelToolCallRewardMode.F1)
+        expected_call = call("alpha")
+
+        # 2 * 1 / (1 + 3)
+        assert comparator.compare_action(expected_call, batch(expected_call, call("j1"), call("j2"))).reward == approx(
+            0.5
+        )
+
     @mark.parametrize("reward_mode", list(ParallelToolCallRewardMode))
     def test_cardinality_gate_admits_only_configured_shapes(self, reward_mode: ParallelToolCallRewardMode) -> None:
         expected_batch = batch(call("alpha"), call("beta"))
