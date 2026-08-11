@@ -10,9 +10,9 @@
 #   @NVIDIA-NeMo/gym_core            Core-Arch + RL — EM Bernard Nguyen,
 #                                    Eng PIC Ananth Subramaniam
 #   @NVIDIA-NeMo/gym_architects      Tech-lead advisors — escalation for cross-lane
-#                                    disputes and last-resort review of unclaimed paths
-#   @NVIDIA-NeMo/project_managers    Leads (EM/PM/TPM) — product/process surfaces that
-#                                    are not a tech-lead escalation (examples, scripts)
+#                                    disputes and backstop for unclaimed paths
+#   @NVIDIA-NeMo/gym_leads           Leads (EM/PM/TPM) — docs surfaces, which leads
+#                                    edit often and which are not a tech-lead call
 #   @NVIDIA-NeMo/docs_team           TME — docs/ and fern/
 #   @NVIDIA-NeMo/automation          CI, build, and release infrastructure
 #
@@ -35,11 +35,9 @@
 
 # ── Global backstop ──────────────────────────────────────────────────────────
 # Anything not claimed by a more specific rule (data/, cache/, results/,
-# top-level files) routes to the tech-lead advisors. Product/process paths that
-# leads (EM/PM/TPM) routinely own are claimed explicitly below rather than
-# falling through here. If a category of unclaimed files starts generating
-# recurring work, give it an explicit owner here rather than leaning on the
-# backstop.
+# examples/, scripts/, top-level files) routes to the tech-lead advisors. If a
+# category of unclaimed files starts generating recurring work, give it an
+# explicit owner here rather than leaning on the backstop.
 *                                       @NVIDIA-NeMo/gym_architects
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -146,18 +144,15 @@
 /responses_api_agents/verifiers_agent/  @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/gym_core
 
 # ═════════════════════════════════════════════════════════════════════════════
-# DOCS / PRODUCT SURFACES
+# DOCS
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Docs — TME owns the surface; both lanes review because docs encode the same
-# shared contracts as config_types / global_config (per ownership callouts).
-/docs/                                  @NVIDIA-NeMo/docs_team @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
-/fern/                                  @NVIDIA-NeMo/docs_team @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
-
-# Examples and scripts are frequently owned by leads (EM/PM/TPM), not tech-lead
-# advisors. Keep architects as a secondary reviewer for escalation only.
-/examples/                              @NVIDIA-NeMo/project_managers @NVIDIA-NeMo/gym_architects
-/scripts/                               @NVIDIA-NeMo/project_managers @NVIDIA-NeMo/gym_architects
+# TME owns the docs surface, and leads edit it often enough to be standing
+# reviewers rather than an escalation. Docs changes that restate a shared runtime
+# contract still need both lanes, same as config_types.py — a policy rule this
+# file cannot express.
+/docs/                                  @NVIDIA-NeMo/docs_team @NVIDIA-NeMo/gym_leads
+/fern/                                  @NVIDIA-NeMo/docs_team @NVIDIA-NeMo/gym_leads
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CI & BUILD
