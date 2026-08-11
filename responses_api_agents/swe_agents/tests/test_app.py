@@ -821,7 +821,8 @@ class TestR2EGymDatasetProcessor:
             processor = R2EGymDatasetProcessor(config=config)
             result = processor.get_run_command()
             assert isinstance(result, ExecuteContainerCommandArgs)
-            assert "run_local_evaluation.py" in result.command
+            assert "/r2egym_setup/R2E-Gym/venv/bin/python" in result.command
+            assert "-m r2egym.agenthub.run.run_local_evaluation" in result.command
             assert result.mode == "eval"
 
 
