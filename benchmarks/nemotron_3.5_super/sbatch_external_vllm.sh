@@ -42,7 +42,7 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
+experiment_name=$EXPERIMENT_NAME/\$SLURM_JOB_ID/\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 gym eval run \
