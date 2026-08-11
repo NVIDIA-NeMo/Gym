@@ -6,7 +6,11 @@ FROM ${BASE_IMAGE}
 
 ARG GYM_SOURCE_SHA=5346c8ffc9e4438959955e5b958a12733ed9abc0
 ARG HERMES_AGENT_SHA=26bb847a88493342ca1b194e0455b479073ae21d
+ARG OPENENV_SHA=5359534c6f003f81f375482ec783e80dd48b46d4
 ARG TALE_SUITE_SHA=ef349ba7cfdebf339e9aedcd09d89d6c917f86e5
+ARG TAU2_SHA=346f74d9752f80af8ca3e083467bafcee961bd74
+ARG VERIFIABLE_INSTRUCTIONS_SHA=f46a5ac87b1400a4f8973039844b6be9b56e3faf
+ARG VERIFIERS_SHA=2fbd2b7fab0236cb039c4aa5afb25ad9c5f17134
 ARG RUNTIME_UID=65532
 ARG RUNTIME_GID=65532
 
@@ -27,31 +31,55 @@ RUN git init /tmp/repository-e2e-gym-source && \
     git -C /tmp/repository-e2e-gym-source checkout --detach FETCH_HEAD && \
     test "$(git -C /tmp/repository-e2e-gym-source rev-parse HEAD)" = "${GYM_SOURCE_SHA}" && \
     git -c credential.helper= -c http.https://github.com/.extraheader= \
-      -C /tmp/repository-e2e-gym-source submodule update --init --recursive
+      -C /tmp/repository-e2e-gym-source submodule update --init --recursive && \
+    echo "aaaea0000b7c59b6ddc5a37146ce47c6d16bdeb62ca234f738be5d880c0fbacd  /tmp/repository-e2e-gym-source/responses_api_agents/verifiers_agent/requirements.txt" | \
+      sha256sum --check --strict && \
+    sed -i '\|^--extra-index-url https://hub.primeintellect.ai/primeintellect/simple/$|d' \
+      /tmp/repository-e2e-gym-source/responses_api_agents/verifiers_agent/requirements.txt && \
+    ! grep -R --include='requirements*.txt' -- '--extra-index-url' \
+      /tmp/repository-e2e-gym-source
 
 # uv cannot resolve mutable Git requirements in offline mode, even when their
-# previously fetched objects remain in its cache. Bundle the exact build-time
-# revisions and redirect those requirements to immutable local sources.
-RUN install -d /opt/repository-e2e-gym/git-sources/hermes-agent \
-      /opt/repository-e2e-gym/git-sources/tale-suite && \
-    git init /opt/repository-e2e-gym/git-sources/hermes-agent && \
-    git -C /opt/repository-e2e-gym/git-sources/hermes-agent remote add origin \
-      https://github.com/cmunley1/hermes-agent && \
-    git -c credential.helper= -c http.https://github.com/.extraheader= \
-      -C /opt/repository-e2e-gym/git-sources/hermes-agent fetch --depth=1 origin \
-      "${HERMES_AGENT_SHA}" && \
-    git -C /opt/repository-e2e-gym/git-sources/hermes-agent checkout --detach FETCH_HEAD && \
-    test "$(git -C /opt/repository-e2e-gym/git-sources/hermes-agent rev-parse HEAD)" = \
-      "${HERMES_AGENT_SHA}" && \
-    git init /opt/repository-e2e-gym/git-sources/tale-suite && \
-    git -C /opt/repository-e2e-gym/git-sources/tale-suite remote add origin \
-      https://github.com/microsoft/tale-suite.git && \
-    git -c credential.helper= -c http.https://github.com/.extraheader= \
-      -C /opt/repository-e2e-gym/git-sources/tale-suite fetch --depth=1 origin \
-      "${TALE_SUITE_SHA}" && \
-    git -C /opt/repository-e2e-gym/git-sources/tale-suite checkout --detach FETCH_HEAD && \
-    test "$(git -C /opt/repository-e2e-gym/git-sources/tale-suite rev-parse HEAD)" = \
-      "${TALE_SUITE_SHA}"
+# previously fetched objects remain in its cache. Bundle every mutable source at
+# its exact resolved revision and redirect those requirements to local sources.
+RUN set -eu; \
+    fetch_source() { \
+      name="$1"; url="$2"; revision="$3"; \
+      target="/opt/repository-e2e-gym/git-sources/${name}"; \
+      git init "${target}"; \
+      git -C "${target}" remote add origin "${url}"; \
+      git -c credential.helper= -c http.https://github.com/.extraheader= \
+        -C "${target}" fetch --depth=1 origin "${revision}"; \
+      git -C "${target}" checkout --detach FETCH_HEAD; \
+      test "$(git -C "${target}" rev-parse HEAD)" = "${revision}"; \
+    }; \
+    install -d /opt/repository-e2e-gym/git-sources; \
+    fetch_source hermes-agent https://github.com/cmunley1/hermes-agent \
+      "${HERMES_AGENT_SHA}"; \
+    fetch_source openenv https://github.com/meta-pytorch/OpenEnv.git \
+      "${OPENENV_SHA}"; \
+    fetch_source tale-suite https://github.com/microsoft/tale-suite.git \
+      "${TALE_SUITE_SHA}"; \
+    fetch_source tau2 https://github.com/bxyu-nvidia/tau2-bench \
+      "${TAU2_SHA}"; \
+    fetch_source verifiable-instructions \
+      https://github.com/abukharin-nv/verifiable-instructions.git \
+      "${VERIFIABLE_INSTRUCTIONS_SHA}"; \
+    fetch_source verifiers https://github.com/PrimeIntellect-ai/verifiers.git \
+      "${VERIFIERS_SHA}"
+
+COPY docker/repository-e2e-constraints.txt /opt/repository-e2e-gym/constraints.txt
+COPY docker/repository-e2e-overrides.txt /opt/repository-e2e-gym/overrides.txt
+COPY --chmod=0755 docker/repository-e2e-curl /opt/repository-e2e-gym/bin/curl
+
+RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/nemo-gym /workspace && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" \
+      /opt/repository-e2e-gym /tmp/repository-e2e-gym-source
+
+ENV UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt \
+    UV_OVERRIDE=/opt/repository-e2e-gym/overrides.txt
+
+USER ${RUNTIME_UID}:${RUNTIME_GID}
 
 RUN cd /tmp/repository-e2e-gym-source && \
     UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
@@ -62,11 +90,6 @@ RUN cd /tmp/repository-e2e-gym-source && \
       --disable-pip-version-check pre-commit==3.6.0 && \
     PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
       /opt/repository-e2e-gym/pre-commit-3.6.0/bin/pre-commit install-hooks
-
-COPY docker/repository-e2e-constraints.txt /opt/repository-e2e-gym/constraints.txt
-COPY docker/repository-e2e-overrides.txt /opt/repository-e2e-gym/overrides.txt
-ENV UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt \
-    UV_OVERRIDE=/opt/repository-e2e-gym/overrides.txt
 
 # Run every native functional shard while package-index egress is available.
 # This validates the dependency closure and fills the immutable uv cache without
@@ -79,19 +102,13 @@ RUN set -eu; \
         GYM_CI_UV_VENV_DIR=/tmp/repository-e2e-gym-venvs \
         bash scripts/ci/server_tests.sh "${shard}" 8; \
     done; \
-    rm -rf /tmp/repository-e2e-gym-venvs /tmp/repository-e2e-gym-source; \
-    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/repository-e2e-gym
-
-RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/nemo-gym /workspace
-
-COPY --chmod=0755 docker/repository-e2e-curl /opt/repository-e2e-gym/bin/curl
+    rm -rf /tmp/repository-e2e-gym-venvs /tmp/repository-e2e-gym-source
 
 ENV PATH=/opt/repository-e2e-gym/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
     UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
     UV_OFFLINE=1
 
-USER ${RUNTIME_UID}:${RUNTIME_GID}
 RUN test "$(uv --version | awk '{print $2}')" = 0.11.19 && \
     test -x /opt/repository-e2e-gym/dev-venv/bin/python && \
     test -x /opt/repository-e2e-gym/pre-commit-3.6.0/bin/pre-commit && \

@@ -1,3 +1,9 @@
-tau2 @ git+https://github.com/bxyu-nvidia/tau2-bench@346f74d9752f80af8ca3e083467bafcee961bd74
+acereason-math @ https://hub.primeintellect.ai/primeintellect/acereason-math/@adbf663a/acereason_math-0.1.8-py3-none-any.whl#sha256=d25cee812d7b81b87ddbedd7ffcdfbbe985ca8e2a76f31e487839173294b9991
 hermes-agent @ file:///opt/repository-e2e-gym/git-sources/hermes-agent
+openenv-coding-env @ file:///opt/repository-e2e-gym/git-sources/openenv/envs/coding_env
+openenv-echo-env @ file:///opt/repository-e2e-gym/git-sources/openenv/envs/echo_env
+openenv-maze-env @ file:///opt/repository-e2e-gym/git-sources/openenv/envs/maze_env
 tale-suite @ file:///opt/repository-e2e-gym/git-sources/tale-suite
+tau2 @ file:///opt/repository-e2e-gym/git-sources/tau2
+verifiable-instructions @ file:///opt/repository-e2e-gym/git-sources/verifiable-instructions
+verifiers @ file:///opt/repository-e2e-gym/git-sources/verifiers
