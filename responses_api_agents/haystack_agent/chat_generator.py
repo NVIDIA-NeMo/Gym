@@ -26,13 +26,14 @@ tool-calling loop; this component is the single per-step model call.
 import asyncio
 import contextvars
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Optional
 
 from haystack import component
 from haystack.core.serialization import allow_deserialization_module, default_from_dict, default_to_dict
-from haystack.dataclasses import ChatMessage, ChatRole, ToolCall
+from haystack.dataclasses import ChatMessage, ChatRole, TextContent, ToolCall
 
 from nemo_gym.openai_utils import (
     RESPONSES_TO_TRAIN,
@@ -102,31 +103,44 @@ _current_run_state: contextvars.ContextVar[Optional[_GenRunState]] = contextvars
 _TRAINING_META_KEY = "__ng_training__"
 _USAGE_META_KEY = "__ng_usage__"
 _TRAINING_META_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
+_TEXT_CONTENT_TYPES = {"text", "input_text", "output_text"}
 
 
 def _stringify(value: Any) -> str:
     """Coerce a tool result (str, or list of content parts) into a plain string."""
     if isinstance(value, str):
         return value
-    if isinstance(value, list):
-        parts = [getattr(part, "text", None) or str(part) for part in value]
-        return "".join(p for p in parts if p is not None)
+    if isinstance(value, Sequence):
+        return "".join(_content_part_text(part, context="tool result") for part in value)
     return str(value)
 
 
+def _content_part_text(part: Any, *, context: str) -> str:
+    """Return text from a supported content part or reject the unsupported modality."""
+    if isinstance(part, TextContent):
+        return part.text
+    if isinstance(part, dict):
+        part_type = part.get("type")
+        text = part.get("text")
+    else:
+        part_type = getattr(part, "type", None)
+        text = getattr(part, "text", None)
+    if part_type not in _TEXT_CONTENT_TYPES or not isinstance(text, str):
+        raise ValueError(
+            f"HaystackAgent supports text-only {context} content; got unsupported part type {part_type!r}."
+        )
+    return text
+
+
 def _content_to_text(content: Any) -> str:
-    """Extract plain text from a Responses message ``content`` (str or list of parts)."""
+    """Extract text from supported Responses content, rejecting other modalities."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, dict):
-                parts.append(part.get("text", ""))
-            else:
-                parts.append(getattr(part, "text", "") or "")
-        return "".join(parts)
-    return ""
+        return "".join(_content_part_text(part, context="Responses") for part in content)
+    if content is None:
+        return ""
+    raise ValueError(f"HaystackAgent supports text-only Responses content, got {type(content).__name__}.")
 
 
 def responses_input_to_messages(input_items: list[Any]) -> list[ChatMessage]:
@@ -145,9 +159,13 @@ def responses_input_to_messages(input_items: list[Any]) -> list[ChatMessage]:
         role = getattr(item, "role", None)
 
         if item_type == "function_call":
+            try:
+                arguments = json.loads(item.arguments) if item.arguments else {}
+            except (json.JSONDecodeError, TypeError):
+                arguments = {"__raw_arguments__": item.arguments}
             tool_call = ToolCall(
                 tool_name=item.name,
-                arguments=json.loads(item.arguments) if item.arguments else {},
+                arguments=arguments,
                 id=item.call_id,
             )
             calls_by_id[item.call_id] = tool_call
@@ -194,6 +212,8 @@ def chat_messages_to_responses(messages: list[ChatMessage], *, output: bool = Fa
     items: list[Any] = []
     for index, message in enumerate(messages):
         item_start = len(items)
+        if message.images or message.files:
+            raise ValueError("HaystackAgent supports text-only ChatMessages; images and files are unsupported.")
         # Tool result messages carry one or more ToolCallResults.
         if message.tool_call_results:
             for result in message.tool_call_results:
@@ -218,7 +238,7 @@ def chat_messages_to_responses(messages: list[ChatMessage], *, output: bool = Fa
                         encrypted_content=message.meta.get("__ng_reasoning_encrypted__"),
                     )
                 )
-            text = message.text
+            text = "".join(message.texts)
             if text:
                 if output:
                     items.append(
@@ -251,7 +271,7 @@ def chat_messages_to_responses(messages: list[ChatMessage], *, output: bool = Fa
         else:
             # user / system / developer (developer is preserved via meta since Haystack has no such role)
             ng_role = message.meta.get("__ng_role__", role.value)
-            items.append(NeMoGymEasyInputMessage(type="message", role=ng_role, content=message.text or ""))
+            items.append(NeMoGymEasyInputMessage(type="message", role=ng_role, content="".join(message.texts)))
     return items
 
 
@@ -270,14 +290,14 @@ def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     reasoning_id: Optional[str] = None
+    reasoning_encrypted_content: Optional[str] = None
     tool_calls: list[ToolCall] = []
 
     for item in ng_response.output:
         item_type = getattr(item, "type", None)
         if item_type == "message" and getattr(item, "role", None) == "assistant":
             for content in item.content:
-                if getattr(content, "type", None) == "output_text":
-                    text_parts.append(content.text)
+                text_parts.append(_content_part_text(content, context="model response"))
         elif item_type == "function_call":
             try:
                 arguments = json.loads(item.arguments) if item.arguments else {}
@@ -288,11 +308,13 @@ def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]
             tool_calls.append(ToolCall(tool_name=item.name, arguments=arguments, id=item.call_id))
         elif item_type == "reasoning":
             reasoning_id = item.id
+            reasoning_encrypted_content = item.encrypted_content
             reasoning_parts.extend(summary.text for summary in item.summary)
 
     meta: dict[str, Any] = {}
     if reasoning_id is not None:
         meta["__ng_reasoning_id__"] = reasoning_id
+        meta["__ng_reasoning_encrypted__"] = reasoning_encrypted_content
     training_item = next(
         (item for item in reversed(ng_response.output) if hasattr(item, "prompt_token_ids")),
         None,
