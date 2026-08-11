@@ -287,9 +287,9 @@ sandbox = [
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
-    # gprof2dot: Used for outputting dot graphs for profiling (dev/optional only; LGPLv3+).
+    # gprof2dot: Used for outputting dot graphs for profiling.
     # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14
-    # License: GNU Lesser General Public License v3.0 https://github.com/jrfonseca/gprof2dot/blob/master/COPYING.LESSER
+    # License: LGPLv3+ https://github.com/jrfonseca/gprof2dot/blob/master/COPYING.LESSER
     "gprof2dot",
 
     # Pre-commit: Used for pre-commit hooks.
@@ -373,10 +373,6 @@ override-dependencies = [
     "opencv-python-headless; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
-    # pycountry (LGPL-2.1) is pulled in by mistral-common via pydantic-extra-types[pycountry]
-    # but is never imported by Gym code. Suppressed here to avoid the LGPL obligation in the
-    # main package. Servers that genuinely need it (e.g. toolsandbox via ccy) re-enable it
-    # via their overrides.txt.
     "pycountry; sys_platform == 'never'",
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
