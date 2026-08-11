@@ -242,7 +242,7 @@ def _build_pi_observations(
                 invocation_id=invocation_id,
                 tool_call_id=call_id,
                 tool_name=tool_name or started_name,
-                started_at=started_at,
+                started_at=started_at if valid_interval else None,
                 completed_at=completed_at,
                 duration_ms=duration_ms,
                 timing_source="harness",

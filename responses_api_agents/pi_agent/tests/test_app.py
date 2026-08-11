@@ -295,6 +295,20 @@ class TestRolloutObservability:
             "subagent_hierarchy_unavailable",
         }
 
+    def test_invalid_tool_interval_keeps_only_valid_timing(self) -> None:
+        events = [
+            (2.0, {"type": "tool_execution_start", "toolCallId": "call-1"}),
+            (1.0, {"type": "tool_execution_end", "toolCallId": "call-1", "isError": False}),
+        ]
+
+        bundle = _build_pi_observations(events, "rollout-1", None, [])
+
+        [tool] = _records(bundle, ToolCallObservation)
+        assert tool.started_at is None
+        assert tool.completed_at == 1.0
+        assert tool.duration_ms is None
+        assert any(gap.code == "tool_timing_unavailable" and gap.detail == "call-1" for gap in bundle.gaps)
+
     def test_compaction_outcome_uses_native_status(self) -> None:
         events = [
             (1.0, {"type": "compaction_start", "reason": "manual"}),
@@ -474,6 +488,22 @@ class TestRolloutObservability:
         assert agent._run_pi.await_args.kwargs["rollout_id"] == "1-2"
         verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
         assert "_ng_agent_observations" not in verify_json["response"]
+
+    def test_prefixed_responses_preserves_observations_through_fastapi(self) -> None:
+        from fastapi.testclient import TestClient
+
+        agent = _make_agent()
+        agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
+
+        response = TestClient(agent.setup_webserver()).post(
+            "/ng-rollout/1-2/v1/responses",
+            json={"input": "solve"},
+        )
+
+        assert response.status_code == 200
+        observations = response.json()["_ng_agent_observations"]
+        assert observations["source"] == "pi"
+        assert observations["records"][0]["invocation_id"] == "1-2"
 
 
 class TestConfigYaml:
