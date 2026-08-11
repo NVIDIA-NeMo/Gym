@@ -1,9 +1,5 @@
 # Nemotron 3.5 Lightning 30B A3B Base evaluation recipes
 
-> **Interim location.** Before this merges to `main` the `more/` folder moves to
-> **`nemotron_recipes/lightning-3.5/`**. Nothing in the configs depends on their path, so the
-> move is a plain `git mv`.
-
 These are `nemo-evaluator-launcher` configs run with `nel run`, not Gym recipes — see
 [`../reproducibility.md`](../reproducibility.md) for how they sit alongside the instruct
 recipes.
