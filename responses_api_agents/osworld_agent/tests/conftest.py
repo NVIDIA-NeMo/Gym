@@ -13,19 +13,12 @@
 # limitations under the License.
 
 import subprocess
-import sys
 from pathlib import Path
 
 
 # opencv-python-headless is excluded from the shipped container via
 # sys_platform == 'never'. Install it before tests via the codec install
 # script so tests that import cv2 don't fail.
-_INSTALL_SCRIPT = Path(__file__).resolve().parents[4] / "docker" / "install_codec_deps.sh"
+_INSTALL_SCRIPT = Path(__file__).resolve().parents[3] / "docker" / "install_codec_deps.sh"
 
-if _INSTALL_SCRIPT.exists():
-    subprocess.run(["bash", str(_INSTALL_SCRIPT)], check=True)
-else:
-    subprocess.run(
-        [sys.executable, "-m", "uv", "pip", "install", "--no-config", "opencv-python-headless==5.0.0.93"],
-        check=True,
-    )
+subprocess.run(["bash", str(_INSTALL_SCRIPT)], check=True)
