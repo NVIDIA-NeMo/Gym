@@ -169,6 +169,34 @@ def test_build_vllm_command_no_trust_remote_code_by_default(vllm_service):
     assert "--trust-remote-code" not in cmd
 
 
+def test_build_vllm_command_multi_instance():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+        distributed_backend={"type": "vllm_service"},
+    )
+    cmd = _build_vllm_command(service)
+    assert "--data-parallel-size 4" in cmd
+
+
+def test_build_vllm_command_single_instance_omits_dp_flag(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert "--data-parallel-size" not in cmd
+
+
+def test_build_vllm_command_pipeline_parallel():
+    service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model", pipeline_parallel_size=2)
+    cmd = _build_vllm_command(service)
+    assert "--pipeline-parallel-size 2" in cmd
+
+
+def test_build_vllm_command_pipeline_parallel_1_omits_flag(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert "--pipeline-parallel-size" not in cmd
+
+
 # ---------------------------------------------------------------------------
 # render_gym_cmd
 # ---------------------------------------------------------------------------

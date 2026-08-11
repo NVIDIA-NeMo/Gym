@@ -15,7 +15,7 @@
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Tag, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Tag, field_validator, model_validator
 
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
@@ -48,11 +48,44 @@ class BaseModelServiceConfig(BaseServiceConfig):
     port: int = 8000
 
 
+class VllmServiceDistributedBackend(_StrictModel):
+    """Use vLLM's native data-parallel multi-instance (--data-parallel-size N)."""
+
+    type: Literal["vllm_service"] = "vllm_service"
+
+
+# Future backends: add Annotated[RayServeDistributedBackend, Tag("ray_serve")], etc.
+DistributedBackendConfig = Annotated[
+    Annotated[VllmServiceDistributedBackend, Tag("vllm_service")],
+    Discriminator("type"),
+]
+
+
 class VllmServiceConfig(BaseModelServiceConfig):
     type: Literal["vllm"]
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
+    number_of_instances: int = 1
+    distributed_backend: DistributedBackendConfig | None = None
+
+    @field_validator("number_of_instances")
+    @classmethod
+    def _validate_number_of_instances(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"number_of_instances must be >= 1, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_distributed_backend(self) -> "VllmServiceConfig":
+        if self.number_of_instances > 1 and self.distributed_backend is None:
+            raise ValueError(
+                f"distributed_backend must be set when number_of_instances > 1 (got {self.number_of_instances}). "
+                "Use: distributed_backend: {type: vllm_service}"
+            )
+        if self.number_of_instances == 1 and self.distributed_backend is not None:
+            raise ValueError("distributed_backend should not be set when number_of_instances == 1")
+        return self
 
     @model_validator(mode="after")
     def _default_health_check(self) -> "VllmServiceConfig":

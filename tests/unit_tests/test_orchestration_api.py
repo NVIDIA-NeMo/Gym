@@ -96,3 +96,41 @@ def test_driver_env_accepted():
 def test_service_unknown_field_raises():
     with pytest.raises(ValidationError):
         SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "unknown_field": "x"}}))
+
+
+# ---------------------------------------------------------------------------
+# number_of_instances / distributed_backend
+# ---------------------------------------------------------------------------
+
+_MULTI_SERVICE = {**SERVICE, "number_of_instances": 4, "distributed_backend": {"type": "vllm_service"}}
+
+
+def test_number_of_instances_with_backend_accepted():
+    config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
+    svc = config.services["svc"]
+    assert svc.number_of_instances == 4
+    assert svc.distributed_backend is not None
+    assert svc.distributed_backend.type == "vllm_service"
+
+
+def test_number_of_instances_defaults_to_1():
+    config = SubmitConfig.model_validate(_config())
+    assert config.services["svc"].number_of_instances == 1
+    assert config.services["svc"].distributed_backend is None
+
+
+def test_multi_instance_without_backend_raises():
+    with pytest.raises(ValidationError, match="distributed_backend must be set"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 4}}))
+
+
+def test_single_instance_with_backend_raises():
+    with pytest.raises(ValidationError, match="should not be set"):
+        SubmitConfig.model_validate(
+            _config(services={"svc": {**SERVICE, "distributed_backend": {"type": "vllm_service"}}})
+        )
+
+
+def test_number_of_instances_zero_raises():
+    with pytest.raises(ValidationError):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 0}}))
