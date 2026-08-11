@@ -9,10 +9,10 @@ below.
 To run a Gym recipe, copy the two templates, fill them in, and run from the Gym repo root:
 
 ```bash
-cp scripts/more/instruct/gym/env.yaml.example env.yaml   # policy endpoint and judges
-cp scripts/more/instruct/gym/.env.example .env           # keys and paths
+cp nemotron_recipes/lightning-3.5/instruct/gym/env.yaml.example env.yaml   # policy endpoint and judges
+cp nemotron_recipes/lightning-3.5/instruct/gym/.env.example .env           # keys and paths
 set -a; source .env; set +a
-scripts/more/instruct/gym/gpqa.sh
+nemotron_recipes/lightning-3.5/instruct/gym/gpqa.sh
 ```
 
 Run from the repo root, not from this directory: each recipe resolves its dataset and
@@ -75,7 +75,7 @@ save it anywhere, and point `TEST_DATA` at it:
 sha256sum /path/to/test_data.h5
 # 48b0272a88b17dbd29777c217e1b4fb2b019b92e11cc2add847409db9541b890
 
-TEST_DATA=/path/to/test_data.h5 scripts/more/instruct/gym/scicode.sh
+TEST_DATA=/path/to/test_data.h5 nemotron_recipes/lightning-3.5/instruct/gym/scicode.sh
 ```
 
 It must be readable by the user running the recipe — otherwise every test case fails
@@ -89,7 +89,7 @@ its code inside an Apptainer sandbox. Three things must exist before a run.
 **1. The sandbox.** The definition ships with Gym; build the image once:
 
 ```bash
-scripts/more/instruct/gym/gdpval/build-gdpval-sif.sh /abs/path/gdpval.sif
+nemotron_recipes/lightning-3.5/instruct/gym/gdpval/build-gdpval-sif.sh /abs/path/gdpval.sif
 export GDPVAL_CONTAINER_PATH=/abs/path/gdpval.sif
 ```
 
@@ -124,7 +124,7 @@ key rate-limits and the agent then cannot search.
 A judge scores each deliverable against its task rubric.
 
 ```bash
-scripts/more/instruct/gym/gdpval/gdpval.sh
+nemotron_recipes/lightning-3.5/instruct/gym/gdpval/gdpval.sh
 ```
 
 #### Comparison mode
@@ -143,13 +143,13 @@ Produce each one with an execute-only run of that model — point the policy in
 `env.yaml` at it, then:
 
 ```bash
-EXECUTE_ONLY=true OUT=./tmp scripts/more/instruct/gym/gdpval/gdpval.sh && mv ./tmp/deliverables ./refs/gptoss_120b
+EXECUTE_ONLY=true OUT=./tmp nemotron_recipes/lightning-3.5/instruct/gym/gdpval/gdpval.sh && mv ./tmp/deliverables ./refs/gptoss_120b
 ```
 
 Then score your model against whatever you collected:
 
 ```bash
-GDPVAL_REWARD_MODE=comparison GDPVAL_REFS=./refs scripts/more/instruct/gym/gdpval/gdpval.sh
+GDPVAL_REWARD_MODE=comparison GDPVAL_REFS=./refs nemotron_recipes/lightning-3.5/instruct/gym/gdpval/gdpval.sh
 ```
 
 The recipe recognises these names and anchors each at the
@@ -233,7 +233,7 @@ result. Average their `mean/reward`:
 
 ```bash
 for i in 1 2 3 4 5; do
-  CRITPT_REPEATS=1 PARALLEL=70 OUT=./results/critpt/run_$i scripts/more/instruct/gym/critpt.sh
+  CRITPT_REPEATS=1 PARALLEL=70 OUT=./results/critpt/run_$i nemotron_recipes/lightning-3.5/instruct/gym/critpt.sh
 done
 ```
 
@@ -275,5 +275,5 @@ in your own AWS account, in the region you plan to run in, then point
 Then run whichever config you want, adding `--resume` to continue an interrupted run:
 
 ```bash
-nel eval run scripts/more/instruct/nemo-evaluator/terminal-bench-2.1.yaml
+nel eval run nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/terminal-bench-2.1.yaml
 ```

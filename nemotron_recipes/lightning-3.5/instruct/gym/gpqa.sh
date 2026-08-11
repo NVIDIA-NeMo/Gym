@@ -22,9 +22,9 @@
 # prepare script resolve relative to your working directory. Results land in
 # ./results/gpqa.
 #
-#   scripts/more/instruct/gym/gpqa.sh                         # full benchmark (198 questions x 8)
-#   LIMIT=3 scripts/more/instruct/gym/gpqa.sh                 # quick smoke
-#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/gpqa.sh  # output dir, concurrency
+#   nemotron_recipes/lightning-3.5/instruct/gym/gpqa.sh                         # full benchmark (198 questions x 8)
+#   LIMIT=3 nemotron_recipes/lightning-3.5/instruct/gym/gpqa.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> nemotron_recipes/lightning-3.5/instruct/gym/gpqa.sh  # output dir, concurrency
 
 gym eval prepare --benchmark gpqa
 

@@ -24,9 +24,9 @@
 # prepare script resolve relative to your working directory. Results land in
 # ./results/gdpval.
 #
-#   scripts/more/instruct/gym/gdpval/gdpval.sh                         # full benchmark (220 tasks x 1)
-#   LIMIT=3 scripts/more/instruct/gym/gdpval/gdpval.sh                 # quick smoke
-#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/gdpval/gdpval.sh  # output dir, concurrency
+#   nemotron_recipes/lightning-3.5/instruct/gym/gdpval/gdpval.sh                         # full benchmark (220 tasks x 1)
+#   LIMIT=3 nemotron_recipes/lightning-3.5/instruct/gym/gdpval/gdpval.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> nemotron_recipes/lightning-3.5/instruct/gym/gdpval/gdpval.sh  # output dir, concurrency
 #
 # Scores each deliverable against its rubric. Comparison mode instead scores against
 # reference deliverables you generate yourself, one subdirectory per reference model;

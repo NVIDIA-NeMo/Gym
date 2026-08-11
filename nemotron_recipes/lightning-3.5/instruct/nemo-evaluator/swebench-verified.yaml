@@ -20,9 +20,9 @@
 # recipe uses POLICY_API_KEY, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY). Results land
 # in ./results/swebench-verified.
 #
-#   nel eval run scripts/more/instruct/nemo-evaluator/swebench-verified.yaml                                # full benchmark (500 tasks x 5)
-#   nel eval run scripts/more/instruct/nemo-evaluator/swebench-verified.yaml -O benchmarks.0.max_problems=3 # quick smoke
-#   nel eval run scripts/more/instruct/nemo-evaluator/swebench-verified.yaml -O output.dir=<dir>            # output dir
+#   nel eval run nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/swebench-verified.yaml                                # full benchmark (500 tasks x 5)
+#   nel eval run nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/swebench-verified.yaml -O benchmarks.0.max_problems=3 # quick smoke
+#   nel eval run nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/swebench-verified.yaml -O output.dir=<dir>            # output dir
 #
 # Note: serve the model with --reasoning-parser=nemotron_v3 plus
 # --enable-auto-tool-choice --tool-call-parser=qwen3_coder. Without the first, <think>
@@ -78,7 +78,7 @@ benchmarks:
   # Throughput only, no effect on score. Raise together with sandbox.concurrency
   # below — the lower of the two binds.
   max_concurrent: 15
-  instruction_template: scripts/more/instruct/nemo-evaluator/prompts/swebench_instruction.md
+  instruction_template: nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/prompts/swebench-instruction.md
   solver:
     service: nemotron
     timeout_strategy: max

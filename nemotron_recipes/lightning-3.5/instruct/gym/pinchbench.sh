@@ -24,9 +24,9 @@
 # benchmark's dataset and prepare script resolve relative to your working
 # directory. Results land in ./results/pinchbench.
 #
-#   scripts/more/instruct/gym/pinchbench.sh                         # full benchmark (147 tasks x 10)
-#   LIMIT=3 scripts/more/instruct/gym/pinchbench.sh                 # quick smoke
-#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/pinchbench.sh  # output dir, concurrency
+#   nemotron_recipes/lightning-3.5/instruct/gym/pinchbench.sh                         # full benchmark (147 tasks x 10)
+#   LIMIT=3 nemotron_recipes/lightning-3.5/instruct/gym/pinchbench.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> nemotron_recipes/lightning-3.5/instruct/gym/pinchbench.sh  # output dir, concurrency
 #
 # Note: OpenClaw calls the policy endpoint itself instead of going through a Gym
 # model server, so the endpoint is given here rather than in env.yaml, and the

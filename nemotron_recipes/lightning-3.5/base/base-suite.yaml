@@ -115,7 +115,7 @@ target:
   api_endpoint:
     url: https://<your-endpoint>/v1/completions
     model_id: <your-model-id>
-    api_key_name: POLICY_API_KEY
+    api_key_name: POLICY_API_KEY  # pragma: allowlist secret
     type: completions
 
 evaluation:

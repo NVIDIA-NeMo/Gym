@@ -22,9 +22,9 @@
 # script resolve relative to your working directory. Results land in
 # ./results/tau3.
 #
-#   scripts/more/instruct/gym/tau3.sh                         # full benchmark (97 tasks x 5)
-#   LIMIT=3 scripts/more/instruct/gym/tau3.sh                 # quick smoke
-#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/tau3.sh  # output dir, concurrency
+#   nemotron_recipes/lightning-3.5/instruct/gym/tau3.sh                         # full benchmark (97 tasks x 5)
+#   LIMIT=3 nemotron_recipes/lightning-3.5/instruct/gym/tau3.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> nemotron_recipes/lightning-3.5/instruct/gym/tau3.sh  # output dir, concurrency
 #
 # Note: Gym installs tau2-bench from a branch, so what you get moves over time.
 # This recipe pins the commit instead.

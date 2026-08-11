@@ -22,9 +22,9 @@
 # prepare script resolve relative to your working directory. Results land in
 # ./results/hle.
 #
-#   scripts/more/instruct/gym/hle.sh                         # full benchmark (2158 questions x 1)
-#   LIMIT=3 scripts/more/instruct/gym/hle.sh                 # quick smoke
-#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/hle.sh  # output dir, concurrency
+#   nemotron_recipes/lightning-3.5/instruct/gym/hle.sh                         # full benchmark (2158 questions x 1)
+#   LIMIT=3 nemotron_recipes/lightning-3.5/instruct/gym/hle.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> nemotron_recipes/lightning-3.5/instruct/gym/hle.sh  # output dir, concurrency
 #
 # Note: the judge overrides below are HLE's grading contract — labels, the
 # answer-extraction regex and a strict JSON schema. Changing them changes scores.

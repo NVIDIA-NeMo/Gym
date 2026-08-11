@@ -23,9 +23,9 @@
 # benchmark's dataset and prepare script resolve relative to your working
 # directory. Results land in ./results/scicode.
 #
-#   scripts/more/instruct/gym/scicode.sh                         # full benchmark (65 problems x 8)
-#   LIMIT=3 scripts/more/instruct/gym/scicode.sh                 # quick smoke
-#   OUT=<dir> PARALLEL=<n> scripts/more/instruct/gym/scicode.sh  # output dir, concurrency
+#   nemotron_recipes/lightning-3.5/instruct/gym/scicode.sh                         # full benchmark (65 problems x 8)
+#   LIMIT=3 nemotron_recipes/lightning-3.5/instruct/gym/scicode.sh                 # quick smoke
+#   OUT=<dir> PARALLEL=<n> nemotron_recipes/lightning-3.5/instruct/gym/scicode.sh  # output dir, concurrency
 #
 # Note: num_repeats 8 is set through the dataset override below — --num-repeats
 # multiplies the config default (3) instead of replacing it.
