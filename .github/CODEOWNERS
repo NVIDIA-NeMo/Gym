@@ -11,9 +11,8 @@
 #                                    Eng PIC Ananth Subramaniam
 #   @NVIDIA-NeMo/gym_architects      Tech-lead advisors — escalation for cross-lane
 #                                    disputes and backstop for unclaimed paths
-#   @NVIDIA-NeMo/gym_leads           Leads (EM/PM/TPM) — docs surfaces, which leads
-#                                    edit often and which are not a tech-lead call
-#   @NVIDIA-NeMo/docs_team           TME — docs/ and fern/
+#   @NVIDIA-NeMo/gym_leads           Leads (EM/PM/TPM) — docs surfaces (docs/, fern/),
+#                                    which leads edit often and which are not a tech-lead call
 #   @NVIDIA-NeMo/automation          CI, build, and release infrastructure
 #
 # The split follows one principle: Core owns the contracts and the substrate,
@@ -147,12 +146,12 @@
 # DOCS
 # ═════════════════════════════════════════════════════════════════════════════
 
-# TME owns the docs surface, and leads edit it often enough to be standing
-# reviewers rather than an escalation. Docs changes that restate a shared runtime
-# contract still need both lanes, same as config_types.py — a policy rule this
-# file cannot express.
-/docs/                                  @NVIDIA-NeMo/docs_team @NVIDIA-NeMo/gym_leads
-/fern/                                  @NVIDIA-NeMo/docs_team @NVIDIA-NeMo/gym_leads
+# Docs are owned by leads (EM/PM/TPM), who edit them often; this keeps docs out
+# of the tech-lead backstop. Docs changes that restate a shared runtime contract
+# still need both lanes, same as config_types.py — a policy rule this file cannot
+# express.
+/docs/                                  @NVIDIA-NeMo/gym_leads
+/fern/                                  @NVIDIA-NeMo/gym_leads
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CI & BUILD
