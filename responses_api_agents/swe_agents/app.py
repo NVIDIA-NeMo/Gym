@@ -288,6 +288,11 @@ class SWEBenchMetrics(BaseModel):
     agent_peak_rss_mb: Optional[int] = None
     eval_peak_rss_mb: Optional[int] = None
 
+    # Number of generated function calls in a terminal no-progress suffix. The
+    # corresponding call ids are returned separately so NeMo-RL can mask only
+    # those assistant messages rather than discarding the whole trajectory.
+    no_progress_tail_call_count: Optional[int] = None
+
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
     openhands_run_time: Optional[float] = None
@@ -307,6 +312,8 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
+    no_progress_tail_call_ids: List[str] = Field(default_factory=list)
+    no_progress_tail_type: Optional[str] = None
 
 
 ########################################
@@ -2153,6 +2160,60 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     return "other"
 
 
+def _detect_no_progress_tail(
+    output_items: list[Any], agent_error_kind: Optional[str]
+) -> tuple[list[str], Optional[str]]:
+    """Return function-call ids belonging to a terminal no-progress loop.
+
+    OpenHands is the authority that the rollout is stuck. This second pass only
+    locates the suffix responsible for that decision, so the trainer can retain
+    the useful prefix while masking the no-op tail.
+    """
+    if agent_error_kind != "stuck_in_loop":
+        return [], None
+
+    def _field(item: Any, name: str) -> Any:
+        return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+    outputs_by_call_id = {
+        _field(item, "call_id"): str(_field(item, "output") or "")
+        for item in output_items
+        if _field(item, "type") == "function_call_output"
+        and _field(item, "call_id")
+    }
+    calls: list[tuple[str, Optional[str]]] = []
+    for item in output_items:
+        if _field(item, "type") != "function_call":
+            continue
+        call_id = _field(item, "call_id")
+        if not call_id:
+            continue
+        output = outputs_by_call_id.get(call_id, "")
+        name = str(_field(item, "name") or "").lower()
+        if output.startswith("Validation failure for "):
+            category = "validation_failure"
+        elif name == "think":
+            category = "think"
+        else:
+            category = None
+        calls.append((str(call_id), category))
+
+    if not calls or calls[-1][1] is None:
+        return [], None
+    tail_type = calls[-1][1]
+    tail_ids: list[str] = []
+    for call_id, category in reversed(calls):
+        if category != tail_type:
+            break
+        tail_ids.append(call_id)
+    tail_ids.reverse()
+
+    minimum = 4 if tail_type == "think" else 3
+    if len(tail_ids) < minimum:
+        return [], None
+    return tail_ids, tail_type
+
+
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -3691,6 +3752,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
             input_items, output_items = split_responses_input_output_items(responses_items)
 
+        no_progress_tail_call_ids, no_progress_tail_type = _detect_no_progress_tail(
+            output_items, agent_error_kind
+        )
+        metrics_to_update["no_progress_tail_call_count"] = len(
+            no_progress_tail_call_ids
+        )
         updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
 
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
@@ -3701,6 +3768,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "metrics": json.dumps(updated_metrics),
             "instance_config": params.model_dump_json(),
             "verify_feedback": verify_feedback,
+            "no_progress_tail_call_ids": json.dumps(no_progress_tail_call_ids),
+            "no_progress_tail_type": no_progress_tail_type or "",
         }
         if params.opencode_subagents_enabled:
             subagent_trajectories = [
@@ -3738,6 +3807,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             subagent_trajectories = None
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
+            no_progress_tail_call_ids = json.loads(
+                metadata.get("no_progress_tail_call_ids", "[]")
+            )
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -3748,6 +3820,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     metadata["instance_config"]
                 ).model_dump(),
                 subagent_trajectories=subagent_trajectories,
+                no_progress_tail_call_ids=no_progress_tail_call_ids,
+                no_progress_tail_type=metadata.get("no_progress_tail_type") or None,
             )
 
 

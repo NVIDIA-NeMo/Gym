@@ -1,0 +1,71 @@
+diff --git a/openhands/controller/stuck.py b/openhands/controller/stuck.py
+--- a/openhands/controller/stuck.py
++++ b/openhands/controller/stuck.py
+@@ -4,6 +4,7 @@ from typing import Optional
+ from openhands.controller.state.state import State
+ from openhands.core.logger import openhands_logger as logger
+ from openhands.events import Event, EventSource
++from openhands.events.action.agent import AgentThinkAction, ValidationFailureAction
+ from openhands.events.action.action import Action
+ from openhands.events.action.commands import IPythonRunCellAction
+ from openhands.events.action.empty import NullAction
+@@ -12,7 +13,11 @@ from openhands.events.observation import (
+     CmdOutputObservation,
+     IPythonRunCellObservation,
+ )
+-from openhands.events.observation.agent import AgentCondensationObservation
++from openhands.events.observation.agent import (
++    AgentCondensationObservation,
++    AgentThinkObservation,
++    ValidationFailureObservation,
++)
+ from openhands.events.observation.empty import NullObservation
+ from openhands.events.observation.error import ErrorObservation
+ from openhands.events.observation.observation import Observation
+@@ -177,6 +182,27 @@ class StuckDetector:
+         if len(last_actions) < 3 or len(last_observations) < 3:
+             return False
+ 
++        # Native function calling turns schema/argument errors into dedicated
++        # ValidationFailure events rather than ErrorObservation. Treat a run of
++        # such events as one no-progress loop even when the model alternates
++        # between tool names: none of the calls reached the runtime or changed
++        # the repository.
++        if all(
++            isinstance(action, ValidationFailureAction)
++            for action in last_actions[:3]
++        ) and all(
++            isinstance(observation, ValidationFailureObservation)
++            for observation in last_observations[:3]
++        ):
++            logger.warning('Function-call validation failure loop detected')
++            self.stuck_analysis = StuckDetector.StuckAnalysis(
++                loop_type='repeating_validation_failure',
++                loop_repeat_times=3,
++                loop_start_idx=filtered_history.index(last_actions[2])
++                + filtered_history_offset,
++            )
++            return True
++
+         # are the last three actions the "same"?
+         if all(self._eq_no_pid(last_actions[0], action) for action in last_actions[:3]):
+             # and the last three observations are all errors?
+@@ -455,7 +481,17 @@ class StuckDetector:
+         return False
+ 
+     def _eq_no_pid(self, obj1: Event, obj2: Event) -> bool:
+-        if isinstance(obj1, IPythonRunCellAction) and isinstance(
++        if isinstance(obj1, AgentThinkAction) and isinstance(obj2, AgentThinkAction):
++            # The thought text naturally changes on every call, but ThinkTool
++            # is still a no-op and always returns the same observation. Ignore
++            # the payload here so four consecutive think/ack pairs trigger the
++            # existing repeating-action-observation detector.
++            return True
++        elif isinstance(obj1, AgentThinkObservation) and isinstance(
++            obj2, AgentThinkObservation
++        ):
++            return True
++        elif isinstance(obj1, IPythonRunCellAction) and isinstance(
+             obj2, IPythonRunCellAction
+         ):
+             # for loop detection on edit actions, ignore the thought, compare some code
