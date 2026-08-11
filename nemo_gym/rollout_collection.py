@@ -69,6 +69,7 @@ from nemo_gym.rollout_observability import (
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
+    RequestFailedError,
     ServerClient,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
@@ -122,20 +123,25 @@ _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 
 
-def _agent_request_failure_result(response: Any, error: ClientResponseError) -> Dict:
-    """The row written to the failures sidecar when `/run` answers with an HTTP error.
+def _agent_request_failure_result(response: Any, error: Exception) -> Dict:
+    """The row written to the failures sidecar when a `/run` call does not produce a result.
 
-    Carries `reward` 0.0 so the row has the same shape as a scored rollout, and the upstream body
-    truncated to 2000 characters so one large error response cannot dominate the sidecar.
+    Covers both an HTTP error from the agent and `request()` giving up on reaching it. Carries
+    `reward` 0.0 so the row has the same shape as a scored rollout, and truncates the detail to
+    2000 characters so one large error response cannot dominate the sidecar.
     """
-    content = getattr(error, "response_content", b"") or b""
-    if isinstance(content, bytes):
-        content = content.decode(errors="replace")
+    if isinstance(error, RequestFailedError):
+        detail = f"/run could not be reached: {error}"
+    else:
+        content = getattr(error, "response_content", b"") or b""
+        if isinstance(content, bytes):
+            content = content.decode(errors="replace")
+        detail = f"/run returned HTTP {getattr(response, 'status', None)}: {content}"
 
     return {
         "reward": 0.0,
         NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS,
-        "error": f"/run returned HTTP {getattr(response, 'status', None)}: {content[:2000]}",
+        "error": detail[:2000],
     }
 
 
@@ -1076,10 +1082,10 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                             flush=True,
                         )
-                    # Only an HTTP error from the agent becomes a failure row. Anything else
-                    # raised here is a bug in this dispatcher rather than a rollout outcome, and
-                    # must still end the run.
-                    if not isinstance(e, ClientResponseError):
+                    # An HTTP error from the agent, or `request()` giving up on reaching it,
+                    # becomes a failure row. Anything else raised here is a bug in this dispatcher
+                    # rather than a rollout outcome, and must still end the run.
+                    if not isinstance(e, (ClientResponseError, RequestFailedError)):
                         raise
                     return row, _agent_request_failure_result(res, e)
                 return row, await get_response_json(res)

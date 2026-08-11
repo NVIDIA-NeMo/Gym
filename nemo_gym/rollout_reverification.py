@@ -48,6 +48,7 @@ from nemo_gym.rollout_collection import (
     _rollout_for_wandb,
 )
 from nemo_gym.server_utils import (
+    RequestFailedError,
     ServerClient,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
@@ -470,7 +471,7 @@ def _run_verification_payloads(
                     )
                 # Same split as rollout collection: an HTTP error from the resources server is a
                 # failure row, anything else is a bug here and must still end the run.
-                if not isinstance(e, ClientResponseError):
+                if not isinstance(e, (ClientResponseError, RequestFailedError)):
                     raise
                 return row, _agent_request_failure_result(res, e)
             return row, await get_response_json(res)
