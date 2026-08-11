@@ -76,6 +76,9 @@ class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
 
 
 class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
+    # Allow for benchmark params to propagate properly
+    model_config = ConfigDict(extra="allow")
+
     opencode_results_fpath: str
     opencode_run_stdout: str
     opencode_run_stderr: str
