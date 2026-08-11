@@ -82,6 +82,7 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_results_fpath: str
     opencode_run_stdout: str
     opencode_run_stderr: str
+    opencode_finished: bool
     opencode_export_found: bool
 
 
@@ -269,7 +270,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {conda_activate_command_str} \
         && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)}
+        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
+        && echo "OpenCode run finished"
         """
 
         opencode_config_content = json.dumps(self._create_opencode_config())
@@ -342,6 +344,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stdout": (result.stdout if result else "") or "",
             "opencode_run_stderr": (result.stderr if result else "") or "",
             "opencode_export_found": opencode_export_found,
+            "opencode_finished": ("OpenCode run finished" in result.stdout if result else False),
         }
 
         return NeMoGymResponse(
