@@ -11,6 +11,7 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser nemotron_v3
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
+    --no-async-scheduling
     --block-size 128
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
