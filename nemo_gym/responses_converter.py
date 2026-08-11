@@ -162,9 +162,31 @@ class ResponsesConverter(BaseModel):
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
         responses_create_params = responses_create_params.model_dump(exclude_unset=True)
 
+        unsupported_fields = sorted(
+            {
+                "background",
+                "context_management",
+                "conversation",
+                "include",
+                "max_tool_calls",
+                "previous_response_id",
+                "prompt",
+                "reasoning",
+                "text",
+                "truncation",
+            }
+            & responses_create_params.keys()
+        )
+        if unsupported_fields:
+            raise NotImplementedError(
+                f"Responses request field(s) {unsupported_fields} have no Chat Completions "
+                "representation, so this request cannot be downconverted. Route it to a model "
+                "server that passes Responses through."
+            )
+
         state = ResponsesConverterState(return_token_id_information=self.return_token_id_information)
 
-        response_input = responses_create_params["input"]
+        response_input = responses_create_params.pop("input")
         if isinstance(response_input, str):
             wrapped_input = {
                 "content": [
@@ -178,7 +200,7 @@ class ResponsesConverter(BaseModel):
             }
             input_messages = [wrapped_input]
         else:
-            input_messages = responses_create_params.pop("input", [])
+            input_messages = response_input
 
         for m in input_messages:
             if not m.get("type") and m.get("role"):

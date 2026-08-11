@@ -100,10 +100,10 @@ class TestApp:
         assert verify_response.category == expected_reward_category
 
     async def test_verify(self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer) -> None:
-        # Built as a FunctionToolParam rather than dumped from the FunctionTool model.
-        # The SDK's model and its param TypedDict disagree about optionality.
-        # FunctionTool.defer_loading is Optional[bool] = None, while FunctionToolParam declares it a plain bool.
-        # So FunctionTool(...).model_dump() emits defer_loading=None, which the params model rejects.
+        # Build the request type directly because the SDK types differ in optionality.
+        # `FunctionTool.defer_loading` defaults to `None`.
+        # `FunctionToolParam` requires a boolean when the field is present.
+        # Dumping the model includes `None`, which the request model rejects.
         tool: FunctionToolParam = {
             "type": "function",
             "name": "set_metric_count",
