@@ -26,7 +26,7 @@ COMMIT = "e016041a6ccf8da29906afc9a3f5a8df940a1f78"  # pragma: allowlist secret
 EXPECTED_TASKS = 113
 HERE = Path(__file__).resolve().parent
 CHECKOUT = HERE / "data" / "deep-swe"
-OUTPUT = HERE / "data" / "deep_swe_benchmark.jsonl"
+OUTPUT = HERE / "data" / "deepswe_benchmark.jsonl"
 
 
 def _run(*args: str, cwd: Path | None = None) -> str:
@@ -70,9 +70,9 @@ def materialize(names: list[str]) -> None:
     with OUTPUT.open("w") as output:
         for name in names:
             row = {
-                "instance_id": f"deep_swe::{name}",
+                "instance_id": f"deepswe::{name}",
                 "responses_create_params": {"input": []},
-                "agent_ref": {"name": "deep_swe"},
+                "agent_ref": {"name": "deepswe"},
             }
             output.write(json.dumps(row, separators=(",", ":")) + "\n")
 

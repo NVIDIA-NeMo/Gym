@@ -149,6 +149,7 @@ class DeepSWEAgent(HarborAgent):
         agent_env = deepcopy(self.config.harbor_agent_env or {})
         if agent_name == "mini-swe-agent":
             agent_env.setdefault("OPENAI_API_KEY", "${POLICY_API_KEY}")
+            agent_env.setdefault("MSWEA_API_KEY", "${POLICY_API_KEY}")
 
         provider, _ = _provider_without_secret(self.config.sandbox_provider)
         environment_kwargs = {
@@ -163,7 +164,7 @@ class DeepSWEAgent(HarborAgent):
             quiet=True,
             timeout_multiplier=self.config.harbor_timeout_multiplier or 1.0,
             environment=EnvironmentConfig(
-                import_path=("responses_api_agents.deep_swe_agent.opensandbox_environment:PierOpenSandboxEnvironment"),
+                import_path=("responses_api_agents.deepswe_agent.opensandbox_environment:PierOpenSandboxEnvironment"),
                 kwargs=environment_kwargs,
             ),
             verifier=VerifierConfig(

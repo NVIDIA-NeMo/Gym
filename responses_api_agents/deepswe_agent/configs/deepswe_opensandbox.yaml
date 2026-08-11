@@ -1,6 +1,6 @@
-deep_swe_agent:
+deepswe_agent:
   responses_api_agents:
-    deep_swe_agent:
+    deepswe_agent:
       entrypoint: app.py
       domain: coding
       description: DeepSWE v1.1 tasks through Pier's Harbor-compatible lifecycle and OpenSandbox.
@@ -11,8 +11,8 @@ deep_swe_agent:
         type: responses_api_models
         name: policy_model
       harbor_datasets:
-        deep_swe:
-          local_dataset_path: benchmarks/deep_swe/data/deep-swe/tasks
+        deepswe:
+          local_dataset_path: benchmarks/deepswe/data/deep-swe/tasks
           workdir: /app
       harbor_agent_name: mini-swe-agent
       harbor_agent_kwargs:
@@ -21,9 +21,11 @@ deep_swe_agent:
         # Zero disables mini-swe-agent's default cost limit.
         cost_limit: 0
         model_class: litellm_response
+        model_kwargs:
+          max_output_tokens: null
       harbor_agent_env:
         OPENAI_BASE_URL: https://inference-api.nvidia.com/v1
-      harbor_jobs_dir: responses_api_agents/deep_swe_agent/jobs
+      harbor_jobs_dir: responses_api_agents/deepswe_agent/jobs
       sandbox_provider:
         opensandbox:
           connection:
@@ -54,7 +56,7 @@ deep_swe_agent:
         ttl_s: 18000
         ready_timeout_s: 1200
         agent_install_timeout_s: 1800
-        tmux_bundle_path: /workspace/gym-deepswe/cache/deep_swe_runtime/tmux-jammy-amd64.tar.gz
+        tmux_bundle_path: /workspace/gym-deepswe/cache/deepswe_runtime/tmux-jammy-amd64.tar.gz
         provider_options:
           platform:
             os: linux

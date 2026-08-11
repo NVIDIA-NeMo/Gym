@@ -1,5 +1,0 @@
-{"instance_id":"deep_swe::kcp-go-multiplexed-kcp-streams","responses_create_params":{"input":[]},"agent_ref":{"name":"deep_swe"}}
-{"instance_id":"deep_swe::ofetch-per-origin-circuit-breaker","responses_create_params":{"input":[]},"agent_ref":{"name":"deep_swe"}}
-{"instance_id":"deep_swe::termenv-preserve-ansi-resets","responses_create_params":{"input":[]},"agent_ref":{"name":"deep_swe"}}
-{"instance_id":"deep_swe::ts-pattern-match-each","responses_create_params":{"input":[]},"agent_ref":{"name":"deep_swe"}}
-{"instance_id":"deep_swe::pebble-durability-wait-apis","responses_create_params":{"input":[]},"agent_ref":{"name":"deep_swe"}}

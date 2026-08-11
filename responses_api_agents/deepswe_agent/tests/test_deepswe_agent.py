@@ -26,14 +26,14 @@ from pier.models.agent.network import NetworkAllowlist
 from pier.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
 from pier.models.trial.paths import TrialPaths
 
-from responses_api_agents.deep_swe_agent.app import (
+from responses_api_agents.deepswe_agent.app import (
     DeepSWEAgent,
     DeepSWEAgentConfig,
     _ensure_pier_litellm_compat,
     _provider_without_secret,
     run_pier_job,
 )
-from responses_api_agents.deep_swe_agent.opensandbox_environment import (
+from responses_api_agents.deepswe_agent.opensandbox_environment import (
     INSTALL_EGRESS_TARGETS,
     PierOpenSandboxEnvironment,
 )
@@ -41,7 +41,7 @@ from responses_api_agents.deep_swe_agent.opensandbox_environment import (
 
 def _agent(tmp_path: Path) -> DeepSWEAgent:
     config = DeepSWEAgentConfig(
-        name="deep_swe_agent",
+        name="deepswe_agent",
         host="0.0.0.0",
         port=8080,
         entrypoint="app.py",
@@ -50,7 +50,7 @@ def _agent(tmp_path: Path) -> DeepSWEAgent:
         datasets=[],
         concurrency=1,
         model_server={"type": "responses_api_models", "name": "policy_model"},
-        harbor_datasets={"deep_swe": {"local_dataset_path": str(tmp_path / "tasks"), "workdir": "/app"}},
+        harbor_datasets={"deepswe": {"local_dataset_path": str(tmp_path / "tasks"), "workdir": "/app"}},
         harbor_agent_name="mini-swe-agent",
         harbor_agent_kwargs={
             "version": "2.4.6",
@@ -77,7 +77,7 @@ def _agent(tmp_path: Path) -> DeepSWEAgent:
 def test_builds_single_task_pier_job_without_serializing_api_key(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     config = agent._build_job_config(
-        dataset_alias="deep_swe",
+        dataset_alias="deepswe",
         task_name="abs-module-cache-flags",
         model_name="model",
         api_base="http://policy:8000/v1",
@@ -97,15 +97,16 @@ def test_builds_single_task_pier_job_without_serializing_api_key(tmp_path: Path)
     assert "api_base" not in mini["kwargs"]
     assert "responses_create_params" not in mini["kwargs"]
     assert mini["env"] == {
+        "MSWEA_API_KEY": "${POLICY_API_KEY}",
         "OPENAI_API_KEY": "${POLICY_API_KEY}",
         "OPENAI_BASE_URL": "https://inference-api.nvidia.com/v1",
     }
 
 
-def test_opensandbox_stream_timeout_exceeds_deep_swe_agent_timeout() -> None:
-    config_path = Path(__file__).parents[1] / "configs/deep_swe_opensandbox.yaml"
+def test_opensandbox_stream_timeout_exceeds_deepswe_agent_timeout() -> None:
+    config_path = Path(__file__).parents[1] / "configs/deepswe_opensandbox.yaml"
     config = yaml.safe_load(config_path.read_text())
-    agent_config = config["deep_swe_agent"]["responses_api_agents"]["deep_swe_agent"]
+    agent_config = config["deepswe_agent"]["responses_api_agents"]["deepswe_agent"]
     connection = agent_config["sandbox_provider"]["opensandbox"]["connection"]
 
     assert connection["request_timeout_s"] > 5400
@@ -130,7 +131,7 @@ async def test_pier_job_returns_absolute_trial_path(tmp_path: Path, monkeypatch)
 
     monkeypatch.chdir(tmp_path)
     config = _agent(tmp_path)._build_job_config(
-        dataset_alias="deep_swe",
+        dataset_alias="deepswe",
         task_name="abs-module-cache-flags",
         model_name="model",
         api_base="http://policy:8000/v1",
@@ -337,7 +338,7 @@ async def test_startup_command_retries_transient_backend_failure(monkeypatch) ->
     )
     sleep = AsyncMock()
     monkeypatch.setattr(
-        "responses_api_agents.deep_swe_agent.opensandbox_environment.asyncio.sleep",
+        "responses_api_agents.deepswe_agent.opensandbox_environment.asyncio.sleep",
         sleep,
     )
 
