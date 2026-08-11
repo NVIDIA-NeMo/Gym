@@ -268,8 +268,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
-        && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
+        && echo "Optionally activated Conda env" \
+        && installer=$(mktemp) && curl -fL -o "$installer" --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 15 https://opencode.ai/install \
+        && echo "Downloaded OpenCode installer to $installer" \
+        && VERSION={self.config.opencode_version} bash "$installer" \
         && export PATH=$HOME/.opencode/bin:$PATH \
+        && echo "Installed OpenCode" \
         && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
         && echo "OpenCode run finished"
         """
