@@ -145,9 +145,9 @@ and output rows.
 ### Reward profiling from pre-baked rollouts (no GPU, no model server)
 
 ```bash
-ng_reward_profile \
-    +materialized_inputs_jsonl_fpath=resources_servers/longmt_eval/data/example_rollouts_materialized_inputs.jsonl \
-    +rollouts_jsonl_fpath=resources_servers/longmt_eval/data/example_rollouts.jsonl
+gym eval profile \
+    --inputs resources_servers/longmt_eval/data/example_rollouts_materialized_inputs.jsonl \
+    --rollouts resources_servers/longmt_eval/data/example_rollouts.jsonl
 ```
 
 Outputs `example_rollouts_reward_profiling.jsonl` (per-task stats) and
@@ -158,20 +158,22 @@ rollouts file.
 
 ```bash
 # Start servers (smoke-test mode — no GPU needed for the verifier)
-ng_run "+config_paths=[resources_servers/longmt_eval/configs/longmt_eval.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-    "++longmt_eval.resources_servers.longmt_eval.compute_segale=false" &
+gym env start \
+    --resources-server longmt_eval \
+    --model-type vllm_model & \
+    ++longmt_eval.resources_servers.longmt_eval.compute_segale=false
 
 # Collect rollouts — also writes results/longmt_eval_rollouts_materialized_inputs.jsonl
-ng_collect_rollouts \
-    +agent_name=longmt_eval_simple_agent \
-    +input_jsonl_fpath=resources_servers/longmt_eval/data/example.jsonl \
-    +output_jsonl_fpath=results/longmt_eval_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent longmt_eval_simple_agent \
+    --input resources_servers/longmt_eval/data/example.jsonl \
+    --output results/longmt_eval_rollouts.jsonl \
+    --num-repeats 1
 
 # Profile rewards from the collected rollouts
-ng_reward_profile \
-    +materialized_inputs_jsonl_fpath=results/longmt_eval_rollouts_materialized_inputs.jsonl \
-    +rollouts_jsonl_fpath=results/longmt_eval_rollouts.jsonl
+gym eval profile \
+    --inputs results/longmt_eval_rollouts_materialized_inputs.jsonl \
+    --rollouts results/longmt_eval_rollouts.jsonl
 ```
 
 For a full SLURM run with SEGALE enabled on WMT24++ see

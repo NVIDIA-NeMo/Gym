@@ -15,7 +15,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 uv venv --python 3.12
 source .venv/bin/activate
-uv sync --extra dev --group docs
+uv sync --extra dev
 
 # Install pre-commit hooks (required for contributors)
 pre-commit install
@@ -25,9 +25,9 @@ pre-commit install
 
 **Run NeMo Gym Tests**:
 ```bash
-ng_dev_test                                    # Run all NeMo Gym core tests
-ng_test_all                                    # Run all server tests
-ng_test +entrypoint=responses_api_agents/simple_agent  # Test single server
+gym dev test                                   # Run all NeMo Gym core tests
+gym env test                                   # Run all server tests
+gym env test --resources-server example_single_tool_call    # Test a single resources server
 ```
 
 **View Test Coverage**:
@@ -37,7 +37,7 @@ coverage html                                  # Generate HTML coverage report
 
 **Configuration Debugging**:
 ```bash
-ng_dump_config                                 # Dump config as NeMo Gym sees it
+gym env resolve                                # Dump config as NeMo Gym sees it
 ```
 
 ---
@@ -55,19 +55,35 @@ All contributions must pass these automated checks:
 
 **Test Requirements**:
 - At least one test per server you contribute
-- Tests must run using `ng_test +entrypoint=your_server_path`
+- Tests must run using `gym env test --resources-server your_server`
 - Use pytest for async testing patterns
 
 ### Build Docs CI Failures
 
 If the build-docs check fails:
 
-1. **Test documentation locally**: Preview the Fern docs by running `fern docs dev` from the repository root.
+1. **Test documentation locally**: Follow the [Fern docs quickstart](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md).
+   - For local documentation previews, ensure Node.js 22+ is installed.
+   - From the repository root, run `make docs-login` once to provision and authenticate Fern.
+   - From the repository root, run `make docs` to generate the API reference and start the local preview.
+   - After the initial generation, prose-only changes can use `cd fern && npm run dev`.
 
 2. **Common issues**:
    - Missing docstrings in public functions
    - Broken markdown links in README or tutorials
    - Invalid MDX syntax
+
+### Contributing documentation (including external contributors)
+
+You do **not** need Fern dashboard org membership or Slack `#fern` access to contribute docs.
+
+1. Edit MDX under `fern/versions/latest/pages/` (and nav YAML if needed).
+2. Open a pull request from a fork or branch.
+3. Rely on CI: `fern check` and the automatic Fern preview comment use the repository `DOCS_FERN_TOKEN`, including for fork PRs.
+
+Optional local preview follows the Fern README. Full `make docs` / library autodoc (`fern docs md generate`) may require membership in the Fern `nvidia` organization if you hit `HTTP 403: User does not belong to organization`.
+
+**Requesting Fern `nvidia` org or Slack `#fern` access (optional):** open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) on NVIDIA-NeMo/Gym asking to be added to the Fern `nvidia` organization (and `#fern` if you use NVIDIA Slack). Maintainers triage the request. If you already have NVIDIA Slack, you can also ask in `#fern`.
 
 ### Copyright Header Errors
 
@@ -177,22 +193,40 @@ ssh-add -l
 **Problem**: IDE not signing commits
 - Restart your IDE after configuring Git
 - Check IDE Git settings match the command line configuration
-- Try committing through the command line first to verify setup
+- Try committing through the command line first to validate setup
 
 **Problem**: "DCO sign-off missing"
+
+**If you have not pushed yet:**
 ```bash
 # Fix the last commit
 git commit --amend -s --no-edit
 
-# For multiple commits, use interactive rebase and add a sign-off to each
-git rebase -i HEAD~3  # Adjust number as needed
+# Fix multiple local commits
+git rebase --signoff HEAD~3  # Adjust number as needed
 ```
 
-Amending or rebasing rewrites commits, so if the branch was already pushed you must force-push the corrected history to your PR branch:
+**If you already pushed to your PR branch:**
+
+Force-pushing is disallowed on branches in the upstream `NVIDIA-NeMo/Gym` repo. If your PR branch is in a fork and your fork allows force pushes, you can re-sign commits locally and push with `--force-with-lease`; otherwise, push the signed history to a new branch and update the PR.
+
 ```bash
-# --force-with-lease refuses to overwrite work you haven't seen yet
+# Option 1: Re-sign commits locally, then push to a new branch and update your PR
+git rebase --signoff origin/main
+git push origin HEAD:your-user/your-feature-dco-fix
+
+# Option 2: Squash into one signed commit on a fresh branch
+git checkout -b your-feature-dco-fix origin/main
+git merge --squash your-feature-branch
+git commit -s -m "Your commit message"
+git push -u origin your-feature-dco-fix
+
+# Option 3 (forks only): Re-sign and force-push to the same branch
+git rebase --signoff origin/main
 git push --force-with-lease
 ```
+
+**Tip:** Always use `git commit -s` when creating commits to avoid this issue.
 
 ### Alternative: GPG Signing
 
@@ -252,15 +286,15 @@ We encourage contributors to use AI coding assistants (Copilot, Cursor, Claude, 
 
 ### Guiding Principle
 
-**If the human effort required to create a pull request is less than the effort required for maintainers to review it, that contribution should not be submitted.**
+Prefer contributions where your review and ownership clearly outweigh the maintainer review burden. Low-effort, unreviewed dumps shift work onto reviewers and usually need substantial rework.
 
 You are responsible for every line of code you submit, regardless of whether you or an AI tool wrote it.
 
 ### What We Expect
 
 - **Understand your changes**: You must be able to explain and debug every line in your PR. Treat AI output as code from an untrusted source that requires your review.
-- **Self-review and test**: Before requesting review, read through the diff carefully, run the test suite (`pytest`), and run pre-commit checks locally. Never treat AI-generated code as ready to merge without your own verification.
-- **Keep PRs focused**: AI tools sometimes make "drive-by improvements" to unrelated code. Strip out any changes that are not directly relevant to the task at hand. If a drive-by change is worth keeping, [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to track it so it can be reviewed on its own merits.
+- **Self-review with real behavior**: Before requesting review, read the diff carefully. For environment or agent changes, run real rollouts with a model and inspect agent and verifier behavior — do not treat green unit tests alone as proof the change is correct. Also run the local checks that mirror CI (tests, pre-commit, DCO sign-off) so automated gates stay green.
+- **Keep PRs focused**: AI tools sometimes make "drive-by improvements" to unrelated code. Strip out any changes that are not directly relevant to the task at hand. If a drive-by change is worth keeping, [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to track it so it can be reviewed on its own merits. Intentional synthetic scaling of environments is welcome when scoped and tracked via an issue or focused PR; what we discourage is unreviewed bulk diffs with no discussion.
 - **Verify correctness of AI-generated tests**: AI-generated tests can appear to pass while testing nothing meaningful. Ensure assertions are substantive and cover the intended behavior.
 
 ### AI Attribution
@@ -270,7 +304,7 @@ When AI tools generate a substantial portion of your contribution, disclose it. 
 If you prefer to attribute at the commit level, you can also add an `Assisted-by:` trailer to the relevant commit messages:
 
 ```bash
-git commit -s -S -m "Add reward function for code evaluation
+git commit -s -m "Add reward function for code evaluation
 
 Assisted-by: GitHub Copilot"
 ```
@@ -292,12 +326,101 @@ This is not about policing tool usage. It is about maintaining the quality bar t
 
 ## Development Workflow
 
-1. **Create feature branch**: `git checkout -b feature/your-feature`
+For a small, self-contained change, open a single PR:
+
+1. **Create a feature branch**: `git checkout -b <username>/<feature>`
 2. **Make changes** with tests
-3. **Run local checks**: `ng_dev_test && pre-commit run --all-files`
-4. **Commit with signoff**: `git commit -s -S -m "Your message"`
-5. **Push and create PR**: Ensure all CI checks pass
+3. **Run local checks**: `gym dev test && pre-commit run --all-files`
+4. **Commit with signoff**: `git commit -s -m "Your message"`
+5. **Push and open a PR**: ensure all CI checks pass
 6. **Address review feedback** and iterate
+
+### Stacked Pull Requests
+
+For larger changes, NeMo Gym uses [GitHub Stacked PRs](https://github.github.com/gh-stack/): a chain of branches where each PR targets the branch below it, so each layer is reviewed as its own focused diff. See GitHub's [Stacked PRs overview](https://github.github.com/gh-stack/) for the concept and PR UI; the mechanics of the `gh stack` CLI in this repo follow.
+
+#### Prerequisites
+
+Install the [GitHub CLI](https://cli.github.com/) (`gh`) v2.0 or later, the `gh stack` extension, and the agent skill:
+
+```bash
+gh extension install github/gh-stack
+gh skill install github/gh-stack gh-stack   # vendored under .agents/skills/gh-stack/; this installs it for your agent
+```
+
+<Warning>
+`gh stack` requires OAuth — Personal Access Tokens are rejected during the private preview. If `gh auth status` shows a `github_pat_…` token, `submit`/`push`/`sync` fail with exit code 9. Re-authenticate with the web flow:
+
+```bash
+gh auth login   # GitHub.com → HTTPS → "Login with a web browser"
+```
+</Warning>
+
+A stack is created in the repo you push to, and that repo must have the preview enabled — push your branches to the remote that points at `NVIDIA-NeMo/Gym`. With multiple remotes, set the target once (or pass `--remote <name>` on each command) and enable conflict memory so commands do not prompt:
+
+```bash
+git config remote.pushDefault upstream   # the remote pointing at NVIDIA-NeMo/Gym
+git config rerere.enabled true
+```
+
+#### Create a Stack
+
+Build the stack bottom-up, one logical change per branch, where each branch depends on the one below it. Keep a contribution self-contained — land code together with its tests in a single PR — and stack genuinely dependent follow-ups (for example, documentation) on top.
+
+```bash
+# Bottom layer: the contribution (resources server, agent config, and its tests) as one branch.
+gh stack init -p <user>/my-env contribution
+git add resources_servers/my_env/
+git commit -s -m "feat: add my_env environment and tests"
+
+# Next layer: a follow-up that depends on the contribution above.
+gh stack add docs
+git add fern/versions/latest/pages/environment-tutorials/my-env.mdx
+git commit -s -m "docs: document my_env"
+
+# Push every branch and open a draft PR per layer (--auto titles them).
+gh stack submit --auto
+
+# Inspect the result (always --json; bare `view` opens a TUI).
+gh stack view --json
+```
+
+`submit` sets each PR's base to the branch below it and links them as a stack on GitHub. Run every `gh stack` command non-interactively: pass branch names to `init`/`add`/`checkout`, `--auto` to `submit`, and `--json` to `view`. Without these flags the commands prompt or open a TUI and hang.
+
+#### Update a Stack
+
+Make a change on the branch it belongs to, then rebase the layers above it:
+
+```bash
+gh stack down              # or: gh stack checkout <branch|pr-number>
+git add <files> && git commit -s -m "..."
+gh stack rebase --upstack  # replay the layers above onto the change
+gh stack push
+```
+
+After a PR merges, sync to fast-forward the trunk and rebase the rest of the stack:
+
+```bash
+gh stack sync --prune      # fetch, rebase, push, drop merged branches
+```
+
+On a rebase conflict (exit code 3), resolve the listed files, `git add` them, then `gh stack rebase --continue` (or `--abort`). Merging is done from the GitHub PR UI; CLI merge is not supported yet.
+
+#### Command Reference
+
+The vendored skill (`.agents/skills/gh-stack/SKILL.md`) carries the full reference, exit codes, and non-interactive rules for agents.
+
+| Task | Command |
+|------|---------|
+| Start a stack | `gh stack init -p <prefix> <branch>` |
+| Add a layer | `gh stack add <suffix>` |
+| Push and open PRs | `gh stack submit --auto` |
+| Inspect state | `gh stack view --json` |
+| Navigate | `gh stack up` / `down` / `top` / `bottom` |
+| Rebase after a lower-layer edit | `gh stack rebase --upstack` |
+| Sync after merges | `gh stack sync --prune` |
+
+See the [gh-stack documentation](https://github.github.com/gh-stack/) for the full feature set.
 
 ---
 

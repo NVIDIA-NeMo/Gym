@@ -15,47 +15,81 @@
 
 import asyncio
 import json
+import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
+import pytest
 import yaml
+from fastapi import Request
 
+from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,
+    ClaudeCodeAgentRunRequest,
+    ModelServerRef,
     ResourcesServerRef,
     _extract_instruction,
+    _invocation_outcome,
     parse_stream_json,
 )
+from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+
+
+def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
+    skills_dir = root / "variant_a"
+    skill = skills_dir / name
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: A skill.\n---\n# Body\n")
+    return skills_dir
 
 
 def _config(**kwargs) -> ClaudeCodeAgentConfig:
+    kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name=""))
     return ClaudeCodeAgentConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="",
-        resources_server=ResourcesServerRef(type="resources_servers", name=""),
         **kwargs,
     )
 
 
 def _make_agent(**kwargs) -> ClaudeCodeAgent:
-    with patch("responses_api_agents.claude_code_agent.app.ClaudeCodeAgent.model_post_init"):
-        agent = ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    # Patch only the external side effect (claude-code install/version check) so the real
+    # model_post_init still runs — it initializes the model's private attrs and the semaphore.
+    with patch("responses_api_agents.claude_code_agent.app.ensure_claude_code"):
+        return ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _event(type_: str, **kwargs) -> str:
     return json.dumps({"type": type_, **kwargs})
+
+
+def _output(*events: str) -> list:
+    return parse_stream_json("\n".join(events))[0]
+
+
+class FakeAioHTTPResponse:
+    ok = True
+
+    def __init__(self, payload: dict, cookies: dict | None = None):
+        self.payload = payload
+        self.cookies = cookies or {}
+
+    async def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
 
 
 class TestSanity:
@@ -105,6 +139,22 @@ class TestBuildCommand:
         # --mcp-config is explicit, so it coexists with the default --bare
         assert "--bare" in cmd
         assert cmd[cmd.index("--mcp-config") + 1] == "/path/to/mcp.json"
+
+    def test_dynamic_mcp_config_overrides_static_for_command(self) -> None:
+        agent = _make_agent(mcp_config="/path/to/static.json")
+        cmd = agent._build_command("m", "x", mcp_config="/tmp/dynamic.json")
+        assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/dynamic.json"
+
+    def test_skills_active_forces_bare_off(self) -> None:
+        # Default config has bare=True, but staged skills must be discoverable, so --bare is dropped.
+        agent = _make_agent()
+        cmd = agent._build_command("m", "x", skills_active=True)
+        assert "--bare" not in cmd
+
+    def test_skills_inactive_keeps_bare(self) -> None:
+        agent = _make_agent()
+        cmd = agent._build_command("m", "x", skills_active=False)
+        assert "--bare" in cmd
 
     def test_optional_flags_threaded_through(self) -> None:
         agent = _make_agent(
@@ -165,6 +215,185 @@ class TestSetupConfigDir:
 
             _shutil.rmtree(config_dir, ignore_errors=True)
 
+    def test_stages_skills_into_config_dir(self, tmp_path: Path) -> None:
+        skills_dir = _write_skill_dir(tmp_path)
+        home = tmp_path / "home"
+        home.mkdir()
+        agent = _make_agent()
+        with patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home):
+            config_dir = agent._setup_config_dir(skills_path=str(skills_dir))
+        try:
+            assert (config_dir / "skills" / "cot_enhanced" / "SKILL.md").is_file()
+        finally:
+            import shutil as _shutil
+
+            _shutil.rmtree(config_dir, ignore_errors=True)
+
+
+class _FakeHttpResp:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.cookies: dict = {}
+        self.ok = True
+
+    async def read(self) -> bytes:
+        return orjson.dumps(self._payload)
+
+
+def _gym_response(text: str = "done") -> dict:
+    return {
+        "id": "resp_x",
+        "created_at": 0.0,
+        "model": "claude-sonnet-4-6",
+        "object": "response",
+        "output": [
+            {
+                "id": "msg_x",
+                "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "usage": {
+            "input_tokens": 1,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 1,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 2,
+        },
+    }
+
+
+def _seed_and_verify_post():
+    async def _post(server_name, url_path, json=None, cookies=None, **kw):
+        if url_path == "/verify":
+            return _FakeHttpResp(
+                {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 1.0}
+            )
+        return _FakeHttpResp({})
+
+    return AsyncMock(side_effect=_post)
+
+
+class TestRunForwardsSkillsPath:
+    def _run(self, agent: ClaudeCodeAgent, body: ClaudeCodeAgentRunRequest, run_claude_code: AsyncMock):
+        agent.server_client.post = _seed_and_verify_post()
+        req = MagicMock()
+        req.cookies = {}
+        with patch.object(
+            ClaudeCodeAgent,
+            "_run_claude_code",
+            run_claude_code,
+        ):
+            return asyncio.run(agent.run(req, body))
+
+    def test_skills_ref_path_forwarded(self) -> None:
+        agent = _make_agent()
+        run_claude_code = AsyncMock(
+            return_value=([], "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
+        )
+        body = ClaudeCodeAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": []},
+                SKILLS_REF_KEY_NAME: {"path": "skills/variant_a/", "hash": "abc123", "skills": []},
+            }
+        )
+
+        self._run(agent, body, run_claude_code)
+
+        assert run_claude_code.call_args.kwargs["skills_path"] == "skills/variant_a/"
+
+    def test_no_skills_ref_forwards_none(self) -> None:
+        agent = _make_agent()
+        run_claude_code = AsyncMock(
+            return_value=([], "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
+        )
+        body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+
+        result = self._run(agent, body, run_claude_code)
+
+        assert run_claude_code.call_args.kwargs["skills_path"] is None
+        assert "ng_agent_observations" not in result.model_dump(mode="json")
+        assert result.turns_used == 1
+        assert result.finished_naturally is True
+
+
+class TestObservability:
+    def test_run_returns_observations_when_enabled(self, tmp_path: Path) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+        agent.server_client.global_config_dict = {"observability_enabled": True}
+        agent.server_client.post = _seed_and_verify_post()
+
+        async def run_claude_code(*args, observation_collector=None, **kwargs):
+            transcript = tmp_path / "projects" / "session.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "session-1",
+                        "timestamp": "2026-07-22T10:00:00Z",
+                        "uuid": "event-1",
+                        "message": {
+                            "role": "assistant",
+                            "id": "msg-1",
+                            "content": [{"type": "text", "text": "done"}],
+                        },
+                    }
+                )
+            )
+            run_metadata = {
+                "status": "completed",
+                "duration_ms": 123.0,
+                "num_turns": 7,
+                "subtype": "success",
+                "is_error": False,
+                "compaction_attempts": [{"invocation_id": "session-1", "outcome": "failed"}],
+            }
+            observation_collector(tmp_path, run_metadata)
+            return (
+                _output(_event("assistant", message={"content": [{"type": "text", "text": "done"}]})),
+                "model",
+                run_metadata,
+            )
+
+        request = MagicMock()
+        request.cookies = {}
+        body = ClaudeCodeAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "solve"},
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 2,
+            }
+        )
+        with patch.object(ClaudeCodeAgent, "_run_claude_code", run_claude_code):
+            result = asyncio.run(agent.run(request, body))
+
+        observations = result.ng_agent_observations
+        assert observations is not None
+        invocation = next(record for record in observations.records if isinstance(record, AgentInvocation))
+        assert invocation.invocation_id == "session-1"
+        assert invocation.status == "completed"
+        assert invocation.duration_ms == 123
+        assert invocation.model_calls[0].response_id == "msg-1"
+        compaction = next(
+            record for record in observations.records if isinstance(record, ContextCompactionObservation)
+        )
+        assert compaction.invocation_id == "session-1"
+        assert compaction.outcome == "failed"
+        assert result.turns_used == 1
+        assert result.finished_naturally is True
+        assert {
+            "compaction_before_model_call_unavailable",
+            "compaction_after_model_call_unavailable",
+            "compaction_model_call_reference_unavailable",
+            "no_sandbox_runtime",
+        } <= {gap.code for gap in observations.gaps}
+
 
 class TestRunClaudeCode:
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
@@ -175,7 +404,11 @@ class TestRunClaudeCode:
             returncode = 0
 
             async def communicate(self):
-                return b'{"type":"result","usage":{"input_tokens":3,"output_tokens":4}}\n', b""
+                return (
+                    b'{"type":"result","subtype":"success","is_error":false,'
+                    b'"usage":{"input_tokens":3,"output_tokens":4}}\n',
+                    b"",
+                )
 
         async def fake_exec(*cmd, **kwargs):
             env = kwargs["env"]
@@ -191,7 +424,7 @@ class TestRunClaudeCode:
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
         ):
-            stdout, model = asyncio.run(agent._run_claude_code("hello", system_prompt="be terse"))
+            output_items, model, metadata = asyncio.run(agent._run_claude_code("hello", system_prompt="be terse"))
 
         assert "claude" in captured["cmd"][0]
         assert "--mcp-config" in captured["cmd"]
@@ -200,27 +433,74 @@ class TestRunClaudeCode:
         assert captured["dir_exists_during_run"] is True
         # config dir is removed after the run (no leakage between rollouts)
         assert not Path(captured["config_dir"]).exists()
-        assert "result" in stdout
+        assert output_items == []
         assert model == "claude-sonnet-4-6"
+        assert metadata["status"] == "completed"
+
+    def test_skills_staged_and_bare_dropped(self, tmp_path: Path) -> None:
+        skills_dir = _write_skill_dir(tmp_path)
+        home = tmp_path / "home"
+        home.mkdir()
+        agent = _make_agent()  # bare defaults to True
+        captured: dict = {}
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            config_dir = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
+            captured["cmd"] = list(cmd)
+            captured["skill_staged"] = (config_dir / "skills" / "cot_enhanced" / "SKILL.md").is_file()
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code("hello", skills_path=str(skills_dir)))
+
+        assert captured["skill_staged"] is True
+        # skills present => --bare must be dropped even though config.bare is True
+        assert "--bare" not in captured["cmd"]
+
+    def test_bad_skills_path_does_not_leak_config_dir(self, tmp_path: Path) -> None:
+        # stage_skills raises for a missing skills dir; the partially-created config dir must
+        # still be cleaned up (setup happens inside the try whose finally rmtree's it).
+        home = tmp_path / "home"
+        home.mkdir()
+        agent = _make_agent()
+
+        with patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home):
+            with pytest.raises(ValueError):
+                asyncio.run(agent._run_claude_code("hello", skills_path=str(tmp_path / "does_not_exist")))
+
+        leaked = home / ".claude_code_agent"
+        assert not leaked.exists() or not any(leaked.iterdir())
 
     def test_timeout_returns_empty(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
-        killed = {"called": False}
+        state = {"killed": False, "communicate_calls": 0}
 
         class SlowProc:
             returncode = None
 
             def kill(self):
-                killed["called"] = True
+                state["killed"] = True
 
             async def communicate(self):
-                return b"", b""
+                state["communicate_calls"] += 1
+                return (
+                    _event("system", subtype="status", status="compacting", session_id="session-1").encode(),
+                    b"",
+                )
 
         async def fake_exec(*cmd, **kwargs):
             return SlowProc()
 
         async def fake_wait_for(coro, timeout):
-            coro.close()  # avoid un-awaited coroutine warning
             raise asyncio.TimeoutError
 
         with (
@@ -228,11 +508,345 @@ class TestRunClaudeCode:
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.claude_code_agent.app.asyncio.wait_for", fake_wait_for),
         ):
-            stdout, model = asyncio.run(agent._run_claude_code("hello"))
+            output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
 
-        assert stdout == ""
-        assert killed["called"] is True
+        assert output_items == []
+        assert state == {"killed": True, "communicate_calls": 1}
         assert model == "claude-sonnet-4-6"
+        assert metadata["status"] == "incomplete"
+        assert metadata["error_type"] == "timeout"
+        assert metadata["duration_ms"] >= 0
+        assert metadata["compaction_attempts"] == [{"invocation_id": "session-1", "outcome": "unknown"}]
+
+    def test_cancellation_stops_process_before_observation_cleanup(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        state: list[str] = []
+
+        async def run() -> None:
+            communicating = asyncio.Event()
+            stopped = asyncio.Event()
+
+            class SlowProc:
+                returncode = None
+
+                def kill(self):
+                    state.append("kill")
+                    self.returncode = -9
+                    stopped.set()
+
+                async def communicate(self):
+                    state.append("communicate")
+                    communicating.set()
+                    await stopped.wait()
+                    state.append("stopped")
+                    return b"", b""
+
+            async def fake_exec(*cmd, **kwargs):
+                return SlowProc()
+
+            def collect(config_dir: Path, metadata: dict) -> None:
+                assert config_dir.exists()
+                state.append("collect")
+
+            with (
+                patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+                patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            ):
+                task = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
+                await communicating.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(run())
+
+        assert state == ["communicate", "kill", "stopped", "collect"]
+
+    def test_collects_observations_before_cleanup(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        captured: dict = {}
+        event_loop_thread = threading.get_ident()
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","subtype":"success","is_error":false,"usage":{}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            config_dir = Path(kwargs["env"]["CLAUDE_CONFIG_DIR"])
+            transcript = config_dir / "projects" / "run.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "session-1",
+                        "timestamp": "2026-07-22T10:00:00Z",
+                        "uuid": "event-1",
+                        "message": {
+                            "role": "assistant",
+                            "id": "msg-1",
+                            "content": [{"type": "text", "text": "done"}],
+                        },
+                    }
+                )
+            )
+            captured["config_dir"] = config_dir
+            return FakeProc()
+
+        def collect(config_dir: Path, run_metadata: dict) -> None:
+            captured["collector_thread"] = threading.get_ident()
+            captured["observations"] = extract_claude_code_observations(
+                config_dir,
+                root_status=run_metadata["status"],
+            )
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code("hello", observation_collector=collect))
+
+        invocation = next(record for record in captured["observations"].records if isinstance(record, AgentInvocation))
+        assert invocation.invocation_id == "session-1"
+        assert invocation.status == "completed"
+        assert captured["collector_thread"] != event_loop_thread
+        assert not captured["config_dir"].exists()
+
+
+class TestRolloutMCPConfig:
+    def test_no_metadata_preserves_static_config(self, tmp_path: Path) -> None:
+        agent = _make_agent(mcp_config="/path/to/static.json")
+        assert agent._write_rollout_mcp_config({}, tmp_path) is None
+
+    def test_writes_rollout_mcp_config_with_session_header(self, tmp_path: Path) -> None:
+        agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
+        agent.server_client.global_config_dict = {
+            "example_mcp_weather": {
+                "resources_servers": {
+                    "example_mcp_weather": {
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                    }
+                }
+            }
+        }
+        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+        config_path = agent._write_rollout_mcp_config(
+            {
+                "mcp": {
+                    "server_name": "example_mcp_weather",
+                    "url_path": "/mcp",
+                    "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                }
+            },
+            tmp_path,
+        )
+
+        assert config_path is not None
+        config = json.loads(Path(config_path).read_text())
+        server = config["mcpServers"]["example_mcp_weather"]
+        assert server["type"] == "http"
+        assert server["url"] == "http://127.0.0.1:8123/mcp"
+        assert server["headers"]["X-NeMo-Gym-Session-Token"] == "secret-token"
+
+    def test_merges_static_mcp_config_when_metadata_present(self, tmp_path: Path) -> None:
+        static_config = tmp_path / "static_mcp.json"
+        static_config.write_text(json.dumps({"mcpServers": {"static": {"type": "stdio", "command": "server"}}}))
+        agent = _make_agent(
+            mcp_config=str(static_config),
+            resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"),
+        )
+        agent.server_client.global_config_dict = {
+            "example_mcp_weather": {
+                "resources_servers": {
+                    "example_mcp_weather": {
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                    }
+                }
+            }
+        }
+        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+        config_path = agent._write_rollout_mcp_config(
+            {
+                "mcp": {
+                    "server_name": "dynamic",
+                    "url_path": "/mcp",
+                    "headers": {"X-NeMo-Gym-Session-Token": "tok"},
+                }
+            },
+            tmp_path / "run",
+        )
+
+        config = json.loads(Path(config_path).read_text())
+        assert "static" in config["mcpServers"]
+        assert config["mcpServers"]["dynamic"]["headers"]["X-NeMo-Gym-Session-Token"] == "tok"
+
+    def test_run_passes_generated_mcp_config(self, tmp_path: Path) -> None:
+        agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
+        agent.server_client.global_config_dict = {
+            "example_mcp_weather": {
+                "resources_servers": {
+                    "example_mcp_weather": {
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                    }
+                }
+            }
+        }
+        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+        async def fake_post(server_name, url_path, json=None, cookies=None):
+            if url_path == "/seed_session":
+                return FakeAioHTTPResponse(
+                    {
+                        "mcp": {
+                            "server_name": "example_mcp_weather",
+                            "url_path": "/mcp",
+                            "headers": {"X-NeMo-Gym-Session-Token": "tok"},
+                        }
+                    },
+                    cookies={"session": "abc"},
+                )
+            if url_path == "/verify":
+                return FakeAioHTTPResponse(json | {"reward": 1.0})
+            raise AssertionError(f"unexpected post: {server_name} {url_path}")
+
+        captured: dict = {}
+
+        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, **kwargs):
+            captured["instruction"] = instruction
+            captured["mcp_config"] = mcp_config
+            captured["config_exists_during_run"] = Path(mcp_config).is_file()
+            captured["config"] = json.loads(Path(mcp_config).read_text())
+            return (
+                _output(
+                    _event(
+                        "assistant",
+                        message={"content": [{"type": "text", "text": "The weather in Paris is sunny and 72 F."}]},
+                    )
+                ),
+                "claude-sonnet-4-6",
+                {"status": "completed"},
+            )
+
+        agent.server_client.post.side_effect = fake_post
+        object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+        body = ClaudeCodeAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
+            expected_city="Paris",
+        )
+
+        result = asyncio.run(agent.run(request, body))
+
+        assert result.reward == 1.0
+        assert captured["instruction"] == "use the weather tool"
+        assert captured["config_exists_during_run"] is True
+        server = captured["config"]["mcpServers"]["example_mcp_weather"]
+        assert server["url"] == "http://127.0.0.1:8123/mcp"
+        assert server["headers"]["X-NeMo-Gym-Session-Token"] == "tok"
+        assert not Path(captured["mcp_config"]).exists()
+
+    def test_run_threads_session_cookie_seed_to_verify(self, tmp_path: Path) -> None:
+        agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
+        agent.server_client.global_config_dict = {
+            "example_mcp_weather": {"resources_servers": {"example_mcp_weather": {"host": "127.0.0.1", "port": 8123}}}
+        }
+        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
+
+        captured: dict = {}
+
+        async def fake_post(server_name, url_path, json=None, cookies=None):
+            if url_path == "/seed_session":
+                # the resources server sets a session cookie on the seed response
+                return FakeAioHTTPResponse(
+                    {
+                        "mcp": {
+                            "server_name": "example_mcp_weather",
+                            "url_path": "/mcp",
+                            "headers": {"X-NeMo-Gym-Session-Token": "tok"},
+                        }
+                    },
+                    cookies={"session": "sess-cookie"},
+                )
+            if url_path == "/verify":
+                captured["verify_cookies"] = cookies
+                return FakeAioHTTPResponse(json | {"reward": 1.0})
+            raise AssertionError(f"unexpected post: {server_name} {url_path}")
+
+        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, **kwargs):
+            captured["config_token"] = json.loads(Path(mcp_config).read_text())["mcpServers"]["example_mcp_weather"][
+                "headers"
+            ]["X-NeMo-Gym-Session-Token"]
+            return (
+                _output(_event("assistant", message={"content": [{"type": "text", "text": "ok"}]})),
+                "claude-sonnet-4-6",
+                {"status": "completed"},
+            )
+
+        agent.server_client.post.side_effect = fake_post
+        object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+        body = ClaudeCodeAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
+            verifier_metadata={"expected_city": "Paris"},
+        )
+
+        asyncio.run(agent.run(request, body))
+
+        # the cookie set on /seed_session is threaded into the /verify call (same rollout session),
+        # and the per-rollout token from seed metadata reaches the generated MCP config.
+        assert captured["verify_cookies"] == {"session": "sess-cookie"}
+        assert captured["config_token"] == "tok"
+
+
+class TestRolloutCorrelation:
+    """The CLI streams /v1/messages, so correlation rides on the ANTHROPIC_BASE_URL path prefix."""
+
+    def _fake_proc(self):
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+
+        return FakeProc()
+
+    def _run_and_capture_base_url(self, agent, tmp_path: Path, **run_kwargs) -> str | None:
+        captured: dict = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["base_url"] = kwargs["env"].get("ANTHROPIC_BASE_URL")
+            return self._fake_proc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code("hi", **run_kwargs))
+        return captured["base_url"]
+
+    def test_base_url_correlation(self, tmp_path: Path) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
+        # CLI appends /v1/messages -> server strips /ng-rollout/<id> and keys capture by it.
+        assert base_url == "http://model-server:9000/ng-rollout/task3-roll1"
+
+        with patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"):
+            assert agent._resolve_call_base_url(None) == "http://model-server:9000"
+
+        # Real Anthropic endpoint (no model server): never prefixed -- it has no stripping middleware,
+        # so a prefix would 404 every /v1/messages call.
+        anthropic = _make_agent(anthropic_base_url="https://api.anthropic.com")
+        assert anthropic._resolve_call_base_url("t3-r1") == "https://api.anthropic.com"
 
 
 class TestExtractInstruction:
@@ -258,6 +872,21 @@ class TestExtractInstruction:
 
 
 class TestParseStreamJson:
+    @pytest.mark.parametrize(
+        ("metadata", "returncode", "expected"),
+        [
+            ({"subtype": "success"}, 0, ("completed", None)),
+            ({"subtype": "success"}, 7, ("failed", "process_exit_7")),
+            ({"subtype": "error_max_turns", "is_error": True}, 0, ("incomplete", "error_max_turns")),
+            ({"subtype": "error_during_execution", "is_error": True}, 0, ("failed", "error_during_execution")),
+            ({"subtype": "error_max_turns", "is_error": True}, 7, ("incomplete", "error_max_turns")),
+            ({}, 7, ("failed", "process_exit_7")),
+            ({}, 0, ("incomplete", "result_missing")),
+        ],
+    )
+    def test_invocation_outcome(self, metadata: dict, returncode: int, expected: tuple[str, str | None]) -> None:
+        assert _invocation_outcome(metadata, returncode) == expected
+
     def _assistant(self, content: list) -> str:
         return _event("assistant", message={"content": content, "usage": {"input_tokens": 10, "output_tokens": 5}})
 
@@ -344,6 +973,50 @@ class TestParseStreamJson:
         _, usage = parse_stream_json(result)
         assert usage["input_tokens"] == 100
         assert usage["output_tokens"] == 50
+
+    def test_result_event_exposes_num_turns(self) -> None:
+        result = _event(
+            "result",
+            num_turns=9,
+            subtype="success",
+            is_error=False,
+            duration_ms=1234,
+            usage={"input_tokens": 1, "output_tokens": 1},
+        )
+        _, usage = parse_stream_json(result)
+        assert usage == {
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "num_turns": 9,
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1234,
+        }
+
+    def test_num_turns_absent_when_no_result_event(self) -> None:
+        assistant = self._assistant([{"type": "text", "text": "hi"}])
+        _, usage = parse_stream_json(assistant)
+        assert "num_turns" not in usage
+
+    def test_compaction_status_events_report_failed_and_unknown_attempts(self) -> None:
+        events = [
+            _event("system", subtype="status", status="compacting", session_id="failed"),
+            _event("system", subtype="status", status="requesting", session_id="failed"),
+            _event("system", subtype="status", compact_result="failed", session_id="failed"),
+            _event("system", subtype="status", compact_result="failed", session_id="failed-without-opener"),
+            _event("system", subtype="status", status="compacting", session_id="success"),
+            _event("system", subtype="status", status="requesting", session_id="success"),
+            _event("system", subtype="status", compact_result="success", session_id="success"),
+            _event("system", subtype="status", status="compacting", session_id="open"),
+        ]
+
+        _, metadata = parse_stream_json("\n".join(events))
+
+        assert metadata["compaction_attempts"] == [
+            {"invocation_id": "failed", "outcome": "failed"},
+            {"invocation_id": "failed-without-opener", "outcome": "failed"},
+            {"invocation_id": "open", "outcome": "unknown"},
+        ]
 
 
 class TestConfigYaml:

@@ -78,18 +78,20 @@ When an environment requires an external tool (compiler, runtime, etc.), auto-in
 
 ```bash
 # Setup
-uv venv && uv sync --extra dev --group docs
+uv venv && uv sync --extra dev
 pre-commit install
 
 # Run servers
-ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server example_single_tool_call \
+    --model-type vllm_model
 
 # Run tests for a specific server (creates .venv per server, installs deps, runs pytest)
 # First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.
-ng_test +entrypoint=resources_servers/example_single_tool_call
+gym env test --resources-server example_single_tool_call
 
 # Run all server tests
-ng_test_all
+gym env test
 
 # Run core library unit tests
 pytest tests/unit_tests/ -x
@@ -105,19 +107,19 @@ ruff format .
 pre-commit run --all-files
 
 # Check server health
-ng_status
+gym env status
 
-# Dev test (runs pytest directly in server dir, no venv isolation)
-ng_dev_test +entrypoint=resources_servers/example_single_tool_call
+# Dev test (runs the core unit tests with coverage: pytest --cov)
+gym dev test
 
 # Dump merged config
-ng_dump_config "+config_paths=[...]"
+gym env resolve --config ...
 ```
 
 ## Code Style
 
 - Line length: 119
-- Python 3.12+, async-first
+- Python 3.13.14+, async-first
 - Ruff for linting and formatting (double quotes, isort)
 - Test coverage must be >= 96%
 - All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
@@ -143,4 +145,4 @@ git checkout -- resources_servers/other_server/
 ## Cluster / HPC Gotchas
 
 - **Ray socket path length**: On systems with long working directory paths (e.g. Lustre mounts), Ray's AF_UNIX socket paths can exceed the 107-byte Linux limit. Fix: `RAY_TMPDIR=/tmp` before running tests or `ray.init()`.
-- **`ng_test` venv isolation**: `ng_test` creates isolated venvs per resources server. `os.environ` changes in Python don't propagate — set env vars externally (e.g. `RAY_TMPDIR=/tmp ng_test ...`).
+- **`gym env test` venv isolation**: `gym env test` creates isolated venvs per resources server. `os.environ` changes in Python don't propagate — set env vars externally (e.g. `RAY_TMPDIR=/tmp gym env test ...`).

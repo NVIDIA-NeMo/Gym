@@ -14,28 +14,27 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import json
 import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from asyncio import Semaphore
+from contextlib import suppress
 from pathlib import Path
-from time import time
-from typing import Any, Optional
+from time import monotonic, time
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -48,7 +47,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
+from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
+from nemo_gym.skills import stage_skills
+from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
 
@@ -86,6 +88,10 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
     buffered_think: str | None = None
     total_input = 0
     total_output = 0
+    num_turns: Optional[int] = None
+    result_metadata: dict[str, Any] = {}
+    compacting_sessions: set[str] = set()
+    compaction_attempts: list[dict[str, str]] = []
 
     for event in raw_events:
         etype = event.get("type")
@@ -94,6 +100,16 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
             usage = event.get("usage") or {}
             total_input += int(usage.get("input_tokens") or 0)
             total_output += int(usage.get("output_tokens") or 0)
+            # Claude Code's authoritative turn counter (what --max-turns bounds).
+            if event.get("num_turns") is not None:
+                num_turns = int(event["num_turns"])
+            if isinstance(event.get("subtype"), str):
+                result_metadata["subtype"] = event["subtype"]
+            if isinstance(event.get("is_error"), bool):
+                result_metadata["is_error"] = event["is_error"]
+            duration_ms = event.get("duration_ms")
+            if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool) and duration_ms >= 0:
+                result_metadata["duration_ms"] = float(duration_ms)
 
         elif etype == "assistant":
             message = event.get("message", {})
@@ -168,7 +184,42 @@ def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
                     )
                 )
 
-    return output_items, {"input_tokens": total_input, "output_tokens": total_output}
+        elif etype == "system" and event.get("subtype") == "status":
+            session_id = event.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            if event.get("status") == "compacting":
+                compacting_sessions.add(session_id)
+                continue
+            compact_result = event.get("compact_result")
+            if compact_result in {"failed", "success"}:
+                if compact_result == "failed":
+                    compaction_attempts.append({"invocation_id": session_id, "outcome": "failed"})
+                compacting_sessions.discard(session_id)
+
+    compaction_attempts.extend(
+        {"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting_sessions
+    )
+    metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
+    if num_turns is not None:
+        metadata["num_turns"] = num_turns
+    if compaction_attempts:
+        metadata["compaction_attempts"] = compaction_attempts
+    metadata.update(result_metadata)
+    return output_items, metadata
+
+
+def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tuple[str, str | None]:
+    subtype = metadata.get("subtype")
+    if subtype == "error_max_turns":
+        return "incomplete", subtype
+    if metadata.get("is_error") is True or (isinstance(subtype, str) and subtype.startswith("error_")):
+        return "failed", subtype if isinstance(subtype, str) else "agent_error"
+    if returncode not in (0, None):
+        return "failed", f"process_exit_{returncode}"
+    if subtype == "success":
+        return "completed", None
+    return "incomplete", "result_missing"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -206,14 +257,14 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
-    # server's URL (requires the server to expose POST /v1/messages. None is pushed yet).
+    # server's URL (requires the server to expose POST /v1/messages).
     # When None, anthropic_base_url is used directly.
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 32
     model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""  # pragma: allowlist secret
     anthropic_base_url: Optional[str] = None
-    max_turns: int = 30
+    max_turns: Optional[int] = 30  # None -> unlimited turns
     timeout: int = 300
     system_prompt: Optional[str] = None
     allowed_tools: Optional[str] = None
@@ -221,9 +272,9 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
-    # Runtime capability knobs. The default (bare=True, no mcp_config/settings)
-    # reproduces the original isolated behavior: Claude Code skips auto-discovery
-    # of skills, hooks, plugins, MCP servers, auto memory, and CLAUDE.md.
+    # Runtime capability knobs. The default (bare=True, no mcp_config/settings) reproduces the original
+    # isolated behavior: Claude Code skips hooks, LSP, plugin sync, attribution, auto-memory, background
+    # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
     bare: bool = True
     mcp_config: Optional[str] = None
     settings: Optional[str] = None
@@ -237,11 +288,15 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     config: ClaudeCodeAgentConfig
     sem: Semaphore = None
+    _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
@@ -261,6 +316,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
             return self.server_client._build_server_base_url(cfg)
         return self.config.anthropic_base_url or ""
+
+    def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
+        """Base URL for the CLI's model calls, with the per-rollout capture prefix applied only when a
+        Gym model server is configured. A real Anthropic endpoint (``model_server`` unset) has no
+        prefix-stripping middleware, so prefixing it would 404 every call.
+        """
+        base_url = self._resolve_base_url()
+        if base_url and self.config.model_server:
+            base_url = apply_rollout_prefix(base_url, rollout_id)
+        return base_url
 
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
@@ -282,24 +347,45 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             settings = {**settings, **user_settings, "env": {**settings["env"], **user_env}}
         return settings
 
-    def _setup_config_dir(self) -> Path:
-        """Create a per-run CLAUDE_CONFIG_DIR and stage settings into it.
+    def _setup_config_dir(self, skills_path: Optional[str] = None) -> Path:
+        """Create a per-run CLAUDE_CONFIG_DIR and stage settings (and optionally skills) into it.
 
-        The directory lives for the duration of a single ``_run_claude_code`` call and is the
-        staging seam for capabilities discovered from CLAUDE_CONFIG_DIR (e.g. skills under
-        ``<dir>/skills/``). The caller is responsible for removing it.
+        The directory lives for the duration of a single ``_run_claude_code`` call. When
+        ``skills_path`` is provided, the directory of skills is copied into ``<dir>/skills/`` so
+        Claude Code's native discovery can pick them up. Each request gets its own ephemeral copy,
+        so concurrent requests with different skills do not contaminate one another. The caller is
+        responsible for removing the directory on success; if setup fails partway (e.g. a bad
+        ``skills_path``), this method cleans up the partially-created dir before re-raising so it
+        does not leak (the caller never receives the path in that case).
         """
         claude_config_dir = Path.home() / ".claude_code_agent" / uuid4().hex
         claude_config_dir.mkdir(parents=True)
-        (claude_config_dir / "settings.json").write_text(json.dumps(self._build_settings()))
+        try:
+            (claude_config_dir / "settings.json").write_text(json.dumps(self._build_settings()))
+            if skills_path:
+                stage_skills(skills_path, claude_config_dir / "skills")
+        except Exception:
+            shutil.rmtree(claude_config_dir, ignore_errors=True)
+            raise
         return claude_config_dir
 
-    def _build_command(self, model: str, instruction: str, system_prompt: Optional[str] = None) -> list[str]:
+    def _build_command(
+        self,
+        model: str,
+        instruction: str,
+        system_prompt: Optional[str] = None,
+        mcp_config: Optional[str] = None,
+        skills_active: bool = False,
+    ) -> list[str]:
         """Construct the ``claude`` CLI argv from config.
 
-        ``--bare`` is only passed when ``config.bare`` is True; it disables auto-discovery of
-        skills, hooks, plugins, MCP servers, auto memory, and CLAUDE.md. Explicit capabilities
-        like ``--mcp-config`` are passed regardless of ``--bare`` since they are not auto-discovered.
+        ``--bare`` is only passed when ``config.bare`` is True; it skips hooks, LSP, plugin sync,
+        attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery
+        (skills still resolve via /skill-name). Explicit capabilities like ``--mcp-config`` are passed
+        regardless of ``--bare`` since they are not auto-discovered.
+
+        When ``skills_active`` is True (skills were staged into CLAUDE_CONFIG_DIR for this request),
+        ``--bare`` is forced off so Claude Code's native filesystem discovery picks the skills up.
         """
         cmd = [
             "claude",
@@ -309,11 +395,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             "--verbose",
             "--dangerously-skip-permissions",
         ]
-        if self.config.bare:
+        if self.config.bare and skills_active:
+            LOG.warning(
+                "skills are active for this request; ignoring bare=True so Claude Code can discover them. "
+                "Note this re-enables ALL native auto-discovery, not just skills (hooks, plugins, MCP servers, "
+                "memory, and CLAUDE.md), so the runtime broadens versus a bare baseline."
+            )
+        if self.config.bare and not skills_active:
             cmd.append("--bare")
-        cmd += ["--max-turns", str(self.config.max_turns), "--model", model]
-        if self.config.mcp_config:
-            cmd += ["--mcp-config", self.config.mcp_config]
+        cmd += ["--model", model]
+        effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
+        if effective_mcp_config:
+            cmd += ["--mcp-config", effective_mcp_config]
         if system_prompt:
             cmd += ["--append-system-prompt", system_prompt]
         if self.config.allowed_tools:
@@ -324,18 +417,36 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--thinking", self.config.thinking]
         if self.config.max_thinking_tokens is not None:
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
+        if self.config.max_turns is not None:
+            cmd += ["--max-turns", str(self.config.max_turns)]
         cmd += ["--", instruction]
         return cmd
 
-    async def _run_claude_code(self, instruction: str, system_prompt: Optional[str] = None) -> tuple[str, str]:
-        """Run claude -p --output-format=stream-json and return (stdout, model_name)."""
-        base_url = self._resolve_base_url()
+    async def _run_claude_code(
+        self,
+        instruction: str,
+        system_prompt: Optional[str] = None,
+        mcp_config: Optional[str] = None,
+        skills_path: Optional[str] = None,
+        rollout_id: Optional[str] = None,
+        observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
+    ) -> tuple[list[Any], str, dict[str, Any]]:
+        """Run Claude Code and return parsed output, model name, and run metadata.
+
+        When ``rollout_id`` is set and a model server is configured, the per-rollout capture prefix is
+        applied to ANTHROPIC_BASE_URL so the CLI's streaming /v1/messages calls correlate to this rollout.
+        """
+        base_url = self._resolve_call_base_url(rollout_id)
         # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         api_key = self.config.anthropic_api_key
 
-        claude_config_dir = self._setup_config_dir()
+        claude_config_dir = None
+        run_metadata: dict[str, Any] = {"status": "unknown"}
         try:
+            # Inside the try so a bad skills.path (raising in stage_skills) still cleans up the
+            # partially-created config dir in the finally rather than leaking it per failing request.
+            claude_config_dir = self._setup_config_dir(skills_path=skills_path)
             env = {
                 **os.environ,
                 "ANTHROPIC_API_KEY": api_key,  # pragma: allowlist secret
@@ -351,34 +462,136 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 env["ANTHROPIC_BASE_URL"] = base_url
                 env["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
 
-            cmd = self._build_command(model, instruction, system_prompt=system_prompt)
+            cmd = self._build_command(
+                model,
+                instruction,
+                system_prompt=system_prompt,
+                mcp_config=mcp_config,
+                skills_active=bool(skills_path),
+            )
 
+            process_started_at = monotonic()
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
+            communication = asyncio.create_task(proc.communicate())
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                stdout, stderr = await asyncio.wait_for(
+                    asyncio.shield(communication),
+                    timeout=self.config.timeout,
+                )
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
+                if proc.returncode is None:
+                    with suppress(ProcessLookupError):
+                        proc.kill()
+                stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                return "", model
+                _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
+                run_metadata.update(
+                    status="incomplete",
+                    error_type="timeout",
+                    duration_ms=(monotonic() - process_started_at) * 1000,
+                )
+                return [], model, run_metadata
+            except asyncio.CancelledError:
+                if proc.returncode is None:
+                    with suppress(ProcessLookupError):
+                        proc.kill()
+                await asyncio.gather(communication, return_exceptions=True)
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("claude-code exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
-            LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
-            return stdout.decode(errors="replace"), model
+            stdout_text = stdout.decode(errors="replace")
+            LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
+            output_items, run_metadata = parse_stream_json(stdout_text)
+            run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
+            status, error_type = _invocation_outcome(run_metadata, proc.returncode)
+            run_metadata["status"] = status
+            if error_type is not None:
+                run_metadata["error_type"] = error_type
+            return output_items, model, run_metadata
         finally:
-            shutil.rmtree(claude_config_dir, ignore_errors=True)
+            if claude_config_dir is not None:
+                try:
+                    if observation_collector is not None:
+                        await asyncio.to_thread(observation_collector, claude_config_dir, run_metadata)
+                except Exception:
+                    LOG.exception("failed to collect Claude Code observations")
+                finally:
+                    shutil.rmtree(claude_config_dir, ignore_errors=True)
 
-    async def responses(
+    def _resources_server_base_url(self) -> str:
+        cfg = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.resources_server.name,
+        )
+        return self.server_client._build_server_base_url(cfg)
+
+    def _load_static_mcp_config(self) -> dict[str, Any]:
+        if not self.config.mcp_config:
+            return {"mcpServers": {}}
+
+        config_path = Path(self.config.mcp_config).expanduser()
+        config = json.loads(config_path.read_text())
+        if not isinstance(config, dict):
+            raise ValueError(f"Claude Code mcp_config must be a JSON object: {config_path}")
+        mcp_servers = config.setdefault("mcpServers", {})
+        if not isinstance(mcp_servers, dict):
+            raise ValueError(f"Claude Code mcp_config has non-object mcpServers: {config_path}")
+        return config
+
+    def _get_static_mcp_config(self) -> dict[str, Any]:
+        # The static mcp_config is immutable, so read it from disk at most once and reuse the cached
+        # copy for every rollout instead of re-reading the file each time.
+        if self._static_mcp_config is None:
+            self._static_mcp_config = self._load_static_mcp_config()
+        return self._static_mcp_config
+
+    def _write_rollout_mcp_config(self, seed_response_json: dict[str, Any], output_dir: Path) -> Optional[str]:
+        metadata = seed_response_json.get(NEMO_GYM_MCP_METADATA_KEY)
+        if not isinstance(metadata, dict):
+            return None
+
+        server_name = metadata.get("server_name") or self.config.resources_server.name
+        url_path = str(metadata.get("url_path") or "/mcp")
+        url = f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}"
+
+        entry: dict[str, Any] = {
+            "type": metadata.get("transport") or "http",
+            "url": url,
+        }
+        headers = metadata.get("headers")
+        if isinstance(headers, dict) and headers:
+            entry["headers"] = {str(key): str(value) for key, value in headers.items()}
+        else:
+            LOG.warning(
+                "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
+                "session token and will reject the calls.",
+                server_name,
+            )
+
+        # Start from a copy of the (cached) static config and add the per-rollout Gym entry. If a static
+        # mcp_config server already uses this name, the per-rollout Gym entry takes precedence over it.
+        config = copy.deepcopy(self._get_static_mcp_config())
+        config.setdefault("mcpServers", {})[str(server_name)] = entry
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config_path = output_dir / "gym_mcp_config.json"
+        config_path.write_text(json.dumps(config, indent=2, sort_keys=True))
+        return str(config_path)
+
+    async def _create_response(
         self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        mcp_config: Optional[str] = None,
+        skills_path: Optional[str] = None,
+        rollout_id: Optional[str] = None,
+        observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -388,8 +601,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        stdout, model_name = await self._run_claude_code(user_message, system_prompt=system_prompt)
-        output_items, usage = parse_stream_json(stdout)
+        output_items, model_name, run_metadata = await self._run_claude_code(
+            user_message,
+            system_prompt=system_prompt,
+            mcp_config=mcp_config,
+            skills_path=skills_path,
+            rollout_id=rollout_id,
+            observation_collector=observation_collector,
+        )
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -406,8 +625,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 )
             )
 
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
+        input_tokens = run_metadata.get("input_tokens", 0)
+        output_tokens = run_metadata.get("output_tokens", 0)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -427,6 +646,58 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
 
+    async def responses(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
+
+    async def _create_episode(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        mcp_config: Optional[str] = None,
+        skills_path: Optional[str] = None,
+        rollout_id: Optional[str] = None,
+    ) -> AgentEpisode:
+        observations: Optional[AgentObservationBundle] = None
+
+        def collect(config_dir: Path, run_metadata: dict[str, Any]) -> None:
+            nonlocal observations
+            try:
+                observations = extract_claude_code_observations(
+                    config_dir,
+                    model_ref=self.config.model_server,
+                    root_status=run_metadata["status"],
+                    root_duration_ms=run_metadata.get("duration_ms"),
+                    root_error_type=run_metadata.get("error_type"),
+                    compaction_attempts=run_metadata.get("compaction_attempts"),
+                )
+                if self.config.model_server is None:
+                    observations.gaps.append(ObservationGap(code="model_call_ownership_unavailable"))
+            except Exception:
+                LOG.exception("failed to extract Claude Code observations")
+                observations = AgentObservationBundle(
+                    source="claude_code",
+                    gaps=[ObservationGap(code="observation_parse_failed")],
+                )
+
+        response = await self._create_response(
+            body,
+            mcp_config=mcp_config,
+            skills_path=skills_path,
+            rollout_id=rollout_id,
+            observation_collector=collect,
+        )
+        if observations is None:
+            observations = AgentObservationBundle(
+                source="claude_code",
+                gaps=[ObservationGap(code="agent_transcript_unavailable")],
+            )
+        observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
+        return AgentEpisode(response=response, observations=observations)
+
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
@@ -439,16 +710,33 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
+            seed_resp_json = await get_response_json(seed_resp)
 
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
+            # The run-level skills_ref (stamped by rollout collection) rides on the request body
+            # (extra="allow"). Pass its path straight into _create_response so the CLI invocation
+            # can stage the skills into its per-request CLAUDE_CONFIG_DIR. run() calls _create_response
+            # in-process, so no metadata side-channel is needed (unlike the schema-forbidden HTTP path).
+            skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
+            rollout_id = self.rollout_id_from_run(body)
+
+            with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
+                mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
+                if rollout_id is not None:
+                    episode = await self._create_episode(
+                        body.responses_create_params,
+                        mcp_config=mcp_config,
+                        skills_path=skills_path,
+                        rollout_id=rollout_id,
+                    )
+                    agent_resp, observations = episode.response, episode.observations
+                else:
+                    agent_resp = await self._create_response(
+                        body.responses_create_params,
+                        mcp_config=mcp_config,
+                        skills_path=skills_path,
+                    )
+                    observations = None
+                agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -468,9 +756,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             last = gym_resp.output[-1] if gym_resp.output else None
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
-            return ClaudeCodeAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
-            )
+            result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            if observations is not None:
+                result["ng_agent_observations"] = observations.model_dump(mode="json")
+            return ClaudeCodeAgentVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":

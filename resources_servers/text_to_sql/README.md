@@ -68,19 +68,19 @@ Each data sample should include:
 ### Running Servers
 
 ```bash
-config_paths="resources_servers/text_to_sql/configs/text_to_sql.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-
-ng_run "+config_paths=[${config_paths}]" \
+gym env start \
+  --resources-server text_to_sql \
+  --model-type openai_model \
   +text_to_sql_resources_server.resources_servers.text_to_sql.judge_responses_create_params.max_output_tokens=512
 ```
 
 ### Collecting Rollouts
 
 ```bash
-ng_collect_rollouts +agent_name=text_to_sql_simple_agent \
-    +input_jsonl_fpath=resources_servers/text_to_sql/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/text_to_sql/data/example_rollouts.jsonl
+gym eval run --no-serve \
+    --agent text_to_sql_simple_agent \
+    --input resources_servers/text_to_sql/data/example.jsonl \
+    --output resources_servers/text_to_sql/data/example_rollouts.jsonl
 ```
 
 ## Configuration Options

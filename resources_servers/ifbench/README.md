@@ -45,17 +45,18 @@ This clones the repo, applies patches, and writes the `.installed` marker. On su
 ## Example Usage
 
 ```bash
-config_paths="benchmarks/ifbench/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml"
+gym env start \
+    --benchmark ifbench \
+    --model-type openai_model
 
-ng_run "+config_paths=[$config_paths]"
-
-ng_collect_rollouts \
-    +agent_name=ifbench_benchmark_simple_agent \
-    +input_jsonl_fpath=resources_servers/ifbench/data/example.jsonl \
-    +prompt_config=benchmarks/ifbench/prompts/default.yaml \
-    +output_jsonl_fpath=/tmp/ifbench_rollouts.jsonl \
-    +num_repeats=1 \
-    "+responses_create_params={max_output_tokens: 4096, temperature: 0.0}"
+gym eval run --no-serve \
+    --agent ifbench_benchmark_simple_agent \
+    --input resources_servers/ifbench/data/example.jsonl \
+    --output /tmp/ifbench_rollouts.jsonl \
+    --num-repeats 1 \
+    --max-output-tokens 4096 \
+    --temperature 0.0 \
+    --prompt-config benchmarks/ifbench/prompts/default.yaml
 ```
 
 ## Licensing

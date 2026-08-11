@@ -1,6 +1,8 @@
 # MMLU-ProX
 
-[MMLU-ProX](https://arxiv.org/abs/2503.04861) is a multilingual extension of MMLU-Pro with 10 answer choices (A–J) across 6 languages: English, German, Spanish, French, Italian, and Japanese. Questions are professionally translated and include language-specific answer extraction patterns.
+[MMLU-ProX](https://arxiv.org/abs/2503.10497) is a multilingual extension of MMLU-Pro with 10 answer choices (A–J) across 29 languages. Questions are professionally translated and include language-specific answer extraction patterns.
+
+The supported language codes are: Afrikaans (`af`), Arabic (`ar`), Bengali (`bn`), Czech (`cs`), German (`de`), English (`en`), Spanish (`es`), French (`fr`), Hindi (`hi`), Hungarian (`hu`), Indonesian (`id`), Italian (`it`), Japanese (`ja`), Korean (`ko`), Marathi (`mr`), Nepali (`ne`), Portuguese (`pt`), Russian (`ru`), Serbian (`sr`), Swahili (`sw`), Telugu (`te`), Thai (`th`), Ukrainian (`uk`), Urdu (`ur`), Vietnamese (`vi`), Wolof (`wo`), Yoruba (`yo`), Chinese (`zh`), and Zulu (`zu`).
 
 ## Configuration
 
@@ -13,13 +15,16 @@ This benchmark uses the `mcqa` resource server with the `mcqa_simple_agent`.
 
 ```bash
 # Prepare data
-ng_prepare_benchmark "+config_paths=[benchmarks/mmlu_prox/config.yaml]"
+gym eval prepare --benchmark mmlu_prox
 
 # Start servers
-ng_run "+config_paths=[benchmarks/mmlu_prox/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --benchmark mmlu_prox \
+    --model-type vllm_model
 
 # Collect rollouts
-ng_collect_rollouts \
-    "+config_paths=[benchmarks/mmlu_prox/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
-    +output_jsonl_fpath=results/mmlu_prox.jsonl
+gym eval run --no-serve \
+    --benchmark mmlu_prox \
+    --model-type vllm_model \
+    --output results/mmlu_prox.jsonl
 ```

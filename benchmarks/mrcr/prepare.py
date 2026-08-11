@@ -31,7 +31,7 @@ Nemotron-3-Super HF tokenizer, see ``prepare_n3_128k.py`` and
 Invocation
 ----------
 
-``ng_prepare_benchmark`` calls ``prepare()`` with no arguments, using
+``gym eval prepare`` calls ``prepare()`` with no arguments, using
 the defaults below. To build a custom variant, run this script
 directly::
 

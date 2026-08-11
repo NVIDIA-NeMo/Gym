@@ -98,14 +98,15 @@ tools=[
 
 ### Running the Server
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-resources_servers/google_search/configs/google_search.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --resources-server google_search
 
-ng_collect_rollouts +agent_name=simple_agent \
-    +input_jsonl_fpath=data/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
-    +output_jsonl_fpath=results/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
-    +limit=1
+gym eval run --no-serve \
+    --agent simple_agent \
+    --input data/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
+    --output results/Nemotron-RL-knowledge-web_search-mcqa.jsonl \
+    --limit 1
 ```
 
 ## Samples

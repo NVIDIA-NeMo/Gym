@@ -12,18 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import base64
+import hashlib
 import json
+import logging
 import os
-import re
 from copy import deepcopy
-from time import time
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
-from uuid import uuid4
+from time import time, time_ns
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -31,39 +32,116 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
-    RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
-    NeMoGymChatCompletionAssistantMessageForTrainingParam,
-    NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionMessage,
-    NeMoGymChatCompletionMessageParam,
-    NeMoGymChatCompletionMessageToolCallFunctionParam,
-    NeMoGymChatCompletionMessageToolCallParam,
-    NeMoGymChatCompletionSystemMessageParam,
-    NeMoGymChatCompletionToolMessageParam,
-    NeMoGymChatCompletionToolParam,
-    NeMoGymChatCompletionUserMessageParam,
     NeMoGymChoice,
-    NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
-    NeMoGymFunctionDefinition,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputItem,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
-    NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseReasoningItem,
-    NeMoGymResponseUsage,
-    NeMoGymSummary,
-    TokenIDLogProbMixin,
+)
+from nemo_gym.responses_converter import (
+    VLLMConverter,
+    VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
+    split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+
+
+LOG = logging.getLogger("nemo_gym.vllm_model")
+
+_TRANSPORT_LOG_CONTEXT_HEADERS = {
+    "run_id": "x-nemo-gym-log-run-id",
+    "adapter": "x-nemo-gym-log-adapter",
+    "task_id": "x-nemo-gym-log-task-id",
+    "domain": "x-nemo-gym-log-domain",
+    "task_attempt": "x-nemo-gym-log-task-attempt",
+    "step": "x-nemo-gym-log-step",
+    "parse_attempt": "x-nemo-gym-log-parse-attempt",
+}
+
+
+def _transport_log_context(request: Request) -> Dict[str, Any]:
+    """Read opt-in Gym trace headers without changing the model body."""
+
+    context: Dict[str, Any] = {}
+    for field, header in _TRANSPORT_LOG_CONTEXT_HEADERS.items():
+        value = request.headers.get(header)
+        if not value:
+            continue
+        if field in {"task_attempt", "step", "parse_attempt"}:
+            try:
+                context[field] = int(value)
+            except ValueError:
+                continue
+        else:
+            context[field] = value
+    return context
+
+
+def _jsonable(value: Any) -> Any:
+    """Return a JSON-compatible representation for transport logs."""
+
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def _transport_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Index embedded images while retaining the complete request payload."""
+
+    images: List[Dict[str, Any]] = []
+    for message_index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part_index, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else image_url
+            if not isinstance(url, str):
+                continue
+            encoded = url.split(",", 1)[1] if url.startswith("data:") and "," in url else ""
+            try:
+                decoded = base64.b64decode(encoded, validate=False) if encoded else b""
+            except Exception:  # noqa: BLE001 - logging must not break a request.
+                decoded = b""
+            images.append(
+                {
+                    "message_index": message_index,
+                    "part_index": part_index,
+                    "data_url_chars": len(url),
+                    "encoded_sha256": hashlib.sha256(encoded.encode("ascii", errors="ignore")).hexdigest(),
+                    "decoded_bytes": len(decoded),
+                    "decoded_sha256": hashlib.sha256(decoded).hexdigest(),
+                }
+            )
+    return images
+
+
+def _append_transport_io(event: Dict[str, Any]) -> None:
+    """Append exact vLLM request/response data when explicitly enabled."""
+
+    path = os.environ.get("NEMO_GYM_VLLM_TRANSPORT_LOG", "").strip()
+    if not path:
+        return
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_jsonable(event), ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        LOG.exception("Failed to append vLLM transport log to %s", path)
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
@@ -74,6 +152,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Keep reconstructed assistant history byte-for-byte in ``content`` for
+    # models whose validated direct-vLLM contract includes <think> tags.
+    # Response parsing remains controlled independently by
+    # ``uses_reasoning_parser``.
+    preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
@@ -94,6 +177,30 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+
+    # When True, outbound calls go to vLLM's /v1/completions endpoint instead
+    # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
+    # external endpoints continue to work; only the upstream call swaps.
+    #
+    # In raw mode (render_chat_template=False, the default) the messages list
+    # must be a single user message (optionally preceded by a single system
+    # message); tools, multi-turn turns, audio, and non-text blocks are
+    # rejected. With render_chat_template=True the messages are rendered into
+    # a prompt string client-side via HF AutoTokenizer.apply_chat_template,
+    # which lifts the multi-turn restriction.
+    use_completions_api: bool = False
+
+    # Only consulted when ``use_completions_api`` is True. When True, render
+    # the messages list to a prompt string via HF AutoTokenizer.apply_chat_template
+    # (tokenize=False, add_generation_prompt=True) before forwarding to
+    # /v1/completions. The HF tokenizer is loaded once at startup from
+    # ``tokenizer`` (or ``model`` if unset). Fails at startup if the loaded
+    # tokenizer has no chat_template.
+    render_chat_template: bool = False
+
+    # HF identifier or local path passed to AutoTokenizer.from_pretrained.
+    # When None, falls back to ``model``.
+    tokenizer: Optional[str] = None
 
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
@@ -131,6 +238,51 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
 
         self._converter = self.get_converter()
+        self._transport_call_index = 0
+
+        self._chat_template_tokenizer = None
+        if self.config.use_completions_api and self.config.render_chat_template:
+            self._chat_template_tokenizer = self._load_chat_template_tokenizer()
+
+    def _load_chat_template_tokenizer(self):
+        """Load an HF AutoTokenizer for client-side chat-template rendering.
+
+        Imported lazily so that VLLMModel users who don't set
+        ``render_chat_template=True`` aren't forced to have ``transformers``
+        imported at server start (it's a heavy import).
+
+        Fails loudly at startup if (a) the tokenizer can't be loaded, or
+        (b) it loaded but has no ``chat_template`` configured.
+        """
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as e:
+            raise ImportError(
+                f"NeMo Gym server `{self.config.name}` is configured with "
+                "use_completions_api=true and render_chat_template=true, which requires "
+                "the `transformers` package to load an HF tokenizer for chat-template "
+                "rendering. Install it (`pip install transformers`) or set "
+                "render_chat_template=false to use raw rendering instead."
+            ) from e
+
+        tokenizer_id = self.config.tokenizer or self.config.model
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"NeMo Gym server `{self.config.name}`: AutoTokenizer.from_pretrained({tokenizer_id!r}) "
+                "failed. Set `tokenizer:` in the server config to an HF identifier or local "
+                "path, or set render_chat_template=false."
+            ) from e
+
+        if not getattr(tokenizer, "chat_template", None):
+            raise RuntimeError(
+                f"NeMo Gym server `{self.config.name}`: tokenizer loaded from {tokenizer_id!r} "
+                "has no chat_template configured. Point `tokenizer:` at a model whose "
+                "tokenizer ships a chat template, or set render_chat_template=false."
+            )
+
+        return tokenizer
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -145,55 +297,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
-        choice = chat_completion_response.choices[0]
-
-        response_output = self._converter.postprocess_chat_response(choice)
-        response_output_dicts = [item.model_dump() for item in response_output]
-
-        usage = None
-        if chat_completion_response.usage:
-            usage = NeMoGymResponseUsage(
-                input_tokens=chat_completion_response.usage.prompt_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-                output_tokens=chat_completion_response.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=chat_completion_response.usage.prompt_tokens
-                + chat_completion_response.usage.completion_tokens,
-            )
-
-        incomplete_details = None
-        if choice.finish_reason == "length":
-            incomplete_details = {"reason": "max_output_tokens"}
-        elif choice.finish_reason == "content_filter":
-            incomplete_details = {"reason": "content_filter"}
-
-        # Chat Completion -> Response
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=body.model,
-            object="response",
-            output=response_output_dicts,
-            tool_choice=body.tool_choice if "tool_choice" in body else "auto",
-            parallel_tool_calls=body.parallel_tool_calls,
-            tools=body.tools,
-            temperature=body.temperature,
-            top_p=body.top_p,
-            background=body.background,
-            max_output_tokens=body.max_output_tokens,
-            max_tool_calls=body.max_tool_calls,
-            previous_response_id=body.previous_response_id,
-            prompt=body.prompt,
-            reasoning=body.reasoning,
-            service_tier=body.service_tier,
-            text=body.text,
-            top_logprobs=body.top_logprobs,
-            truncation=body.truncation,
-            metadata=body.metadata,
-            instructions=body.instructions,
-            user=body.user,
-            incomplete_details=incomplete_details,
-            usage=usage,
+        return self._converter.chat_completion_to_response(
+            responses_create_params=body, chat_completion=chat_completion_response
         )
 
     async def _responses_native(
@@ -300,10 +405,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             chat_template_kwargs = deepcopy(self.config.chat_template_kwargs)
 
-        metadata = body_dict.get("metadata", dict())
+        metadata = body_dict.get("metadata") or {}
 
         # Merge global config chat_template_kwargs with per-request overrides in metadata (e.g. per-sample reasoning on/off)
-        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs", "{}")
+        metadata_chat_template_kwargs_str = metadata.get("chat_template_kwargs") or "{}"
         chat_template_kwargs.update(json.loads(metadata_chat_template_kwargs_str))
 
         if chat_template_kwargs:
@@ -314,7 +419,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
 
-        metadata_extra_body_str = metadata.get("extra_body", "{}")
+        metadata_extra_body_str = metadata.get("extra_body") or "{}"
         extra_body.update(json.loads(metadata_extra_body_str))
 
         if self.config.return_token_id_information:
@@ -334,7 +439,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # prompt_logprobs=0,
             )
 
-        if self.config.uses_reasoning_parser:
+        if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") != "assistant" or "content" not in message_dict:
                     continue
@@ -452,11 +557,13 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        if self.config.use_completions_api:
+            return await self._chat_completions_via_completions_api(request, body)
+
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
-
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
@@ -464,9 +571,50 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "content_filter"
                 return res
 
+        transport_io_enabled = bool(os.environ.get("NEMO_GYM_VLLM_TRANSPORT_LOG", "").strip())
+        log_context = _transport_log_context(request)
+        call_index = 0
+        started_ns = 0
+        if transport_io_enabled:
+            self._transport_call_index += 1
+            call_index = self._transport_call_index
+            request_value = _jsonable(body_dict)
+            request_json = json.dumps(request_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            started_ns = time_ns()
+            _append_transport_io(
+                {
+                    **log_context,
+                    "schema_version": 2,
+                    "event": "transport_request",
+                    "call_index": call_index,
+                    "timestamp_unix_ns": started_ns,
+                    "pid": os.getpid(),
+                    "configured_base_urls": self.config.base_url,
+                    "request_payload": request_value,
+                    "request_payload_sha256": hashlib.sha256(request_json.encode("utf-8")).hexdigest(),
+                    "embedded_images": _transport_images(body_dict.get("messages", [])),
+                }
+            )
+
         try:
             chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
+            if transport_io_enabled:
+                finished_ns = time_ns()
+                _append_transport_io(
+                    {
+                        **log_context,
+                        "schema_version": 2,
+                        "event": "transport_error_response",
+                        "call_index": call_index,
+                        "timestamp_unix_ns": finished_ns,
+                        "elapsed_ns": finished_ns - started_ns,
+                        "pid": os.getpid(),
+                        "http_status": e.status,
+                        "raw_response_body": e.response_content.decode(errors="replace"),
+                        "error": repr(e),
+                    }
+                )
             """
             Example messages for out of context length:
 
@@ -489,6 +637,38 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return res
             else:
                 raise e
+        except Exception as e:
+            if transport_io_enabled:
+                finished_ns = time_ns()
+                _append_transport_io(
+                    {
+                        **log_context,
+                        "schema_version": 2,
+                        "event": "transport_error",
+                        "call_index": call_index,
+                        "timestamp_unix_ns": finished_ns,
+                        "elapsed_ns": finished_ns - started_ns,
+                        "pid": os.getpid(),
+                        "error_type": type(e).__name__,
+                        "error": repr(e),
+                    }
+                )
+            raise
+
+        if transport_io_enabled:
+            finished_ns = time_ns()
+            _append_transport_io(
+                {
+                    **log_context,
+                    "schema_version": 2,
+                    "event": "transport_response",
+                    "call_index": call_index,
+                    "timestamp_unix_ns": finished_ns,
+                    "elapsed_ns": finished_ns - started_ns,
+                    "pid": os.getpid(),
+                    "raw_response": deepcopy(chat_completion_dict),
+                }
+            )
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:
@@ -571,6 +751,325 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
+    async def _chat_completions_via_completions_api(
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> NeMoGymChatCompletion:
+        """Drive vLLM's /v1/completions instead of /v1/chat/completions.
+
+        Primary use case: base (non-instruct) models. Returns the same
+        NeMoGymChatCompletion shape as the chat-completions path so external
+        callers don't need to change.
+
+        Two render modes (selected by ``render_chat_template``):
+
+        - **raw** (default): the messages list must be a single user message
+          (optionally preceded by a single system message); their content is
+          forwarded verbatim. Tools and multi-turn turns are rejected.
+        - **chat_template**: messages are rendered via
+          ``HF AutoTokenizer.apply_chat_template(tokenize=False,
+          add_generation_prompt=True)`` before being forwarded. Multi-turn
+          and tools are allowed; tools are rendered into the prompt by the
+          template, but tool-call output text is **not parsed** by Gym since
+          /v1/completions doesn't run vLLM's tool-call parser — the caller
+          is responsible for parsing tool calls out of the assistant text.
+
+        Audio metadata and non-text content blocks are rejected in both
+        modes — /v1/completions is text-only.
+        """
+        body_dict = body.model_dump(exclude_unset=True)
+        messages = body_dict.get("messages", []) or []
+        metadata = body_dict.get("metadata", {}) or {}
+
+        if not self.config.render_chat_template and body_dict.get("tools"):
+            raise ValueError(
+                f"NeMo Gym server `{self.config.name}`: tools are not supported "
+                "with use_completions_api=true and render_chat_template=false. "
+                "Set render_chat_template=true (so the chat template can render "
+                "tool definitions into the prompt) or set use_completions_api=false "
+                "for the standard chat-completions tool-call path."
+            )
+
+        for audio_key in ("audio_data", "audio_path", "audio_paths"):
+            if metadata.get(audio_key):
+                raise ValueError(
+                    f"NeMo Gym server `{self.config.name}`: audio metadata "
+                    f"({audio_key!r}) is not supported with use_completions_api=true. "
+                    "/v1/completions is text-only."
+                )
+
+        if self.config.render_chat_template:
+            prompt = await asyncio.to_thread(self._render_messages_via_chat_template, body_dict)
+        else:
+            prompt = self._render_messages_to_prompt(messages)
+
+        completion_body = self._build_completion_body_from_chat_body(body_dict, prompt)
+
+        client = self._resolve_client(request)
+
+        try:
+            completion_dict = await client.create_completion(**completion_body)
+        except ClientResponseError as e:
+            result_content_str = e.response_content.decode()
+            is_out_of_context_length = e.status == 400 and (
+                "context length" in result_content_str or "max_tokens" in result_content_str
+            )
+            if is_out_of_context_length:
+                res = self._create_empty_chat_completion()
+                res.choices[0].finish_reason = "length"
+                return res
+            raise
+
+        if self.config.return_token_id_information:
+            choice_dict = completion_dict["choices"][0]
+            if choice_dict.get("prompt_token_ids") is None:
+                tokenize_body = dict(
+                    model=self.config.model,
+                    prompt=prompt,
+                )
+                if "add_special_tokens" in completion_body:
+                    tokenize_body["add_special_tokens"] = completion_body["add_special_tokens"]
+                tokenize_response = await client.create_tokenize(**tokenize_body)
+                choice_dict["prompt_token_ids"] = tokenize_response["tokens"]
+
+        return self._completion_dict_to_chat_completion(completion_dict)
+
+    def _render_messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        """Convert a chat-style messages list into a flat prompt string.
+
+        Allows at most one optional system message followed by exactly one
+        user message. Their string contents are joined with ``\\n\\n``.
+        Rejects anything else (assistant / tool turns, multiple users,
+        list-of-blocks content with non-text parts). The caller is expected
+        to do prompt templating upstream before sending.
+        """
+        if not messages:
+            raise ValueError("Cannot render an empty messages list to a prompt.")
+
+        if len(messages) > 2:
+            raise ValueError(
+                f"use_completions_api=true accepts at most one system + one user message; "
+                f"got {len(messages)} messages. Render the prompt upstream and submit a "
+                "single user message."
+            )
+
+        roles = [m.get("role") for m in messages]
+        if len(messages) == 2 and roles != ["system", "user"]:
+            raise ValueError(
+                f"use_completions_api=true requires the two-message form to be [system, user]; got {roles}."
+            )
+        if len(messages) == 1 and roles[0] != "user":
+            raise ValueError(f"use_completions_api=true requires a user message; got role={roles[0]!r}.")
+
+        parts: List[str] = []
+        for m in messages:
+            parts.append(self._stringify_message_content(m))
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _stringify_message_content(message: Dict[str, Any]) -> str:
+        """Coerce a single message's content into a flat string.
+
+        Accepts:
+          - ``str``: returned as-is.
+          - list of text blocks (``[{"type": "text", "text": ...}, ...]``):
+            concatenated with no separator. This is the shape produced by
+            VLLMConverter when the caller passes a string ``input`` to
+            /v1/responses.
+
+        Anything else (image / audio blocks, None content) is rejected — the
+        caller is expected to render upstream when use_completions_api is true.
+        """
+        content = message.get("content")
+        role = message.get("role")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") not in ("text", "input_text"):
+                    raise ValueError(
+                        f"use_completions_api=true only accepts text content blocks; "
+                        f"got block type {part.get('type') if isinstance(part, dict) else type(part).__name__!r} "
+                        f"for role={role!r}."
+                    )
+                text_parts.append(part.get("text", ""))
+            return "".join(text_parts)
+        raise ValueError(
+            f"use_completions_api=true requires string or text-block-list content; "
+            f"got {type(content).__name__} for role={role!r}."
+        )
+
+    def _render_messages_via_chat_template(self, body_dict: Dict[str, Any]) -> str:
+        """Render the request's messages to a single prompt string using the
+        HF tokenizer's chat template.
+
+        Calls ``apply_chat_template`` with ``add_generation_prompt=True`` so
+        the rendered string ends where the assistant turn would begin.
+        Assistant and tool messages, plus any tool definitions, are passed
+        through to the template unchanged.
+
+        ``chat_template_kwargs`` is merged from two sources: the
+        server-level value from config, plus an optional per-request
+        override JSON-encoded under ``metadata.chat_template_kwargs``. The
+        per-request override wins on key conflicts.
+        """
+        messages = body_dict.get("messages") or []
+        tools = body_dict.get("tools") or None
+        self._validate_text_only_messages(messages)
+
+        # Mirror the precedence rules in _preprocess_chat_completion_create_params:
+        # global config baseline, per-request metadata overrides on top.
+        chat_template_kwargs: Dict[str, Any] = {}
+        if self.config.chat_template_kwargs:
+            chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))
+        metadata = body_dict.get("metadata") or {}
+        metadata_kwargs_str = metadata.get("chat_template_kwargs") or "{}"
+        chat_template_kwargs.update(json.loads(metadata_kwargs_str))
+
+        return self._chat_template_tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            tools=tools,
+            **chat_template_kwargs,
+        )
+
+    def _validate_text_only_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Reject non-text content before forwarding to /v1/completions."""
+        for message in messages:
+            if message.get("content") is not None:
+                self._stringify_message_content(message)
+
+    def _build_completion_body_from_chat_body(self, chat_body_dict: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+        """Translate a chat-completion request body into a /v1/completions body.
+
+        Only forwards fields that vLLM /v1/completions accepts. Sampling knobs
+        (top_k, min_p, repetition_penalty, etc.) that have no first-class
+        completion field are passed via ``extra_body`` if the operator set
+        ``config.extra_body`` — same precedence rule as the chat path.
+        """
+        out: Dict[str, Any] = {
+            "model": self.config.model,
+            "prompt": prompt,
+        }
+
+        # Pass-through sampling fields with the same names on /v1/completions.
+        for key in (
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "n",
+            "seed",
+            "stop",
+            "frequency_penalty",
+            "presence_penalty",
+            "logit_bias",
+            "response_format",
+            "user",
+        ):
+            if key in chat_body_dict:
+                out[key] = chat_body_dict[key]
+
+        # ``max_completion_tokens`` is the chat-API alias; map onto ``max_tokens``.
+        if "max_tokens" not in out and "max_completion_tokens" in chat_body_dict:
+            out["max_tokens"] = chat_body_dict["max_completion_tokens"]
+
+        # /v1/completions ``logprobs`` is an int (top-N), not a bool. We mainly
+        # need ``logprobs=0`` (just the sampled token's logprob) when the
+        # operator wants generation-token-id metadata for RL training.
+        chat_logprobs = chat_body_dict.get("logprobs")
+        chat_top_logprobs = chat_body_dict.get("top_logprobs")
+        if chat_top_logprobs is not None:
+            out["logprobs"] = chat_top_logprobs
+        elif chat_logprobs is True:
+            out["logprobs"] = 0
+        elif self.config.return_token_id_information and "logprobs" not in out:
+            out["logprobs"] = 0
+
+        # Operator-level extra_body merges in (e.g. return_tokens_as_token_ids).
+        # Same precedence as the chat path: extra_body fields do NOT override
+        # request-level fields.
+        if self.config.extra_body:
+            extra_body = deepcopy(self.config.extra_body)
+            out = extra_body | out
+
+        if self.config.return_token_id_information:
+            # Prefer vLLM's inline prompt and generation token IDs. Keep the
+            # token-string form available for older engines that omit them.
+            out["return_token_ids"] = True
+            out["return_tokens_as_token_ids"] = True
+
+        return out
+
+    def _completion_dict_to_chat_completion(self, completion_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
+        """Wrap a /v1/completions response as a NeMoGymChatCompletion.
+
+        vLLM /v1/completions returns ``choices[i].text``; we lift it into a
+        single assistant chat message. Reasoning content (``<think>...</think>``
+        in the raw text) is left inline — VLLMConverter._extract_reasoning_from_content
+        will pull it out downstream when the result is converted back to a
+        Response.
+        """
+        choice_dict = completion_dict["choices"][0]
+        text = choice_dict.get("text") or ""
+
+        message_dict: Dict[str, Any] = {
+            "role": "assistant",
+            "content": text,
+            "tool_calls": None,
+        }
+
+        if self.config.return_token_id_information:
+            logprobs = choice_dict.get("logprobs")
+            if not logprobs or logprobs.get("token_logprobs") is None:
+                raise RuntimeError(
+                    f"`{self.config.name}` requested per-token logprobs from vLLM "
+                    "(return_token_id_information=True, logprobs=0), but the response "
+                    f"had none (choice.logprobs={logprobs!r}). Cannot extract token IDs or logprobs."
+                )
+
+            tokens = logprobs.get("tokens") or []
+            token_logprobs = logprobs["token_logprobs"]
+
+            inline_generation_token_ids = choice_dict.get("token_ids")
+            if inline_generation_token_ids is None and logprobs.get("tokens") is None:
+                raise RuntimeError(
+                    f"`{self.config.name}` requested generation token IDs from vLLM, "
+                    "but the response contained neither choice.token_ids nor choice.logprobs.tokens."
+                )
+            generation_token_ids = (
+                inline_generation_token_ids
+                if inline_generation_token_ids is not None
+                else [t.removeprefix("token_id:") for t in tokens]
+            )
+            generation_log_probs = list(token_logprobs)
+
+            message_dict.update(
+                prompt_token_ids=choice_dict["prompt_token_ids"],
+                generation_token_ids=generation_token_ids,
+                generation_log_probs=generation_log_probs,
+            )
+
+        chat_completion_dict = {
+            "id": completion_dict.get("id", "chatcmpl-completions"),
+            "object": "chat.completion",
+            "created": completion_dict.get("created", int(time())),
+            "model": completion_dict.get("model", self.config.model),
+            "choices": [
+                {
+                    "index": choice_dict.get("index", 0),
+                    "finish_reason": choice_dict.get("finish_reason") or "stop",
+                    "message": message_dict,
+                }
+            ],
+        }
+
+        if completion_dict.get("usage") is not None:
+            chat_completion_dict["usage"] = completion_dict["usage"]
+
+        return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
     def _create_empty_chat_completion(self) -> NeMoGymChatCompletion:
         return NeMoGymChatCompletion(
             id="chtcmpl-123",
@@ -593,405 +1092,15 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
-            # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self._clients)
+            # Uvicorn workers do not share this cache. A stable assignment keeps
+            # every turn in a session on the same vLLM endpoint across workers.
+            digest = hashlib.sha256(session_id.encode("utf-8")).digest()
+            client_idx = int.from_bytes(digest[:8], byteorder="big") % len(self._clients)
             client = self._clients[client_idx]
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
         return client
-
-
-class VLLMConverterResponsesToChatCompletionsState(BaseModel):
-    return_token_id_information: bool
-
-    messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
-
-    # We are mapping from Response input items to chat completions messages, which is many to one.
-    # Our state will accumulate the reasoning, chat, and tool calls for assistant messages.
-    content_buffer: str = ""  # Buffer for reasoning and chat
-    tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
-
-    # Will only be populated if return_token_id_information is True.
-    token_information: Optional[TokenIDLogProbMixin] = None
-
-    def flush_assistant(self) -> None:
-        if not (self.content_buffer or self.tool_calls_buffer):
-            return
-
-        shared_params = dict(
-            content=self.content_buffer or None,
-            role="assistant",
-            tool_calls=self.tool_calls_buffer,
-        )
-
-        # We check here that self.token_information is non-empty since it's possible that some assistant messages are entirely inputs and are not generated by the model in this trajectory.
-        if self.return_token_id_information and self.token_information:
-            message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
-                **shared_params,
-                **self.token_information.model_dump(),
-            )
-        else:
-            message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)
-
-        self.messages.append(message)
-
-        self.content_buffer = ""
-        self.tool_calls_buffer = []
-
-
-class VLLMConverter(BaseModel):
-    return_token_id_information: bool
-    uses_reasoning_parser: bool = True
-
-    # =======================================================
-    # Reasoning handling. This may change across models and model families
-    # =======================================================
-
-    THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-
-    @staticmethod
-    def _wrap_reasoning_in_think_tags(texts: List[str]) -> str:
-        return "".join(f"<think>{t}</think>" for t in texts if t)
-
-    @classmethod
-    def _parse_think_tags(cls, content: str) -> Tuple[List[str], str]:
-        # Extract reasoning content from between <think></think> tags.
-        matches = cls.THINK_TAG_PATTERN.findall(content)
-        # Remove reasoning from main content
-        cleaned = cls.THINK_TAG_PATTERN.sub("", content)
-        return matches, cleaned
-
-    # =======================================================
-    # Response create params to Chat Completion create params
-    # =======================================================
-
-    def responses_to_chat_completion_create_params(
-        self,
-        responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
-    ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
-        responses_create_params = responses_create_params.model_dump(exclude_unset=True)
-
-        # Tracks messages including reasoning for each respective message type helper function
-        state = VLLMConverterResponsesToChatCompletionsState(
-            return_token_id_information=self.return_token_id_information
-        )
-
-        # Input can be a string. Wrap in a ResponseInput-like
-        response_input = responses_create_params["input"]
-        if isinstance(response_input, str):
-            wrapped_input = {
-                "content": [
-                    {
-                        "text": response_input,
-                        "type": "input_text",
-                    }
-                ],
-                "role": "user",
-                "type": "message",
-            }
-            input_messages = [wrapped_input]
-        else:
-            input_messages = responses_create_params.pop("input", [])
-
-        for m in input_messages:
-            if not m.get("type") and m.get("role"):
-                m["type"] = "message"
-
-            match m["type"]:
-                case "message":
-                    self._format_message(m, state)
-                case "reasoning":
-                    self._format_reasoning(m, state)
-                case "function_call":
-                    self._format_function_call(m, state)
-                case "function_call_output":
-                    self._format_function_call_output(m, state)
-                case _:  # pragma: no cover
-                    raise NotImplementedError(f"Unsupported message type: {m}")
-
-            if self.return_token_id_information and m.get("prompt_token_ids"):
-                state.token_information = TokenIDLogProbMixin(
-                    prompt_token_ids=m["prompt_token_ids"],
-                    generation_token_ids=m["generation_token_ids"],
-                    generation_log_probs=m["generation_log_probs"],
-                )
-
-        state.flush_assistant()
-
-        model = responses_create_params.pop("model", None)
-        if model is not None:
-            responses_create_params["model"] = model
-
-        # The corresponding parameter to `max_output_tokens`` is `max_tokens`
-        max_output_tokens = responses_create_params.pop("max_output_tokens", None)
-        if max_output_tokens is not None:
-            responses_create_params["max_tokens"] = max_output_tokens
-
-        tools = responses_create_params.pop("tools", None)
-        if tools:
-            responses_create_params["tools"] = []
-            for tool_dict in tools:
-                tool_dict = tool_dict.copy()
-                tool_dict.pop("type", None)
-
-                # As of vLLM 0.17.1, vLLM Chat Completions does not accept this `strict` parameter on tool definitions that OpenAI accepts.
-                tool_dict.pop("strict", None)
-                responses_create_params["tools"].append(
-                    NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
-                )
-
-        chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
-            messages=state.messages,
-            **responses_create_params,
-        )
-
-        return chat_completion_create_params
-
-    def _format_function_call_output(
-        self,
-        m: dict,
-        state: VLLMConverterResponsesToChatCompletionsState,
-    ) -> None:
-        state.flush_assistant()
-
-        assert "call_id" in m
-        converted = NeMoGymChatCompletionToolMessageParam(
-            content=m["output"],
-            role="tool",
-            tool_call_id=m["call_id"],
-        )
-        state.messages.append(converted)
-
-    def _format_message(
-        self,
-        m: dict,
-        state: VLLMConverterResponsesToChatCompletionsState,
-    ) -> None:
-        content = m["content"]
-
-        if isinstance(content, list) and m["role"] != "assistant":
-            converted_parts = []
-            for part_param in content:
-                match part_param["type"]:
-                    case "input_text":
-                        converted_parts.append({"type": "text", "text": part_param["text"]})
-                    case "input_image":
-                        image_url = part_param.get("image_url", "")
-                        detail = part_param.get("detail", "auto")
-                        converted_parts.append(
-                            {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
-                        )
-                    case _:
-                        raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
-            content = converted_parts
-            m["content"] = content
-
-        match m["role"]:
-            case "assistant":
-                # Handle reasoning
-                final_content = ""
-                if isinstance(m["content"], list):
-                    content_str = "".join([part.get("text", "") for part in m["content"]])
-                    final_content += content_str
-                elif isinstance(m["content"], str):
-                    final_content += m["content"]
-                else:
-                    raise NotImplementedError(
-                        f"Expected m['content'] to be str or list[dict], but got {type(m['content']).__name__!r}: {m['content']!r}"
-                    )
-
-                converted = []
-                state.content_buffer += final_content
-            case "user":
-                state.flush_assistant()
-                converted = [
-                    NeMoGymChatCompletionUserMessageParam(
-                        content=content,
-                        role="user",
-                    )
-                ]
-            # TODO: Revisit this in case we need separate handling. Not all chat templates may support the 'developer' role.
-            case "system":
-                state.flush_assistant()
-                converted = [
-                    NeMoGymChatCompletionSystemMessageParam(
-                        content=content,
-                        role="system",
-                    )
-                ]
-            case "developer":
-                state.flush_assistant()
-                converted = [
-                    NeMoGymChatCompletionDeveloperMessageParam(
-                        content=content,
-                        role="developer",
-                    )
-                ]
-            case _:  # pragma: no cover
-                raise NotImplementedError(f"Unrecognized role for message: `{m['role']}`")
-
-        state.messages.extend(converted)
-
-    def _format_reasoning(
-        self,
-        m: dict,
-        state: VLLMConverterResponsesToChatCompletionsState,
-    ) -> None:
-        """
-        Collects text from 'reasoning' messages in responses api and appends it to a buffer.
-
-        This is done to group together one (or multiple) reasoning message(s) into a single,
-        cohesive block, later prepending it to a subsequent assistant message.
-        See: https://github.com/NVIDIA-NeMo/Gym/blob/main/docs/how-to-faq.md#faq-openai-responses-vs-chat-completions-api for an example of reasoning in responses api.
-        """
-        if "summary" in m and m["summary"]:
-            texts = [s["text"] for s in m["summary"]]
-            state.content_buffer += self._wrap_reasoning_in_think_tags(texts)
-
-    def _format_function_call(
-        self,
-        m: dict,
-        state: VLLMConverterResponsesToChatCompletionsState,
-    ) -> None:
-        assert "call_id" in m
-        tool_call = NeMoGymChatCompletionMessageToolCallParam(
-            id=m["call_id"],
-            function=NeMoGymChatCompletionMessageToolCallFunctionParam(
-                arguments=m["arguments"],
-                name=m["name"],
-            ),
-            type="function",
-        )
-        state.tool_calls_buffer.append(tool_call)
-
-    # =======================================================
-    # Chat Completion to Response
-    # =======================================================
-
-    def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        return self.postprocess_assistant_message_dict(choice.message.model_dump())
-
-    def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
-        response_output = []
-
-        content = message_dict.get("content") or ""
-        if self.uses_reasoning_parser:
-            reasoning_matches, content = self._extract_reasoning_from_content(content)
-        else:
-            reasoning_matches = []
-        if reasoning_matches:
-            reasoning_item = NeMoGymResponseReasoningItem(
-                id=f"rs_{uuid4().hex}",
-                type="reasoning",
-                summary=[
-                    NeMoGymSummary(text=reasoning_text, type="summary_text") for reasoning_text in reasoning_matches
-                ],
-                status="completed",
-            )
-            response_output.append(reasoning_item)
-
-        tool_calls_raw = message_dict.get("tool_calls", []) or []
-        # We need to return at least one output item. When the model decides to just stop with no chat or tool calls
-        # We just add an output item with empty or null content here. This is prevalent e.g. in the case of base models that may not be the most reliable since they have not been instruction tuned.
-        has_empty_output = not (response_output or tool_calls_raw)
-
-        if content or has_empty_output:
-            response_output.append(
-                NeMoGymResponseOutputMessage(
-                    id=f"msg_{uuid4().hex}",
-                    role=message_dict.get("role"),
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text",
-                            text=content,
-                            annotations=[],
-                        )
-                    ],
-                    status="completed",
-                    type="message",
-                )
-            )
-
-        for tc in tool_calls_raw:
-            assert "id" in tc
-            response_output.append(
-                NeMoGymResponseFunctionToolCall(
-                    name=tc["function"]["name"],
-                    arguments=tc["function"]["arguments"],
-                    call_id=tc["id"],
-                    type="function_call",
-                    status="completed",
-                    id=tc["id"],
-                )
-            )
-
-        # `"prompt_token_ids" in raw_message`: sometimes the model endpoint may go out of context length, in which case we return an empty response
-        # In these cases, there are no token id information provided.
-        if self.return_token_id_information and "prompt_token_ids" in message_dict:
-            last_response_output_item = response_output[-1]
-            train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
-            response_output[-1] = train_cls(
-                **last_response_output_item.model_dump(),
-                prompt_token_ids=message_dict["prompt_token_ids"],
-                generation_token_ids=message_dict["generation_token_ids"],
-                generation_log_probs=message_dict["generation_log_probs"],
-            )
-
-        return response_output
-
-    def _extract_reasoning_from_content(self, content: str) -> Tuple[List[str], str]:
-        # TODO: Currently only parses reasoning wrapped in <think>...</think> tags.
-        # Maybe parameterize to support other model formats in the future.
-        return self._parse_think_tags(content)
-
-    def chat_completions_messages_to_responses_items(
-        self, messages: List[Dict[str, Any]]
-    ) -> List[NeMoGymResponseOutputItem]:
-        output_items = []
-
-        for message in messages:
-            role = message["role"]
-            if role in ("user", "system", "developer"):
-                # vLLM may return None content
-                if message["content"] is None:
-                    message["content"] = ""
-                output_items.append(NeMoGymEasyInputMessage.model_validate(message))
-            elif role == "assistant":
-                output_items.extend(self.postprocess_assistant_message_dict(message))
-            elif role == "tool":
-                output_items.append(
-                    NeMoGymFunctionCallOutput(
-                        call_id=message["tool_call_id"],
-                        output=message["content"],
-                        status="completed",
-                    )
-                )
-            else:
-                raise NotImplementedError(f"Unrecognized role: {role}!")
-
-        return output_items
-
-
-def split_responses_input_output_items(
-    items: List[NeMoGymResponseOutputItem],
-) -> Tuple[List[NeMoGymResponseOutputItem], List[NeMoGymResponseOutputItem]]:
-    if not items:
-        return [], []
-
-    for i, item in enumerate(items):
-        if (
-            getattr(item, "role", None) == "assistant"
-            or getattr(item, "type", None)
-            in {
-                "reasoning",
-                "reasoning_item",
-            }
-            or getattr(item, "type", None) in ("function_call",)
-        ):
-            break
-
-    return items[:i], items[i:]
 
 
 if __name__ == "__main__":

@@ -42,29 +42,29 @@ python benchmarks/longbench_v2/prepare.py \
 
 ```bash
 # Prepare benchmark data (default)
-ng_prepare_benchmark "+config_paths=[benchmarks/longbench_v2/config.yaml]"
+gym eval prepare --benchmark longbench_v2
 
 # Prepare benchmark data (N3 1M variant)
-ng_prepare_benchmark "+config_paths=[benchmarks/longbench_v2/config_n3_1m.yaml]"
+gym eval prepare --benchmark longbench_v2/config_n3_1m
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/longbench_v2/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark longbench_v2
 
 # Collecting rollouts — default
-ng_collect_rollouts \
-    +agent_name=longbench_v2_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/longbench_v2/data/longbench_v2_benchmark.jsonl \
-    +output_jsonl_fpath=results/longbench_v2_rollouts.jsonl \
-    +prompt_config=benchmarks/longbench_v2/prompts/default.yaml \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent longbench_v2_mcqa_simple_agent \
+    --input benchmarks/longbench_v2/data/longbench_v2_benchmark.jsonl \
+    --output results/longbench_v2_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/longbench_v2/prompts/default.yaml
 
 # Collecting rollouts — N3 1M
-ng_collect_rollouts \
-    +agent_name=longbench_v2_n3_1m_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/longbench_v2/data/longbench_v2_n3_1m_benchmark.jsonl \
-    +output_jsonl_fpath=results/longbench_v2_n3_1m_rollouts.jsonl \
-    +prompt_config=benchmarks/longbench_v2/prompts/default.yaml \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent longbench_v2_n3_1m_mcqa_simple_agent \
+    --input benchmarks/longbench_v2/data/longbench_v2_n3_1m_benchmark.jsonl \
+    --output results/longbench_v2_n3_1m_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/longbench_v2/prompts/default.yaml
 ```

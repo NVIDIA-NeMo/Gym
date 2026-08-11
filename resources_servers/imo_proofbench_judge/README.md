@@ -22,9 +22,9 @@ Use ``benchmarks/imo_proofbench/`` for the IMO-ProofBench dataset.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/imo_proofbench_judge/configs/imo_proofbench_judge.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type vllm_model \
+    --resources-server imo_proofbench_judge \
     +judge_base_url=https://generativelanguage.googleapis.com/v1beta/openai \
     "+judge_api_key=$GEMINI_API_KEY" \
     +judge_model_name=gemini-2.5-pro
@@ -33,11 +33,11 @@ ng_run "+config_paths=[$config_paths]" \
 ## Collecting rollouts (5-example smoke test)
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=imo_proofbench_judge_simple_agent \
-    +input_jsonl_fpath=resources_servers/imo_proofbench_judge/data/example.jsonl \
-    +output_jsonl_fpath=results/imo_proofbench_judge_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent imo_proofbench_judge_simple_agent \
+    --input resources_servers/imo_proofbench_judge/data/example.jsonl \
+    --output results/imo_proofbench_judge_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 ## Notes

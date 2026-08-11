@@ -5,12 +5,11 @@ code-generation benchmark. Each problem is decomposed into sub-steps; the model 
 Python function per sub-step, with each sub-step building on the code it generated for previous
 sub-steps. Generated code is executed against the problem's test cases.
 
-- **Tasks**: 80 problems / 341 sub-steps (`validation` + `test` combined — the split nemo-skills calls `test_aai`)
+- **Tasks**: 65 problems / 288 evaluated sub-steps (`test` only, matching the current AA Intelligence Index setup)
 - **Reward**: binary per problem — `1.0` only if every sub-step passes its tests
 - **Metrics** (reported by the agent): `subtask_accuracy` — the headline SciCode number,
-  total sub-steps passed divided by total sub-steps across all rollouts (matches nemo-skills'
-  `pass@1[avg-of-3]/subtask_accuracy`) — and `problem_accuracy` (= `mean/reward`, the whole problem
-  passing)
+  total sub-steps passed divided by total sub-steps across all rollouts — and `problem_accuracy`
+  (= `mean/reward`, the whole problem passing)
 
 A custom multi-step agent (`responses_api_agents/scicode_agent`) drives the per-sub-step
 generation loop; the resources server (`resources_servers/scicode`) executes each sub-step's
@@ -47,12 +46,16 @@ If the file is missing, the resources server fails fast with a clear error rathe
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/scicode/config.yaml]"
+gym eval prepare --benchmark scicode
 ```
 
 Downloads `SciCode1/SciCode` and writes `benchmarks/scicode/data/scicode_benchmark.jsonl`
-(one row per problem, carrying the full `sub_steps` list). This does not fetch `test_data.h5` — see
-above.
+(one row per problem from the HuggingFace `test` split, carrying the full `sub_steps` list). This
+does not fetch `test_data.h5` — see above.
+
+The agent uses the current AA SciCode prompt in `benchmarks/scicode/prompts/background.yaml`.
+The scientist-authored background in each sub-step is included in the prompt; the model is asked
+to write the next function directly.
 
 ## Dependencies
 
@@ -64,9 +67,9 @@ some test cases, removed in scipy 1.14) while still providing Python 3.12 wheels
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/scicode/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark scicode
 ```
 
 Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in `env.yaml` (or passed as CLI
@@ -77,16 +80,16 @@ overrides).
 With the servers up, run the full benchmark:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=scicode_benchmark_agent \
-    +input_jsonl_fpath=benchmarks/scicode/data/scicode_benchmark.jsonl \
-    +output_jsonl_fpath=results/scicode_rollouts.jsonl \
-    +num_repeats=3 \
-    "++responses_create_params={temperature: 0.0}"
+gym eval run --no-serve \
+    --agent scicode_benchmark_agent \
+    --input benchmarks/scicode/data/scicode_benchmark.jsonl \
+    --output results/scicode_rollouts.jsonl \
+    --num-repeats 3 \
+    --temperature 0.0
 ```
 
-(For a quick smoke, point `+input_jsonl_fpath` at `resources_servers/scicode/data/example.jsonl`
-with `+num_repeats=1`.)
+(For a quick smoke, point `--input` at `resources_servers/scicode/data/example.jsonl`
+with `--num-repeats 1`.)
 
 ### One-shot alternative
 
@@ -95,23 +98,21 @@ full-benchmark run that produces the headline `subtask_accuracy`. Requires `test
 (see above).
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/scicode/config.yaml"
-
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
-    ++split=benchmark \
-    ++output_jsonl_fpath=results/benchmarks/scicode.jsonl \
+gym eval run \
+    --model-type vllm_model \
+    --benchmark scicode \
+    --split benchmark \
+    --output results/benchmarks/scicode.jsonl \
     ++reuse_existing_data_preparation=true \
     ++overwrite_metrics_conflicts=true \
-    ++policy_base_url=<your_endpoint> \
-    ++policy_api_key=<your_key> \
-    ++policy_model_name=<your_model> \
-    "++responses_create_params={temperature: 0.0}"
+    --model-url <your_endpoint> \
+    --model-api-key <your_key> \
+    --model <your_model> \
+    --temperature 0.0
 ```
 
-`num_repeats: 3` (from the dataset config) and `temperature: 0.0` match nemo-skills' SciCode eval
-(`pass@1[avg-of-3]`).
+`num_repeats: 3` comes from Gym's dataset config and can be overridden independently of the
+AA-aligned problem set and prompt.
 
 ## Licensing
 

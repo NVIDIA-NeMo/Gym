@@ -25,16 +25,18 @@ https://github.com/NVIDIA-NeMo/Skills/blob/main/nemo_skills/evaluation/evaluator
 ## Start environment
 
 ```bash
-ng_run "+config_paths=[resources_servers/graphwalks/configs/graphwalks.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server graphwalks \
+    --model-type vllm_model
 ```
 
 ## Collect example rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=graphwalks_simple_agent \
-    +input_jsonl_fpath=resources_servers/graphwalks/data/example.jsonl \
-    +output_jsonl_fpath=resources_servers/graphwalks/data/example_rollouts.jsonl
+gym eval run --no-serve \
+    --agent graphwalks_simple_agent \
+    --input resources_servers/graphwalks/data/example.jsonl \
+    --output resources_servers/graphwalks/data/example_rollouts.jsonl
 ```
 
 For the full benchmark run see

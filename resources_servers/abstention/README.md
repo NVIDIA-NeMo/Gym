@@ -15,20 +15,20 @@ The dataset used is [HotPotQA](https://hotpotqa.github.io/) (fullwiki split).
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
-resources_servers/abstention/configs/abstention.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type openai_model \
+    --resources-server abstention \
     +abstention.resources_servers.abstention.judge_model_server.name=policy_model
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=abstention_simple_agent \
-    +input_jsonl_fpath=resources_servers/abstention/data/example.jsonl \
-    +output_jsonl_fpath=results/abstention_verify_responses.jsonl \
-    +limit=3
+gym eval run --no-serve \
+    --agent abstention_simple_agent \
+    --input resources_servers/abstention/data/example.jsonl \
+    --output results/abstention_verify_responses.jsonl \
+    --limit 3
 ```
 
 ## Preprocessing HotPotQA data

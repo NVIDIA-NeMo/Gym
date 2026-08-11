@@ -17,6 +17,7 @@ import importlib.util
 import threading
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -27,19 +28,26 @@ from nemo_gym.sandbox import (
     AsyncSandbox,
     Sandbox,
     SandboxCreateError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxEndpoint,
     create_provider,
     get_provider_class,
     list_providers,
     register_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
 from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
+
+
+pytestmark = pytest.mark.sandbox
 
 
 def _has_module(module_name: str) -> bool:
@@ -83,6 +91,7 @@ class FakeSandboxProvider:
         self.created_specs: list[SandboxSpec] = []
         self.created_handles: list[SandboxHandle] = []
         self.exec_calls: list[dict[str, Any]] = []
+        self.endpoint_calls: list[tuple[SandboxHandle, int]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
         self.closed: list[SandboxHandle] = []
@@ -132,6 +141,10 @@ class FakeSandboxProvider:
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         del handle
         return SandboxStatus.RUNNING
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        self.endpoint_calls.append((handle, port))
+        return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}", headers={"x-route": "fake"})
 
     async def close(self, handle: SandboxHandle) -> None:
         self.closed.append(handle)
@@ -255,6 +268,7 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
             metadata={"suite": "unit"},
             workdir="/repo",
             files={"/tmp/bootstrap.txt": "hello"},
+            ports=[8000],
         ),
     )
 
@@ -278,6 +292,11 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
         "user": "agent",
     }
     assert await sandbox.status() == SandboxStatus.RUNNING
+    assert await sandbox.endpoint(8000) == SandboxEndpoint(
+        endpoint="http://127.0.0.1:8000",
+        headers={"x-route": "fake"},
+    )
+    assert provider.endpoint_calls == [(handle, 8000)]
 
     source_path = tmp_path / "source.txt"
     target_path = tmp_path / "nested" / "target.txt"
@@ -333,23 +352,78 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
+def test_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
+    asyncio.run(_assert_async_sandbox_requires_spec_and_reports_unknown_status())
+
+
+async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
+    sandbox = AsyncSandbox(FakeSandboxProvider())
+    assert await sandbox.status() == SandboxStatus.UNKNOWN
+    with pytest.raises(ValueError, match="requires a SandboxSpec"):
+        await sandbox.start()
+
+    plain = AsyncSandbox(PlainSandboxProvider())
+    await plain.start(SandboxSpec(image="image:tag", ports=[8000]))
+    with pytest.raises(NotImplementedError, match="does not support service endpoints"):
+        await plain.endpoint(8000)
+    with pytest.raises(ValueError, match="was not declared"):
+        await plain.endpoint(9000)
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        await plain.endpoint(0)
+    await plain.stop()
+
+
 def test_rewrite_image_validation() -> None:
     assert rewrite_image(None, []) is None
     assert rewrite_image("image:tag", [{"from": "other/", "to": "mirror/"}]) == "image:tag"
 
 
 def test_sandbox_resources_validation() -> None:
-    spec = SandboxSpec(resources={"cpu": "0.5", "memory_mib": "4096", "disk_gib": "8"})
+    spec = SandboxSpec(resources={"cpu": "0.5", "memory_mib": "4096", "disk_gib": "8"}, ports=[8000, "9222"])
     assert spec.resources == SandboxResources(cpu=0.5, memory_mib=4096, disk_gib=8)
+    assert spec.ports == (8000, 9222)
 
     with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
         SandboxSpec(resources={"memory": "4Gi"})
+    with pytest.raises(ValueError, match="Duplicate sandbox TCP port"):
+        SandboxSpec(ports=[8000, 8000])
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        SandboxSpec(ports=[65536])
+    with pytest.raises(ValueError, match="Invalid sandbox TCP port"):
+        SandboxSpec(ports=[8000.5])
+    with pytest.raises(ValueError, match="absolute URL"):
+        SandboxEndpoint(endpoint="/relative/path")
+
+
+def test_sandbox_endpoint_is_an_optional_provider_capability() -> None:
+    assert isinstance(FakeSandboxProvider(), SupportsSandboxEndpoint)
+    assert not isinstance(PlainSandboxProvider(), SupportsSandboxEndpoint)
+
+
+def test_sandbox_spec_keeps_legacy_positional_provider_options() -> None:
+    provider_options = {"legacy": True}
+    spec = SandboxSpec(
+        "image:tag",
+        60,
+        30,
+        "/workspace",
+        {},
+        {},
+        {},
+        SandboxResources(cpu=1),
+        ["/bin/sh"],
+        provider_options,
+    )
+
+    assert spec.provider_options == provider_options
+    assert spec.ports == ()
 
 
 def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatch) -> None:
     provider_name = f"fake-{uuid4().hex}"
     register_provider(provider_name, FakeSandboxProvider)
 
+    assert get_provider_class("opensandbox").__name__ == "OpenSandboxProvider"
     assert get_provider_class(provider_name) is FakeSandboxProvider
     assert "opensandbox" in list_providers()
     assert provider_name in list_providers()
@@ -369,6 +443,59 @@ def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatc
     register_provider(builtin_name, PlainSandboxProvider, override=True)
     assert get_provider_class(builtin_name) is PlainSandboxProvider
     assert builtin_name in list_providers()
+
+
+def _fake_entry_point(name: str, provider: type, dist_name: str) -> SimpleNamespace:
+    return SimpleNamespace(name=name, load=lambda: provider, dist=SimpleNamespace(name=dist_name))
+
+
+def test_provider_entry_point_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    ep_name = f"ep-{uuid4().hex}"
+
+    class EntryPointProvider(FakeSandboxProvider):
+        pass
+
+    def fake_entry_points(*, group: str) -> list[SimpleNamespace]:
+        assert group == provider_registry.ENTRY_POINT_GROUP
+        return [_fake_entry_point(ep_name, EntryPointProvider, "pkg-a")]
+
+    monkeypatch.setattr(provider_registry, "entry_points", fake_entry_points)
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+
+    assert ep_name in list_providers()
+    assert get_provider_class(ep_name) is EntryPointProvider
+
+
+def test_provider_entry_point_collisions(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class EntryPointProvider(FakeSandboxProvider):
+        pass
+
+    # Two distributions publishing the same name raise, naming both packages.
+    dup_name = f"ep-{uuid4().hex}"
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+    monkeypatch.setattr(
+        provider_registry,
+        "entry_points",
+        lambda *, group: [
+            _fake_entry_point(dup_name, EntryPointProvider, "pkg-a"),
+            _fake_entry_point(dup_name, EntryPointProvider, "pkg-b"),
+        ],
+    )
+    with pytest.raises(ValueError, match=r"Duplicate sandbox provider entry point.*pkg-a.*pkg-b"):
+        list_providers()
+
+    # An entry point shadowed by a built-in is warned (at discovery) and ignored.
+    monkeypatch.setattr(provider_registry, "_ENTRY_POINT_LOADERS", None)
+    monkeypatch.setattr(
+        provider_registry,
+        "entry_points",
+        lambda *, group: [_fake_entry_point("opensandbox", EntryPointProvider, "pkg-a")],
+    )
+    with caplog.at_level("WARNING", logger=provider_registry.__name__):
+        list_providers()
+    assert any("shadowed" in message for message in caplog.messages)
+    # Built-in still wins on lookup.
+    assert get_provider_class("opensandbox").__name__ == "OpenSandboxProvider"
 
 
 def test_create_provider_validation_and_constructor_cleanup() -> None:
@@ -393,6 +520,73 @@ def test_create_provider_validation_and_constructor_cleanup() -> None:
     register_provider(failing_provider_name, FailingProvider)
     with pytest.raises(RuntimeError, match="provider constructor failed"):
         Sandbox({failing_provider_name: {}})
+
+
+def test_resolve_provider_config_named_reference() -> None:
+    global_config = {
+        "policy_model_name": "test_model",
+        "sandbox_main": {"opensandbox": {"connection": {"domain": "sandbox.example"}}},
+    }
+
+    resolved = resolve_provider_config("sandbox_main", global_config)
+    assert resolved == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+
+    # An OmegaConf DictConfig block resolves to a plain dict.
+    from omegaconf import OmegaConf
+
+    omega_config = OmegaConf.create(global_config)
+    resolved_from_omega = resolve_provider_config("sandbox_main", omega_config)
+    assert resolved_from_omega == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+    assert isinstance(resolved_from_omega["opensandbox"], dict)
+
+
+def test_resolve_provider_config_inline_mapping() -> None:
+    inline = {"opensandbox": {"connection": {}}}
+    assert resolve_provider_config(inline) == inline
+    # The result is a fresh dict, not the same object.
+    assert resolve_provider_config(inline) is not inline
+
+
+def test_resolve_provider_config_errors() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        resolve_provider_config("", {})
+
+    with pytest.raises(ValueError, match="is not defined in the merged config"):
+        resolve_provider_config("missing", {"sandbox_main": {"opensandbox": {}}})
+
+    # Error lists available single-key sandbox blocks as candidates.
+    with pytest.raises(ValueError, match="'sandbox_main'"):
+        resolve_provider_config("missing", {"sandbox_main": {"opensandbox": {}}})
+
+    with pytest.raises(TypeError, match="must be a name reference"):
+        resolve_provider_config(123)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="exactly one provider key"):
+        resolve_provider_config({"opensandbox": {}, "extra": {}})
+
+    with pytest.raises(ValueError, match="exactly one provider key"):
+        resolve_provider_config("sandbox_main", {"sandbox_main": {}})
+
+
+def test_resolve_provider_metadata() -> None:
+    block = {
+        "opensandbox": {"connection": {"domain": "sandbox.example"}},
+        "default_metadata": {"sandbox-api": "opensandbox-sdk"},
+    }
+
+    # default_metadata is excluded from the provider config and read separately.
+    assert resolve_provider_config(block) == {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
+    assert resolve_provider_metadata(block) == {"sandbox-api": "opensandbox-sdk"}
+
+    # A named reference works the same way.
+    global_config = {"sandbox": block}
+    assert resolve_provider_metadata("sandbox", global_config) == {"sandbox-api": "opensandbox-sdk"}
+
+    # No default_metadata key -> empty dict.
+    assert resolve_provider_metadata({"opensandbox": {}}) == {}
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        resolve_provider_metadata({"opensandbox": {}, "default_metadata": "not-a-mapping"})
 
 
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:
@@ -497,6 +691,24 @@ def test_sync_loop_runner_times_out_waits_and_skips_running_loop_close() -> None
             runner._loop.close()
 
 
+def test_sync_loop_runner_times_out_async_operations() -> None:
+    runner = _AsyncLoopRunner(wait_timeout_s=0.01)
+    cancelled = threading.Event()
+
+    async def never_finishes() -> None:
+        try:
+            await asyncio.get_running_loop().create_future()
+        finally:
+            cancelled.set()
+
+    try:
+        with pytest.raises(TimeoutError, match="timed out waiting for the sync loop"):
+            runner.run("blocked", never_finishes)
+        assert cancelled.wait(timeout=1)
+    finally:
+        runner.close()
+
+
 def test_sync_sandbox_file_operations(tmp_path: Path) -> None:
     provider = FakeSandboxProvider()
     with Sandbox(provider) as sandbox:
@@ -583,11 +795,11 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
 
 
 @requires_tenacity
-def test_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
-    asyncio.run(_assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch))
+def test_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch))
 
 
-async def _assert_opensandbox_connect_after_create_uses_connection_config(monkeypatch) -> None:
+async def _assert_opensandbox_connect_after_create_preserves_request_timeout(monkeypatch) -> None:
     opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
     class FakeConnectionConfig:
@@ -612,7 +824,7 @@ async def _assert_opensandbox_connect_after_create_uses_connection_config(monkey
     )
 
     provider = OpenSandboxProvider(
-        connection={"domain": "sandbox.example", "protocol": "https"},
+        connection={"domain": "sandbox.example", "protocol": "https", "request_timeout_s": 300},
         create={"connect_attempt_timeout_s": 1},
         probe={"command": None},
     )
@@ -624,11 +836,15 @@ async def _assert_opensandbox_connect_after_create_uses_connection_config(monkey
     assert handle.sandbox_id == "sdk-sandbox-1"
     assert isinstance(handle.raw, FakeSDKSandbox)
     connect_call = FakeSDKSandbox.connect_calls[0]
-    assert connect_call["skip_health_check"] is True
-    assert connect_call["connection_config"].kwargs == {
+    # This provider does not opt out, so the reconnect health-checks too.
+    assert connect_call["skip_health_check"] is False
+    connection_kwargs = dict(connect_call["connection_config"].kwargs)
+    # Transport identity is asserted in test_opensandbox_provider.py.
+    connection_kwargs.pop("transport", None)
+    assert connection_kwargs == {
         "domain": "sandbox.example",
         "protocol": "https",
-        "request_timeout": timedelta(seconds=1),
+        "request_timeout": timedelta(seconds=300),
     }
 
 
@@ -1060,3 +1276,60 @@ def test_mini_swe_sandbox_environment_submit_sentinel() -> None:
         assert exc_info.value.messages[0]["extra"]["submission"] == "final answer"
     finally:
         env.cleanup()
+
+
+@requires_tenacity
+def test_opensandbox_implements_connectable_provider(monkeypatch) -> None:
+    asyncio.run(_assert_opensandbox_implements_connectable_provider(monkeypatch))
+
+
+async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> None:
+    from nemo_gym.sandbox import ConnectableProvider
+
+    opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeSDKSandbox:
+        connect_calls: list[dict[str, Any]] = []
+
+        def __init__(self, sandbox_id: str) -> None:
+            self.id = sandbox_id
+
+        @classmethod
+        async def connect(cls, sandbox_id: str, **kwargs: Any) -> "FakeSDKSandbox":
+            cls.connect_calls.append({"sandbox_id": sandbox_id, **kwargs})
+            return cls(sandbox_id)
+
+    monkeypatch.setattr(
+        opensandbox_provider_module,
+        "_require_opensandbox_sdk",
+        lambda: (FakeSDKSandbox, FakeConnectionConfig, object, object, object),
+    )
+
+    provider = OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "protocol": "https"},
+        create={"connect_attempt_timeout_s": 1},
+        probe={"command": None},
+    )
+
+    # The provider satisfies the optional capability protocol.
+    assert isinstance(provider, ConnectableProvider)
+
+    # serialize_handle returns a descriptor of just the id.
+    descriptor = await provider.serialize_handle(
+        SandboxHandle(sandbox_id="sdk-sandbox-9", provider_name="opensandbox", raw=object())
+    )
+    assert descriptor == {"sandbox_id": "sdk-sandbox-9"}
+
+    # connect rebuilds a live handle by reconnecting to that id via the SDK.
+    handle = await provider.connect(descriptor)
+    assert handle.sandbox_id == "sdk-sandbox-9"
+    assert isinstance(handle.raw, FakeSDKSandbox)
+    connect_call = FakeSDKSandbox.connect_calls[0]
+    assert connect_call["sandbox_id"] == "sdk-sandbox-9"
+    # connect() health-checks by default so the handle it returns is usable.
+    assert connect_call["skip_health_check"] is False
+    assert connect_call["connection_config"].kwargs["domain"] == "sandbox.example"

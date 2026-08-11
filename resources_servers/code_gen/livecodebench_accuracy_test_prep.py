@@ -57,13 +57,13 @@ Loaded 322 problems
 
 Download the test data using:
 ```bash
-ng_download_dataset_from_gitlab \
+gym dataset download --storage gitlab \
     +dataset_name=livecodebench \
     +version=0.0.1 \
     +artifact_fpath=gpt-4o-2024-05-13_Scenario.codegeneration_10_0.2_eval_all.json \
     +output_fpath=resources_servers/code_gen/data/gpt-4o-2024-05-13_Scenario.codegeneration_10_0.2_eval_all.json
 
-ng_download_dataset_from_gitlab \
+gym dataset download --storage gitlab \
     +dataset_name=livecodebench \
     +version=0.0.1 \
     +artifact_fpath=livecodebench_prompts.jsonl \

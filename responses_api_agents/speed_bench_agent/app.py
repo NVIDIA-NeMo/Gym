@@ -68,6 +68,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    accumulate_response_usage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -163,7 +164,7 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             new_body = body.model_copy(update={"input": turn_input})
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path="/v1/responses",
+                url_path=self.url_path_for_request("/v1/responses", request),
                 json=new_body,
                 cookies=model_server_cookies,
             )
@@ -203,14 +204,7 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             last_response, model_server_cookies = await _call_model(running_input)
             accumulated_outputs.extend(last_response.output)
             accumulated_text_parts.append(_gather_assistant_text(last_response))
-            if usage and last_response.usage:
-                usage.input_tokens += last_response.usage.input_tokens
-                usage.output_tokens += last_response.usage.output_tokens
-                usage.total_tokens += last_response.usage.total_tokens
-                usage.input_tokens_details.cached_tokens = 0
-                usage.output_tokens_details.reasoning_tokens = 0
-            elif last_response.usage and not usage:
-                usage = last_response.usage
+            usage = accumulate_response_usage(usage, last_response.usage)
             last_response.usage = None
 
         # Propagate any cookies the resources server set so /verify sees them.
@@ -235,7 +229,7 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
 
         api_response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
             cookies=cookies,
         )

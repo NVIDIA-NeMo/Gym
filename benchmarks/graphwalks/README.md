@@ -28,10 +28,10 @@ The N3 1M variant requires HF auth for the gated NVIDIA repo
 
 ```bash
 # Default (o200k_base, no filter)
-ng_prepare_benchmark "+config_paths=[benchmarks/graphwalks/config.yaml]"
+gym eval prepare --benchmark graphwalks
 
 # N3 1M variant
-ng_prepare_benchmark "+config_paths=[benchmarks/graphwalks/config_n3_1m.yaml]"
+gym eval prepare --benchmark graphwalks/config_n3_1m
 ```
 
 For one-off custom builds (different tokenizer / cap / output path),
@@ -47,25 +47,27 @@ python benchmarks/graphwalks/prepare.py \
 ## Start environment
 
 ```bash
-ng_run "+config_paths=[benchmarks/graphwalks/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --benchmark graphwalks \
+    --model-type vllm_model
 ```
 
 ## Collect rollouts
 
 ```bash
 # Default variant
-ng_collect_rollouts \
-    +agent_name=graphwalks_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/graphwalks/data/graphwalks_benchmark.jsonl \
-    +output_jsonl_fpath=results/graphwalks_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent graphwalks_benchmark_simple_agent \
+    --input benchmarks/graphwalks/data/graphwalks_benchmark.jsonl \
+    --output results/graphwalks_rollouts.jsonl \
+    --num-repeats 4
 
 # N3 1M variant
-ng_collect_rollouts \
-    +agent_name=graphwalks_n3_1m_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/graphwalks/data/graphwalks_n3_1m_benchmark.jsonl \
-    +output_jsonl_fpath=results/graphwalks_n3_1m_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent graphwalks_n3_1m_benchmark_simple_agent \
+    --input benchmarks/graphwalks/data/graphwalks_n3_1m_benchmark.jsonl \
+    --output results/graphwalks_n3_1m_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Metrics

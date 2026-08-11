@@ -35,10 +35,10 @@ The `example.jsonl` file contains 3 synthetic tasks for quick testing:
 
 **Usage:**
 ```bash
-ng_collect_rollouts \
-  +agent_name=inverse_if_simple_agent \
-  +input_jsonl_fpath=resources_servers/inverse_if/data/example.jsonl \
-  +output_jsonl_fpath=/tmp/test_rollouts.jsonl
+gym eval run --no-serve \
+  --agent inverse_if_simple_agent \
+  --input resources_servers/inverse_if/data/example.jsonl \
+  --output /tmp/test_rollouts.jsonl
 ```
 
 ## Raw JSON Format
@@ -89,7 +89,7 @@ Each line in the JSONL file:
 **Key transformations:**
 - Inconsistent rubric keys normalised to `{"id", "criteria"}`
 - Per-task judge template and system prompt extracted from messages
-- `responses_create_params` wrapper required by `ng_collect_rollouts`
+- `responses_create_params` wrapper required by `gym eval run --no-serve`
 - `model_responses` discarded
 
 ## Regenerating JSONL Files

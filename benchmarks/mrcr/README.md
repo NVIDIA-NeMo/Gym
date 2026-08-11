@@ -33,44 +33,46 @@ python benchmarks/mrcr/prepare.py \
 
 ```bash
 # Default (o200k_base, no filter)
-ng_prepare_benchmark "+config_paths=[benchmarks/mrcr/config.yaml]"
+gym eval prepare --benchmark mrcr
 
 # N3 128k variant
-ng_prepare_benchmark "+config_paths=[benchmarks/mrcr/config_n3_128k.yaml]"
+gym eval prepare --benchmark mrcr/config_n3_128k
 
 # N3 1M variant
-ng_prepare_benchmark "+config_paths=[benchmarks/mrcr/config_n3_1m.yaml]"
+gym eval prepare --benchmark mrcr/config_n3_1m
 ```
 
 ## Start environment
 
 ```bash
-ng_run "+config_paths=[benchmarks/mrcr/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --benchmark mrcr \
+    --model-type vllm_model
 ```
 
 ## Collect rollouts
 
 ```bash
 # Default variant
-ng_collect_rollouts \
-    +agent_name=mrcr_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/mrcr/data/mrcr_benchmark.jsonl \
-    +output_jsonl_fpath=results/mrcr_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent mrcr_benchmark_simple_agent \
+    --input benchmarks/mrcr/data/mrcr_benchmark.jsonl \
+    --output results/mrcr_rollouts.jsonl \
+    --num-repeats 4
 
 # N3 128k variant
-ng_collect_rollouts \
-    +agent_name=mrcr_n3_128k_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/mrcr/data/mrcr_n3_128k_benchmark.jsonl \
-    +output_jsonl_fpath=results/mrcr_n3_128k_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent mrcr_n3_128k_benchmark_simple_agent \
+    --input benchmarks/mrcr/data/mrcr_n3_128k_benchmark.jsonl \
+    --output results/mrcr_n3_128k_rollouts.jsonl \
+    --num-repeats 4
 
 # N3 1M variant
-ng_collect_rollouts \
-    +agent_name=mrcr_n3_1m_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/mrcr/data/mrcr_n3_1m_benchmark.jsonl \
-    +output_jsonl_fpath=results/mrcr_n3_1m_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent mrcr_n3_1m_benchmark_simple_agent \
+    --input benchmarks/mrcr/data/mrcr_n3_1m_benchmark.jsonl \
+    --output results/mrcr_n3_1m_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 ## Metrics
