@@ -305,7 +305,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         try:
             pwd_result = await sandbox.exec(command="pwd")
-            results_remote_fpath = Path(pwd_result.stdout) / export_fname
+            results_remote_fpath = Path(pwd_result.stdout.strip()) / export_fname
         except:
             print("Failed to get current working directory", format_exc(), file=sys.stderr)
             results_remote_fpath = None
