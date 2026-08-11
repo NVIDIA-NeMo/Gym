@@ -99,6 +99,7 @@ def _reasoning_item(text: str = "I should call the tool.") -> dict:
         "type": "reasoning",
         "id": "rs_1",
         "summary": [{"type": "summary_text", "text": text}],
+        "encrypted_content": "opaque-reasoning-state",
     }
 
 
@@ -224,9 +225,11 @@ class TestChatGenerator:
         messages = response_to_chat_messages(response)
         assert messages[0].meta["__ng_training__"]["generation_token_ids"] == [20, 21]
         assert messages[0].meta["__ng_usage__"]["total_tokens"] == 15
+        assert messages[0].meta["__ng_reasoning_encrypted__"] == "opaque-reasoning-state"
 
         output = chat_messages_to_responses(messages, output=True)
         assert [item.type for item in output] == ["reasoning", "function_call"]
+        assert output[0].encrypted_content == "opaque-reasoning-state"
         assert not hasattr(output[0], "generation_token_ids")
         assert output[1].generation_token_ids == [20, 21]
         assert output[1].generation_log_probs == [-0.1, -0.2]

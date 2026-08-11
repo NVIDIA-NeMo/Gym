@@ -16,6 +16,25 @@ The pipeline is deserialized once at startup and warmed by Haystack on its first
 opens a token-authenticated MCP connection lazily on its first MCP tool call and closes it when the
 rollout ends. Concurrent rollouts remain isolated.
 
+## Pipeline and request contract
+
+The configured component must be a Haystack `Agent` backed by `NeMoGymResponsesChatGenerator`.
+`Agent.system_prompt` is supported, but `Agent.user_prompt` must be unset: the incoming Responses
+request already supplies the complete user context, and Haystack appends `user_prompt` after that
+context, making it impossible to distinguish from generated output when the rollout is reconstructed.
+
+The request's `input` is converted to Haystack messages and request `tools` become request-scoped
+HTTP tools. Other explicitly supplied generation settings, including `temperature`, `top_p`,
+`max_output_tokens`, and `tool_choice`, are forwarded to every model call. They override the
+generator's static `generation_kwargs` from the pipeline YAML. `instructions` is ignored in favor
+of the pipeline's `system_prompt`; streaming is unsupported.
+
+The harness is text-only. It rejects image, file, refusal, and other non-text content parts rather
+than silently changing the trajectory. Generated token IDs, logprobs, routed-expert metadata, and
+per-call usage are retained in `ChatMessage.meta` while Haystack executes tools, then restored in
+the final Responses trajectory. Each model turn's token stream is attached once to that turn's
+terminal function-call or assistant-message output item.
+
 ## Layout
 
 - `chat_generator.py` — `NeMoGymResponsesChatGenerator` + Haystack `ChatMessage` ⇄ Responses-API
