@@ -134,15 +134,9 @@ if (( SLURM_PROCID == 0 )); then
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-    until curl -fs "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" >/dev/null; do
-        sleep 5
-    done
-    until curl -fs "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" >/dev/null; do
-        sleep 5
-    done
-
     # --intra-node-data-parallel-size must match the data-parallel-size-local above.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
+    # Don't manually wait as vllm-router will wait for the URLs to come up
     vllm-router \
         --policy consistent_hash \
         --vllm-pd-disaggregation \
