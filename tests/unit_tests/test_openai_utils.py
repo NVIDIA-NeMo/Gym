@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
+from openai.types.chat import ChatCompletionContentPartInputAudioParam
 from openai.types.responses import (
     ResponseCodeInterpreterToolCall,
     ResponseComputerToolCall,
@@ -31,6 +32,8 @@ from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletionContentPartInputAudioParam,
+    NeMoGymChatCompletionContentPartVideoParam,
     NeMoGymImageGenerationCall,
     NeMoGymLocalShellCall,
     NeMoGymResponse,
@@ -46,6 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseMcpListTools,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NeMoGymVideoURL,
     TokenIDLogProbMixin,
     accumulate_response_usage,
 )
@@ -83,6 +87,21 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_unknown_field_still_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponseCreateParamsNonStreaming(input="hello", not_a_real_field=1)
+
+
+class TestNeMoGymChatCompletionContentParts:
+    def test_input_audio_content_part_inherits_openai_schema(self) -> None:
+        assert (
+            ChatCompletionContentPartInputAudioParam in NeMoGymChatCompletionContentPartInputAudioParam.__orig_bases__
+        )
+        assert (
+            NeMoGymChatCompletionContentPartInputAudioParam.__annotations__
+            == ChatCompletionContentPartInputAudioParam.__annotations__
+        )
+
+    def test_video_content_part_uses_public_gym_video_url_type(self) -> None:
+        assert "video_url" in NeMoGymChatCompletionContentPartVideoParam.__annotations__
+        assert NeMoGymVideoURL.__name__ == "NeMoGymVideoURL"
 
 
 class TestNeMoGymResponseHostedMcpItems:

@@ -41,6 +41,9 @@ from openai.types.chat import (
     ChatCompletionToolParam,
     ChatCompletionUserMessageParam,
 )
+from openai.types.chat import (
+    ChatCompletionContentPartInputAudioParam as OpenAIChatCompletionContentPartInputAudioParam,
+)
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_assistant_message_param import (
     ContentArrayOfContentPart,
@@ -515,9 +518,28 @@ class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageP
     pass
 
 
+class NeMoGymVideoURL(TypedDict, total=False):
+    url: Required[str]
+
+
+class NeMoGymChatCompletionContentPartVideoParam(TypedDict, total=False):
+    # Gym extension: ``video_url`` is not part of the OpenAI Chat Completions
+    # content-part schema in the OpenAI Python SDK. Gym accepts it so
+    # OpenAI-compatible backends such as vLLM can receive video inputs without the
+    # proxy rejecting the request during schema validation.
+    type: Required[Literal["video_url"]]
+    video_url: Required[NeMoGymVideoURL]
+
+
+class NeMoGymChatCompletionContentPartInputAudioParam(OpenAIChatCompletionContentPartInputAudioParam):
+    pass
+
+
 NeMoGymChatCompletionContentPartParam = Union[
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionContentPartImageParam,
+    NeMoGymChatCompletionContentPartVideoParam,
+    NeMoGymChatCompletionContentPartInputAudioParam,
 ]
 
 

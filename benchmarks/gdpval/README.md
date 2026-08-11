@@ -31,9 +31,8 @@ gym eval run \
 
 Required environment variables for the judge:
 
-- `JUDGE_API_KEY` — sk- key for the judge inference API (nvapi- keys 401 on
-  multimodal payloads)
-- `JUDGE_BASE_URL` — defaults to NVIDIA's internal inference API
+- `JUDGE_API_KEY` — API key for the judge inference endpoint
+- `JUDGE_BASE_URL` — OpenAI-compatible judge endpoint
 - `JUDGE_MODEL_NAME` — the single-judge fallback model (used only when the
   [multi-judge panel](#multi-judge-panel) is disabled); defaults to
   `gcp/google/gemini-3.1-pro-preview`
@@ -216,7 +215,7 @@ The default panel (see `benchmarks/gdpval/config.yaml`) is:
 | Member | Model (default) | Reasoning |
 |--------|-----------------|-----------|
 | `gpt-5.5` | `openai/openai/gpt-5.5` | medium |
-| `gemini-3.1-pro` | `gcp/google/gemini-3.1-pro-preview` | high (handles audio/video) |
+| `gemini-3.1-pro` | `gcp/google/gemini-3.1-pro-preview` | high (reads audio + video) |
 | `claude-opus-4.8` | `aws/anthropic/bedrock-claude-opus-4-8` | thinking enabled |
 
 All three route through the single `gdpval_judge_model` proxy server and differ
@@ -249,12 +248,23 @@ subset draws the same panel members it did originally.
 
 ### Audio / video routing
 
-Tasks whose deliverables or references contain audio or video files (detected by
-extension, including inside `.zip` archives) are routed to the panel member(s)
-flagged `handles_audio_video: true` — Gemini 3.1 Pro Preview by default, which
-reads those modalities natively. The whole rollout for that task is graded by the
-AV-capable subset, and comparison responses set `av_routed: true`. If no member
-is flagged AV-capable, the full panel is used unchanged (best-effort).
+Audio and video capability is tracked **per modality** — a judge may read one but
+not the other (e.g. MiniMax-M3 reads video but has no audio tower). Tasks whose
+deliverables or references contain media (detected by extension, including inside
+`.zip` archives) are routed accordingly:
+
+- **Video**: routed to the member(s) flagged `handles_video: true` — Gemini 3.1
+  Pro Preview by default, which reads video natively. If no member reads video,
+  `on_missing_av_judge` decides: `warn` (default) grades with the full,
+  video-blind panel and logs that the scores are unreliable; `error` fails the
+  task hard.
+- **Audio**: routed to the member(s) flagged `handles_audio: true`. Audio is
+  always best-effort — if no routed judge reads audio (e.g. any task graded solely
+  by MiniMax-M3), the audio files are **dropped with a warning** and the rest of
+  the deliverable (video / images / text) is still graded. Never fatal.
+
+Only Gemini among the frontier judges reads audio/video; GPT and Claude read
+neither.
 
 ### Configuring the panel
 
@@ -267,7 +277,8 @@ Each member accepts:
 | `model_server` | `judge_model_server` | Point a member at a distinct endpoint instead of the shared proxy. |
 | `create_params_overrides` | `{}` | Generation/reasoning knobs merged into `chat.completions.create` (e.g. `{reasoning_effort: high}`, `{extra_body: {...}}`). A `null` value drops a default. |
 | `weight` | `1.0` | Relative sampling weight. |
-| `handles_audio_video` | `false` | Eligible to grade audio/video tasks (see above). |
+| `handles_audio` | `false` | Member reads audio natively (eligible to grade audio tasks — see above). |
+| `handles_video` | `false` | Member reads video natively (eligible to grade video tasks — see above). |
 
 To grade with a **single judge** instead of the panel, set `judge_panel` to
 `null` — the lone judge is then taken from `judge_model_server` +
@@ -276,6 +287,101 @@ To grade with a **single judge** instead of the panel, set `judge_panel` to
 ```bash
     ++gdpval_resources_server.resources_servers.gdpval.judge_panel=null
 ```
+
+## Local multimodal judge (MiniMax-M3)
+
+By default the judges are frontier models hosted on a third-party inference API
+that decode PDFs natively. You can instead judge with a **local, open,
+multimodal** model — MiniMax-M3, which reads images **and video** (it has no audio
+tower — see below), so it scores most GDPVal deliverable modalities with no
+third-party inference API. You host MiniMax-M3 yourself; the only twist is that
+**gym does not spawn it** — gym connects to your vLLM server over its
+OpenAI-compatible `/v1` endpoint.
+
+Two pieces make this work:
+
+1. **`judge_media_mode: images_and_text`** — a VLM can't decode a raw
+   `application/pdf` data URL, so each PDF/Office-doc **page is rasterized to a
+   PNG** (via PyMuPDF) and the **extracted text is attached** alongside. This
+   applies to every judge mode (rubric text/visual/structured and pairwise
+   comparison). See `resources_servers/gdpval/media_conversion.py`. Knobs:
+   `judge_pdf_render_dpi` (default 144), `judge_pdf_max_pages` (cap per file),
+   `judge_pdf_include_text` (attach the text copy). Because MiniMax-M3 reads
+   video, `judge_handles_video: true` keeps video deliverables as native media
+   instead of filename-only stubs. It has **no audio tower**, so
+   `judge_handles_audio` stays false and audio deliverables are dropped with a
+   warning (everything else is still graded).
+2. **A self-hosted MiniMax-M3 endpoint** — you serve the model from the vendor's
+   `vllm/vllm-openai:minimax-m3` container and gym connects to its
+   OpenAI-compatible `/v1` endpoint. See
+   `resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml`.
+
+> **Why self-host instead of letting gym spawn it?** The bundled
+> `vllm/models/minimax_m3/nvidia/` plugin hardcodes FlashInfer CuTe-DSL kernels
+> (`gemma_rmsnorm`, fused MoE, MLA) with no fallback. On Blackwell/GB200 those
+> hit the `nvidia-cutlass-dsl` 4.5.2 JIT bug (`Expected an MLIR object (got
+> OpResultList)`, [vllm#45392](https://github.com/vllm-project/vllm/issues/45392))
+> and abort engine startup during the profiling pass. The plugin is designed to
+> run inside the vendor container, where the FlashInfer/cutlass-dsl/CUDA combo is
+> matched. Gym does not currently ship a MiniMax-M3 `local_vllm_model` config for
+> this path; use the self-hosted overlay instead.
+
+### Run it
+
+Serve MiniMax-M3 from the public vLLM image `vllm/vllm-openai:minimax-m3` and
+expose its OpenAI-compatible `/v1` endpoint. In our testing, a **single-node
+TP=4** instance worked, as did independent single-node TP=4 replicas for
+data-parallel throughput. Do NOT form one TP=8 group across two nodes unless
+you have validated that stack: the cross-node MXFP8 all-reduce path can produce
+*garbage logits that still start cleanly*.
+
+```bash
+# Verify the self-hosted endpoint from the gym host:
+curl -s http://<judge-host>:5000/v1/models
+```
+
+Then point gym at that endpoint in repo-root `env.yaml` (the port and
+served-model name must match your deployment):
+
+```yaml
+MINIMAX_BASE_URL: http://<judge-host>:5000/v1
+MINIMAX_MODEL: minimax-m3
+MINIMAX_API_KEY: unused
+```
+
+```bash
+gym eval run \
+    --config benchmarks/gdpval/config.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config resources_servers/gdpval/configs/gdpval_minimax_selfhosted_judge.yaml \
+    --split benchmark \
+    --output results/gdpval_minimax_judge.jsonl \
+    ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
+    ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+```
+
+The overlay repoints the benchmark's existing `gdpval_judge_model` proxy at your
+endpoint (a thin HTTP proxy — no GPU used by gym for the judge), sets
+`judge_panel: null`, selects `judge_media_mode: images_and_text`, and sets
+`judge_handles_video: true` / `judge_handles_audio: false`.
+
+Notes:
+
+- **Endpoint config**: `MINIMAX_BASE_URL` (must include `/v1`), `MINIMAX_MODEL`
+  (defaults to `MiniMaxAI/MiniMax-M3`; match the container's
+  `--served-model-name`), and `MINIMAX_API_KEY` (any non-empty string; vLLM
+  ignores it).
+- **Context budget**: high-DPI page images consume context faster than a
+  frontier judge; the overlay caps `judge_pdf_max_pages: 30`. Lower the DPI or
+  page cap if you hit `finish_reason: length`.
+- **Video**: MiniMax-M3 reads video natively, so video deliverables are passed as
+  native `video_url` media blocks (not filename stubs) via
+  `judge_handles_video: true`.
+- **Audio**: MiniMax-M3 has **no audio tower** (its `config.json` is an
+  image+video VLM with no audio config), so `judge_handles_audio` stays false —
+  audio deliverables are dropped with a warning and the rest of the deliverable
+  (video/images/text) is still graded. Route audio tasks to an audio-capable
+  judge (e.g. Gemini) if you need them scored.
 
 ## Aggregate metrics
 

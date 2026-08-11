@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GDPVal judge overlay for a self-hosted MiniMax-M3 endpoint. Gym does not spawn
+# the model; it connects to the OpenAI-compatible /v1 endpoint you run.
+# See benchmarks/gdpval/README.md for serving and run instructions.
+
+# --- Repoint the judge proxy at your self-hosted MiniMax-M3 endpoint ---------
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      # Your MiniMax-M3 server's OpenAI-compatible endpoint. Must include /v1.
+      openai_base_url: ${oc.select:MINIMAX_BASE_URL,${oc.env:MINIMAX_BASE_URL,http://127.0.0.1:8000/v1}}
+      # vLLM ignores the key by default; any non-empty string works.
+      openai_api_key: ${oc.select:MINIMAX_API_KEY,${oc.env:MINIMAX_API_KEY,dummy}}
+      # Must match the server's --served-model-name (defaults to the HF id).
+      openai_model: ${oc.select:MINIMAX_MODEL,${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}}
+      openai_default_headers: {}
+
+# --- Point the GDPVal resources server at that single self-hosted judge ------
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      verified: false
+      # Keep judge_model_server on the default `gdpval_judge_model` proxy, which
+      # we repointed at your endpoint above.
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model
+      # The judge model id must match the server's served model name.
+      judge_responses_create_params_overrides:
+        model: ${oc.select:MINIMAX_MODEL,${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}}
+      # Disable the frontier panel so scoring uses the single MiniMax-M3 judge
+      # from judge_model_server (+ the overrides above).
+      judge_panel: null
+      # Present PDFs/Office docs as rasterized page images + extracted text —
+      # a VLM cannot decode an application/pdf data URL.
+      judge_media_mode: images_and_text
+      judge_pdf_render_dpi: 144
+      # Conservative page cap: many high-DPI page images can exhaust a VLM's
+      # context far sooner than a hosted frontier judge. Raise if your
+      # deliverables are short and you have context headroom.
+      judge_pdf_max_pages: 30
+      judge_pdf_include_text: true
+      # MiniMax-M3 reads VIDEO → forward video deliverables to the judge as
+      # standard vLLM video_url blocks (not filename-only stubs). M3 has no audio
+      # tower, so leave judge_handles_audio false: audio deliverables are dropped
+      # with a warning and the rest (video/images/text) is still graded.
+      judge_handles_video: true
+      judge_handles_audio: false
+      # If a task carries VIDEO but no judge can read it, "warn" grades with the
+      # video-blind judge and logs that the scores are unreliable (default). Set
+      # "error" to fail such tasks hard instead. (Here M3 reads video, so this
+      # guard never trips.) Audio is always handled leniently — dropped + warned.
+      on_missing_av_judge: warn
