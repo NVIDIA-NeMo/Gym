@@ -22,11 +22,10 @@ Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
 `PARALLEL` for concurrency and `RESUME` to continue an interrupted run. Results land in
 `./results/<benchmark>`.
 
-Each recipe puts your working tree at the Gym commit its tech report number was produced
-with, leaving the recipes themselves alone. It overwrites tracked files and deletes ones
-added since that commit, so commit or stash your own work first. Your index and `HEAD`
-are left alone, and `git restore .` from the repo root puts everything back. Set
-`PIN_GYM=0` to run against your current checkout instead.
+Each recipe first puts the repo at the Gym commit its tech report number was produced
+with, leaving the recipes alone. It overwrites and deletes files in your checkout, so
+commit or stash your work first; `git restore .` puts everything back. Set `PIN_GYM=0`
+to run against your current checkout instead.
 
 ## Prerequisites
 
