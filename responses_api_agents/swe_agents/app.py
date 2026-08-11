@@ -16,6 +16,7 @@
 import asyncio
 import base64
 import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -31,7 +32,7 @@ from asyncio import Semaphore
 from asyncio.subprocess import Process
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from shutil import rmtree
 from subprocess import Popen
 from subprocess import run as subprocess_run
@@ -69,6 +70,202 @@ from responses_api_models.vllm_model.app import VLLMConverter, split_responses_i
 ########################################
 # START Configuration
 ########################################
+
+
+# ---------------------------------------------------------------------------
+# Model-in-netns bridge (terminal-bench offline service tasks)
+# ---------------------------------------------------------------------------
+# Offline service tasks (allow_internet=false) run under `apptainer --net
+# --network=none` so daemons can bind privileged ports (nginx :80) and parallel
+# workers don't collide on the shared host netns. That isolated netns also severs
+# the in-SIF opencode agent from the host policy-model endpoint. We carry the model
+# in over a bind-mounted unix-domain socket (a filesystem object that crosses the
+# netns boundary) bridged with socat on both ends:
+#   in-SIF agent -> 127.0.0.1:PORT (inner socat) -> unix sock -> outer socat ->
+#   real model server (host:dynport, in the rl-container netns).
+# REQUIRED for allow_internet=false: every offline Terminal-Bench task uses the private
+# netns and a usable portable socat/ip bundle. allow_internet=true / absent keeps the
+# shared host netns. The bundle is architecture-specific, so it has no default: set it
+# declaratively via the `tb_net_bridge_pkg` config field (see configs/terminalbench.yaml),
+# or override per-process with the TB_NET_BRIDGE_PKG env var. Missing or invalid
+# private-network setup is fatal; it must never silently widen an offline task back onto
+# the shared network. The model endpoint the agent dials is overridden to loopback in
+# OpenCodeHarnessProcessor.
+
+
+def _tb_private_network_requested(data_point: Dict[str, Any]) -> bool:
+    if data_point.get("dataset_name") != "terminal-bench":
+        return False
+    try:
+        instance_dict = json.loads(data_point.get("instance_dict", "{}"))
+    except Exception as error:
+        raise RuntimeError("Terminal-Bench instance_dict is not valid JSON") from error
+    if not isinstance(instance_dict, dict):
+        raise RuntimeError("Terminal-Bench instance_dict must be a JSON object")
+    return instance_dict.get("allow_internet", True) is False
+
+
+def _tb_net_bridge_cfg(config: Any) -> Optional[Dict[str, Any]]:
+    """Resolve the model-in-netns bridge for this datapoint, or None if not needed.
+
+    The bundle path and listen port come from config (`tb_net_bridge_pkg` /
+    `tb_net_bridge_port`); the TB_NET_BRIDGE_PKG / TB_NET_BRIDGE_PORT env vars override
+    them so a single node can be repointed without editing the config.
+    """
+    data_point = config.problem_info
+    if not _tb_private_network_requested(data_point):
+        return None
+    pkg = os.environ.get("TB_NET_BRIDGE_PKG") or getattr(config, "tb_net_bridge_pkg", None)
+    if not pkg:
+        raise RuntimeError(
+            "Terminal-Bench task requires the private-network bridge (allow_internet=false) but no "
+            "socat/ip bundle is configured; set `tb_net_bridge_pkg` in the config or TB_NET_BRIDGE_PKG "
+            "in the environment. The bundle is architecture-specific, so there is no default."
+        )
+    pkg = str(pkg)
+    if not (
+        (Path(pkg) / "socat").is_file() and (Path(pkg) / "ld-linux.so").is_file() and (Path(pkg) / "libs").is_dir()
+    ):
+        raise RuntimeError(f"Terminal-Bench private network bridge bundle is missing or invalid: pkg={pkg}")
+    # Full executable/content validation runs again on the Ray worker immediately before
+    # the outer bridge starts. Keeping this first check structural lets command-only tests
+    # use inert placeholders without creating an execution path that can fall back to the
+    # shared network.
+    try:
+        port = int(os.environ.get("TB_NET_BRIDGE_PORT") or getattr(config, "tb_net_bridge_port", None) or 18900)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Terminal-Bench net bridge port must be an integer") from error
+    if not 1 <= port <= 65535:
+        raise RuntimeError(f"Terminal-Bench net bridge port is out of range: {port}")
+    tok = hashlib.sha1(config.agent_run_id.encode()).hexdigest()[:16]
+    return {"pkg": pkg, "port": port, "sock": f"/tmp/tbnb/{tok}.sock", "sockdir": "/tmp/tbnb"}
+
+
+def _tb_validate_net_bridge_bundle(pkg: str) -> None:
+    required_executables = [Path(pkg) / name for name in ("socat", "ip", "ld-linux.so")]
+    invalid = [
+        str(path)
+        for path in required_executables
+        if not path.is_file() or path.stat().st_size == 0 or not os.access(path, os.X_OK)
+    ]
+    libs_dir = Path(pkg) / "libs"
+    libraries = list(libs_dir.iterdir()) if libs_dir.is_dir() else []
+    if invalid or not libraries or any(not path.is_file() or path.stat().st_size == 0 for path in libraries):
+        raise RuntimeError(
+            "Terminal-Bench private network bridge bundle is missing or invalid: "
+            f"pkg={pkg} invalid_executables={invalid} libs={libs_dir}"
+        )
+
+
+def _tb_tests_host_dir(eval_private_dir: Path) -> Path:
+    """Staging root for the hidden test bundle.
+
+    Lives under ``eval_private_dir``, which every container masks with an empty
+    read-only overmount, so the agent container can never read it.
+    """
+    return eval_private_dir / "tb_tests"
+
+
+def _tb_verifier_host_dir(eval_private_dir: Path) -> Path:
+    """Eval-only host directory mounted writable at /logs/verifier."""
+    return eval_private_dir / "verifier"
+
+
+_TB_TERMINAL_TOOL_OUTPUT = "[terminal tool execution ended before the harness captured an output]"
+
+
+def _append_terminal_tool_outputs(messages: list[dict]) -> list[str]:
+    """Pair only dangling tool calls in the final assistant message.
+
+    Some task commands use ``pkill -f`` with a pattern that also matches their
+    own command shell. OpenCode then persists the assistant's final tool call
+    but cannot persist a tool result before the shell disappears. Preserve the
+    event explicitly instead of emitting a structurally orphaned trajectory.
+    Earlier unmatched calls are not repaired because appending their results at
+    the end would falsify message ordering.
+    """
+    assistant_indices = [index for index, message in enumerate(messages) if message.get("role") == "assistant"]
+    if not assistant_indices:
+        return []
+    final_assistant_index = assistant_indices[-1]
+    tail = messages[final_assistant_index + 1 :]
+    if any(message.get("role") != "tool" for message in tail):
+        return []
+    result_ids = {
+        message.get("tool_call_id")
+        for message in tail
+        if message.get("role") == "tool" and message.get("tool_call_id")
+    }
+    missing = []
+    for call in messages[final_assistant_index].get("tool_calls") or []:
+        call_id = call.get("id")
+        if call_id and call_id not in result_ids:
+            missing.append(call_id)
+    for call_id in missing:
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": _TB_TERMINAL_TOOL_OUTPUT})
+    return missing
+
+
+def _tb_flatten_multipart_content(messages: list[dict]) -> int:
+    """Flatten list-form chat content to plain text (terminal-bench only).
+
+    Opencode formats some tool-result notices as a LIST of chat-completions
+    parts — e.g. when a tool result carries an image and the policy model is
+    text-only, opencode substitutes text parts reading "Attached image(s) from
+    tool result:" / "ERROR: Cannot read image (this model does not support
+    image input). Inform the user." — but ``NeMoGymEasyInputMessage`` accepts
+    only plain-string content, so the Responses conversion raises and 500s the
+    whole rollout. Flattening to the concatenated part text records exactly
+    what a text-only model consumed, so the trajectory stays faithful.
+
+    NOTE (vision LLMs): this is correct for TEXT-ONLY policies only. If
+    NeMo-Gym ever serves a vision policy, opencode will attach real image
+    parts and flattening would silently drop them from the recorded
+    trajectory — the implementation path must be reconsidered then (proper
+    multi-part image support through the Responses conversion, end to end).
+    """
+    flattened = 0
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") == "assistant" or not isinstance(content, list):
+            continue
+        texts = []
+        for part in content:
+            if isinstance(part, dict):
+                value = part.get("text", "")
+                texts.append("" if value is None else str(value))
+            elif part is not None:
+                texts.append(str(part))
+        message["content"] = "\n".join(text for text in texts if text)
+        flattened += 1
+    return flattened
+
+
+def _effective_agent_timeout_sec(config: Any) -> int:
+    """Per-instance agent budget, falling back to the global `swebench_agent_timeout`.
+
+    Terminal-Bench rows declare their own `agent_timeout_sec` (the task's real time
+    budget); other datasets leave it unset and keep the config-wide value.
+    """
+    try:
+        instance_dict = json.loads(config.problem_info.get("instance_dict") or "{}")
+        declared = int(instance_dict.get("agent_timeout_sec") or 0)
+    except Exception:
+        declared = 0
+    return declared if declared > 0 else config.swebench_agent_timeout
+
+
+def _tb_repair_trajectory(problem_info: Dict[str, Any], chat_completions_trajectory: list[dict]) -> Optional[int]:
+    """Apply the terminal-bench-only trajectory repairs, in place.
+
+    Returns the number of synthesized tool results, or None when the datapoint is
+    not terminal-bench — in which case the trajectory is left completely untouched.
+    """
+    if problem_info.get("dataset_name") != "terminal-bench":
+        return None
+    synthesized = _append_terminal_tool_outputs(chat_completions_trajectory)
+    _tb_flatten_multipart_content(chat_completions_trajectory)
+    return len(synthesized)
 
 
 class AgentPromptOverride(BaseModel):
@@ -124,6 +321,46 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = Field(default=30 * 60, description="Timeout for running tests (seconds)")
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
+
+    # Terminal-Bench configuration
+    tb_single_exec: bool = Field(
+        default=False,
+        description=(
+            "Terminal-Bench: run the agent and the eval in ONE apptainer exec so background "
+            "services the agent starts (grpc/nginx/pypi/...) stay alive for the test phase via "
+            "the shared PID namespace. Required for service tasks; the two-exec default kills "
+            "them between execs. Cannot provide strict hidden-test mount isolation, because the "
+            "single exec needs the eval test mount for its whole duration."
+        ),
+    )
+    tb_service_settle_sec: int = Field(
+        default=20, description="Terminal-Bench single-exec: seconds to let agent services settle before eval."
+    )
+    tb_net_bridge_pkg: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path to the portable socat/ip bundle used to carry the model server into the "
+            "private network namespace of an offline Terminal-Bench task (allow_internet=false). "
+            "Must contain socat, ip, ld-linux.so and a libs/ directory, and must match the node "
+            "architecture — hence no default. Overridable per-process with TB_NET_BRIDGE_PKG. "
+            "Offline tasks fail closed when this is unset rather than falling back to the shared network."
+        ),
+    )
+    tb_net_bridge_port: int = Field(
+        default=18900,
+        description=(
+            "Loopback port the in-container socat hop listens on for the model-in-netns bridge. "
+            "Overridable per-process with TB_NET_BRIDGE_PORT."
+        ),
+    )
+    tb_verifier_timeout_floor_sec: Optional[int] = Field(
+        default=None,
+        description=(
+            "Optional Terminal-Bench-only lower bound for verifier wall time. "
+            "The effective timeout is max(instance verifier_timeout_sec, this floor); "
+            "useful on slower architectures where the task-declared limit assumes warm installs."
+        ),
+    )
 
     apptainer_memory_limit_mb: int = Field(
         default=64 * 1024,
@@ -207,7 +444,9 @@ class SWEBenchWrapperServerConfig(BaseModel):
 class ExecuteContainerCommandArgs(BaseModel):
     command: str
     expected_file_pattern: str
-    mode: Union[Literal["agent"], Literal["eval"]]
+    # "agent_eval" is the Terminal-Bench single-exec mode: one apptainer exec that runs
+    # the agent and then the verifier, so agent-started services survive into the eval.
+    mode: Union[Literal["agent"], Literal["eval"], Literal["agent_eval"]]
     timeout: int
 
 
@@ -251,6 +490,15 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_command: Optional[ExecuteContainerCommandArgs] = None
     agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
+    # tb_single_exec (terminal-bench): merged agent+eval command, built in _setup_params
+    # where _build_apptainer_command is available (it lives on the wrapper, not the runner).
+    merged_command: Optional[ExecuteContainerCommandArgs] = None
+    merged_apptainer_command_str: Optional[str] = None
+    # Model-in-netns bridge: real model-server "host:port" + portable socat bundle path, set
+    # in _setup_params when the bridge is active, so the Ray worker can start the outer socat
+    # hop WITHOUT depending on the env var propagating into the worker process.
+    tb_bridge_real_hostport: Optional[str] = None
+    tb_bridge_pkg: Optional[str] = None
 
     # GRPO related fields
     mask_sample: bool = False
@@ -273,6 +521,9 @@ class SWEBenchMetrics(BaseModel):
     agent_error_kind: Optional[str] = None
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
+    # Terminal-Bench: tool results synthesized for calls whose shell died before the
+    # harness could persist an output (see _append_terminal_tool_outputs).
+    synthetic_terminal_tool_outputs: Optional[int] = None
 
     # Memory watchdog signals
     oom_killed: Optional[bool] = None
@@ -1497,6 +1748,228 @@ fi
         report_path.write_text(json.dumps(report, indent=2))
 
 
+# Size of the per-instance ext3 overlay shared between the Terminal-Bench agent
+# and eval containers. Holds the agent's writes to the task filesystem so the
+# eval phase can grade live state. Tunable; tasks rarely write more than a few
+# hundred MB, but uv/pip caches inside run-tests.sh can be sizeable.
+TB_OVERLAY_SIZE_MB = 8192
+
+
+def _validated_tb_tests_dir(raw_tests_dir: Any, workspace_path: str) -> str:
+    tests_dir = str(raw_tests_dir or "/tests")
+    path = PurePosixPath(tests_dir)
+    workspace = PurePosixPath(workspace_path)
+    allowed = {PurePosixPath("/tests")}
+    normalized_workspace = workspace.is_absolute() and workspace.as_posix() == workspace_path
+    if normalized_workspace:
+        allowed.add(workspace / "tests")
+    destroys_workspace = normalized_workspace and (path == workspace or path in workspace.parents)
+    if not path.is_absolute() or path.as_posix() != tests_dir or path not in allowed or destroys_workspace:
+        raise ValueError(
+            "terminal-bench tests_dir must be the normalized absolute path /tests "
+            f"or <workspace_path>/tests; observed={tests_dir!r} "
+            f"workspace_path={workspace_path!r}"
+        )
+    return path.as_posix()
+
+
+def _validated_tb_test_entrypoint(raw_entrypoint: Any) -> str:
+    entrypoint = str(raw_entrypoint or "test.sh")
+    path = PurePosixPath(entrypoint)
+    if path == PurePosixPath(".") or path.is_absolute() or ".." in path.parts or path.as_posix() != entrypoint:
+        raise ValueError(f"terminal-bench test_entrypoint must be a normalized relative path; observed={entrypoint!r}")
+    return path.as_posix()
+
+
+def _tb_hidden_tests_install_script(
+    tests_dir: str,
+    test_entrypoint: str,
+    *,
+    bundle_dir: str = "/root/tb_tests/bundle",
+) -> str:
+    destination = shlex.quote(tests_dir)
+    destination_copy = shlex.quote(tests_dir + "/")
+    source_copy = shlex.quote(bundle_dir.rstrip("/") + "/.")
+    entrypoint = shlex.quote(str(PurePosixPath(tests_dir) / test_entrypoint))
+    return (
+        f"rm -rf -- {destination} || exit 1\n"
+        f"mkdir -p -- {destination} || exit 1\n"
+        f"cp -a -- {source_copy} {destination_copy} || exit 1\n"
+        f"chmod +x -- {entrypoint} || exit 1"
+    )
+
+
+class TerminalBenchDatasetProcessor(BaseDatasetHarnessProcessor):
+    """Terminal-Bench (Harbor-style) tasks — shared-overlay, live-state scoring.
+
+    Unlike the SWE-bench processors there is NO test patch and NO git-diff
+    reconstruction. The opencode agent runs under a persistent Apptainer overlay
+    (see `_build_apptainer_command` / `_process_single_datapoint_terminal_bench`);
+    this eval step runs *sequentially* in a second container that mounts the SAME
+    overlay, so it grades the agent's live filesystem. It reproduces the Harbor
+    verifier contract: the task's `tests/` bundle (staged under `eval_private_dir`,
+    which every container masks with an empty overmount, and mounted read-only at
+    `/root/tb_tests` ONLY in the eval container) is copied to `tests_dir`
+    (default `/tests`); the entrypoint (default `test.sh`) is run with CWD =
+    `workspace_path` (default `/app`); reward is read from Harbor's
+    `/logs/verifier/reward.txt` (falling back to the entrypoint exit code), giving
+    a single all-or-nothing 0/1 `resolved`.
+
+    Required `instance_dict` fields:
+      - `test_files`: {relative-path-within-the-task-tests-dir: file-contents} —
+        the full hidden test bundle, INCLUDING the entrypoint (e.g. `test.sh`).
+    Optional:
+      - `workspace_path`: in-SIF task dir / CWD for the entrypoint (default `/app`).
+      - `tests_dir`: where the bundle is placed in-container (default `/tests`).
+      - `test_entrypoint`: script to run, relative to `tests_dir` (default `test.sh`).
+      - `verifier_timeout_sec`: eval timeout (default `swebench_tests_timeout`).
+    """
+
+    def setup(self) -> Path:
+        pass
+
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        workspace_path = str(instance_dict.get("workspace_path") or "/app")
+        tests_dir = _validated_tb_tests_dir(instance_dict.get("tests_dir"), workspace_path)
+        test_entrypoint = _validated_tb_test_entrypoint(instance_dict.get("test_entrypoint"))
+
+        test_files = instance_dict.get("test_files") or {}
+        if not isinstance(test_files, dict) or not test_files:
+            raise ValueError(
+                f"terminal-bench instance {self.config.instance_id} is missing "
+                "instance_dict['test_files'] (a dict of rel-path -> contents for the task's tests/ bundle)."
+            )
+        if test_entrypoint not in test_files:
+            raise ValueError(
+                f"terminal-bench instance {self.config.instance_id}: test_entrypoint "
+                f"'{test_entrypoint}' not present in instance_dict['test_files'] {sorted(test_files)}."
+            )
+
+        # Stage the authoritative test bundle host-side under eval_private_dir. Mounted
+        # read-only into the eval container at /root/tb_tests (see _build_apptainer_command).
+        tests_host_dir = _tb_tests_host_dir(self.config.eval_private_dir)
+        if tests_host_dir.exists():
+            shutil.rmtree(tests_host_dir, ignore_errors=True)
+        bundle_dir = tests_host_dir / "bundle"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        for rel_path, contents in test_files.items():
+            dest = bundle_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(contents if isinstance(contents, str) else json.dumps(contents))
+
+        # Binary fixtures (reference images, archives, model weights, sqlite DBs,
+        # .pt/.npy/...) cannot be inlined as text; they ride in
+        # instance_dict['test_files_b64'] (rel-path -> base64) and are written
+        # byte-identically here so the staged bundle matches the task's real tests/
+        # dir. Gated on the key's presence -> zero impact on rows without it.
+        test_files_b64 = instance_dict.get("test_files_b64") or {}
+        if isinstance(test_files_b64, dict):
+            for rel_path, b64 in test_files_b64.items():
+                dest = bundle_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(base64.b64decode(b64))
+
+        report_mounted = "/trajectories_mount/eval_results/report.json"
+        report_host = self.config.persistent_dir / "eval_results" / "report.json"
+        report_host.parent.mkdir(parents=True, exist_ok=True)
+
+        # This directory is mounted only in the eval container. Recreate it
+        # before each verification so an agent-created overlay path cannot
+        # supply or retain a reward file.
+        verifier_host_dir = _tb_verifier_host_dir(self.config.eval_private_dir)
+        if verifier_host_dir.exists():
+            shutil.rmtree(verifier_host_dir, ignore_errors=True)
+        verifier_host_dir.mkdir(parents=True, exist_ok=True)
+
+        ws = shlex.quote(workspace_path)
+        td = shlex.quote(tests_dir)
+        ep = shlex.quote(test_entrypoint)
+        install_hidden_tests = _tb_hidden_tests_install_script(tests_dir, test_entrypoint)
+        # Launched sequentially AFTER the agent finishes, so no sleep-until-
+        # predictions busy-wait — the overlay already holds the agent's work.
+        # No `set -e`: a failing test run is a valid (unresolved) outcome, not a
+        # container error, so the script must still exit 0 for _finish_container_command.
+        cmd = f"""#!/bin/bash
+set -uo pipefail
+
+date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} 2>/dev/null || true
+
+mkdir -p /trajectories_mount/eval_results /logs/verifier {ws}
+find /logs/verifier -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} + 2>/dev/null || true
+VERIFIER_STARTED_EPOCH=$(date +%s)
+
+# Inject the authoritative hidden test bundle (Harbor mounts tests/ at /tests).
+{install_hidden_tests}
+
+# Reproduce the env the Harbor/terminal-bench verifier normally provides, and fix
+# apt inside the UNPRIVILEGED Apptainer container. Vendor test.sh scripts assume:
+#   - TEST_DIR / T_BENCH_TEST_DIR  -> the mounted tests dir (else `: ${{TEST_DIR:?}}` aborts)
+#   - T_BENCH_CONTAINER_LOGS_PATH  -> /logs (LOG_DIR for solution.log etc.)
+#   - HOME                         -> writable home for the `curl | sh` uv installer
+#   - working apt-get              -> ~57% `apt-get install -y curl` before uv; apt's
+#       _apt sandbox user cannot setgroups in an unprivileged container, giving
+#       "Could not switch group" / "Method http has died" -> APT::Sandbox::User root.
+mkdir -p /etc/apt/apt.conf.d 2>/dev/null && printf 'APT::Sandbox::User "root";\\nAcquire::Retries "3";\\n' > /etc/apt/apt.conf.d/99tb-no-sandbox 2>/dev/null || true
+export TEST_DIR={td}
+export T_BENCH_TEST_DIR={td}
+export T_BENCH_CONTAINER_LOGS_PATH=/logs
+export HOME="${{HOME:-/root}}"
+export DEBIAN_FRONTEND=noninteractive
+export PYTHONDONTWRITEBYTECODE=1
+
+# Run the task's own verifier entrypoint (e.g. test.sh) with CWD = workspace.
+cd {ws}
+bash {td}/{ep} > /trajectories_mount/eval_results/pytest_stdout.log 2> /trajectories_mount/eval_results/pytest_stderr.log
+TB_EXIT=$?
+
+# Prefer a fresh regular Harbor reward.txt from the eval-only verifier mount;
+# otherwise fall back to the entrypoint exit code. All-or-nothing: reward 1 /
+# exit 0 == resolved.
+REWARD=""
+REWARD_SOURCE="exit_code"
+if [ -f /logs/verifier/reward.txt ] && [ ! -L /logs/verifier/reward.txt ]; then
+    REWARD_MTIME=$(stat -c %Y /logs/verifier/reward.txt 2>/dev/null || echo 0)
+    REWARD_CANDIDATE=$(tr -dc '0-9' < /logs/verifier/reward.txt 2>/dev/null || echo "")
+    if [ "$REWARD_MTIME" -ge "$VERIFIER_STARTED_EPOCH" ] && \
+       {{ [ "$REWARD_CANDIDATE" = "0" ] || [ "$REWARD_CANDIDATE" = "1" ]; }}; then
+        REWARD="$REWARD_CANDIDATE"
+        REWARD_SOURCE="verifier_file"
+        cp -f /logs/verifier/reward.txt /trajectories_mount/eval_results/reward.txt
+    fi
+fi
+if [ "$REWARD" = "1" ]; then RESOLVED=true
+elif [ "$REWARD" = "0" ]; then RESOLVED=false
+elif [ "$TB_EXIT" -eq 0 ]; then RESOLVED=true
+else RESOLVED=false; fi
+cat > {report_mounted} <<EOF
+{{"{self.config.instance_id}": {{"resolved": $RESOLVED, "exit_code": $TB_EXIT, "reward_txt": "$REWARD", "reward_source": "$REWARD_SOURCE", "patch_exists": true}}}}
+EOF
+"""
+
+        declared_timeout = int(instance_dict.get("verifier_timeout_sec") or self.config.swebench_tests_timeout)
+        timeout_floor = int(self.config.tb_verifier_timeout_floor_sec or 0)
+        effective_timeout = max(declared_timeout, timeout_floor)
+        return ExecuteContainerCommandArgs(
+            command=cmd,
+            expected_file_pattern=str(report_host),
+            mode="eval",
+            timeout=effective_timeout,
+        )
+
+    def postprocess_after_run(self, report_file: Path) -> None:
+        # The eval container already wrote {instance_id: {resolved, ...}}; just
+        # validate/normalize so _inner_responses can read ["resolved"] safely.
+        with open(report_file, "r+") as f:
+            report = json.loads(f.read())
+            entry = report.get(self.config.instance_id, {}) or {}
+            entry["resolved"] = bool(entry.get("resolved", False))
+            report[self.config.instance_id] = entry
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(report, indent=2))
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
@@ -1830,6 +2303,11 @@ def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
         repo = str(instance.get("repo", problem_info.get("repo", "")))
         repo_name = repo.split("/", 1)[1] if "/" in repo else repo
         return f"/{repo_name}"
+    if dataset_name == "terminal-bench":
+        # Terminal-Bench task images bake the task files at the Dockerfile WORKDIR
+        # (some SIFs use /workspace; Harbor v2 uses /app). The data prep sets
+        # workspace_path explicitly; default to /app.
+        return str(instance.get("workspace_path") or "/app")
     return "/testbed"
 
 
@@ -1966,6 +2444,13 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             raise RuntimeError(
                 f"Could not resolve model server '{self.config.model_server_name}' for opencode bench: {e}"
             )
+
+        # Model-in-netns bridge: an offline Terminal-Bench task runs in a private netns and
+        # cannot reach the host model server directly, so the agent dials the in-SIF inner
+        # socat hop on loopback instead (see _tb_net_bridge_cfg / _tb_start_outer_bridge).
+        _tb_bridge = _tb_net_bridge_cfg(self.config)
+        if _tb_bridge is not None:
+            model_server_base_url = f"http://127.0.0.1:{_tb_bridge['port']}"
 
         # Falls back to the policy model so opencode doesn't POST model=default.
         effective_model = self.config.body.model or default_model_name
@@ -2109,7 +2594,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f.flush()
             os.fsync(f.fileno())
 
-        agent_timeout_seconds = self.config.swebench_agent_timeout
+        agent_timeout_seconds = _effective_agent_timeout_sec(self.config)
         opencode_cmd = (
             f"timeout --signal=TERM --kill-after=30 {agent_timeout_seconds} "
             f"bash /trajectories_mount/{agent_script_name}"
@@ -2125,7 +2610,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             command=opencode_cmd,
             expected_file_pattern=search_path,
             mode="agent",
-            timeout=self.config.swebench_agent_timeout + 60,
+            timeout=agent_timeout_seconds + 60,
         )
 
 
@@ -2530,9 +3015,262 @@ class RunOpenHandsAgent(BaseModel):
         if active_command.watchdog_task is not None:
             active_command.watchdog_task.cancel()
 
+    async def _create_overlay_image(self, overlay_img: Path) -> None:
+        """Create the persistent ext3 overlay image shared by the Terminal-Bench
+        agent and eval containers. Prefers `apptainer overlay create`; falls back
+        to a raw mkfs.ext3 image (apptainer creates the upper/work dirs on first
+        use). Runs on the Ray worker, so apptainer is on PATH."""
+        overlay_img.parent.mkdir(parents=True, exist_ok=True)
+        if overlay_img.exists():
+            overlay_img.unlink()
+
+        # Size the overlay from the task's declared storage budget
+        # (task.toml [environment] storage_mb, carried in instance_dict), + 2 GB fs
+        # headroom. Falls back to TB_OVERLAY_SIZE_MB. A fixed small overlay caused
+        # "No space left on device" on storage-heavy tasks (e.g. mteb model downloads).
+        size_mb = TB_OVERLAY_SIZE_MB
+        try:
+            _idict = json.loads(self.config.problem_info.get("instance_dict") or "{}")
+            _smb = int(_idict.get("storage_mb") or 0)
+            if _smb > 0:
+                size_mb = _smb + 2048
+        except Exception:
+            pass
+
+        create_cmd = f"apptainer overlay create --size {size_mb} {shlex.quote(str(overlay_img))}"
+        proc = await asyncio.create_subprocess_shell(
+            create_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0 and overlay_img.exists():
+            return
+
+        print(
+            f"[terminal-bench] 'apptainer overlay create' failed (rc={proc.returncode}): "
+            f"{(stdout or b'').decode(errors='replace')[:500]}; falling back to mkfs.ext3",
+            flush=True,
+        )
+        fallback_cmd = (
+            f"dd if=/dev/zero of={shlex.quote(str(overlay_img))} bs=1M count={size_mb} status=none && "
+            f"mkfs.ext3 -F -q {shlex.quote(str(overlay_img))}"
+        )
+        proc2 = await asyncio.create_subprocess_shell(
+            fallback_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+        stdout2, _ = await proc2.communicate()
+        if proc2.returncode != 0 or not overlay_img.exists():
+            raise RuntimeError(f"overlay image creation failed: {(stdout2 or b'').decode(errors='replace')[:500]}")
+
+    async def _tb_start_outer_bridge(self):
+        """Model-in-netns bridge OUTER hop: start `socat UNIX-LISTEN:<sock> -> TCP:<real
+        model server>` (in the rl-container netns) so the in-SIF inner hop can reach the
+        host model over the bind-mounted unix socket. Returns the subprocess, or None if
+        the bridge isn't active for this task. Killed via _tb_stop_outer_bridge."""
+        # Worker-side: rely ONLY on params (set in _setup_params on the driver) so this does
+        # not depend on TB_NET_BRIDGE_PKG propagating into the Ray worker process. The socket
+        # name is recomputed deterministically from agent_run_id (matches the inner hop).
+        if not _tb_private_network_requested(self.config.problem_info):
+            return None
+        pkg = self.config.tb_bridge_pkg
+        real_hostport = self.config.tb_bridge_real_hostport
+        if not pkg or not real_hostport:
+            raise RuntimeError("Terminal-Bench private network bridge lacks its bundle or model endpoint")
+        _tb_validate_net_bridge_bundle(pkg)
+        sockdir = "/tmp/tbnb"
+        sock = f"{sockdir}/{hashlib.sha1(self.config.agent_run_id.encode()).hexdigest()[:16]}.sock"
+        try:
+            os.makedirs(sockdir, exist_ok=True)
+            if os.path.exists(sock):
+                os.unlink(sock)
+            outer_cmd = (
+                f"{pkg}/ld-linux.so --library-path {pkg}/libs {pkg}/socat "
+                f"UNIX-LISTEN:{shlex.quote(sock)},fork,reuseaddr "
+                f"TCP:{real_hostport}"
+            )
+            proc = await asyncio.create_subprocess_shell(
+                outer_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.sleep(0.5)
+            # Fast-fail: if socat exited already (bad bundle/path/bind) don't report success.
+            if proc.returncode is not None:
+                raise RuntimeError(f"outer socat exited early rc={proc.returncode} for {self.config.instance_id}")
+            # Wait for the listening socket to appear before the agent connects through it.
+            for _ in range(25):
+                if os.path.exists(sock):
+                    break
+                await asyncio.sleep(0.2)
+            if not os.path.exists(sock):
+                proc.terminate()
+                await proc.wait()
+                raise RuntimeError(f"outer socat did not create its Unix socket for {self.config.instance_id}")
+            print(f"[terminal-bench bridge] outer socat up: {sock} -> {real_hostport}", flush=True)
+            return proc
+        except Exception as e:
+            raise RuntimeError(
+                f"Terminal-Bench private network bridge start failed for {self.config.instance_id}: {e}"
+            ) from e
+
+    async def _tb_stop_outer_bridge(self, proc) -> None:
+        # Async + await wait() so the terminated socat is reaped (no zombie accrual across
+        # the many datapoints/repeats a single gym process serves).
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+        except Exception:
+            pass
+
+    async def _process_single_datapoint_terminal_bench(self) -> Optional[Path]:
+        """Shared-overlay orchestration for Terminal-Bench tasks.
+
+        Sequential (NOT the SWE-bench concurrent-launch + busy-wait): run the
+        opencode agent under a persistent overlay, then run the eval container
+        against the SAME overlay so the task's tests grade the agent's live
+        filesystem. The hidden tests are never present in the agent container.
+        Unlike the SWE path, we do NOT bail on an empty git patch — terminal-bench
+        success can be non-git state.
+        """
+        instance_id = self.config.instance_id
+        metrics = SWEBenchMetrics(ray_queue_time=time.time() - self.config.ray_queue_timestamp)
+
+        # 1) Create the persistent overlay both containers share.
+        overlay_img = self.config.persistent_dir / "agent_overlay.img"
+        try:
+            await self._create_overlay_image(overlay_img)
+        except Exception as e:
+            print(f"[terminal-bench] overlay creation failed for {instance_id}: {e}", flush=True)
+            metrics.patch_exists = False
+            update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
+            return None
+
+        # 1b) SINGLE-EXEC path (tb_single_exec): run the agent AND the eval in ONE
+        # apptainer exec so background services the agent starts (grpc/nginx/pypi/...)
+        # stay alive for the test phase (shared PID namespace). The two-exec default
+        # kills them between execs. Apptainer `instance` would be cleaner but user
+        # namespaces are blocked on the nodes. This path cannot provide strict mount
+        # isolation, because agent_eval needs the eval test mount for the whole exec.
+        if self.config.tb_single_exec and self.config.merged_command is not None:
+            # The merged agent+eval command was built in _setup_params (the wrapper has
+            # _build_apptainer_command; this runner does not). Just use it here.
+            agent_cmd = self.config.agent_command
+            merged_cmd = self.config.merged_command
+            merged_apptainer = self.config.merged_apptainer_command_str
+            metrics.openhands_run_time = -time.time()
+            metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
+            # Model-in-netns bridge: start the OUTER socat hop before the exec; the in-SIF
+            # inner hop connects to the bind-mounted socket. No-op unless the bridge is
+            # active for this task. Always torn down in finally.
+            _outer = await self._tb_start_outer_bridge()
+            try:
+                active = await self._start_container_command(merged_cmd, merged_apptainer)
+                try:
+                    report_file = await self._finish_container_command(active, merged_cmd)
+                except Exception as e:
+                    print(f"[terminal-bench single-exec] merged command failed for {instance_id}: {e}", flush=True)
+                    metrics.openhands_run_time += time.time()
+                    metrics.patch_exists = False
+                    metrics.agent_timed_out = (
+                        metrics.openhands_run_time is not None
+                        and metrics.openhands_run_time >= _effective_agent_timeout_sec(self.config)
+                    )
+                    update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
+                    return None
+                metrics.openhands_run_time += time.time()
+                metrics.patch_exists = True
+                # best-effort agent metrics (patch / error) from the agent's output file
+                try:
+                    agent_out = glob.glob(agent_cmd.expected_file_pattern, recursive=True)
+                    if agent_out:
+                        out_file = self._openhands_dir_copy_from_host(output_file_path=agent_out[0])
+                        with open(out_file, "r") as f:
+                            out_dict = json.loads(f.read().strip())
+                        metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
+                        patch = (out_dict.get("test_result") or {}).get("git_patch") or None
+                        metrics.model_patch = (patch + "\n") if patch and not patch.endswith("\n") else patch
+                except Exception as e:
+                    print(
+                        f"[terminal-bench single-exec] agent-metrics read failed for {instance_id}: {e}",
+                        flush=True,
+                    )
+                update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
+                return report_file
+            finally:
+                await self._tb_stop_outer_bridge(_outer)
+
+        # 2) Run the opencode agent (sequential; writes land in the overlay).
+        metrics.openhands_run_time = -time.time()
+        metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
+        _outer = await self._tb_start_outer_bridge()
+        try:
+            try:
+                agent_active = await self._start_container_command(
+                    self.config.agent_command, self.config.agent_apptainer_command_str
+                )
+                out_file_in_eval = await self._finish_container_command(agent_active, self.config.agent_command)
+                out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
+            except Exception as e:
+                print(f"[terminal-bench] agent command failed for {instance_id}: {e}", flush=True)
+                try:
+                    self._openhands_dir_copy_from_host(output_file_path=None)
+                except Exception:
+                    pass
+                metrics.openhands_run_time += time.time()
+                metrics.patch_exists = False
+                metrics.agent_timed_out = (
+                    metrics.openhands_run_time is not None
+                    and metrics.openhands_run_time >= _effective_agent_timeout_sec(self.config)
+                )
+                update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
+                return None
+        finally:
+            await self._tb_stop_outer_bridge(_outer)
+
+        metrics.openhands_run_time += time.time()
+        try:
+            with open(out_file, "r") as f:
+                out_dict = json.loads(f.read().strip())
+            metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
+            patch = (out_dict.get("test_result") or {}).get("git_patch") or None
+            metrics.model_patch = (patch + "\n") if patch and not patch.endswith("\n") else patch
+        except Exception as e:
+            print(f"[terminal-bench] could not read agent output for {instance_id}: {e}", flush=True)
+
+        # 3) Run the eval container against the same overlay (sequential).
+        metrics.final_eval_time = -time.time()
+        eval_active = await self._start_container_command(
+            self.config.eval_command, self.config.eval_apptainer_command_str
+        )
+        try:
+            report_file = await self._finish_container_command(eval_active, self.config.eval_command)
+        except Exception as e:
+            print(f"[terminal-bench] eval command failed for {instance_id}: {e}", flush=True)
+            metrics.final_eval_time += time.time()
+            metrics.patch_exists = True
+            # Terminal-Bench declares its verifier timeout per instance, so compare against
+            # the command's own timeout rather than the global swebench_tests_timeout.
+            metrics.eval_timed_out = str(e) == "Command timed out" or (
+                metrics.final_eval_time is not None
+                and metrics.final_eval_time >= float(self.config.eval_command.timeout) + 0.05
+            )
+            update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
+            return None
+
+        metrics.final_eval_time += time.time()
+        metrics.patch_exists = True
+        update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
+        return report_file
+
     async def process_single_datapoint(self) -> Optional[Path]:
         if self.config.verify_golden_patch:
             return await self._run_golden_patch_verification()
+
+        if self.config.problem_info.get("dataset_name") == "terminal-bench":
+            return await self._process_single_datapoint_terminal_bench()
 
         instance_id = self.config.instance_id
         if self.config.debug:
@@ -2929,6 +3667,23 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             FileNotFoundError: If no matching container file is found.
         """
         instance_id = data_point["instance_id"]
+        # Terminal-Bench: when a trusted SIF root is configured, resolve the image by exact
+        # name only. The fuzzy strategies below glob on *{instance_id}*.sif, which a planted
+        # neighbouring file could satisfy, so this path is deliberately fail-closed.
+        trusted_sif_root = os.environ.get("TB_TRUSTED_SIF_ROOT")
+        if data_point.get("dataset_name") == "terminal-bench" and trusted_sif_root:
+            root = Path(trusted_sif_root)
+            if not root.is_absolute():
+                raise FileNotFoundError(f"TB_TRUSTED_SIF_ROOT must be absolute: {trusted_sif_root}")
+            if Path(instance_id).name != instance_id or instance_id in {".", ".."}:
+                raise FileNotFoundError(f"invalid Terminal-Bench instance_id for trusted SIF lookup: {instance_id}")
+            trusted_container = root / f"{instance_id}_amd64.sif"
+            if trusted_container.is_file():
+                return str(trusted_container)
+            raise FileNotFoundError(
+                "No exact trusted Terminal-Bench SIF found: "
+                f"{trusted_container} (TB_TRUSTED_SIF_ROOT is set; fuzzy fallback disabled)"
+            )
         container_formatters = data_point["container_formatter"]
 
         if isinstance(container_formatters, str):
@@ -3021,9 +3776,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
         data_point = params.problem_info
 
+        # Private-netns config for offline Terminal-Bench tasks. `tb_bridge` is the
+        # model-carrying socat hop, which only the agent-side exec needs.
+        tb_net = _tb_net_bridge_cfg(params)
+        tb_bridge = tb_net if command.mode in ("agent", "agent_eval") else None
+
         # Fix localhost URLs not working sometimes
         container_commands = []
-        container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
+        if tb_net is not None:
+            # In a private netns the container's own hostname must resolve too, or
+            # daemons that bind to it fail to start.
+            container_commands.append('echo "127.0.0.1 localhost $(hostname 2>/dev/null)" >/etc/hosts')
+        else:
+            container_commands.append("echo '127.0.0.1 localhost' >/etc/hosts")
 
         # Apptainer uid namespacing makes the eval-image's `chmod` against
         # /var/run/postgresql fail with "Value too large for defined data
@@ -3109,7 +3874,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if params.agent_framework == "opencode" and command.mode == "eval":
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
-        elif params.agent_framework == "opencode" and command.mode == "agent":
+        elif params.agent_framework == "opencode" and command.mode in ("agent", "agent_eval"):
+            # "agent_eval" is the terminal-bench single-exec mode: the one exec runs the agent
+            # first, so it needs the full opencode harness mounted exactly like a plain agent exec.
             assert params.opencode_setup_dir is not None, "opencode_setup_dir not set"
             opencode_dir = f"{params.opencode_setup_dir}/opencode"
             bun_dir = f"{params.opencode_setup_dir}/bun"
@@ -3174,8 +3941,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
         # Add SWE-bench setup directory mount if available (for evaluation)
-        # swe-bench-ext, nv-internal-1, and deepswe don't use the swebench harness
-        if command.mode == "eval" and data_point["dataset_name"] not in ("nv-internal-1", "swe-bench-ext", "deepswe"):
+        # swe-bench-ext, nv-internal-1, deepswe, and terminal-bench don't use the swebench harness
+        if command.mode == "eval" and data_point["dataset_name"] not in (
+            "nv-internal-1",
+            "swe-bench-ext",
+            "deepswe",
+            "terminal-bench",
+        ):
             # Mount the entire setup directory at both /swebench_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
@@ -3272,6 +4044,67 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 mount_args.append(f"--mount type=bind,src={denovoswe_eval_script},dst=/root/_denovoswe_eval.py,ro")
                 mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
+        if command.mode in ("eval", "agent_eval") and data_point.get("dataset_name") == "terminal-bench":
+            # The authoritative test bundle, staged by TerminalBenchDatasetProcessor under
+            # eval_private_dir. Mounted read-only here and never in a pure agent exec.
+            tb_tests_host_dir = _tb_tests_host_dir(params.eval_private_dir)
+            mount_args.append(f"--mount type=bind,src={tb_tests_host_dir},dst=/root/tb_tests,ro")
+            # Writable: the Harbor verifier writes reward.txt here.
+            tb_verifier_host_dir = _tb_verifier_host_dir(params.eval_private_dir)
+            tb_verifier_host_dir.mkdir(parents=True, exist_ok=True)
+            mount_args.append(f"--mount type=bind,src={tb_verifier_host_dir},dst=/logs/verifier")
+
+        if command.mode in ("agent", "agent_eval") and data_point.get("dataset_name") == "terminal-bench":
+            # Defense-in-depth: if the task SIF baked the hidden tests in, delete
+            # them so the agent cannot read them. (Harbor builds the agent image
+            # from environment/ only, so normally there are none.) The canonical
+            # tests are injected solely in the eval container (mirrors the R2E-Gym
+            # test-hiding below).
+            tb_idict = json.loads(data_point["instance_dict"])
+            tb_ws_q = shlex.quote(str(tb_idict.get("workspace_path") or "/app"))
+            tb_td_q = shlex.quote(str(tb_idict.get("tests_dir") or "/tests"))
+            container_commands.append(
+                f"rm -rf {tb_td_q} {tb_ws_q}/tests {tb_ws_q}/test_outputs.py "
+                f"{tb_ws_q}/solution.sh /logs/verifier 2>/dev/null || true"
+            )
+            # systemctl shim (no systemd in the unprivileged container): map to
+            # `service` so tasks that do `systemctl restart nginx` (re)start the daemon.
+            container_commands.append(
+                "command -v systemctl >/dev/null 2>&1 || { "
+                'printf \'#!/bin/bash\\ncase "$1" in start|stop|restart|reload|try-restart|force-reload|status) '
+                'service "$2" "$1" 2>/dev/null || /etc/init.d/"$2" "$1" 2>/dev/null || true;; *) true;; esac\\nexit 0\\n\' '
+                "> /usr/local/bin/systemctl 2>/dev/null && chmod +x /usr/local/bin/systemctl 2>/dev/null; }; true"
+            )
+            # Let the AGENT run apt-get inside the unprivileged Apptainer container
+            # (else apt's _apt sandbox user cannot setgroups -> "Could not switch
+            # group"). Many tasks expect the agent to `apt-get install` tooling, as
+            # it could in the real (privileged) Terminal-Bench container.
+            container_commands.append(
+                "mkdir -p /etc/apt/apt.conf.d 2>/dev/null && "
+                'printf \'APT::Sandbox::User "root";\\nAcquire::Retries "3";\\n\' '
+                "> /etc/apt/apt.conf.d/99tb-no-sandbox 2>/dev/null || true"
+            )
+
+        if data_point.get("dataset_name") == "terminal-bench" and tb_net is not None:
+            # Give each offline service phase a private netns, bring loopback up,
+            # and boot the image runscript from the shared modified overlay. Only
+            # the agent phase needs the unix-socket hop to the policy model.
+            _ld = f"{tb_net['pkg']}/ld-linux.so --library-path {tb_net['pkg']}/libs"
+            container_commands.append(f"{_ld} {tb_net['pkg']}/ip link set lo up 2>/dev/null || true")
+            if tb_bridge is not None:
+                container_commands.append(
+                    f"{_ld} {tb_bridge['pkg']}/socat "
+                    f"TCP-LISTEN:{tb_bridge['port']},fork,reuseaddr,bind=127.0.0.1 "
+                    f"UNIX-CONNECT:{tb_bridge['sock']} >/tmp/tb_inner_socat.log 2>&1 & sleep 1"
+                )
+            container_commands.append(
+                "if [ -f /.singularity.d/runscript ]; then "
+                "( bash /.singularity.d/runscript </dev/null >/tmp/tb_boot.log 2>&1 & ); sleep 5; fi; true"
+            )
+            mount_args.append(f"--mount type=bind,src={tb_net['pkg']},dst={tb_net['pkg']},ro")
+            if tb_bridge is not None:
+                mount_args.append(f"--mount type=bind,src={tb_bridge['sockdir']},dst={tb_bridge['sockdir']}")
+
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
             # Remove R2E-Gym test-related files.
             for root_dir in ["", "/root", "/testbed"]:
@@ -3331,9 +4164,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         env_args += "--env CHROME_BIN=/tmp/chrome-wrapper.sh "
         env_args += "--env CHROMIUM_BIN=/tmp/chrome-wrapper.sh "
 
+        # Terminal-Bench: use a PERSISTENT per-instance overlay image instead of the
+        # ephemeral tmpfs overlay, so the agent's writes to the task filesystem survive
+        # into the eval container (which mounts the SAME overlay) and the verifier can
+        # grade live state. The image is created in _process_single_datapoint_terminal_bench.
+        # Offline tasks additionally get a private netns so daemons can bind privileged
+        # ports and parallel workers don't collide. All other datasets keep the original
+        # ephemeral tmpfs overlay (each container fully isolated).
+        net_flag = ""
+        if data_point.get("dataset_name") == "terminal-bench":
+            overlay_img = params.persistent_dir / "agent_overlay.img"
+            writable_overlay_flag = f"--overlay {shlex.quote(str(overlay_img))}"
+            if tb_net is not None:
+                net_flag = " --net --network=none"
+        else:
+            writable_overlay_flag = "--writable-tmpfs"
+
         # Launch Apptainer container and execute the script file
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"apptainer exec {writable_overlay_flag}{net_flag} --cleanenv --pid --no-mount home,tmp,bind-paths "
             f"{env_args}"
             f"{mount_str} "
             f" {params.container} bash {container_script_path}"
@@ -3497,7 +4346,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params.resolved_agent_cls = selected.agent_cls
             params.resolved_diversify_tool_names = selected.diversify_tool_names
 
-        if params.problem_info["dataset_name"] == "nv-internal-1":
+        if params.problem_info["dataset_name"] == "terminal-bench":
+            dataset_processor = TerminalBenchDatasetProcessor(config=params)
+        elif params.problem_info["dataset_name"] == "nv-internal-1":
             dataset_processor = NVInternalDatasetProcessor(config=params)
         elif params.problem_info["dataset_name"] == "deepswe":
             dataset_processor = DeepSWEDatasetProcessor(config=params)
@@ -3523,6 +4374,46 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
         params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
         params.agent_script = params.agent_script_path.read_text()
+
+        # tb_single_exec (terminal-bench): build the merged agent+eval command HERE, where
+        # _build_apptainer_command is available (it lives on the wrapper, not the runner).
+        # `set +e` + `|| true` so a failing agent phase still reaches the verifier — an
+        # unresolved task is a valid outcome, not a container error.
+        if params.tb_single_exec and params.problem_info.get("dataset_name") == "terminal-bench":
+            settle = int(params.tb_service_settle_sec)
+            merged_inner = (
+                "set +e\n( "
+                + params.agent_command.command
+                + "\n) || true\n"
+                + f'echo "[tb_single_exec] agent phase done; settling services {settle}s"\n'
+                + f"sleep {settle}\n"
+                + params.eval_command.command
+            )
+            params.merged_command = ExecuteContainerCommandArgs(
+                command=merged_inner,
+                expected_file_pattern=params.eval_command.expected_file_pattern,
+                mode="agent_eval",
+                timeout=(
+                    _effective_agent_timeout_sec(params)
+                    + int(params.eval_command.timeout or params.swebench_tests_timeout)
+                    + settle
+                    + 120
+                ),
+            )
+            params.merged_apptainer_command_str = self._build_apptainer_command(params, params.merged_command)
+
+        # Record the real model endpoint + bundle path for the model-in-netns bridge, so the
+        # Ray worker can start the outer socat hop without depending on env propagation.
+        _b = _tb_net_bridge_cfg(params)
+        if _b is not None:
+            params.tb_bridge_pkg = _b["pkg"]
+            try:
+                _msc = get_first_server_config_dict(get_global_config_dict(), params.model_server_name)
+                params.tb_bridge_real_hostport = f"{_msc.host}:{_msc.port}"
+            except Exception as _e:
+                raise RuntimeError(
+                    "Terminal-Bench private network bridge could not resolve model server host:port"
+                ) from _e
 
         return params, dataset_processor
 
@@ -3588,6 +4479,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         chat_completions_trajectory, chat_completions_tools, prefix_msg_count = (
             self.get_openhands_trajectory_from_completions(trajectories_dir, params.instance_id)
         )
+
+        tb_synthesized = _tb_repair_trajectory(params.problem_info, chat_completions_trajectory)
+        if tb_synthesized is not None:
+            metrics_to_update["synthetic_terminal_tool_outputs"] = tb_synthesized
 
         tools = [
             FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in chat_completions_tools

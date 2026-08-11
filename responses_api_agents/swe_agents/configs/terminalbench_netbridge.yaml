@@ -1,0 +1,63 @@
+# Terminal-Bench rollout — opencode, Path-2 live-state scoring, with the MODEL-IN-NETNS
+# BRIDGE for offline service tasks (branch tb-service-network-fix). Tasks whose
+# instance_dict has allow_internet=false run under `apptainer --net --network=none`
+# (private netns: services bind privileged ports, parallel workers isolated) AND reach the
+# host policy model over a bind-mounted unix-domain socket bridged with socat on both ends
+# (the bridge is active only when env TB_NET_BRIDGE_PKG points at the portable socat/ip
+# bundle). allow_internet=true tasks keep the shared host netns (unchanged). REQUIRES
+# tb_single_exec=true (the outer socat hop is started in the single-exec runner path).
+# See logbook P260611 H3 run 2026-06-14-netns-model-bridge.
+swe_agents:
+  responses_api_agents:
+    swe_agents: &swe_agents_config
+      entrypoint: app.py
+      domain: coding
+      description: Terminal-Bench rollouts (opencode) with the model-in-netns service bridge.
+      value: Roll out offline service tasks under --network=none with the model bridged into the private netns.
+
+      agent_framework: opencode
+      agent_max_turns: 300
+      # Pinned NeMo-Gym opencode fork (adds bench/cli.ts + the nemo-gym LanguageModelV3 provider).
+      # Same repo/branch as configs/swebench_opencode.yaml.
+      agent_framework_repo: https://github.com/sdevare-nv/nv-opencode.git
+      agent_framework_commit: sdd/dev
+
+      container_formatter:
+        - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/dev/image-conversion-HSG/{instance_id}_arm64.sif
+        - /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_sifs_arm64/{instance_id}_arm64.sif
+        - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/datasets/nvidia-ots-1000-batch-2/sifs_arm64/{instance_id}_arm64.sif
+      container_folder_path: null
+
+      # Single-exec: run agent + eval in ONE apptainer exec so the inner socat bridge +
+      # boot daemons the agent starts persist into the eval phase. REQUIRED for the bridge.
+      tb_single_exec: true
+      tb_service_settle_sec: 20
+
+      # Portable socat/ip bundle carrying the model into the private netns (arm64/HSG).
+      tb_net_bridge_pkg: /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_net_bridge/socat_portable
+
+      # Per-task agent_timeout_sec / verifier_timeout_sec from the row win over these.
+      swebench_agent_timeout: 7200
+      swebench_tests_timeout: 900
+      command_exec_timeout: 300
+
+      dataset_path: responses_api_agents/swe_agents/data/example_terminal.jsonl
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example_terminal.jsonl
+
+swe_agents_val:
+  responses_api_agents:
+    swe_agents:
+      <<: *swe_agents_config
+
+swe_agents_train:
+  responses_api_agents:
+    swe_agents:
+      <<: *swe_agents_config
