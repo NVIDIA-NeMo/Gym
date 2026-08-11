@@ -256,11 +256,12 @@ class TestApp:
             StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE,
         )
 
-    def _search_tool(self) -> FunctionTool:
-        return FunctionTool(
-            type="function",
-            name="search",
-            parameters={
+    def _search_tool(self) -> FunctionToolParam:
+        return {
+            "type": "function",
+            "name": "search",
+            "strict": None,
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
@@ -271,10 +272,10 @@ class TestApp:
                     "query",
                 ],
             },
-        )
+        }
 
     def _parallel_verify_request(
-        self, tool: FunctionTool, actual_queries: list[str], expected_queries: list[str]
+        self, tool: FunctionToolParam, actual_queries: list[str], expected_queries: list[str]
     ) -> SingleStepToolUseArgumentComparisonVerifyRequest:
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[
@@ -284,7 +285,7 @@ class TestApp:
                 )
             ],
             parallel_tool_calls=True,
-            tools=[tool.model_dump()],
+            tools=[tool],
         )
         response = NeMoGymResponse(
             id="parallel_tool_calls",
