@@ -39,6 +39,17 @@ TAU2_VENV="${TAU2_VENV:-$GYM_ROOT/responses_api_agents/tau2/.venv}"
 
 # Gym builds the tau2 agent venv on first use, so pre-build it here to give the
 # pin below somewhere to install.
+# Pin Gym to the commit the tech report numbers were produced with. Set PIN_GYM=0 to
+# run against your current checkout instead. `nemotron_recipes` is excluded, so this
+# never touches the recipe that is running, and HEAD does not move. Undo the pin with
+# `git restore .` from the repo root.
+GYM_PIN="${GYM_PIN:-e590c4fadd36a89ab4b826497a7414b4a9de281c}"   # 0.5.0rc0, first commit with `gym env prefetch`
+if [ "${PIN_GYM:-1}" != 0 ]; then
+  git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
+  git restore --source="$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
+  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip; git restore . to undo)"
+fi
+
 [ -d "$TAU2_VENV" ] || gym env prefetch --benchmark "$BENCH" --model-type vllm_model
 [ -d "$TAU2_VENV" ] || { echo "tau2 agent venv still missing at $TAU2_VENV" >&2; exit 1; }
 
@@ -48,17 +59,6 @@ uv pip install --python "$TAU2_VENV/bin/python" --quiet rank-bm25
 
 SIM=gpt-5_4-mini-2026-03-17.responses_api_models.openai_model
 POLICY=policy_model.responses_api_models.vllm_model
-
-# Pin Gym to the commit the tech report numbers were produced with. Set PIN_GYM=0 to
-# run against your current checkout instead. `nemotron_recipes` is excluded, so this
-# never touches the recipe that is running, and HEAD does not move. Undo the pin with
-# `git restore .` from the repo root.
-GYM_PIN="${GYM_PIN:-e446e4f415b9cde0e95bb813c85e9e3e23f5d893}"   # 0.5.0rc0
-if [ "${PIN_GYM:-1}" != 0 ]; then
-  git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
-  git restore --source="$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
-  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip; git restore . to undo)"
-fi
 
 gym eval prepare --benchmark "$BENCH"
 
