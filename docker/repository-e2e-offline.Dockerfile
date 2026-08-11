@@ -12,12 +12,16 @@ ARG RUNTIME_GID=65532
 
 USER root
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/repository-e2e-gym/bin && \
-    /usr/bin/curl -LsSf https://astral.sh/uv/0.11.19/install.sh | \
-      env UV_UNMANAGED_INSTALL=/opt/repository-e2e-gym/bin sh && \
+    /usr/bin/curl --fail --location --silent --show-error \
+      https://astral.sh/uv/0.11.19/install.sh --output /tmp/uv-install.sh && \
+    echo "ef8cf0575d37cf3c72e05f153dd72a845a87a7bb9be86184d5fe931b8c426250  /tmp/uv-install.sh" | \
+      sha256sum --check --strict && \
+    env UV_UNMANAGED_INSTALL=/opt/repository-e2e-gym/bin sh /tmp/uv-install.sh && \
+    rm /tmp/uv-install.sh && \
     test "$(/opt/repository-e2e-gym/bin/uv --version | awk '{print $2}')" = 0.11.19
 
 RUN git init /tmp/repository-e2e-gym-source && \
-    git -C /tmp/repository-e2e-gym-source remote add origin https://github.com/ko3n1g/Gym.git && \
+    git -C /tmp/repository-e2e-gym-source remote add origin https://github.com/NVIDIA-NeMo/Gym.git && \
     git -c credential.helper= -c http.https://github.com/.extraheader= \
       -C /tmp/repository-e2e-gym-source fetch --depth=1 origin "${GYM_SOURCE_SHA}" && \
     git -C /tmp/repository-e2e-gym-source checkout --detach FETCH_HEAD && \
