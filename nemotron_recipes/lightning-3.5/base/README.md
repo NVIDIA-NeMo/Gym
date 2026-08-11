@@ -11,7 +11,7 @@ on `nemo-evaluator-launcher` 0.2.6.
 There are two configs:
 
 - **Base suite** — [`base-suite.yaml`](./base-suite.yaml),
-  the 21 short-context tasks across knowledge, math, code, commonsense, reading
+  the 20 short-context tasks across knowledge, math, code, commonsense, reading
   comprehension and multilingual. Runs against an OpenAI-compatible endpoint **you
   provide** (`deployment: none`) — see
   [Running against an existing endpoint](#running-against-an-existing-endpoint). The
@@ -25,7 +25,7 @@ There are two configs:
 suite is LLM-graded. What you need is:
 
 - one OpenAI-compatible **`/v1/completions`** endpoint serving the base model, which
-  **must honour `echo` together with `logprobs`** (9 of the 21 tasks are scored by
+  **must honour `echo` together with `logprobs`** (9 of the 20 tasks are scored by
   log-likelihood).
 
 ### Reproducing the reference numbers
@@ -151,7 +151,7 @@ short-context suite this way.
 
 ### Base suite
 
-21 pretraining tasks against your endpoint:
+20 pretraining tasks against your endpoint:
 
 ```bash
 nel run --config base-suite.yaml --env-file .env
@@ -162,7 +162,7 @@ nel run --config base-suite.yaml --env-file .env -t adlr_mmlu # one benchmark
 | Category | Tasks |
 |---|---|
 | General knowledge | `adlr_mmlu`, `adlr_mmlu_pro_5_shot_base`, `adlr_agieval_en_cot`, `adlr_gpqa_diamond_cot_5_shot` |
-| Math | `adlr_gsm8k_cot_8_shot`, `adlr_minerva_math_nemo_4_shot`, `adlr_math_500_4_shot_sampled` |
+| Math | `adlr_gsm8k_cot_8_shot`, `adlr_math_500_4_shot_sampled` |
 | Code | `adlr_humaneval_greedy`, `adlr_humaneval_sampled`, `adlr_mbpp_sanitized_3_shot_greedy`, `adlr_mbpp_sanitized_3_shot_sampled` |
 | Commonsense | `adlr_commonsense_qa_7_shot`, `adlr_arc_challenge_llama_25_shot`, `hellaswag`, `openbookqa`, `piqa`, `social_iqa`, `adlr_winogrande_5_shot` |
 | Reading comprehension | `adlr_race` |
@@ -196,7 +196,7 @@ The nine log-likelihood tasks send:
 | | tasks |
 |---|---|
 | **Need `echo` + `logprobs`** | `adlr_arc_challenge_llama_25_shot`, `adlr_commonsense_qa_7_shot`, `adlr_global_mmlu_lite_5_shot`, `adlr_race`, `adlr_winogrande_5_shot`, `hellaswag`, `openbookqa`, `piqa`, `social_iqa` |
-| **Plain completions** | `adlr_agieval_en_cot`, `adlr_gpqa_diamond_cot_5_shot`, `adlr_gsm8k_cot_8_shot`, `adlr_humaneval_greedy`, `adlr_humaneval_sampled`, `adlr_math_500_4_shot_sampled`, `adlr_mbpp_sanitized_3_shot_greedy`, `adlr_mbpp_sanitized_3_shot_sampled`, `adlr_mgsm_native_cot_8_shot`, `adlr_minerva_math_nemo_4_shot`, `adlr_mmlu`, `adlr_mmlu_pro_5_shot_base` |
+| **Plain completions** | `adlr_agieval_en_cot`, `adlr_gpqa_diamond_cot_5_shot`, `adlr_gsm8k_cot_8_shot`, `adlr_humaneval_greedy`, `adlr_humaneval_sampled`, `adlr_math_500_4_shot_sampled`, `adlr_mbpp_sanitized_3_shot_greedy`, `adlr_mbpp_sanitized_3_shot_sampled`, `adlr_mgsm_native_cot_8_shot`, `adlr_mmlu`, `adlr_mmlu_pro_5_shot_base` |
 
 Some hosted services accept the request but silently ignore `echo`, which produces
 **wrong scores rather than an error** — check before trusting the multiple-choice

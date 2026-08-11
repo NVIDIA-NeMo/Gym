@@ -17,9 +17,6 @@
 # Base (pretraining) suite for NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16, run
 # against an EXISTING OpenAI-compatible endpoint. Nothing is deployed by this config.
 #
-# For the variant that deploys its own local vLLM, use
-# `base-suite.yaml` instead.
-#
 # How to use:
 #
 # 1. copy this file locally or clone the repository
@@ -40,7 +37,7 @@
 # endpoint is not a substitute: the base model has no chat template, and wrapping the
 # prompts in one changes what is being measured.
 #
-# 9 of the 21 tasks are multiple-choice and scored by log-likelihood. They send:
+# 9 of the 20 tasks are multiple-choice and scored by log-likelihood. They send:
 #
 #     {"prompt": ..., "max_tokens": 1, "logprobs": 1, "echo": true,
 #      "temperature": 0, "seed": 1234}
@@ -59,8 +56,8 @@
 #                            adlr_humaneval_sampled, adlr_math_500_4_shot_sampled,
 #                            adlr_mbpp_sanitized_3_shot_greedy,
 #                            adlr_mbpp_sanitized_3_shot_sampled,
-#                            adlr_mgsm_native_cot_8_shot, adlr_minerva_math_nemo_4_shot,
-#                            adlr_mmlu, adlr_mmlu_pro_5_shot_base
+#                            adlr_mgsm_native_cot_8_shot, adlr_mmlu,
+#                            adlr_mmlu_pro_5_shot_base
 #
 # If your endpoint cannot do echo+logprobs, run only the second group with `-t <task>`.
 #
@@ -121,6 +118,7 @@ target:
 evaluation:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
+    POLICY_API_KEY: host:POLICY_API_KEY  # pragma: allowlist secret
     TRUST_REMOTE_CODE: lit:1
   nemo_evaluator_config:
     config:
@@ -149,10 +147,6 @@ evaluation:
       container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
     # Math
     - name: adlr_gsm8k_cot_8_shot
-      container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
-    # NOTE: adlr_minerva_math_nemo_4_shot currently fails on the 26.03 container —
-    #       see the "Known issue" section of the README.
-    - name: adlr_minerva_math_nemo_4_shot
       container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03
     - name: adlr_math_500_4_shot_sampled
       container: nvcr.io/nvidia/eval-factory/lm-evaluation-harness:26.03

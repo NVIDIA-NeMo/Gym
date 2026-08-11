@@ -10,7 +10,7 @@ The recipes are split by model:
   suites are NeMo Evaluator configs in
   [`instruct/nemo-evaluator/`](./instruct/nemo-evaluator/).
 - **[`base/`](./base/README.md)** — the base (pretraining) model:
-  `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16`, 21 short-context benchmarks
+  `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16`, 20 short-context benchmarks
   plus RULER. These are `nemo-evaluator-launcher` configs rather than Gym recipes, and
   their prerequisites differ.
 
@@ -46,7 +46,7 @@ long context. Prerequisites differ from the instruct recipes — see
 | Group | Benchmarks |
 |---|---|
 | General knowledge | MMLU, MMLU-Pro, AGIEval, GPQA Diamond |
-| Math | GSM8K, Minerva Math, MATH-500 |
+| Math | GSM8K, MATH-500 |
 | Code | HumanEval (greedy + sampled), MBPP-sanitized (greedy + sampled) |
 | Commonsense | CommonsenseQA, ARC-Challenge, HellaSwag, OpenBookQA, PIQA, Social IQa, WinoGrande |
 | Reading comprehension | RACE |

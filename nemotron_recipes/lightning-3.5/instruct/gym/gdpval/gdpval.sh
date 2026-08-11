@@ -48,6 +48,7 @@ else
   [ -r "$GDPVAL_CONTAINER_PATH" ] || { echo "gdpval.sif not readable at $GDPVAL_CONTAINER_PATH" >&2; exit 1; }
   TAVILY_API_KEY="${TAVILY_API_KEY:?export TAVILY_API_KEY (one key, or [k1,k2] for several)}"
 fi
+export TAVILY_API_KEY
 
 STIR=gdpval_stirrup_agent.responses_api_agents.stirrup_agent
 GDR=gdpval_resources_server.resources_servers.gdpval
@@ -109,6 +110,12 @@ fi
 # `git restore .` from the repo root.
 GYM_PIN="${GYM_PIN:-57c15a22f8b82d3d859b71468fe3329f4e2093b4}"
 if [ "${PIN_GYM:-1}" != 0 ]; then
+  if ! git diff --quiet -- . ':(exclude)nemotron_recipes' ||
+    ! git diff --cached --quiet -- . ':(exclude)nemotron_recipes' ||
+    [ -n "$(git ls-files --others --exclude-standard -- . ':(exclude)nemotron_recipes')" ]; then
+    echo "refusing to pin over uncommitted changes outside nemotron_recipes; commit/stash them or set PIN_GYM=0" >&2
+    exit 1
+  fi
   git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
   git restore --source="$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
   echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip; git restore . to undo)"
@@ -122,7 +129,6 @@ gym eval run \
   --split benchmark \
   ${RESUME:+--resume} \
   --output "${OUT:-./results/gdpval}/evaluator_rollouts.jsonl" \
-  "++$STIR.tavily_api_key=$TAVILY_API_KEY" \
   "++$STIR.persist_deliverables_dir=$DELIVERABLES" \
   "++$GDR.judge_sampling_seed=${JUDGE_SAMPLING_SEED:-42}" \
   "++$GDR.persist_raw_judge_responses=true" \

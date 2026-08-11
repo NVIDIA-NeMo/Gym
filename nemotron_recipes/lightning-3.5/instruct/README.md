@@ -23,9 +23,10 @@ Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
 `./results/<benchmark>`.
 
 Each recipe first rolls the repo back to the Gym commit its tech report number was
-produced with, leaving the recipes alone. It overwrites tracked files, so commit or stash
-your work first; `git restore .` puts everything back. Set `PIN_GYM=0` to run against
-your current checkout instead.
+produced with, leaving the recipes alone. Before doing so, it requires no uncommitted
+changes outside `nemotron_recipes` (ignored outputs are allowed), so it cannot overwrite
+your work. Set `PIN_GYM=0` to run
+against your current checkout instead.
 
 ## Prerequisites
 

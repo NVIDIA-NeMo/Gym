@@ -36,6 +36,7 @@
 # holds its slot, so anything lower wedges the run until it times out.
 
 ARTIFICIAL_ANALYSIS_API_KEY="${ARTIFICIAL_ANALYSIS_API_KEY:?export ARTIFICIAL_ANALYSIS_API_KEY (one key, or [k1,k2] to fail over when a key is rate-limited)}"
+export ARTIFICIAL_ANALYSIS_API_KEY
 
 AGENT=critpt_benchmark_agent.responses_api_agents.critpt_agent
 CRITPT=critpt_resources_server.resources_servers.critpt
@@ -52,6 +53,12 @@ export CRITPT_CACHE_DIR="${CRITPT_CACHE_DIR:-$(realpath -m "${OUT:-./results/cri
 # `git restore .` from the repo root.
 GYM_PIN="${GYM_PIN:-e446e4f415b9cde0e95bb813c85e9e3e23f5d893}"   # 0.5.0rc0
 if [ "${PIN_GYM:-1}" != 0 ]; then
+  if ! git diff --quiet -- . ':(exclude)nemotron_recipes' ||
+    ! git diff --cached --quiet -- . ':(exclude)nemotron_recipes' ||
+    [ -n "$(git ls-files --others --exclude-standard -- . ':(exclude)nemotron_recipes')" ]; then
+    echo "refusing to pin over uncommitted changes outside nemotron_recipes; commit/stash them or set PIN_GYM=0" >&2
+    exit 1
+  fi
   git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
   git restore --source="$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
   echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip; git restore . to undo)"
@@ -66,7 +73,6 @@ gym eval run \
   ${RESUME:+--resume} \
   --output "${OUT:-./results/critpt}/evaluator_rollouts.jsonl" \
   "++$AGENT.datasets=[{name: critpt, type: benchmark, jsonl_fpath: benchmarks/critpt/data/critpt_benchmark.jsonl, prompt_config: benchmarks/critpt/prompts/turn1.yaml, prepare_script: benchmarks/critpt/prepare.py, num_repeats: ${CRITPT_REPEATS:-5}}]" \
-  "++artificial_analysis_api_key=$ARTIFICIAL_ANALYSIS_API_KEY" \
   "++$CRITPT.verify_timeout_seconds=21600" \
   "++$POLICY.chat_template_kwargs={enable_thinking: true}" \
   "++$POLICY.extra_body={skip_special_tokens: false}" \

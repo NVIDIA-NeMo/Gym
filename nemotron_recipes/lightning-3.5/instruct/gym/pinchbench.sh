@@ -56,6 +56,9 @@ PINCHBENCH_MODEL_NAME="${PINCHBENCH_MODEL_NAME:?export PINCHBENCH_MODEL_NAME (na
 # One key only — this field is a plain string, so [k1,k2] is taken literally. Kept
 # separate from TAVILY_API_KEY for that reason: the other recipes accept a key list.
 PINCHBENCH_TAVILY_API_KEY="${PINCHBENCH_TAVILY_API_KEY:?export PINCHBENCH_TAVILY_API_KEY (one key)}"
+export PINCHBENCH_MODEL_BASE_URL PINCHBENCH_MODEL_API_KEY PINCHBENCH_MODEL_NAME
+export PINCHBENCH_JUDGE_MODEL PINCHBENCH_JUDGE_BASE_URL PINCHBENCH_JUDGE_API_KEY
+export PINCHBENCH_TAVILY_API_KEY
 
 # The published run raised Gym's rollout retry budget from its default of 3. An
 # exhausted rollout scores 0, so on a flaky endpoint this moves the result.
@@ -74,6 +77,12 @@ OUTDIR="$(realpath -m "${OUT:-./results/pinchbench}")"
 # `git restore .` from the repo root.
 GYM_PIN="${GYM_PIN:-86290ee8fdc191f2d27b48bd2e957a25dcbd7fd7}"
 if [ "${PIN_GYM:-1}" != 0 ]; then
+  if ! git diff --quiet -- . ':(exclude)nemotron_recipes' ||
+    ! git diff --cached --quiet -- . ':(exclude)nemotron_recipes' ||
+    [ -n "$(git ls-files --others --exclude-standard -- . ':(exclude)nemotron_recipes')" ]; then
+    echo "refusing to pin over uncommitted changes outside nemotron_recipes; commit/stash them or set PIN_GYM=0" >&2
+    exit 1
+  fi
   git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
   git restore --source="$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
   echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip; git restore . to undo)"
@@ -88,13 +97,6 @@ gym eval run \
   ${RESUME:+--resume} \
   --output "${OUT:-./results/pinchbench}/evaluator_rollouts.jsonl" \
   "+sandbox_image=$PINCHBENCH_SIF" \
-  "+model_base_url=$PINCHBENCH_MODEL_BASE_URL" \
-  "+model_api_key=$PINCHBENCH_MODEL_API_KEY" \
-  "+model_name=$PINCHBENCH_MODEL_NAME" \
-  "+judge_model=$PINCHBENCH_JUDGE_MODEL" \
-  "+judge_base_url=$PINCHBENCH_JUDGE_BASE_URL" \
-  "+judge_api_key=$PINCHBENCH_JUDGE_API_KEY" \
-  "+tavily_api_key=$PINCHBENCH_TAVILY_API_KEY" \
   "++$BENCH.datasets=[{name: pinchbench, type: benchmark, jsonl_fpath: benchmarks/pinchbench/data/pinchbench_benchmark.jsonl, prompt_config: null, prepare_script: benchmarks/pinchbench/prepare.py, num_repeats: 10, license: MIT}]" \
   "++$PB.web_search_provider=tavily" \
   "++$PB.sandbox_provider.apptainer.direct_exec=true" \
