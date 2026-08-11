@@ -333,6 +333,20 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     submit(config, dry_run=args.dry_run)
 
 
+def _harness_optimize(args: argparse.Namespace, overrides: list[str]) -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.cli.harness import optimize
+    from nemo_gym.harness_optimization import HarnessOptimizationRecipe
+
+    merged = OmegaConf.merge(
+        OmegaConf.load(args.config),
+        OmegaConf.from_dotlist([token.lstrip("+") for token in overrides]) if overrides else OmegaConf.create(),
+    )
+    recipe = HarnessOptimizationRecipe.model_validate(OmegaConf.to_container(merged, resolve=True))
+    optimize(recipe)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
@@ -368,6 +382,7 @@ GROUPS = {
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
+    "harness": "Optimize Agent harness configuration.",
     "dev": "Contributor helpers.",
 }
 
@@ -687,6 +702,17 @@ COMMANDS = {
             Flag(
                 register=lambda p: p.add_argument(
                     "--dry-run", action="store_true", help="Print generated job scripts without submitting."
+                ),
+            ),
+        ),
+    ),
+    "harness optimize": Command(
+        target=_harness_optimize,
+        summary="Optimize a declared Agent harness target.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--config", "-c", required=True, metavar="PATH", help="Harness optimization recipe YAML."
                 ),
             ),
         ),

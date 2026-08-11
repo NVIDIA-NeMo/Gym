@@ -589,6 +589,54 @@ class TestEvalProfileFlags:
             main()
 
 
+class TestHarnessOptimize:
+    def test_config_is_required(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "harness", "optimize"])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_loads_recipe_and_applies_overrides(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        config_path = tmp_path / "optimization.yaml"
+        config_path.write_text(
+            """
+train_jsonl_fpath: rows.jsonl
+rollout:
+  agent_name: test_agent
+  head_server:
+    host: 127.0.0.1
+    port: 11000
+target:
+  type: prompt_config.system
+  module_name: prompt
+  prompt_config:
+    user: "{question}"
+    system: baseline
+optimizer:
+  type: candidate_sweep
+  output_dir: original
+""".lstrip()
+        )
+        captured = {}
+        monkeypatch.setattr("nemo_gym.cli.harness.optimize", lambda recipe: captured.setdefault("recipe", recipe))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "gym",
+                "harness",
+                "optimize",
+                "--config",
+                str(config_path),
+                "+optimizer.output_dir=overridden",
+            ],
+        )
+
+        main()
+
+        assert captured["recipe"].optimizer.type == "candidate_sweep"
+        assert captured["recipe"].optimizer.output_dir == "overridden"
+
+
 class TestEvalReverifyFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
