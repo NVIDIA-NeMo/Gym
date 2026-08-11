@@ -153,12 +153,6 @@ class HermesAgentObserver:
             for tool in self._tools.values():
                 if tool.status == "unknown":
                     tool.status = "incomplete"
-                if tool.timing_source is None:
-                    self._gap(
-                        "tool_execution_boundary_unavailable",
-                        tool.invocation_id,
-                        tool.tool_call_id,
-                    )
             for invocation in self._invocations.values():
                 if not invocation.model_calls:
                     self._gap("model_call_ownership_unavailable", invocation.invocation_id)
