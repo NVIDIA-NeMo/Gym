@@ -57,6 +57,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     Reasoning,
     TokenIDLogProbMixin,
+    _validate_atomic_token_metadata,
 )
 
 
@@ -94,11 +95,13 @@ class ResponsesConverterState(BaseModel):
 
     content_buffer: str = ""
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
+    assistant_item_buffered: bool = False
 
     token_information: Optional[TokenIDLogProbMixin] = None
 
     def flush_assistant(self) -> None:
-        if not (self.content_buffer or self.tool_calls_buffer):
+        if not (self.assistant_item_buffered or self.content_buffer or self.tool_calls_buffer):
+            self.token_information = None
             return
 
         shared_params = dict(
@@ -107,7 +110,7 @@ class ResponsesConverterState(BaseModel):
             tool_calls=self.tool_calls_buffer,
         )
 
-        if self.return_token_id_information and self.token_information:
+        if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
                 **self.token_information.model_dump(exclude_none=True),
@@ -119,6 +122,16 @@ class ResponsesConverterState(BaseModel):
 
         self.content_buffer = ""
         self.tool_calls_buffer = []
+        self.assistant_item_buffered = False
+        self.token_information = None
+
+
+def _token_information_from_mapping(value: Dict[str, Any]) -> Optional[TokenIDLogProbMixin]:
+    """Return validated token metadata when the mapping contains it."""
+    _validate_atomic_token_metadata(value)
+    if "prompt_token_ids" not in value:
+        return None
+    return TokenIDLogProbMixin.model_validate(value)
 
 
 class ResponsesConverter(BaseModel):
@@ -183,13 +196,10 @@ class ResponsesConverter(BaseModel):
                 case _:  # pragma: no cover
                     raise NotImplementedError(f"Unsupported message type: {m}")
 
-            if self.return_token_id_information and m.get("prompt_token_ids"):
-                state.token_information = TokenIDLogProbMixin(
-                    prompt_token_ids=m["prompt_token_ids"],
-                    generation_token_ids=m["generation_token_ids"],
-                    generation_log_probs=m["generation_log_probs"],
-                    routed_experts=m.get("routed_experts"),
-                )
+            if self.return_token_id_information:
+                token_information = _token_information_from_mapping(m)
+                if token_information is not None:
+                    state.token_information = token_information
 
         state.flush_assistant()
 
@@ -282,6 +292,7 @@ class ResponsesConverter(BaseModel):
 
         match m["role"]:
             case "assistant":
+                state.assistant_item_buffered = True
                 final_content = ""
                 if m["content"] is None:
                     # Tool-call only turns have "None" according to the official API spec.
@@ -340,6 +351,7 @@ class ResponsesConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        state.assistant_item_buffered = True
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
             state.content_buffer += self._wrap_reasoning_in_think_tags(texts)
@@ -349,6 +361,7 @@ class ResponsesConverter(BaseModel):
         m: dict,
         state: ResponsesConverterState,
     ) -> None:
+        state.assistant_item_buffered = True
         assert "call_id" in m
         tool_call = NeMoGymChatCompletionMessageToolCallParam(
             id=m["call_id"],
@@ -454,18 +467,13 @@ class ResponsesConverter(BaseModel):
                 )
             )
 
-        if self.return_token_id_information and "prompt_token_ids" in message_dict:
+        token_information = _token_information_from_mapping(message_dict) if self.return_token_id_information else None
+        if token_information is not None:
             last_response_output_item = response_output[-1]
             train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
-            extra_training_fields = {}
-            if "routed_experts" in message_dict and message_dict["routed_experts"] is not None:
-                extra_training_fields["routed_experts"] = message_dict["routed_experts"]
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
-                prompt_token_ids=message_dict["prompt_token_ids"],
-                generation_token_ids=message_dict["generation_token_ids"],
-                generation_log_probs=message_dict["generation_log_probs"],
-                **extra_training_fields,
+                **token_information.model_dump(exclude_none=True),
             )
 
         return response_output
