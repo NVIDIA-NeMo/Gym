@@ -1,10 +1,10 @@
 # Instruct model recipes
 
-Recipes for `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B`. Most benchmarks ship as a Gym
-recipe in [`gym/`](./gym/): a script that wraps `gym eval run` with the settings the
-published run used. Terminal-Bench and the two SWE-bench suites are NeMo Evaluator configs
-in [`nemo-evaluator/`](./nemo-evaluator/) — see [that section](#nemo-evaluator-recipes)
-below.
+Recipes for `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`. Most benchmarks ship as
+a Gym recipe in [`gym/`](./gym/): a script that wraps `gym eval run` with the settings
+the published run used. Terminal-Bench and the two SWE-bench suites are NeMo Evaluator
+configs in [`nemo-evaluator/`](./nemo-evaluator/) — see
+[that section](#nemo-evaluator-recipes) below.
 
 To run a Gym recipe, copy the two templates, fill them in, and run from the Gym repo root:
 
@@ -23,9 +23,9 @@ Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
 `./results/<benchmark>`.
 
 Each recipe first rolls the repo back to the Gym commit its tech report number was
-produced with, leaving the recipes alone. It overwrites tracked files, so commit or stash
-your work first; `git restore .` puts everything back. Set `PIN_GYM=0` to run against
-your current checkout instead.
+produced with, leaving the recipes alone. It overwrites and deletes tracked files, so
+commit or stash your work first; `git restore .` puts everything back. Set `PIN_GYM=0`
+to run against your current checkout instead.
 
 ## Prerequisites
 
@@ -42,13 +42,13 @@ your current checkout instead.
 ## Serving the model
 
 Reproducing these numbers depends on the model being served the right way. Check the
-[model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B) for the
-authoritative serving guidance; the command below is what these recipes were validated
-with, on `vllm/vllm-openai:v0.26.0`.
+[model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16)
+for the authoritative serving guidance; the command below is what these recipes were
+validated with, on `vllm/vllm-openai:v0.26.0`.
 
 ```bash
-vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B \
-  --served-model-name nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B --port 8000 \
+vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 \
+  --served-model-name nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 --port 8000 \
   --tensor-parallel-size 2 --pipeline-parallel-size 1 --data-parallel-size 2 \
   --data-parallel-backend ray --data-parallel-size-local 2 --api-server-count 1 \
   --trust-remote-code --gpu-memory-utilization 0.85 \
@@ -103,18 +103,18 @@ deliverables inside the sandbox, and the image already carries LibreOffice plus
 `python-docx`, `python-pptx`, `openpyxl`, `fpdf2`, `reportlab`, `weasyprint` and the
 rest.
 
-**2. Root, for the PDF conversion step.** Office deliverables are converted to PDF on
-the host — not in the sandbox — and the resources server prepares LibreOffice on
-startup by running:
+**2. Root.** The sandbox is started with `--home /root`, which an ordinary user cannot
+enter. Office deliverables are also converted to PDF on the host — not in the sandbox —
+and the resources server prepares LibreOffice on startup by running:
 
 ```bash
 apt-get install -y libreoffice fonts-liberation default-jre-headless libreoffice-java-common
 ```
 
 That call needs root and returns early if it fails, so pre-installing the packages
-doesn't substitute. Without root the conversion silently becomes a no-op — the run
-exits 0, but deliverables reach the judge unconverted and score lower with no error.
-Run as root, or in a container where you are.
+doesn't substitute. Either way the run still exits 0: if the sandbox cannot start no
+task runs at all, and if only the conversion fails the deliverables reach the judge
+unconverted and score lower. Run as root, or in a container where you are.
 
 **3. A judge endpoint serving all three panel models.** Deliverables are graded by a
 panel — GPT-5.5, Gemini 3.1 Pro and Claude Opus 4.8, one sampled per call — all routed
