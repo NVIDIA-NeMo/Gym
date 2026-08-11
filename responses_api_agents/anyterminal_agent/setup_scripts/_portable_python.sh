@@ -5,8 +5,8 @@ set -euo pipefail
 # Keep pip from satisfying deps from the host user site.
 export PYTHONNOUSERSITE=1
 
-PYTHON_VERSION="${PYTHON_VERSION:-3.12.8}"
-PBS_RELEASE="${PBS_RELEASE:-20241219}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"
+PBS_RELEASE="${PBS_RELEASE:-20260718}"
 ARCH="${ARCH:-x86_64-unknown-linux-gnu}"
 
 install_portable_python() {
