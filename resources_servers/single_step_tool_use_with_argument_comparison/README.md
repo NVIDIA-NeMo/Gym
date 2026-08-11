@@ -4,7 +4,30 @@ This is a resources server that is to be used to verify a single action taken by
 Data links: ?
 
 # Parallel tool calls
-Rows may also set `expected_action.type` to `function_call_batch` with a `calls` list containing the same `function_call` objects used by single-call rows. The verifier matches parallel tool calls as an unordered multiset, so response output order does not matter. Because argument matching is fuzzy, one actual call can satisfy several expected calls; the verifier resolves this with a maximum bipartite matching rather than pairing calls greedily.
+
+## Authoring a parallel row: you must write the expectation as a batch
+
+To verify several tool calls in one step, the dataset row **must** set `expected_action.type` to `function_call_batch` and list them under `calls`. This is not inferred — `type` is a required discriminator, and a row written as a plain `function_call` is only ever checked for that one call, no matter how many the model emits.
+
+```jsonc
+// expects three parallel calls in a single turn
+"expected_action": {
+  "type": "function_call_batch",
+  "calls": [
+    {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Paris\"}"},
+    {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Tokyo\"}"},
+    {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Cairo\"}"}
+  ]
+}
+```
+
+The `calls` entries are exactly the `function_call` objects a single-call row uses, so an existing row is converted by wrapping it in a batch. A batch of one call is legal and behaves like the single-call row it came from.
+
+**The response side needs nothing.** You never author the actual side: `extract_action` collects every `function_call` item in the model's response and builds the batch itself, so a model emitting N calls is compared as a set automatically.
+
+## Matching
+
+The verifier matches parallel tool calls as an unordered multiset, so response output order does not matter. Because argument matching is fuzzy, one actual call can satisfy several expected calls; the verifier resolves this with a maximum bipartite matching rather than pairing calls greedily.
 
 ## `parallel_tool_call_rewarding`: the master switch
 

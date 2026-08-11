@@ -1,9 +1,21 @@
 # Worked example of parallel tool-call verification.
 #
-# A dataset row asks for parallel calls by setting `expected_action.type` to `function_call_batch`
-# with a `calls` list of the usual `function_call` objects. The verifier matches the response's
-# tool calls against that set as an unordered multiset, so the order the model emits them in does
-# not matter. Rows using plain `function_call` or `message` keep working unchanged.
+# AUTHORING. A dataset row asks for parallel calls by setting `expected_action.type` to
+# `function_call_batch` with a `calls` list of the usual `function_call` objects:
+#
+#   "expected_action": {"type": "function_call_batch", "calls": [
+#       {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Paris\"}"},
+#       {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Tokyo\"}"}]}
+#
+# You MUST write it that way -- it is not inferred. `type` is a required discriminator, and a row
+# left as a plain `function_call` is only ever checked for that one call, no matter how many calls
+# the model emits. See data/parallel_example.jsonl for complete rows.
+#
+# The response side needs nothing: `extract_action` collects every `function_call` item the model
+# emitted and builds the batch itself, so N emitted calls are compared as a set automatically.
+#
+# The two sets are matched as an unordered multiset, so the order the model emits them in does not
+# matter. Rows using plain `function_call` or `message` keep working unchanged.
 #
 # Try it, in two steps like the rest of this server's examples:
 #
