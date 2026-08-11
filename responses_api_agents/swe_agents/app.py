@@ -549,8 +549,27 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
 
             return setup_dir
 
+    def _mounted_eval_python(self) -> str:
+        """Resolve the eval interpreter to a path that exists under the /r2egym_setup bind.
+
+        uv creates venv/bin/python (and the versionless python install dir) as
+        symlinks to absolute host paths, so invoking the venv wrapper through
+        /r2egym_setup still dereferences to the host path — dangling when the
+        same-path bind did not establish. Resolve the symlink chain on the host
+        and re-anchor the real interpreter under /r2egym_setup: the standalone
+        CPython locates its stdlib relative to the executable, and the venv
+        site-packages arrive via PYTHONPATH.
+        """
+        setup_dir = os.path.realpath(str(self.config.r2e_gym_setup_dir))
+        resolved = os.path.realpath(f"{setup_dir}/R2E-Gym/venv/bin/python")
+        if resolved.startswith(f"{setup_dir}/"):
+            return f"/r2egym_setup{resolved[len(setup_dir):]}"
+        # Interpreter resolves outside the setup dir (non-standard setup); keep
+        # the venv wrapper via the fixed bind as the best effort.
+        return "/r2egym_setup/R2E-Gym/venv/bin/python"
+
     def get_run_command(self) -> ExecuteContainerCommandArgs:
-        # Invoke the venv through the /r2egym_setup bind: _build_apptainer_command always
+        # Run the eval through the /r2egym_setup bind: _build_apptainer_command always
         # creates that one, while its second bind of the setup dir at the original host
         # path needs overlay/underlay support for deep destination paths inside read-only
         # SIFs and can fail to establish. Put both path variants of the venv
@@ -576,7 +595,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             f'export PATH="{self.config.r2e_gym_setup_dir}/uv/bin:$PATH" && '
             f'export PYTHONPATH="{python_path}:$PYTHONPATH" && '
             # Run with clean environment to avoid venv contamination
-            "env -u VIRTUAL_ENV /r2egym_setup/R2E-Gym/venv/bin/python -m r2egym.agenthub.run.run_local_evaluation "
+            f"env -u VIRTUAL_ENV {self._mounted_eval_python()} -m r2egym.agenthub.run.run_local_evaluation "
             f"    --predictions_path {self.config.output_for_eval_mounted_path} "
             f"    --instance_id {self.config.instance_id} "
             f"    --timeout {self.config.swebench_tests_timeout} "

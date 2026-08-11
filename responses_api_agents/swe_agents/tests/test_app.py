@@ -825,6 +825,35 @@ class TestR2EGymDatasetProcessor:
             assert "-m r2egym.agenthub.run.run_local_evaluation" in result.command
             assert result.mode == "eval"
 
+    def test_get_run_command_remaps_symlinked_interpreter(self) -> None:
+        """The eval interpreter must not dereference to a host-absolute path.
+
+        Mirrors uv's real layout: venv/bin/python -> versionless install dir
+        (itself a symlink) -> versioned interpreter, all via absolute host
+        paths that only resolve in-container when the same-path bind worked.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            setup_dir = Path(config.r2e_gym_setup_dir)
+            real_dir = setup_dir / "python/cpython-3.12.13-linux-x86_64-gnu"
+            real_python = real_dir / "bin/python3.12"
+            real_python.parent.mkdir(parents=True)
+            real_python.touch()
+            versionless_dir = setup_dir / "python/cpython-3.12-linux-x86_64-gnu"
+            versionless_dir.symlink_to(real_dir)
+            venv_bin = setup_dir / "R2E-Gym/venv/bin"
+            venv_bin.mkdir(parents=True)
+            (venv_bin / "python").symlink_to(versionless_dir / "bin/python3.12")
+
+            processor = R2EGymDatasetProcessor(config=config)
+            result = processor.get_run_command()
+
+            assert (
+                "/r2egym_setup/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12"
+                in result.command
+            )
+            assert f"{setup_dir}/R2E-Gym/venv/bin/python" not in result.command
+
 
 ########################################
 # OpenHandsHarnessProcessor tests
