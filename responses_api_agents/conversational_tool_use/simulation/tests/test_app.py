@@ -179,6 +179,28 @@ def test_canonicalize_run_transcript_moves_user_only_terminal_output_to_input() 
     assert canonical_response["output"] == []
 
 
+def test_canonicalize_run_transcript_preserves_tool_only_model_output() -> None:
+    agent = make_agent()
+    responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[NeMoGymEasyInputMessage(role="user", content="Search for the answer.")],
+    )
+    payload = response_payload(
+        [
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "action": {"type": "search", "query": "answer"},
+                "status": "completed",
+            }
+        ]
+    )
+
+    canonical_params, canonical_response = agent._canonicalize_run_transcript(responses_create_params, payload)
+
+    assert canonical_params is responses_create_params
+    assert canonical_response == payload
+
+
 def test_normalize_response_input_items_preserves_default_message_type() -> None:
     agent = make_agent()
 
