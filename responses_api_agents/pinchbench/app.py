@@ -353,10 +353,10 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             defaults.setdefault("models", {})[agent_model] = {"params": runtime_params}
             defaults.setdefault("model", {})["primary"] = agent_model
             if provider_timeout_s is not None:
+                # Only agents.defaults accepts timeoutSeconds; OpenClaw's agents.list
+                # entry schema is strict and rejects it, invalidating the whole config.
+                # defaults already covers every list entry that does not override it.
                 defaults["timeoutSeconds"] = provider_timeout_s
-                for agent in agents.get("list", []):
-                    if isinstance(agent, dict):
-                        agent["timeoutSeconds"] = provider_timeout_s
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), "utf-8")
             PYCFG
 
