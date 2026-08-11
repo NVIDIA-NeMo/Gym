@@ -1,4 +1,1 @@
 stirrup==0.1.12
-tau2 @ git+https://github.com/bxyu-nvidia/tau2-bench@346f74d9752f80af8ca3e083467bafcee961bd74
-litellm==1.80.0
-openai==2.7.2
