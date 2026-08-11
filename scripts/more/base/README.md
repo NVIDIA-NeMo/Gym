@@ -1,7 +1,7 @@
-# Nemotron 3.5 Lightning 30B A3B Base — v0.2 evaluation recipes
+# Nemotron 3.5 Lightning 30B A3B Base evaluation recipes
 
 > **Interim location.** Before this merges to `main` the `more/` folder moves to
-> **`nemotron_recipes/nano-3.5/`**. Nothing in the configs depends on their path, so the
+> **`nemotron_recipes/lightning-3.5/`**. Nothing in the configs depends on their path, so the
 > move is a plain `git mv`.
 
 These are `nemo-evaluator-launcher` configs run with `nel run`, not Gym recipes — see
@@ -22,33 +22,22 @@ There are two configs:
   endpoint must support `echo` + `logprobs` for 9 of the tasks.
 - **Long context (RULER)** — [`ruler.yaml`](./ruler.yaml),
   RULER at 64k / 128k / 256k / 512k / 1M. Also endpoint-based, but it needs a
-  **separately served, long-context endpoint** — a normal deployment will not do. Also
+  **separately served, long-context endpoint**. Also
   needs a pre-generated dataset. **Results are provisional** — see [RULER](#ruler).
 
-Neither config deploys anything: you serve the model and point them at it. See
-[Serving the model](#serving-the-model) for the exact commands.
-
 **No judge is required.** Unlike several of the instruct recipes, nothing in the base
-suite is LLM-graded — every task is scored deterministically by `lm-evaluation-harness`
-(exact match, log-likelihood, or code execution) and RULER by `nemo-skills`. There is no
-`JUDGE_API_KEY` and no judge endpoint to configure. What you need is:
+suite is LLM-graded. What you need is:
 
 - one OpenAI-compatible **`/v1/completions`** endpoint serving the base model, which
   **must honour `echo` together with `logprobs`** (9 of the 21 tasks are scored by
-  log-likelihood), and
-- for RULER only, a **second** endpoint of the same model served for long context.
+  log-likelihood).
 
 ### Reproducing the reference numbers
 
 Reproduction depends on the *serving* configuration as much as on the eval configuration:
 vLLM version, tensor parallelism, cache dtype, prefix caching and mamba cache mode all
-move scores. So to compare against published numbers, **serve the model with the exact
-command in [Serving the model](#serving-the-model)** and point the config at it.
-
-If you instead point the config at an endpoint someone else operates, the suite still
-runs, but a difference from the reference becomes ambiguous — you cannot tell whether it
-came from that endpoint's serving stack or from the model. That is fine for measuring a
-deployment you already have; it is not a basis for confirming published numbers.
+move scores. We recommend serving the model using the command provided in
+[Serving the model](#serving-the-model).
 
 For the instruct-model recipes, see [`../instruct/`](../instruct/).
 
@@ -222,8 +211,7 @@ nel run --config base-suite.yaml --env-file .env
 endpoint is not a substitute — the base model has no chat template, and wrapping the
 prompts in one changes what is measured.
 
-**Your endpoint must support `echo: true` together with `logprobs`.** Nine of the 21
-tasks are multiple-choice, scored by log-likelihood, and send:
+The nine log-likelihood tasks send:
 
 ```json
 {"prompt": "...", "max_tokens": 1, "logprobs": 1, "echo": true, "temperature": 0, "seed": 1234}
@@ -252,33 +240,6 @@ curl -s "$URL" -H "Authorization: Bearer $POLICY_API_KEY" -H "Content-Type: appl
 The response must echo the prompt back and return one logprob per prompt token. If
 `logprobs` is empty or the text does not start with your prompt, the nine tasks above
 will mis-score.
-
-**Cross-checked at full scale.** All nine log-likelihood tasks were run at full sample
-counts twice — once against a self-hosted vLLM 0.19.1 (TP=4) and once against a separate
-OpenAI-compatible endpoint serving the same weights with vLLM 0.26.0 (TP=2):
-
-| task | endpoint B (0.26.0) | endpoint A (0.19.1) | Δ |
-|---|---|---|---|
-| `adlr_commonsense_qa_7_shot` | 0.8026 | 0.8026 | 0.0000 |
-| `hellaswag` | 0.6553 | 0.6560 | −0.0007 |
-| `piqa` | 0.8319 | 0.8308 | +0.0011 |
-| `openbookqa` | 0.3720 | 0.3700 | +0.0020 |
-| `social_iqa` | 0.4770 | 0.4790 | −0.0020 |
-| `adlr_global_mmlu_lite_5_shot` | 0.7600 | 0.7575 | +0.0025 |
-| `adlr_arc_challenge_llama_25_shot` | 0.9241 | 0.9275 | −0.0034 |
-| `adlr_race` | 0.8727 | 0.8689 | +0.0038 |
-| `adlr_winogrande_5_shot` | 0.7901 | 0.7972 | −0.0071 |
-
-Maximum deviation **0.0071**, across two different vLLM versions and TP layouts. This is
-expected for log-likelihood scoring: it is an argmax over prompt-token logprobs at
-temperature 0, so small numerical differences between builds rarely change the selected
-choice. It is also the evidence that `echo` is genuinely honoured — an endpoint ignoring
-it would drift toward chance, not track the reference to three decimals.
-
-Generative tasks have no such guarantee: they sample, so expect ordinary run-to-run
-variation there. The reference table under [Expected results](#expected-results) is from
-a self-hosted deployment started with the serve command in
-[Serving the model](#serving-the-model).
 
 ### RULER
 
@@ -366,12 +327,6 @@ nel run --config <cfg> -o evaluation.nemo_evaluator_config.config.params.limit_s
 
 Comparable to the model card; expect slight variation on the sampled tasks
 (`temperature > 0`). Never report `limit_samples` runs.
-
-This recipe has been run end to end against the published weights and reproduces the
-reference numbers. Across the 15 tasks with a reference value to compare against, every
-one agreed to within 0.02 absolute, and 12 of 15 to within 0.006 — for example
-`adlr_mmlu` 0.7859 vs 0.7859, `adlr_gsm8k_cot_8_shot` 0.9158 vs 0.9128, `hellaswag`
-0.6560 vs 0.6557, `piqa` 0.8308 vs 0.8335.
 
 ## License
 
