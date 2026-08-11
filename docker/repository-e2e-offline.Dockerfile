@@ -113,18 +113,33 @@ RUN cd /tmp/repository-e2e-gym-source && \
     PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
       /opt/repository-e2e-gym/pre-commit-3.6.0/bin/pre-commit install-hooks
 
-# Run every native functional shard while package-index egress is available.
-# This validates the dependency closure and fills the immutable uv cache without
-# coupling the image contents to the contract digest's sampled shard indices.
+# Run every native functional shard concurrently in isolated source and venv
+# trees while package-index egress is available. This validates the dependency
+# closure and fills the shared, lock-safe uv cache without coupling the image
+# contents to the contract digest's sampled shard indices.
 RUN set -eu; \
-    cd /tmp/repository-e2e-gym-source; \
+    pids=""; \
     for shard in 0 1 2 3 4 5 6 7; do \
-      git clean -ffdx; \
-      UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
-        GYM_CI_UV_VENV_DIR=/tmp/repository-e2e-gym-venvs \
-        bash scripts/ci/server_tests.sh "${shard}" 8; \
+      shard_root="/tmp/repository-e2e-gym-shard-${shard}"; \
+      cp -a /tmp/repository-e2e-gym-source "${shard_root}"; \
+      ( \
+        cd "${shard_root}"; \
+        git clean -ffdx; \
+        UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
+          GYM_CI_UV_VENV_DIR="/tmp/repository-e2e-gym-venvs-${shard}" \
+          bash scripts/ci/server_tests.sh "${shard}" 8 \
+      ) & \
+      pids="${pids} $!"; \
     done; \
-    rm -rf /tmp/repository-e2e-gym-venvs /tmp/repository-e2e-gym-source
+    status=0; \
+    for pid in ${pids}; do \
+      wait "${pid}" || status=1; \
+    done; \
+    rm -rf \
+      /tmp/repository-e2e-gym-shard-* \
+      /tmp/repository-e2e-gym-venvs-* \
+      /tmp/repository-e2e-gym-source; \
+    test "${status}" -eq 0
 
 ENV PATH=/opt/repository-e2e-gym/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
