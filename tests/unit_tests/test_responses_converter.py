@@ -1216,6 +1216,30 @@ def test_downconverting_an_unsupported_type_names_it_and_the_way_out():
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("background", True),
+        ("context_management", []),
+        ("conversation", "conv_1"),
+        ("include", ["reasoning.encrypted_content"]),
+        ("max_tool_calls", 2),
+        ("previous_response_id", "resp_1"),
+        ("prompt", {"id": "pmpt_1"}),
+        ("reasoning", {"effort": "high"}),
+        ("text", {"verbosity": "high"}),
+        ("truncation", "auto"),
+    ],
+)
+def test_downconverting_present_responses_only_fields_fails_explicitly(
+    converter: ResponsesConverter, field: str, value
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", **{field: value})
+
+    with pytest.raises(NotImplementedError, match=field):
+        converter.responses_to_chat_completion_create_params(params)
+
+
 def test_training_variant_of_raises_a_named_error_for_an_unregistered_class():
     """An unregistered class raises NotImplementedError, not KeyError."""
 

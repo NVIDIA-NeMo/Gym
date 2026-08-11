@@ -209,7 +209,7 @@ ITEM_FIXTURES: dict[str, dict] = {
         "execution": "server",
         "status": "completed",
     },
-    # Results a client hands back, and the approval it grants.
+    # Client-supplied tool results and approvals.
     "function_call_output": {
         "type": "function_call_output",
         "call_id": "call_1",
@@ -265,7 +265,7 @@ ITEM_FIXTURES: dict[str, dict] = {
         "role": "developer",
         "tools": [],
     },
-    # Context-management bookkeeping and the tool carrier Codex code mode sends.
+    # Context-compaction records.
     "compaction": {
         "type": "compaction",
         "id": "cmp_1",
@@ -291,8 +291,7 @@ CHAT_INCONVERTIBLE_TYPES = frozenset(
         "mcp_call",
         "mcp_list_tools",
         "web_search_call",
-        # Codex tool family and context management (openai >= 2.25). A shell command, a patch, a
-        # tool search and an opaque compaction record have no chat-message form either.
+        # Tool calls, tool results, and compaction records have no chat-message form.
         "apply_patch_call",
         "apply_patch_call_output",
         "compaction",
@@ -300,7 +299,7 @@ CHAT_INCONVERTIBLE_TYPES = frozenset(
         "shell_call_output",
         "tool_search_call",
         "tool_search_output",
-        # Client-supplied results, approvals and tool carriers have no chat-message form.
+        # Client-supplied results, approvals, and tool definitions have no chat-message form.
         "computer_call_output",
         "custom_tool_call_output",
         "local_shell_call_output",
@@ -332,7 +331,8 @@ class TestSanitizeStreamingBody:
         cleaned, _ = sanitize_streaming_responses_body(
             {"input": [], "stream": True, "client_metadata": {"x": 1}, "prompt_cache_key": "abc", "store": False}
         )
-        # prompt_cache_key is part of the pinned request schema, so it survives; client_metadata is not.
+        # `prompt_cache_key` is part of the request schema and survives.
+        # `client_metadata` is not part of the schema and is removed.
         assert set(cleaned) == {"input", "store", "prompt_cache_key"}
         # the cleaned body validates against the strict params model
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
@@ -496,19 +496,15 @@ class TestSanitizeStreamingBody:
 
 class TestValidateStreamingParams:
     def test_prunes_nested_extra_fields(self) -> None:
-        # A nested field the SDK's Reasoning model does not know is dropped so the rest of the
-        # request still validates. Uses an invented field name rather than a real one: a field
-        # the SDK later adopts stops being pruned, which is what happened to `reasoning.context`
-        # (Codex sent it, the pinned SDK forbade it, and openai 2.44 added it).
+        # Drop unknown nested fields so the remaining request can validate.
+        # Use an unsupported field name so schema additions do not change the test.
         params = validate_streaming_responses_params(
             {"input": [], "reasoning": {"effort": "medium", "not_a_real_reasoning_field": "x"}}
         )
         assert params.reasoning == {"effort": "medium"}
 
     def test_reasoning_context_is_forwarded_now_that_the_sdk_models_it(self) -> None:
-        # Codex sends `reasoning.context`. The pinned SDK models it, so it is passed through
-        # rather than pruned. If a later SDK drops the field this fails, which is the signal to
-        # check whether Codex requests still round-trip.
+        # The SDK models `reasoning.context`, so the sanitizer preserves it.
         params = validate_streaming_responses_params(
             {"input": [], "reasoning": {"effort": "medium", "context": "all_turns"}}
         )
@@ -557,8 +553,7 @@ class TestSynthesizeSSE:
         response = _build_response([_function_call_item("exec_command")]).model_dump(mode="json")
         events = self._events("".join(synthesize_responses_sse(response, {"other__tool": ("other", "tool")})))
         assert events[1]["item"]["name"] == "exec_command"
-        # namespace is a field on the call model now, so an unmapped call carries it unset
-        # rather than not carrying it at all.
+        # Unmapped calls retain an unset `namespace` field.
         assert events[1]["item"]["namespace"] is None
 
     def test_failure_stream_is_terminal_response_failed(self) -> None:
@@ -570,18 +565,17 @@ class TestSynthesizeSSE:
         assert failed["output"] == []
 
 
-# Item types the streaming sanitizer removes from the input on purpose, so the no-drop check
-# below must not apply to them. `additional_tools` is a Codex code-mode carrier: the sanitizer
-# hoists the function tools it contains into the `tools` param and discards the item itself.
+# The streaming sanitizer intentionally removes these input item types.
+# The transcript preservation check excludes them.
+# For `additional_tools`, the sanitizer moves function definitions into `tools`.
 STREAMING_CONSUMED_TYPES = frozenset({"additional_tools"})
 
 
 def test_no_dead_entries_in_streaming_consumed_types() -> None:
-    """Every consumed type must be one the union still accepts.
+    """Require a fixture for every consumed item type.
 
-    The test that reads this list is parametrized over ITEM_FIXTURES, so it never visits a tag that
-    is not in it. A dead entry is then invisible: the type it was meant to name is checked as if it
-    survived the sanitizer, and the type that actually is consumed goes unchecked.
+    The transcript test is parametrized over ``ITEM_FIXTURES``.
+    An entry without a fixture would not be tested.
     """
     suspicious = sorted(STREAMING_CONSUMED_TYPES - set(ITEM_FIXTURES))
     assert not suspicious, (
