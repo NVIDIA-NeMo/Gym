@@ -85,6 +85,9 @@ from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_fr
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
+# `ClientTimeout` is per session, so the session carries the external deadline and
+# `ServerClient.request` passes this one explicitly for server-to-server calls.
+_GLOBAL_AIOHTTP_INTERNAL_SOCK_CONNECT_TIMEOUT_SECONDS: float = 10.0
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
@@ -104,6 +107,25 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_tcp_keepalive_probes: int = Field(
         default=3,
         description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
+    )
+
+    global_aiohttp_sock_connect_timeout_seconds: float = Field(
+        default=30.0,
+        description=(
+            "Deadline for opening a new socket to an external endpoint, in seconds. Bounds a host "
+            "that silently drops connection attempts rather than refusing them, which the kernel "
+            "otherwise abandons only after roughly two minutes. This is aiohttp's own default for "
+            "`sock_connect`. It covers the socket connect alone, not waiting for a pooled "
+            "connection, so a saturated pool is never failed by it."
+        ),
+    )
+    global_aiohttp_internal_sock_connect_timeout_seconds: float = Field(
+        default=10.0,
+        description=(
+            "The same deadline for calls to other NeMo Gym servers, which are near or on the same "
+            "machine. Not lower than this: under load a localhost accept queue can fill, the kernel "
+            "drops the SYN, and the retransmit does not arrive for a full second."
+        ),
     )
 
 
@@ -164,7 +186,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
                 probes=cfg.global_aiohttp_tcp_keepalive_probes,
             ),
         ),
-        timeout=ClientTimeout(),
+        # `total` stays unset: generations legitimately run for minutes and must not be cut off.
+        # Only `sock_connect` is set, so a blackholed connect fails on our deadline rather than the
+        # kernel's SYN retry budget. Deliberately not `connect`, which also covers waiting for a
+        # free pooled connection; at Gym's concurrency that wait is normal and not a failure.
+        timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
         cookie_jar=DummyCookieJar(),
     )
 
@@ -173,6 +199,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
 
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
+
+    global _GLOBAL_AIOHTTP_INTERNAL_SOCK_CONNECT_TIMEOUT_SECONDS
+    _GLOBAL_AIOHTTP_INTERNAL_SOCK_CONNECT_TIMEOUT_SECONDS = cfg.global_aiohttp_internal_sock_connect_timeout_seconds
 
     return _GLOBAL_AIOHTTP_CLIENT
 
@@ -183,6 +212,15 @@ def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
 
 def is_global_aiohttp_client_request_debug_enabled() -> bool:
     return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
+
+
+def internal_client_timeout() -> ClientTimeout:
+    """The per-call timeout for a request to another NeMo Gym server.
+
+    Only `sock_connect` is set. Everything else stays unset, so a `/run` that legitimately takes an
+    hour is not cut off, and a request queued behind a saturated connection pool is not failed.
+    """
+    return ClientTimeout(sock_connect=_GLOBAL_AIOHTTP_INTERNAL_SOCK_CONNECT_TIMEOUT_SECONDS)
 
 
 def global_aiohttp_client_exit():  # pragma: no cover
@@ -486,6 +524,7 @@ class ServerClient(BaseModel):
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
+        kwargs.setdefault("timeout", internal_client_timeout())
         return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
     async def get(
