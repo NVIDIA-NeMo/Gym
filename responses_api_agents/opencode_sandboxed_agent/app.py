@@ -55,6 +55,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
     opencode_version: str
+    remote_opencode_install_script_path: Optional[str] = None
+    remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
 
     # Sandbox config
@@ -264,14 +266,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         opencode_thinking_str = "--thinking"
 
+        if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
+            install_str = f"""bash {self.config.remote_opencode_install_script_path} --binary {self.config.remote_opencode_binary_path}"""
+        else:
+            print(
+                "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
+                file=sys.stderr,
+            )
+            install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 15 https://opencode.ai/install \
+        && echo "Downloaded OpenCode installer to $installer" \
+        && VERSION={self.config.opencode_version} bash "$installer\""""
+
         # --auto is to approve not explicitly denied requests.
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
         && echo "Optionally activated Conda env" \
-        && installer=$(mktemp) && curl -fL -o "$installer" --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 15 https://opencode.ai/install \
-        && echo "Downloaded OpenCode installer to $installer" \
-        && VERSION={self.config.opencode_version} bash "$installer" \
+        && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
         && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
