@@ -180,10 +180,11 @@ gym _setup_params  ──▶  OpenCodeHarnessProcessor.get_run_command   (host s
 
 ### Key files (in the [nv-opencode fork](https://github.com/sdevare-nv/nv-opencode))
 
-- `packages/opencode/src/provider/sdk/nemo-gym/language-model.ts` — `LanguageModelV3` impl. Strips token-ID fields from older assistant messages on input (mirrors `nemo_gym_client.py:85-97`); captures `prompt_token_ids` / `generation_token_ids` / `generation_log_probs` from the response and threads them into `providerMetadata.nemo-gym`.
+- `packages/opencode/src/provider/sdk/nemo-gym/language-model.ts` — `LanguageModelV3` impl. Strips token-ID fields from older assistant messages on input (mirrors `nemo_gym_client.py:85-97`); captures `prompt_token_ids` / `generation_token_ids` / `generation_log_probs` from the response and threads them into `providerMetadata.nemo-gym`. It also records each model request's latency and completion timestamp.
 - `packages/opencode/src/provider/sdk/nemo-gym/index.ts` — `createNemoGym(opts)` factory.
 - `packages/opencode/src/provider/provider.ts` — registers `@opencode-ai/nemo-gym` in `BUNDLED_PROVIDERS` so opencode's normal config path picks it up.
-- `packages/opencode/src/bench/cli.ts` — per-instance bench driver. Writes a temporary `.opencode/opencode.jsonc` (registers the `nemo-gym` provider with the right `baseURL`, `completionsDir`, `instanceId`; defines a `swe-bench` agent with the SWE-bench tool subset; sets `compaction.auto: false`), then spawns `bun .../src/index.ts run "<task>" --agent swe-bench --model nemo-gym/<model> --format json` against the workspace dir. On exit it captures `git diff` and writes `output.jsonl` in the openhands-compatible shape.
+- `packages/opencode/src/bench/metrics.ts` — converts completion dumps and final tool events into response-latency, token-usage, and tool-execution records with absolute timestamps.
+- `packages/opencode/src/bench/cli.ts` — per-instance bench driver. Writes a temporary `.opencode/opencode.jsonc` (registers the `nemo-gym` provider with the right `baseURL`, `completionsDir`, `instanceId`; defines a `swe-bench` agent with the SWE-bench tool subset; sets `compaction.auto: false`), then spawns `bun .../src/index.ts run "<task>" --agent swe-bench --model nemo-gym/<model> --format json` against the workspace dir. On exit it captures `git diff`, consolidates the precise timing metrics, and writes `output.jsonl` in the openhands-compatible shape.
 - `evaluation/benchmarks/swe_bench/scripts/run_infer.sh` — in-SIF entry script invoked by the gym harness.
 
 ### Token-ID guarantees (RL contract)
@@ -209,7 +210,8 @@ Per-turn JSON files match the openhands shape exactly:
     "generation_log_probs": [...]
   },
   "kwargs":   { "tools": [...], "model": "...", ... },
-  "timestamp": 1715000000.0
+  "latency": 12.34,
+  "timestamp": 1715000000.0 // completion-received time
 }
 ```
 
@@ -220,12 +222,18 @@ Final `output.jsonl` matches what `RunOpenHandsAgent.process_single_datapoint` a
   "instance_id": "...",
   "test_result": { "git_patch": "diff --git ..." },
   "metadata":    { "llm_config": { "model": "..." } },
-  "metrics":     { "bench_run_time": 412.3, "opencode_exit_code": 0 },
+  "metrics": {
+    "bench_run_time": 412.3,
+    "opencode_exit_code": 0,
+    "response_latencies": [...],
+    "action_execution_latencies": [...],
+    "token_usages": [...]
+  },
   "error":       null
 }
 ```
 
-This means gym's existing `get_openhands_trajectory_from_completions` and patch-extraction logic work without any changes when `agent_framework: opencode`.
+This means gym's existing `get_openhands_trajectory_from_completions` and patch-extraction logic work without any changes when `agent_framework: opencode`. Gym also copies the three per-turn arrays into `nemo_gym_metrics.json` under `per_turn_metrics`, so `swe_trace_converter.py` uses the same precise schema for OpenCode and OpenHands rollouts.
 
 ### Setup
 
@@ -579,7 +587,7 @@ jq -C . swebench-verified.openhands.qwen3-30b-coder.jsonl | less -R
 
 ## Output format
 
-Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-API conversion of the OpenHands chat-completion trajectory, whose `tools` is the function-tool list the agent saw, and whose `metadata` carries `metrics` (a `SWEBenchMetrics` JSON) and the full `instance_config`. The same metrics are written incrementally to `<persistent_dir>/nemo_gym_metrics.json` for profiling and post-run inspection.
+Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-API conversion of the selected agent's chat-completion trajectory, whose `tools` is the function-tool list the agent saw, and whose `metadata` carries `metrics` (a `SWEBenchMetrics` JSON) and the full `instance_config`. The same metrics are written incrementally to `<persistent_dir>/nemo_gym_metrics.json` for profiling and post-run inspection.
 
 `run` wraps that in `SWEBenchVerifyResponse`:
 
