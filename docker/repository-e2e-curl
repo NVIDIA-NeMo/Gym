@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+set -eu
+
+installer_url=https://astral.sh/uv/0.11.19/install.sh
+for argument in "$@"; do
+    if [ "$argument" = "$installer_url" ]; then
+        cat <<'INSTALLER'
+#!/usr/bin/env sh
+set -eu
+: "${UV_UNMANAGED_INSTALL:?UV_UNMANAGED_INSTALL is required}"
+install -d "${UV_UNMANAGED_INSTALL}"
+install -m 0755 /opt/repository-e2e-gym/bin/uv "${UV_UNMANAGED_INSTALL}/uv"
+install -m 0755 /opt/repository-e2e-gym/bin/uvx "${UV_UNMANAGED_INSTALL}/uvx"
+INSTALLER
+        exit 0
+    fi
+done
+
+exec /usr/bin/curl "$@"
