@@ -338,9 +338,8 @@ class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
     """A client-executed custom tool call (OpenAI Responses ``custom_tool_call`` output item)."""
 
 
-# The results a client hands back for the calls above.
-# The SDK models them in response_input_item rather than exporting them at the package root.
-# They reach Gym as input items, and openai puts them in ResponseOutputItem from a later version.
+# These models represent client-supplied results for the calls above.
+# The installed SDK defines them in ``response_input_item``.
 class NeMoGymComputerCallOutput(ComputerCallOutput):
     """The client's result of a computer-use action (``computer_call_output`` item)."""
 

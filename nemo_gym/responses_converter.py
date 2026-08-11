@@ -648,14 +648,11 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
     }
 )
 
-# Responses output-item types that are not model-generated.
-# These are tool results the client supplies, approvals it grants, and context-management bookkeeping.
-# They must stay out of the boundary set above.
-# Otherwise split_responses_input_output_items would treat a tool result as the start of the sampled segment.
+# These item types are not model-generated.
+# They include client-supplied tool results, approvals, and context-management data.
+# Excluding them from the boundary set prevents tool results from starting the sampled segment.
 #
-# The SDK does not distinguish the two groups, so the classification lives here.
-# These reach Gym as input items at the pinned version, and openai moves them into
-# ResponseOutputItem alongside generated items in a later release.
+# The SDK unions do not distinguish generated items from client-supplied items.
 _RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
     {
         "computer_call_output",

@@ -91,9 +91,8 @@ def _function_call_item(name: str) -> dict:
     }
 
 
-# Minimal valid payloads, one per item type NeMoGymResponseInputItem accepts.
-# Keyed by the type tag, so a new union member without a fixture is reported by
-# test_every_union_tag_has_a_fixture rather than going untested.
+# Provide one minimal valid payload for each item type in ``NeMoGymResponseInputItem``.
+# Key payloads by type tag so the fixture coverage test can detect missing entries.
 ITEM_FIXTURES: dict[str, dict] = {
     "message": {
         "type": "message",
@@ -217,15 +216,11 @@ ITEM_FIXTURES: dict[str, dict] = {
 }
 
 
-# Item types Gym can carry in a Responses transcript but that Chat Completions cannot express.
-# ResponsesConverter.responses_to_chat_completion_create_params raises NotImplementedError for these.
-# A hosted web search or an MCP call has no chat-message representation.
+# These Responses item types have no Chat Completions representation.
+# ``ResponsesConverter.responses_to_chat_completion_create_params`` raises ``NotImplementedError`` for them.
 #
-# Union membership and chat-convertibility are therefore two separate things.
-# openai_model passes Responses through untouched and handles all of these.
-# Model servers that downconvert to a chat backend, vllm_model and inference_provider, cannot replay them.
-# They raise inside the converter rather than rejecting the request.
-# A type added to the union belongs in one list or the other.
+# ``openai_model`` passes Responses requests through without conversion.
+# ``vllm_model`` and ``inference_provider`` convert requests to Chat Completions.
 CHAT_INCONVERTIBLE_TYPES = frozenset(
     {
         "code_interpreter_call",
@@ -605,14 +600,13 @@ class TestResponsesDispatchRoute:
 
 
 class TestUnionItemTypesThroughDispatch:
-    """Both dispatch paths must agree about which item types are legal.
+    """Verify item handling on streaming and non-streaming dispatch paths.
 
     A plain JSON request validates strictly.
     A ``stream: true`` request goes through ``sanitize_streaming_responses_body`` first.
-    That validates each input item on its own, drops the ones that fail with a warning, and returns 200.
-    The drop is intended for unknown harness bookkeeping.
-    Losing one carrier item is preferable to a 422 that ends the rollout.
-    It also means an item type Gym cannot represent disappears from the transcript rather than raising.
+    The sanitizer validates each input item separately.
+    It drops invalid items with a warning.
+    This behavior allows unknown harness data without rejecting the entire request.
     """
 
     _ADAPTER = TypeAdapter(NeMoGymResponseInputItem)
@@ -638,7 +632,7 @@ class TestUnionItemTypesThroughDispatch:
         return tags
 
     def test_every_union_tag_has_a_fixture(self) -> None:
-        """A union member with no fixture is untested by everything below."""
+        """Require a fixture for every union member."""
         missing = sorted(self._union_tags() - set(ITEM_FIXTURES))
         assert not missing, (
             f"NeMoGymResponseInputItem accepts {missing} but ITEM_FIXTURES has no payload for "
@@ -647,7 +641,7 @@ class TestUnionItemTypesThroughDispatch:
 
     @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
     def test_fixture_is_a_valid_union_member(self, tag: str) -> None:
-        """Guard the fixtures themselves: an invalid payload would make the drop tests vacuous."""
+        """Require every fixture to validate as a union member."""
         try:
             self._ADAPTER.validate_python(ITEM_FIXTURES[tag])
         except ValidationError as exc:  # pragma: no cover - only on a bad fixture
@@ -655,12 +649,7 @@ class TestUnionItemTypesThroughDispatch:
 
     @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
     def test_streaming_does_not_drop_representable_items(self, tag: str) -> None:
-        """The transcript the backend sees matches what the client sent, item for item.
-
-        Regression guard for issue #2436.
-        Before the hosted-tool wrappers existed, a ``web_search_call`` echoed back as history was
-        dropped here, at HTTP 200 with only a log line.
-        """
+        """Preserve each representable item in the transcript sent to the backend."""
         client, server = _client(_EchoModel)
         history = [
             {"role": "user", "content": "first turn"},
@@ -693,12 +682,10 @@ class TestUnionItemTypesThroughDispatch:
         assert streaming.status_code == 200
 
     def test_unrepresentable_input_item_is_dropped_when_streaming_and_rejected_otherwise(self) -> None:
-        """Record the asymmetry so a change to it is deliberate.
+        """Verify the different handling of unrepresentable input items.
 
-        An item type with no union member is a 422 non-streaming and a silent drop streaming.
-        The drop is intentional.
-        Making the streaming path strict, or making the drop louder, comes with a failing test
-        pointing at it.
+        Non-streaming requests reject an item type with no union member.
+        Streaming requests drop the item.
         """
         client, server = _client(_EchoModel)
         unknown = {"type": "definitely_not_a_responses_item_type", "id": "x_1"}
@@ -712,14 +699,11 @@ class TestUnionItemTypesThroughDispatch:
 
     @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
     def test_union_type_is_chat_convertible_or_declared_inconvertible(self, tag: str) -> None:
-        """Every union type is either downconvertible to chat, or declared as not.
+        """Classify each union type by whether Chat Completions can represent it.
 
         The union says what Gym can carry.
-        The converter says what a chat backend can express, and that is a strict subset.
-        Nothing else states where the line falls, because
-        ``responses_to_chat_completion_create_params`` ends in ``case _: raise NotImplementedError``.
-        A type added to the union would otherwise first show up as a mid-rollout failure on
-        whichever model server downconverts.
+        The converter supports a subset of those item types.
+        Unsupported types raise ``NotImplementedError`` during conversion.
         """
         converter = ResponsesConverter(return_token_id_information=False)
         params = NeMoGymResponseCreateParamsNonStreaming(input=[ITEM_FIXTURES[tag]])
@@ -745,17 +729,11 @@ class TestUnionItemTypesThroughDispatch:
 
     @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
     def test_params_survive_a_dump_and_revalidate(self, tag: str) -> None:
-        """Anything the params model accepts, it must accept again after model_dump().
+        """Require accepted parameters to validate again after ``model_dump``.
 
         Servers forward a request by re-validating ``**body.model_dump()``.
-        A dump Gym cannot re-read breaks that hop.
-        The risk is an SDK model whose field accepts a value its matching ``*Param`` TypedDict does not.
-        Dumping emits the value, and re-validation rejects it.
-
-        Construction is the gate that keeps that from happening.
-        A tool carrying ``defer_loading: None`` is refused up front, rather than dumped into
-        something unreadable.
-        This test records that, per item type.
+        SDK models and their corresponding ``*Param`` types may accept different values.
+        Re-validation must accept every value emitted by the first validation.
         """
         params = NeMoGymResponseCreateParamsNonStreaming(
             input=[ITEM_FIXTURES[tag]],
@@ -770,6 +748,6 @@ class TestUnionItemTypesThroughDispatch:
             )
 
     def test_chat_inconvertible_list_has_no_stale_entries(self) -> None:
-        """A declared-inconvertible type that is not in the union is a stale entry."""
+        """Require each type unsupported by Chat Completions to belong to the input union."""
         stale = sorted(CHAT_INCONVERTIBLE_TYPES - self._union_tags())
         assert not stale, f"CHAT_INCONVERTIBLE_TYPES names types the union does not accept: {stale}"
