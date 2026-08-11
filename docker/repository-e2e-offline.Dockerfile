@@ -36,13 +36,15 @@ RUN cd /tmp/repository-e2e-gym-source && \
 # Run every native functional shard while package-index egress is available.
 # This validates the dependency closure and fills the immutable uv cache without
 # coupling the image contents to the contract digest's sampled shard indices.
-RUN cd /tmp/repository-e2e-gym-source && \
+RUN set -eu; \
+    cd /tmp/repository-e2e-gym-source; \
     for shard in 0 1 2 3 4 5 6 7; do \
+      git clean -ffdx; \
       UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
         GYM_CI_UV_VENV_DIR=/tmp/repository-e2e-gym-venvs \
         bash scripts/ci/server_tests.sh "${shard}" 8; \
-    done && \
-    rm -rf /tmp/repository-e2e-gym-venvs /tmp/repository-e2e-gym-source && \
+    done; \
+    rm -rf /tmp/repository-e2e-gym-venvs /tmp/repository-e2e-gym-source; \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/repository-e2e-gym
 
 COPY --chmod=0755 docker/repository-e2e-curl /opt/repository-e2e-gym/bin/curl
