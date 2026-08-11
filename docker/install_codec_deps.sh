@@ -20,8 +20,8 @@
 #   bash docker/install_codec_deps.sh
 #
 # Safe to call multiple times — exits immediately if already installed.
-# Versions are pinned to match uv.lock — if uv lock changes these versions,
-# CI will catch the mismatch via server tests that depend on these packages.
+# Versions are pinned to match the container's uv.lock. Update these pins
+# manually when uv lock bumps them (e.g. after a vllm upgrade).
 # --no-config bypasses the project's sys_platform=='never' overrides.
 set -euo pipefail
 
