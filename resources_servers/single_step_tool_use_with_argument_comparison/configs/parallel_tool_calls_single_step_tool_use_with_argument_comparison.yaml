@@ -16,21 +16,24 @@
 #     --input resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl \
 #     --output /tmp/parallel_rollouts.jsonl
 #
-# Scoring has two independent stages, both set under `tool_call_comparator_config` below.
+# `parallel_tool_call_rewarding` is the master switch, and it defaults to FALSE.
+#
+# While it is off, the number of tool calls a response makes is not part of the verdict at all: the
+# response is asked only whether it made the expected call(s), and surplus calls cost nothing. That
+# is exactly how this server behaved before parallel tool-call support existed, which is why it is
+# the default -- every pre-existing dataset scores identically whether or not this feature is
+# merged. It is also the honest default: chat templates do not render differently for
+# `parallel_tool_calls` (the Nemotron template never references the flag), so a model is never told
+# how many calls it may make, and charging it for an extra call would punish behaviour it had no
+# signal to avoid.
+#
+# This config turns it ON, because counting calls is the entire point of this environment. Once on,
+# two further stages apply, both set under `tool_call_comparator_config` below.
 #
 # 1. The cardinality gate decides which response *shapes* are admissible at all:
 #      allow_subset    admits responses that make FEWER calls than expected
 #      allow_superset  admits responses that make MORE calls than expected
-#    Both default to false, so for a `function_call_batch` row the call count must match exactly
-#    and anything else scores 0.
-#
-#    The gate only applies to `function_call_batch` rows. A plain `function_call` row asks "did the
-#    model make this call?", not "how many calls did it make", so surplus calls never reduce its
-#    reward. That is deliberate: chat templates do not render differently for `parallel_tool_calls`
-#    (the Nemotron template never references the flag), so a model is never told that only one call
-#    is allowed, and penalizing an extra call would punish behaviour it had no signal to avoid.
-#    It also keeps this environment a no-op for every pre-existing single-call dataset.
-#    Use `f1` if you do want surplus calls charged for on single-call rows.
+#    Both default to false, so the call count must match exactly and anything else scores 0.
 #
 # 2. parallel_tool_call_reward_mode decides how much credit an admissible response earns:
 #      binary_strict  (default) 1.0 only if every required call matched, else 0.0
@@ -60,6 +63,10 @@ parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_serv
       domain: agent
       tool_call_comparator_config:
         word_count_similarity_threshold: 0.1
+        # Master switch. Remove this line (or set it false) and this environment scores exactly as
+        # it did before parallel tool-call support: surplus calls cost nothing, and the three
+        # settings below are not consulted at all.
+        parallel_tool_call_rewarding: true
         # Admit under- and over-calling, then let f1 score them proportionally. Drop these three
         # lines to get the strict default: exact call count, all-or-nothing reward.
         allow_subset: true

@@ -39,6 +39,11 @@ def batch(*calls: FunctionCallAction) -> FunctionCallBatchAction:
 
 
 def build_comparator(word_count_similarity_threshold: float = 0.1, **config_overrides: object) -> ActionComparator:
+    """Most tests here are about parallel tool-call counting, so the master switch defaults to on.
+
+    Tests for the off (shipped default) behaviour pass `parallel_tool_call_rewarding=False`.
+    """
+    config_overrides.setdefault("parallel_tool_call_rewarding", True)
     return ActionComparator(
         config=ToolCallComparatorConfig(
             word_count_similarity_threshold=word_count_similarity_threshold, **config_overrides
@@ -153,55 +158,63 @@ class TestActionComparator:
             StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
         )
 
-    def test_a_single_expected_call_does_not_constrain_the_call_count(
-        self, action_comparator: ActionComparator
-    ) -> None:
-        """A `function_call` row asks "did the model make this call?", not "how many did it make?".
-
-        Surplus calls were never penalized before parallel tool-call support, and the chat templates
-        these datasets are collected with do not render differently for `parallel_tool_calls`, so the
-        model is never told that only one call is allowed. Keeping this at 1.0 is what makes the
-        change a no-op for every pre-existing non-batch dataset.
-        """
+    def test_rewarding_off_ignores_the_call_count(self) -> None:
+        """The shipped default. This is what makes the feature a no-op for pre-existing datasets."""
+        off = build_comparator(parallel_tool_call_rewarding=False)
         expected_call = call("alpha")
 
+        # Surplus calls cost nothing, however many, and wherever the expected call appears.
         for surplus in range(1, 4):
             actual = batch(expected_call, *[call(f"junk{index}") for index in range(surplus)])
-            assert outcome(action_comparator.compare_action(expected_call, actual)) == (
+            assert outcome(off.compare_action(expected_call, actual)) == (
                 1.0,
                 StepRewardCategory.EXPECTED_TOOL_CALL,
             ), f"{surplus} surplus call(s) should not change the reward"
-
-        # Order is irrelevant: the expected call may appear anywhere in the response.
-        assert outcome(action_comparator.compare_action(expected_call, batch(call("junk"), expected_call))) == (
+        assert outcome(off.compare_action(expected_call, batch(call("junk"), expected_call))) == (
             1.0,
             StepRewardCategory.EXPECTED_TOOL_CALL,
         )
 
-        # It still has to be there.
-        assert outcome(action_comparator.compare_action(expected_call, batch(call("junk"), call("other")))) == (
+        # A batch still needs all of its expected calls present, but tolerates extras.
+        expected_batch = batch(call("alpha"), call("beta"))
+        assert outcome(off.compare_action(expected_batch, batch(call("beta"), call("alpha"), call("junk")))) == (
+            1.0,
+            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
+        )
+        assert off.compare_action(expected_batch, batch(call("alpha"), call("junk"))).reward == 0.0
+
+        # The reward mode is not consulted either: f1 does not charge for surplus while off.
+        off_f1 = build_comparator(
+            parallel_tool_call_rewarding=False, parallel_tool_call_reward_mode=ParallelToolCallRewardMode.F1
+        )
+        assert off_f1.compare_action(expected_call, batch(expected_call, call("j1"), call("j2"))).reward == 1.0
+
+        # The expected call still has to actually be there.
+        assert outcome(off.compare_action(expected_call, batch(call("junk"), call("other")))) == (
             0.0,
             StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
         )
+        assert outcome(off.compare_action(expected_call, MessageAction(type="message", content="hi"))) == (
+            0.0,
+            StepRewardCategory.NO_EXPECTED_TOOL_CALL,
+        )
 
-        # Under-calling is still nothing: a response with no tool call cannot match one.
-        assert outcome(
-            action_comparator.compare_action(expected_call, MessageAction(type="message", content="hi"))
-        ) == (0.0, StepRewardCategory.NO_EXPECTED_TOOL_CALL)
-
-    def test_a_batch_does_constrain_the_call_count(self, action_comparator: ActionComparator) -> None:
-        """The contrast with the test above: a batch verifies the expected *set*, so surplus is rejected."""
-        expected_batch = batch(call("alpha"))
-        actual = batch(call("alpha"), call("junk"))
-
-        assert outcome(action_comparator.compare_action(expected_batch, actual)) == (
+    def test_rewarding_on_constrains_the_call_count(self, action_comparator: ActionComparator) -> None:
+        """The contrast: with the switch on, a surplus call is disqualifying by default."""
+        assert outcome(action_comparator.compare_action(call("alpha"), batch(call("alpha"), call("junk")))) == (
+            0.0,
+            StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
+        )
+        assert outcome(action_comparator.compare_action(batch(call("alpha")), batch(call("alpha"), call("junk")))) == (
             0.0,
             StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
         )
 
-    def test_f1_still_charges_for_surplus_on_a_single_expected_call(self) -> None:
-        """`f1` is the opt-in for precision, and it applies even where the gate does not."""
-        comparator = build_comparator(parallel_tool_call_reward_mode=ParallelToolCallRewardMode.F1)
+    def test_f1_charges_for_surplus_when_rewarding_is_on(self) -> None:
+        """`f1` is the opt-in for precision, and it applies even where the gate lets a shape through."""
+        comparator = build_comparator(
+            allow_superset=True, parallel_tool_call_reward_mode=ParallelToolCallRewardMode.F1
+        )
         expected_call = call("alpha")
 
         # 2 * 1 / (1 + 3)

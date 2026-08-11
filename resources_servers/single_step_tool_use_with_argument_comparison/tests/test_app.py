@@ -316,23 +316,31 @@ class TestApp:
         self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer
     ) -> None:
         tool = self._search_tool()
+        counting_server = build_resources_server(parallel_tool_call_rewarding=True)
 
         # The response emits the expected calls in the opposite order, which does not matter.
-        verify_response = await resources_server.verify(
-            self._parallel_verify_request(tool, ["beta", "alpha"], ["alpha", "beta"])
-        )
+        for server in (resources_server, counting_server):
+            verify_response = await server.verify(
+                self._parallel_verify_request(tool, ["beta", "alpha"], ["alpha", "beta"])
+            )
+            assert verify_response.reward == approx(1.0)
+            assert verify_response.category == StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
+
+        surplus = self._parallel_verify_request(tool, ["alpha", "beta", "gamma"], ["alpha", "beta"])
+
+        # With the shipped default (parallel_tool_call_rewarding off) the call count is ignored.
+        verify_response = await resources_server.verify(surplus)
         assert verify_response.reward == approx(1.0)
         assert verify_response.category == StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
 
-        # A surplus call is disqualifying unless the cardinality gate is opened.
-        verify_response = await resources_server.verify(
-            self._parallel_verify_request(tool, ["alpha", "beta", "gamma"], ["alpha", "beta"])
-        )
+        # With it on, a surplus call is disqualifying unless the cardinality gate is opened.
+        verify_response = await counting_server.verify(surplus)
         assert verify_response.reward == approx(0.0)
         assert verify_response.category == StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
 
     async def test_verify_parallel_tool_calls_with_f1_reward_mode(self) -> None:
         resources_server = build_resources_server(
+            parallel_tool_call_rewarding=True,
             allow_subset=True,
             allow_superset=True,
             parallel_tool_call_reward_mode=ParallelToolCallRewardMode.F1,

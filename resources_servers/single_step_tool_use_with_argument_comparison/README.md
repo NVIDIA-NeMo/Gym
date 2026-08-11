@@ -6,13 +6,17 @@ Data links: ?
 # Parallel tool calls
 Rows may also set `expected_action.type` to `function_call_batch` with a `calls` list containing the same `function_call` objects used by single-call rows. The verifier matches parallel tool calls as an unordered multiset, so response output order does not matter. Because argument matching is fuzzy, one actual call can satisfy several expected calls; the verifier resolves this with a maximum bipartite matching rather than pairing calls greedily.
 
-Scoring has two independent stages, both configured under `tool_call_comparator_config`.
+## `parallel_tool_call_rewarding`: the master switch
+
+`tool_call_comparator_config.parallel_tool_call_rewarding` decides whether the **number** of tool calls a response makes affects its reward. It defaults to `false`.
+
+While it is off, the call count is not part of the verdict at all: a response is asked only whether it made the expected call(s), and surplus calls cost nothing. This is exactly how the server behaved before parallel tool-call support existed, so **every pre-existing dataset scores identically whether or not this feature is merged**. It is also the honest default — chat templates do not render differently for `parallel_tool_calls` (the Nemotron template never references the flag), so a model is never told how many calls it may make, and charging it for an extra call would penalize behaviour it had no signal to avoid.
+
+Turn it on for datasets that use `function_call_batch`. The two stages below are only consulted when it is on.
 
 ## Cardinality gate: which responses are admissible
 
-`allow_subset` admits responses that make **fewer** calls than expected, and `allow_superset` admits responses that make **more**. Both default to `false`, so by default the call count must match the expected batch exactly and anything else scores zero.
-
-The gate applies to `function_call_batch` rows only. A plain `function_call` row asks whether the model made *that call*, not how many calls it made, so surplus calls never reduce its reward. Chat templates do not render differently for `parallel_tool_calls` — the Nemotron template never references the flag — so a model is never told that only one call is allowed, and charging it for an extra call would penalize behaviour it had no signal to avoid. This also keeps parallel tool-call support a **no-op for every existing single-call dataset**. Set `parallel_tool_call_reward_mode: f1` if you do want surplus calls charged for on single-call rows.
+`allow_subset` admits responses that make **fewer** calls than expected, and `allow_superset` admits responses that make **more**. Both default to `false`, so the call count must match exactly and anything else scores zero.
 
 ## Reward mode: how much credit an admissible response earns
 
