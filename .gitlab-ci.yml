@@ -54,6 +54,7 @@ gym-cpu-ci-junit:
   stage: report
   image: python:3.12-slim
   script:
+    - python3 -m pip install --no-cache-dir --disable-pip-version-check "defusedxml==0.7.1"
     - >-
       python3 .gitlab/ci/collect_downstream_junit.py
       --output-dir collected-junit

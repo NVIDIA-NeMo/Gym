@@ -179,6 +179,18 @@ def test_receipt_identity_mismatch_is_rejected_atomically(tmp_path, updates, mes
             "forbidden DTD/entity",
         ),
         (
+            {
+                "junit/report.xml": (
+                    '<?xml version="1.0" encoding="UTF-16"?>'
+                    '<!DOCTYPE testsuite [<!ENTITY y "expanded">]>'
+                    '<testsuite name="&y;"/>'
+                ).encode("utf-16")
+            },
+            None,
+            None,
+            "forbidden DTD/entity",
+        ),
+        (
             {"junit/report.xml": _junit("ok")},
             None,
             {"unexpected.txt": b"x"},

@@ -309,6 +309,10 @@ dev = [
     "pytest",
     "pytest-asyncio",
 
+    # DefusedXML: Hardened XML parsing for the GitLab JUnit relay receiver.
+    # License: Python Software Foundation License
+    "defusedxml>=0.7.1",
+
     # Requests-mock: Used for mocking HTTP requests in tests
     # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
     # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE

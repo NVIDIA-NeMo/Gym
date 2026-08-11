@@ -31,6 +31,9 @@ from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
+
 
 DEFAULT_OUTPUT_DIR = "collected-junit"
 PACKAGE_NAME = "nemo-gym-ci-junit"
@@ -349,7 +352,14 @@ def _validate_junit(payload: bytes, path: str) -> None:
     if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)\b", payload, flags=re.IGNORECASE):
         raise CollectorError(f"relay XML contains a forbidden DTD/entity: {path!r}")
     try:
-        root = ET.fromstring(payload)
+        root = DefusedET.fromstring(
+            payload,
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except DefusedXmlException as exc:
+        raise CollectorError(f"relay XML contains a forbidden DTD/entity: {path!r}") from exc
     except ET.ParseError as exc:
         raise CollectorError(f"relay XML is malformed: {path!r}: {exc}") from exc
     if not isinstance(root.tag, str) or root.tag.rsplit("}", 1)[-1] not in {"testsuite", "testsuites"}:
