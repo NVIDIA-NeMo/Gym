@@ -166,20 +166,6 @@ Aggregate metrics: results/mcqa_rollouts_aggregate_metrics.json
 
 For per-task pass rates, see the [`gym eval profile`](https://docs.nvidia.com/nemo/gym/main/reference/cli-commands) command.
 
-### Using the NeMo-Gym Container with VLM or Audio/Video Benchmarks
-
-The NeMo-Gym container omits packages with bundled codec libraries
-(`opencv-python-headless`, `torchvision`, `torchaudio`) to avoid shipping
-royalty-bearing binaries. If you are running VLM or audio/video benchmarks
-inside the container, restore them first:
-
-```bash
-bash docker/install_codec_deps.sh
-```
-
-This installs the packages at the same versions used during the container
-build. It is safe to run multiple times.
-
 ### Next Steps
 
 - **[Browse Environments](#-available-environments)** — Browse available environments for evaluation and training.
