@@ -81,6 +81,8 @@ MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_se
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+RESULTS_DIR_KEY_NAME = "results_dir"
+CACHE_DIR_KEY_NAME = "cache_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
@@ -117,6 +119,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
+    RESULTS_DIR_KEY_NAME,
+    CACHE_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -848,6 +852,14 @@ Found global config dict yaml:
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
+
+            # Artifact roots. `results_dir` is where servers write run artifacts;
+            # `cache_dir` is where they keep reusable setup trees (clones, venvs,
+            # toolchains). Overridable independently, so a run can point results at
+            # a shared filesystem while caches stay on fast local (or baked
+            # container) storage.
+            global_config_dict.setdefault(RESULTS_DIR_KEY_NAME, str(RESULTS_DIR))
+            global_config_dict.setdefault(CACHE_DIR_KEY_NAME, str(CACHE_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
             self._recursively_hide_secrets(global_config_dict)

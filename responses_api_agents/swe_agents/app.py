@@ -45,7 +45,7 @@ from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -56,7 +56,12 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import OmegaConf, get_global_config_dict
+from nemo_gym.global_config import (
+    CACHE_DIR_KEY_NAME,
+    RESULTS_DIR_KEY_NAME,
+    OmegaConf,
+    get_global_config_dict,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -350,7 +355,18 @@ class BaseDatasetHarnessProcessor(BaseModel):
 
     @property
     def parent_dir(self) -> Path:
+        """Anchor for packaged read-only assets (setup scripts, prompts, configs)."""
         return Path(__file__).parent
+
+    @property
+    def setup_root(self) -> Path:
+        """Root for the reusable multi-GB setup trees (clones, venvs, toolchains).
+
+        Anchored at the global `cache_dir` so deployments can relocate the
+        caches (e.g. to node-local or baked container storage) independently of
+        the package and of where run artifacts go.
+        """
+        return Path(get_global_config_dict().get(CACHE_DIR_KEY_NAME) or CACHE_DIR) / "swe_agents"
 
     def _run_setup_command(self, command: str) -> None:
         process = Popen(command, shell=True)
@@ -376,7 +392,7 @@ class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
         swebench_repo = "https://github.com/HeyyyyyyG/SWE-bench.git"
         swebench_commit = "HEAD"
 
-        setup_dir = self.parent_dir / "swe_swebench_setup"
+        setup_dir = self.setup_root / "swe_swebench_setup"
         setup_dir.mkdir(parents=True, exist_ok=True)
 
         with file_lock(setup_dir, "SWE-bench setup"):
@@ -446,7 +462,7 @@ class SweBenchMultilingualDatasetProcessor(BaseDatasetHarnessProcessor):
         swebench_repo = "https://github.com/Kipok/SWE-bench.git"
         swebench_commit = "HEAD"
 
-        setup_dir = self.parent_dir / "swe_swebench_multilingual_setup"
+        setup_dir = self.setup_root / "swe_swebench_multilingual_setup"
         setup_dir.mkdir(parents=True, exist_ok=True)
 
         with file_lock(setup_dir, "SWE-bench_Multilingual setup"):
@@ -516,7 +532,7 @@ class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
         eval_harness_repo = "https://github.com/sdevare-nv/nv-R2E-Gym.git"
         eval_harness_commit = "local-eval"
 
-        setup_dir = self.parent_dir / "swe_r2e_gym_setup"
+        setup_dir = self.setup_root / "swe_r2e_gym_setup"
 
         with file_lock(setup_dir, "R2E-Gym setup"):
             r2e_gym_dir = setup_dir / "R2E-Gym"
@@ -760,7 +776,7 @@ def _load_rebench_log_parsers(rebench_repo_dir: Path):
 
 class SWERebenchDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
-        setup_dir = self.parent_dir / "swe_rebench_setup"
+        setup_dir = self.setup_root / "swe_rebench_setup"
 
         with file_lock(setup_dir, "SWE-rebench setup"):
             rebench_dir = setup_dir / "SWE-rebench-V2"
@@ -901,7 +917,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
             report_path.write_text(json.dumps(report, indent=2))
             return
 
-        setup_dir = self.parent_dir / "swe_rebench_setup"
+        setup_dir = self.setup_root / "swe_rebench_setup"
         log_parsers = _load_rebench_log_parsers(setup_dir / "SWE-rebench-V2")
 
         parser = log_parsers.NAME_TO_PARSER.get(log_parser_name) or getattr(log_parsers, log_parser_name, None)
@@ -1544,7 +1560,10 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         print(f"OpenHands now at commit {new_commit[:12]} (target={target})", flush=True)
 
     def setup(self) -> Path:
-        setup_dir = self.parent_dir / "swe_openhands_setup"
+        # Keyed by commit: file_lock is only held during setup(), so an unkeyed
+        # shared checkout could be reset --hard to a different commit by a
+        # later run while this one is still executing from it.
+        setup_dir = self.setup_root / "swe_openhands_setup" / self.config.agent_framework_commit
 
         with file_lock(setup_dir, "OpenHands setup"):
             openhands_dir = setup_dir / "OpenHands"
@@ -1912,7 +1931,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
 
     def setup(self) -> Path:
-        setup_dir = self.parent_dir / "swe_opencode_setup"
+        setup_dir = self.setup_root / "swe_opencode_setup"
 
         with file_lock(setup_dir, "opencode"):
             opencode_dir = setup_dir / "opencode"
@@ -2766,7 +2785,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
-        workspace_root = Path(__file__).parent
+        # Run artifacts are written here by this server and read across the run
+        # (on multinode deployments, from other nodes); resolved from the global
+        # `results_dir` so runs can point it at a shared filesystem.
+        results_root = Path(get_global_config_dict().get(RESULTS_DIR_KEY_NAME) or RESULTS_DIR)
+        base_results_dir = results_root / f"swebench_results_{run_session_id}"
+        base_results_dir.mkdir(parents=True, exist_ok=True)
         # Only set up the agent harness that's actually selected. Both share the
         # same dataset/eval setup paths.
         openhands_setup_dir, opencode_setup_dir = None, None
@@ -2777,7 +2801,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
-            base_results_dir=workspace_root / "results" / f"swebench_results_{run_session_id}",
+            base_results_dir=base_results_dir,
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
             openhands_setup_dir=openhands_setup_dir,

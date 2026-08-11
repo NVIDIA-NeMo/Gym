@@ -764,7 +764,7 @@ class TestSweBenchDatasetProcessor:
 
             with patch.object(
                 BaseDatasetHarnessProcessor,
-                "parent_dir",
+                "setup_root",
                 new_callable=lambda: property(lambda self: Path(tmpdir)),
             ):
                 setup_dir = Path(tmpdir) / "swe_swebench_setup"

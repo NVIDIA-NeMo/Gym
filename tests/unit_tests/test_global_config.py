@@ -23,7 +23,7 @@ from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
+from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
@@ -75,6 +75,8 @@ class TestGlobalConfig:
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
+            "results_dir": str(RESULTS_DIR),
+            "cache_dir": str(CACHE_DIR),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -194,6 +196,16 @@ class TestGlobalConfig:
 
         with raises(ConfigError, match="must be a boolean"):
             get_global_config_dict()
+
+    def test_get_global_config_dict_artifact_dir_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "/shared/results", "cache_dir": "/local/cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["results_dir"] == "/shared/results"
+        assert global_config_dict["cache_dir"] == "/local/cache"
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
