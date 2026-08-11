@@ -5,6 +5,8 @@ ARG BASE_IMAGE=766267172432.dkr.ecr.us-east-1.amazonaws.com/nemo-autobot/agent-s
 FROM ${BASE_IMAGE}
 
 ARG GYM_SOURCE_SHA=5346c8ffc9e4438959955e5b958a12733ed9abc0
+ARG HERMES_AGENT_SHA=26bb847a88493342ca1b194e0455b479073ae21d
+ARG TALE_SUITE_SHA=ef349ba7cfdebf339e9aedcd09d89d6c917f86e5
 ARG RUNTIME_UID=65532
 ARG RUNTIME_GID=65532
 
@@ -22,6 +24,30 @@ RUN git init /tmp/repository-e2e-gym-source && \
     test "$(git -C /tmp/repository-e2e-gym-source rev-parse HEAD)" = "${GYM_SOURCE_SHA}" && \
     git -c credential.helper= -c http.https://github.com/.extraheader= \
       -C /tmp/repository-e2e-gym-source submodule update --init --recursive
+
+# uv cannot resolve mutable Git requirements in offline mode, even when their
+# previously fetched objects remain in its cache. Bundle the exact build-time
+# revisions and redirect those requirements to immutable local sources.
+RUN install -d /opt/repository-e2e-gym/git-sources/hermes-agent \
+      /opt/repository-e2e-gym/git-sources/tale-suite && \
+    git init /opt/repository-e2e-gym/git-sources/hermes-agent && \
+    git -C /opt/repository-e2e-gym/git-sources/hermes-agent remote add origin \
+      https://github.com/cmunley1/hermes-agent && \
+    git -c credential.helper= -c http.https://github.com/.extraheader= \
+      -C /opt/repository-e2e-gym/git-sources/hermes-agent fetch --depth=1 origin \
+      "${HERMES_AGENT_SHA}" && \
+    git -C /opt/repository-e2e-gym/git-sources/hermes-agent checkout --detach FETCH_HEAD && \
+    test "$(git -C /opt/repository-e2e-gym/git-sources/hermes-agent rev-parse HEAD)" = \
+      "${HERMES_AGENT_SHA}" && \
+    git init /opt/repository-e2e-gym/git-sources/tale-suite && \
+    git -C /opt/repository-e2e-gym/git-sources/tale-suite remote add origin \
+      https://github.com/microsoft/tale-suite.git && \
+    git -c credential.helper= -c http.https://github.com/.extraheader= \
+      -C /opt/repository-e2e-gym/git-sources/tale-suite fetch --depth=1 origin \
+      "${TALE_SUITE_SHA}" && \
+    git -C /opt/repository-e2e-gym/git-sources/tale-suite checkout --detach FETCH_HEAD && \
+    test "$(git -C /opt/repository-e2e-gym/git-sources/tale-suite rev-parse HEAD)" = \
+      "${TALE_SUITE_SHA}"
 
 RUN cd /tmp/repository-e2e-gym-source && \
     UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
