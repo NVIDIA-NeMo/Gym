@@ -14,11 +14,6 @@ RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/repository-e2e-gym/b
       env UV_UNMANAGED_INSTALL=/opt/repository-e2e-gym/bin sh && \
     test "$(/opt/repository-e2e-gym/bin/uv --version | awk '{print $2}')" = 0.11.19
 
-COPY docker/repository-e2e-constraints.txt /opt/repository-e2e-gym/constraints.txt
-COPY docker/repository-e2e-overrides.txt /opt/repository-e2e-gym/overrides.txt
-ENV UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt \
-    UV_OVERRIDE=/opt/repository-e2e-gym/overrides.txt
-
 RUN git init /tmp/repository-e2e-gym-source && \
     git -C /tmp/repository-e2e-gym-source remote add origin https://github.com/ko3n1g/Gym.git && \
     git -c credential.helper= -c http.https://github.com/.extraheader= \
@@ -37,6 +32,11 @@ RUN cd /tmp/repository-e2e-gym-source && \
       --disable-pip-version-check pre-commit==3.6.0 && \
     PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
       /opt/repository-e2e-gym/pre-commit-3.6.0/bin/pre-commit install-hooks
+
+COPY docker/repository-e2e-constraints.txt /opt/repository-e2e-gym/constraints.txt
+COPY docker/repository-e2e-overrides.txt /opt/repository-e2e-gym/overrides.txt
+ENV UV_CONSTRAINT=/opt/repository-e2e-gym/constraints.txt \
+    UV_OVERRIDE=/opt/repository-e2e-gym/overrides.txt
 
 # Run every native functional shard while package-index egress is available.
 # This validates the dependency closure and fills the immutable uv cache without
