@@ -551,7 +551,20 @@ class TestApp:
                 "env_id": env_id,
                 "group_id": "0",
                 "contains_transitions": True,
-                "output": [[{"type": "message", "role": "user", "content": "obs"}]],
+                # AviaryResourcesServer.verify echoes the request back through model_dump(),
+                # so every item in a transition carries its `type` field.
+                "output": [
+                    [
+                        {"role": "user", "content": "obs", "type": "message"},
+                        {
+                            "call_id": "call_1",
+                            "name": "tool_1",
+                            "arguments": '{"arg": "val"}',
+                            "type": "function_call",
+                        },
+                        {"call_id": "call_1", "output": "result", "type": "function_call_output"},
+                    ]
+                ],
                 "parallel_tool_calls": True,
                 "tool_choice": "auto",
                 "tools": [],
@@ -576,6 +589,12 @@ class TestApp:
 
         assert verify_response.reward == 1.0
         assert verify_response.success is True
+        assert verify_response.response.contains_transitions is True
+        assert [item.type for item in verify_response.response.output[0]] == [
+            "message",
+            "function_call",
+            "function_call_output",
+        ]
 
         agent.server_client.post.assert_has_awaits(
             [
