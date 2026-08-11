@@ -88,7 +88,14 @@ COPY docker/repository-e2e-constraints.txt /opt/repository-e2e-gym/constraints.t
 COPY docker/repository-e2e-overrides.txt /opt/repository-e2e-gym/overrides.txt
 COPY --chmod=0755 docker/repository-e2e-curl /opt/repository-e2e-gym/bin/curl
 
-RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/nemo-gym /workspace && \
+RUN if ! getent group "${RUNTIME_GID}" >/dev/null; then \
+      printf 'repository-e2e:x:%s:\n' "${RUNTIME_GID}" >> /etc/group; \
+    fi && \
+    if ! getent passwd "${RUNTIME_UID}" >/dev/null; then \
+      printf 'repository-e2e:x:%s:%s:Repository E2E:/opt/repository-e2e-gym:/usr/sbin/nologin\n' \
+        "${RUNTIME_UID}" "${RUNTIME_GID}" >> /etc/passwd; \
+    fi && \
+    install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/nemo-gym /workspace && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" \
       /opt/repository-e2e-gym /tmp/repository-e2e-gym-source
 
@@ -125,9 +132,18 @@ RUN set -eu; \
       git clone --shared --no-checkout \
         /tmp/repository-e2e-gym-source "${shard_root}"; \
       git -C "${shard_root}" checkout --detach "${GYM_SOURCE_SHA}"; \
+      shard_home="/tmp/repository-e2e-gym-home-${shard}"; \
+      install -d \
+        "${shard_home}/.cache" \
+        "${shard_home}/.config" \
+        "${shard_home}/.local/share"; \
       ( \
         cd "${shard_root}"; \
-        UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
+        HOME="${shard_home}" \
+          XDG_CACHE_HOME="${shard_home}/.cache" \
+          XDG_CONFIG_HOME="${shard_home}/.config" \
+          XDG_DATA_HOME="${shard_home}/.local/share" \
+          UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
           GYM_CI_UV_VENV_DIR="/tmp/repository-e2e-gym-venvs-${shard}" \
           bash scripts/ci/server_tests.sh "${shard}" 8 \
       ) & \
@@ -139,6 +155,7 @@ RUN set -eu; \
     done; \
     rm -rf \
       /tmp/repository-e2e-gym-shard-* \
+      /tmp/repository-e2e-gym-home-* \
       /tmp/repository-e2e-gym-venvs-* \
       /tmp/repository-e2e-gym-source; \
     test "${status}" -eq 0
