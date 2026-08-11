@@ -244,9 +244,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.use_completions_api and self.config.render_chat_template:
             self._chat_template_tokenizer = self._load_chat_template_tokenizer()
 
-        # TODO @bxyu-nvidia: Remove
-        self._num_requests = 0
-
     def _load_chat_template_tokenizer(self):
         """Load an HF AutoTokenizer for client-side chat-template rendering.
 
@@ -560,11 +557,6 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        # TODO @bxyu-nvidia: Remove
-        self._num_requests += 1
-        if self._num_requests % 100 == 0:
-            print(f"Hit {self._num_requests} requests to /v1/chat/completions")
-
         if self.config.use_completions_api:
             return await self._chat_completions_via_completions_api(request, body)
 
