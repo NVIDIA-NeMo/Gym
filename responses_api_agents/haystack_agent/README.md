@@ -4,30 +4,29 @@ A NeMo Gym agent harness that runs a serialized [Haystack](https://haystack.deep
 `Pipeline` as its rollout loop. The pipeline contains a Haystack `Agent` whose
 `chat_generator` is a `NeMoGymResponsesChatGenerator` — a Haystack `ChatGenerator` that calls a
 native NeMo Gym model server's `/v1/responses` endpoint (resolved by `server_name`). Haystack's
-`Agent` drives the repeated tool-calling loop. It can use Haystack-local tools and, through a
-`ContextAwareMCPToolset`, environment tools exposed by a Gym Resources Server over MCP.
+`Agent` drives the repeated tool-calling loop. It can use Haystack-local tools, request-supplied
+HTTP environment tools, and `ContextAwareMCPToolset` environment tools exposed over MCP.
 
 > [!NOTE]
-> Dataset-row `responses_create_params.tools` are ignored. To use Resources Server tools,
-> configure the server with `expose_tools_over_mcp: true` and include a
-> `ContextAwareMCPToolset` in the Haystack pipeline. Gym seeds the Resources Server for each
-> rollout and places its signed MCP session token in request-local context for tool calls.
+> Function tools in `responses_create_params.tools` become request-scoped Haystack tools and
+> dispatch to the Resources Server's `POST /{tool_name}` routes. A configured MCP tool with the
+> same name takes precedence; otherwise the request tool overrides a same-named local pipeline tool.
 
-The pipeline and MCP tool schemas are deserialized and warmed up **once at startup**. Each rollout
-opens one token-authenticated MCP connection lazily on its first tool call and closes it when the
+The pipeline is deserialized once at startup and warmed by Haystack on its first use. Each rollout
+opens a token-authenticated MCP connection lazily on its first MCP tool call and closes it when the
 rollout ends. Concurrent rollouts remain isolated.
 
 ## Layout
 
 - `chat_generator.py` — `NeMoGymResponsesChatGenerator` + Haystack `ChatMessage` ⇄ Responses-API
   conversion helpers. Serializable, so it can be declared in a pipeline YAML by `type:`.
+- `http_tool.py` — request-scoped direct HTTP Resources Server tool adapter.
 - `app.py` — `HaystackAgent`; `responses()` loads `pipeline_yaml`, runs it, and returns the
   trajectory as a `NeMoGymResponse`. `run()` seeds the resources-server session and verifies.
-- `configs/pipeline.yaml` — example Haystack `Agent` pipeline (one trivial `get_weather` tool).
-  Regenerate with Haystack's `Pipeline.dumps()`; swap in your own `Tool`/`PipelineTool`.
+- `configs/pipeline.yaml` — minimal Haystack `Agent` pipeline. Regenerate with Haystack's
+  `Pipeline.dumps()`; add local `Tool`/`PipelineTool` instances as needed.
 - `configs/haystack_agent.yaml` — Gym config wiring resources server, model server, and
   `pipeline_yaml` together.
-- `example_tools.py` — example Haystack-side tool referenced by `configs/pipeline.yaml`.
 
 ## Run
 

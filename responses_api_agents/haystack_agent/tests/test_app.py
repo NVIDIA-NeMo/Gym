@@ -21,8 +21,10 @@ from haystack import Pipeline
 from haystack.components.agents import Agent
 from haystack.dataclasses import ChatMessage
 from haystack.tools import create_tool_from_function
+from haystack_integrations.tools.mcp import StreamableHttpServerInfo
 from pytest import MonkeyPatch
 
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.haystack_agent import chat_generator as chat_generator_module
 from responses_api_agents.haystack_agent.app import (
@@ -33,6 +35,7 @@ from responses_api_agents.haystack_agent.app import (
 )
 from responses_api_agents.haystack_agent.chat_generator import NeMoGymResponsesChatGenerator
 from responses_api_agents.haystack_agent.example_tools import get_weather
+from responses_api_agents.haystack_agent.http_tool import HTTPTool
 from responses_api_agents.haystack_agent.mcp_toolset import (
     ContextAwareMCPToolset,
 )
@@ -66,12 +69,12 @@ def _envelope(output: list[dict], usage: dict | None = None) -> dict:
     return payload
 
 
-def _function_call_item(arguments: str = '{"city": "San Francisco"}') -> dict:
+def _function_call_item(name: str = "get_weather", arguments: str = '{"city": "San Francisco"}') -> dict:
     return {
         "type": "function_call",
         "id": "fc_1",
         "call_id": "call_1",
-        "name": "get_weather",
+        "name": name,
         "arguments": arguments,
         "status": "completed",
     }
@@ -98,6 +101,13 @@ _USAGE = {
 
 def _weather_tool():
     return create_tool_from_function(get_weather, name="get_weather", description="Get the weather for a city.")
+
+
+def _http_response(body: str, cookies: dict | None = None) -> MagicMock:
+    response = MagicMock()
+    response.cookies = cookies or {}
+    response.content.read = AsyncMock(return_value=body.encode())
+    return response
 
 
 def _pipeline_yaml(raise_on_tool_invocation_failure: bool = False, generation_kwargs: dict | None = None) -> str:
@@ -181,6 +191,25 @@ class TestChatGenerator:
         # Usage was captured on the generator for later aggregation.
         assert gen._usage.total_tokens == 15
 
+    async def test_run_async_does_not_replace_resource_cookies(self, monkeypatch: MonkeyPatch) -> None:
+        client = MagicMock()
+        model_response = _make_response(_envelope([_text_item()], _USAGE))
+        model_response.cookies = {"model_session": "next"}
+        client.post = AsyncMock(return_value=model_response)
+        monkeypatch.setattr(chat_generator_module, "_server_client", client)
+
+        state = chat_generator_module._GenRunState(resources_server_cookies={"resource_session": "seeded"})
+        context_token = chat_generator_module._current_run_state.set(state)
+        try:
+            await NeMoGymResponsesChatGenerator(server_name="policy_model").run_async(
+                messages=[ChatMessage.from_user("hi")]
+            )
+        finally:
+            chat_generator_module._current_run_state.reset(context_token)
+
+        assert state.resources_server_cookies == {"resource_session": "seeded"}
+        assert state.model_server_cookies == {"model_session": "next"}
+
     async def test_run_async_streaming_unsupported(self, monkeypatch: MonkeyPatch) -> None:
         gen = NeMoGymResponsesChatGenerator(server_name="policy_model")
         try:
@@ -192,10 +221,20 @@ class TestChatGenerator:
 
 
 class TestContextAwareMCPToolset:
-    def test_agent_retargets_mcp_toolset_once_at_startup(self, monkeypatch: MonkeyPatch) -> None:
+    def test_agent_retargets_mcp_toolset_once_at_startup(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         warm_up = MagicMock()
         monkeypatch.setattr(ContextAwareMCPToolset, "warm_up", warm_up)
         monkeypatch.setattr(HaystackAgent, "_resources_mcp_url", lambda self: "http://resources:19724/mcp")
+        pipeline = Pipeline()
+        pipeline.add_component(
+            "agent",
+            Agent(
+                chat_generator=NeMoGymResponsesChatGenerator(server_name="policy_model"),
+                tools=[ContextAwareMCPToolset(server_info=StreamableHttpServerInfo(url="http://unused/mcp"))],
+            ),
+        )
+        pipeline_path = tmp_path / "pipeline.yaml"
+        pipeline_path.write_text(pipeline.dumps())
         config = HaystackAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -203,7 +242,7 @@ class TestContextAwareMCPToolset:
             name="haystack_agent",
             resources_server=ResourcesServerRef(type="resources_servers", name="res"),
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-            pipeline_yaml="configs/pipeline.yaml",
+            pipeline_yaml=str(pipeline_path),
         )
 
         agent = HaystackAgent(config=config, server_client=MagicMock(spec=ServerClient))
@@ -220,6 +259,90 @@ class TestContextAwareMCPToolset:
                 toolset._client_for_current_rollout()
         finally:
             chat_generator_module._current_run_state.reset(context_token)
+
+    async def test_rejects_mcp_toolset_when_mcp_is_disabled(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        server, _ = _build_agent(tmp_path, monkeypatch, model_responses=[])
+        server._agent.tools = [ContextAwareMCPToolset.__new__(ContextAwareMCPToolset)]
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "hi"})
+
+        with pytest.raises(RuntimeError, match="did not enable MCP"):
+            await server.responses(request=MagicMock(headers={}, cookies={}), response=MagicMock(), body=body)
+
+    async def test_warns_when_mcp_is_enabled_without_mcp_toolset(
+        self, tmp_path, monkeypatch: MonkeyPatch, caplog
+    ) -> None:
+        server, _ = _build_agent(tmp_path, monkeypatch, model_responses=[_envelope([_text_item()], _USAGE)])
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "hi"})
+
+        with caplog.at_level("WARNING"):
+            await server.responses(
+                request=MagicMock(
+                    headers={"X-NeMo-Gym-Session-Token": "token"},
+                    cookies={},
+                ),
+                response=MagicMock(),
+                body=body,
+            )
+
+        assert "has no ContextAwareMCPToolset" in caplog.text
+
+
+class TestHTTPTool:
+    def test_drops_null_placeholder_properties(self) -> None:
+        tool = HTTPTool(
+            {
+                "type": "function",
+                "name": "send_email",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "recipient": {"type": "string"},
+                        "subject": None,
+                    },
+                    "required": ["recipient", "subject"],
+                },
+            },
+            MagicMock(spec=ServerClient),
+            "resources",
+        )
+
+        assert tool.parameters == {
+            "type": "object",
+            "properties": {"recipient": {"type": "string"}},
+            "required": ["recipient"],
+        }
+
+    async def test_posts_arguments_and_preserves_response_body(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=_http_response('{"error": "bad request"}', {"sid": "next"}))
+        tool = HTTPTool(
+            {
+                "type": "function",
+                "name": "lookup",
+                "description": "Look up an item.",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+            },
+            server_client,
+            "resources",
+        )
+        state = chat_generator_module._GenRunState(resources_server_cookies={"sid": "current"})
+        context_token = chat_generator_module._current_run_state.set(state)
+        try:
+            assert await tool.invoke_async(query="Ada") == '{"error": "bad request"}'
+        finally:
+            chat_generator_module._current_run_state.reset(context_token)
+
+        server_client.post.assert_awaited_once_with(
+            server_name="resources",
+            url_path="/lookup",
+            json={"query": "Ada"},
+            cookies={"sid": "current"},
+        )
+        assert state.resources_server_cookies == {"sid": "next"}
+
+    def test_rejects_non_function_schema(self) -> None:
+        with pytest.raises(ValueError, match="type 'function'"):
+            HTTPTool({"type": "web_search_preview"}, MagicMock(spec=ServerClient), "resources")
 
 
 class TestApp:
@@ -288,8 +411,7 @@ class TestApp:
         assert "function_call_output" in output_types
 
     async def test_responses_forwards_sampling_params(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
-        # The row's sampling params reach the model call; pipeline-owned fields (tools, instructions)
-        # are not forwarded.
+        # The row's sampling params reach the model call; request tools are runtime Haystack tools.
         server, client = _build_agent(tmp_path, monkeypatch, model_responses=[_envelope([_text_item()])])
         http = TestClient(server.setup_webserver())
 
@@ -312,9 +434,90 @@ class TestApp:
         assert out_body.temperature == 0.9
         assert out_body.max_output_tokens == 123
         assert out_body.top_p == 0.5
-        # instructions is dropped; tools stay the pipeline's, not the request's.
+        # instructions is dropped; request tools are combined with the pipeline's local tools.
         assert out_body.instructions is None
-        assert [tool["name"] for tool in out_body.tools] == ["get_weather"]
+        assert [tool["name"] for tool in out_body.tools] == ["get_weather", "ignored_tool"]
+
+    async def test_responses_invokes_request_http_tool(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        server, model_client = _build_agent(
+            tmp_path,
+            monkeypatch,
+            model_responses=[
+                _envelope([_function_call_item(name="environment_tool", arguments='{"value": 3}')], _USAGE),
+                _envelope([_text_item("Done.")], _USAGE),
+            ],
+        )
+        server.server_client.post = AsyncMock(return_value=_http_response('{"result": 6}', {"sid": "updated"}))
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {
+                "input": [{"role": "user", "content": "Double 3."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "environment_tool",
+                        "description": "Double a value.",
+                        "strict": False,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"value": {"type": "integer"}},
+                            "required": ["value"],
+                        },
+                    }
+                ],
+            }
+        )
+        request = MagicMock(headers={}, cookies={})
+        response = MagicMock()
+        model_response = await server.responses(request=request, response=response, body=body)
+
+        assert [item.type for item in model_response.output] == ["function_call", "function_call_output", "message"]
+        server.server_client.post.assert_awaited_once_with(
+            server_name="res", url_path="/environment_tool", json={"value": 3}, cookies={}
+        )
+        assert [tool["name"] for tool in model_client.post.call_args_list[0].kwargs["json"].tools] == [
+            "get_weather",
+            "environment_tool",
+        ]
+
+    def test_request_http_tool_overrides_configured_tool(self, tmp_path, monkeypatch: MonkeyPatch, caplog) -> None:
+        server, _ = _build_agent(tmp_path, monkeypatch, model_responses=[])
+
+        with caplog.at_level("WARNING"):
+            runtime_tools = server._tools_for_http_request(
+                [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Environment weather.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ]
+            )
+
+        assert len(runtime_tools) == 1
+        assert isinstance(runtime_tools[0], HTTPTool)
+        assert "overrides a configured local tool with the same name" in caplog.text
+
+    def test_configured_mcp_tool_overrides_request_http_tool(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        server, _ = _build_agent(tmp_path, monkeypatch, model_responses=[])
+        mcp_toolset = ContextAwareMCPToolset(server_info=StreamableHttpServerInfo(url="http://unused/mcp"))
+        mcp_toolset.tools = [_weather_tool()]
+        mcp_toolset._warmup_called = True
+        server._agent.tools = [mcp_toolset]
+
+        runtime_tools = server._tools_for_http_request(
+            [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Environment weather.",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ]
+        )
+
+        assert [tool.name for tool in runtime_tools] == ["get_weather"]
+        assert not isinstance(runtime_tools[0], HTTPTool)
 
     async def test_responses_request_param_overrides_static_generation_kwargs(
         self, tmp_path, monkeypatch: MonkeyPatch
