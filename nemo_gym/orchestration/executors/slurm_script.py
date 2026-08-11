@@ -172,9 +172,7 @@ def build_sbatch_script(
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
     driver_mounts_flag = (
-        f" --container-mounts={','.join(shlex.quote(m) for m in config.driver.mounts)}"
-        if config.driver.mounts
-        else ""
+        f" --container-mounts={','.join(shlex.quote(m) for m in config.driver.mounts)}" if config.driver.mounts else ""
     )
     driver_command = (
         f"{gym_cmd}\n"

@@ -44,7 +44,7 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         # SSHConnection.run() pipes commands as a bash script, so || works fine.
         checks = [f'test -e {shlex.quote(src)} || echo "__GYM_MISSING:{src}"' for _, src in srcs_by_label]
         output = conn.run(checks)
-        missing = {line[len("__GYM_MISSING:"):] for line in output.splitlines() if line.startswith("__GYM_MISSING:")}
+        missing = {line[len("__GYM_MISSING:") :] for line in output.splitlines() if line.startswith("__GYM_MISSING:")}
 
     if missing:
         bad = [(label, src) for label, src in srcs_by_label if src in missing]
