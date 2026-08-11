@@ -53,10 +53,6 @@ finance_agent_v2_resources_server:
       use_cache: true
       cache_dir: ${oc.select:finance_agent_v2_cache_dir,${oc.env:FINANCE_AGENT_V2_CACHE_DIR,null}}
 
-      # edgar_search alone matches Vals. Adding sec_filing_search is cheaper and
-      # needs no key, but breaks that parity — training/SDG only.
-      enabled_sec_tools: [edgar_search]
-
 # Kept separate from the policy model: if each policy graded itself, scores
 # across models would not be comparable. Pin this for any cross-model claim.
 search_judge_model:

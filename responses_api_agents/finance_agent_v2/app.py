@@ -130,10 +130,6 @@ UPSTREAM_NO_TOOL_CALL_NUDGE: str = (
     "otherwise continue with the next tool call."
 )
 
-#: Upstream's message for tool calls dropped by ``max_tool_calls_per_turn``.
-#: Providers require a result for every call, so skipped calls still get one.
-UPSTREAM_TOOL_CALL_CAP_MESSAGE: str = "Skipped: tool call limit exceeded"
-
 # Regex that matches common vLLM / OpenAI context-length error messages.
 # Stands in for upstream's typed ``MaxContextWindowExceededError``, which Gym
 # cannot see because the model is reached over HTTP rather than through a
@@ -213,12 +209,6 @@ class FinanceAgentV2Config(BaseResponsesAPIAgentConfig):
         description="Exception type names in a tool's error payload that abort "
         "the whole rollout instead of being fed back to the model. Mirrors "
         "upstream v2's on_tool_result hook re-raising RetryExhaustedError.",
-    )
-    max_tool_calls_per_turn: Optional[int] = Field(
-        default=None,
-        description="Cap on tool calls executed per turn. Calls beyond the cap "
-        "still get a result item because providers require one for every call. "
-        "Upstream supports this but v2 leaves it unset.",
     )
     model_call_timeout: Optional[float] = Field(
         default=None,
@@ -335,7 +325,6 @@ class FinanceAgentV2(SimpleResponsesAPIAgent):
         done_tools_set = set(self.config.done_tools)
         max_steps = self.config.max_steps
         max_time_seconds = self.config.max_time_seconds
-        tool_call_cap = self.config.max_tool_calls_per_turn
         started_at = time.monotonic()
         stop_reason = StopReason.ERROR
 
@@ -432,19 +421,7 @@ class FinanceAgentV2(SimpleResponsesAPIAgent):
 
             done = False
             aborted = False
-            for index, output_function_call in enumerate(all_fn_calls):
-                if tool_call_cap is not None and index >= tool_call_cap:
-                    # Not executed, but still answered: providers reject a turn
-                    # whose tool calls do not all have results.
-                    new_outputs.append(
-                        NeMoGymFunctionCallOutput(
-                            type="function_call_output",
-                            call_id=output_function_call.call_id,
-                            output=UPSTREAM_TOOL_CALL_CAP_MESSAGE,
-                        )
-                    )
-                    continue
-
+            for output_function_call in all_fn_calls:
                 try:
                     coro = self.server_client.post(
                         server_name=self.config.resources_server.name,

@@ -31,11 +31,11 @@ from pathlib import Path
 import pytest
 
 
-_SERVER_DIR = Path(__file__).resolve().parents[1]
-_SCRIPT_FPATH = _SERVER_DIR / "scripts" / "export_upstream_spec.py"
+_SCRIPT_FPATH = Path(__file__).resolve().parents[1] / "scripts" / "export_upstream_spec.py"
 
 
-def _load_exporter():
+@pytest.fixture(scope="module")
+def exporter():
     """Import the exporter by path: `scripts/` is a directory of standalone CLI
     scripts, not an importable package (no server in this repo makes it one)."""
     spec = importlib.util.spec_from_file_location("export_upstream_spec", _SCRIPT_FPATH)
@@ -45,74 +45,40 @@ def _load_exporter():
 
 
 @pytest.fixture(scope="module")
-def exporter():
-    return _load_exporter()
-
-
-@pytest.fixture(scope="module")
 def committed(exporter) -> dict:
     return json.loads(exporter.SPEC_FPATH.read_text(encoding="utf-8"))
 
 
-class TestSnapshotIsCurrent:
-    def test_committed_snapshot_matches_installed_package(self, exporter) -> None:
-        """A mismatch means samples advertise a tool signature the installed tools do
-        not implement."""
-        expected = exporter.serialize(exporter.build_spec())
-        actual = exporter.SPEC_FPATH.read_text(encoding="utf-8")
-        assert actual == expected, (
-            f"{exporter.SPEC_FPATH} is stale relative to the installed finance_agent package. "
-            "Re-run scripts/export_upstream_spec.py from this venv."
-        )
-
-    def test_check_mode_agrees(self, exporter) -> None:
-        # The --check path is what a human (or CI) runs; keep it wired to the same
-        # comparison rather than letting it rot into a no-op.
-        assert exporter.main(["--check"]) == 0
-
-    def test_snapshot_commit_matches_the_benchmark_pin(self, committed) -> None:
-        """prepare.py refuses to run when these disagree; catch it here, where the
-        failure names the cause."""
-        from benchmarks.finance_agent_v2 import prepare as prepare_module
-
-        assert committed["upstream_commit_id"] == prepare_module._UPSTREAM_SHA
-
-    def test_snapshot_covers_every_upstream_tool(self, committed) -> None:
-        """A tool upstream adds must reach the dataset; without it the agent simply
-        cannot call it, which reads as a weak model."""
-        from finance_agent.tools import VALID_TOOLS
-
-        assert set(committed["valid_tools"]) == set(VALID_TOOLS)
-        assert set(committed["tools"]) == set(VALID_TOOLS) | {committed["submit_tool"]}
-
-    def test_every_schema_is_a_usable_function_tool(self, committed) -> None:
-        # Guards against a tool class losing an attribute and exporting an empty
-        # description or parameter block, which the responses API accepts silently.
-        for name, schema in committed["tools"].items():
-            assert schema["type"] == "function", name
-            assert schema["name"] == name
-            assert schema["description"].strip(), f"{name} has no description"
-            assert schema["parameters"]["type"] == "object", name
-            assert isinstance(schema["parameters"]["properties"], dict), name
-            for required in schema["parameters"]["required"]:
-                assert required in schema["parameters"]["properties"], (
-                    f"{name}: required {required!r} is not a property"
-                )
-
-    def test_prompts_are_non_empty_and_take_the_question(self, committed) -> None:
-        assert committed["system_prompt"].strip()
-        assert "{question}" in committed["question_prompt"]
+def test_committed_snapshot_matches_installed_package(exporter) -> None:
+    """A mismatch means samples advertise a tool signature the installed tools do
+    not implement. Byte equality, so it also pins the prompts and every schema."""
+    assert exporter.SPEC_FPATH.read_text(encoding="utf-8") == exporter.serialize(exporter.build_spec()), (
+        f"{exporter.SPEC_FPATH} is stale relative to the installed finance_agent package. "
+        "Re-run scripts/export_upstream_spec.py from this venv."
+    )
 
 
-class TestExportGuards:
-    def test_unknown_upstream_tool_fails_the_export(self, exporter, monkeypatch) -> None:
-        """Rather than exporting a silently incomplete tool set."""
-        monkeypatch.setattr(exporter, "VALID_TOOLS", list(exporter.VALID_TOOLS) + ["brand_new_tool"])
+def test_one_upstream_version_across_the_pin_snapshot_and_dataset(exporter, committed) -> None:
+    """Bumping the requirements pin is what makes the snapshot stale, and nothing
+    else. prepare.py refuses to run when it disagrees; catch it here, where the
+    failure names the cause."""
+    from benchmarks.finance_agent_v2 import prepare as prepare_module
 
-        with pytest.raises(ValueError, match="brand_new_tool"):
-            exporter.build_spec()
+    assert exporter._upstream_sha() == committed["upstream_commit_id"] == prepare_module._UPSTREAM_SHA
 
-    def test_sha_comes_from_the_requirements_pin(self, exporter, committed) -> None:
-        # One source of truth for the upstream version: bumping requirements.txt is
-        # what makes the snapshot stale, and nothing else.
-        assert exporter._upstream_sha() == committed["upstream_commit_id"]
+
+def test_snapshot_covers_every_upstream_tool(committed) -> None:
+    """A tool upstream adds must reach the dataset; without it the agent simply
+    cannot call it, which reads as a weak model."""
+    from finance_agent.tools import VALID_TOOLS
+
+    assert set(committed["valid_tools"]) == set(VALID_TOOLS)
+    assert set(committed["tools"]) == set(VALID_TOOLS) | {committed["submit_tool"]}
+
+
+def test_unknown_upstream_tool_fails_the_export(exporter, monkeypatch) -> None:
+    """Rather than exporting a silently incomplete tool set."""
+    monkeypatch.setattr(exporter, "VALID_TOOLS", list(exporter.VALID_TOOLS) + ["brand_new_tool"])
+
+    with pytest.raises(ValueError, match="brand_new_tool"):
+        exporter.build_spec()

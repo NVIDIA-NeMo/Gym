@@ -26,7 +26,6 @@ Cache namespaces live as subdirectories under the root:
   - ``pricing/``        per-(endpoint, ticker) master records (Tiingo)
   - ``edgar_search/``   raw sec-api.io search result lists
   - ``sec_filings/``    parsed sec.gov filing documents
-  - ``sec_submissions/``data.sec.gov ticker map + per-company filing metadata
 """
 
 from __future__ import annotations

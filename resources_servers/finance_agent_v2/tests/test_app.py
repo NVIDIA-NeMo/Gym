@@ -47,7 +47,6 @@ from resources_servers.finance_agent_v2.app import (
 from resources_servers.finance_agent_v2.cached_tools import (
     CachedParseHtmlPage,
     CachedPriceHistory,
-    SecFilingSearch,
 )
 
 
@@ -338,16 +337,6 @@ class TestInitialization:
 
 
 class TestToolSurface:
-    def test_edgar_search_default_secfiling_absent(self) -> None:
-        """Default eval surface: edgar_search present, sec_filing_search not registered."""
-        server = _make_server()
-        assert server._tools.get("edgar_search") is not None
-        assert "sec_filing_search" not in server._tools
-
-    def test_sec_filing_search_when_enabled(self) -> None:
-        server = _make_server(enabled_sec_tools=["edgar_search", "sec_filing_search"])
-        assert isinstance(server._tools.get("sec_filing_search"), SecFilingSearch)
-
     def test_server_registers_every_tool_the_benchmark_advertises(self) -> None:
         """The dataset's tool list and this registry come from the same package by
         different paths (committed snapshot vs. live instantiation). A tool advertised
@@ -890,6 +879,29 @@ class TestVerifyRubricJudge:
         assert res.judge_error is None  # a real failure, not a judge problem
         assert res.rubric_judgements is None
         assert sum(stub.calls.values()) == 0
+        # Scored zero rather than left unset, so every mean sees this rollout the
+        # way mean/reward already does.
+        assert res.rubric_partial_credit == 0.0
+        assert res.rubric_all_pass is False
+        assert res.rubric_fraction == 0.0
+        assert res.rubric_weighted_fraction == 0.0
+        # The criteria it failed to answer still count, so mean/rubric_total covers
+        # the same rollouts as the score means.
+        assert res.rubric_total == 1
+
+    @pytest.mark.asyncio
+    async def test_no_submission_and_no_rubric_is_still_a_give_up(self) -> None:
+        """An unscorable rubric must not reclassify a give-up as a judge problem:
+        the no-submission result is the model's, and outranks the missing rubric."""
+        server, stub = _rubric_server({_C1: [1, 1, 1]})
+        request = _make_verify_request(_make_response(_msg("No submission here.")), rubric="not json")
+        res = await server.verify(_mock_request(), request)
+
+        assert res.reward == 0.0
+        assert res.judge_error is None
+        assert res.rubric_partial_credit == 0.0
+        assert res.rubric_total == 0
+        assert sum(stub.calls.values()) == 0
 
     @pytest.mark.asyncio
     async def test_agent_stop_reason_reaches_the_rollout(self) -> None:
@@ -1024,6 +1036,43 @@ class TestAggregateMetrics:
         # A rollout with nothing to grade had no dealbreaker to trip, so counting it
         # would dilute the rate with rows that were never eligible to fail one.
         assert "mean/rubric_dealbreaker_tripped" not in metrics
+        # Scored zero even though the fields are absent, which is what lets a run
+        # collected before verify() wrote them be re-aggregated without rejudging.
+        assert metrics["mean/rubric_partial_credit"] == 0.0
+        assert metrics["mean/rubric_all_pass"] == 0.0
+        assert metrics["mean/rubric_fraction"] == 0.0
+        assert metrics["mean/rubric_weighted_fraction"] == 0.0
+
+    def test_give_up_is_not_double_counted_once_verify_writes_the_zeros(self) -> None:
+        """Rollouts collected after the fix carry explicit zeros, so the aggregator
+        must not add a second one for the same rollout."""
+        scored_give_up = {
+            "reward": 0.0,
+            "rubric_judgements": None,
+            "judge_error": None,
+            "rubric_fraction": 0.0,
+            "rubric_all_pass": False,
+            "rubric_partial_credit": 0.0,
+            "rubric_weighted_fraction": 0.0,
+        }
+        metrics = _make_server().compute_metrics([[self._rollout()], [scored_give_up]])
+
+        assert metrics["rubric/rollouts_without_submission"] == 1
+        assert metrics["mean/rubric_partial_credit"] == 0.5
+        assert metrics["mean/rubric_all_pass"] == 0.5
+
+    def test_judge_errors_stay_out_of_the_means_that_give_ups_join(self) -> None:
+        """A give-up is a model result and scores zero; a judge failure is not, and
+        must not be averaged in as if the model had answered badly."""
+        broken = {"reward": 0.0, "rubric_judgements": None, "judge_error": "judge unreachable"}
+        give_up = {"reward": 0.0, "rubric_judgements": None, "judge_error": None}
+        metrics = _make_server().compute_metrics([[self._rollout()], [give_up], [broken]])
+
+        assert metrics["rubric/rollouts_with_judge_error"] == 1
+        assert metrics["rubric/rollouts_without_submission"] == 1
+        # Two rollouts in the mean, not three: 1.0 and the give-up's zero.
+        assert metrics["mean/rubric_partial_credit"] == 0.5
+        assert metrics["mean/rubric_fraction"] == 0.5
 
     def test_legacy_rollouts_omit_the_weighted_metrics(self) -> None:
         """Pre-weighting rollouts have no partial credit to average; inventing one
@@ -1034,6 +1083,9 @@ class TestAggregateMetrics:
         assert metrics["mean/rubric_fraction"] == 1.0
         assert "mean/rubric_partial_credit" not in metrics
         assert "mean/rubric_weighted_fraction" not in metrics
+        # It answered and scored, so it is not a give-up however few judgements it
+        # kept — otherwise the zero-fill above would rewrite its score.
+        assert metrics["rubric/rollouts_without_submission"] == 0
 
     def test_key_metrics_promote_judge_health(self) -> None:
         agent_metrics = {

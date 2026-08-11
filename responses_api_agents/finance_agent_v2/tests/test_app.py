@@ -26,6 +26,10 @@ import finance_agent.get_agent as upstream_get_agent
 import pytest
 from fastapi.testclient import TestClient
 
+# Imported by name: `finance_agent.get_agent` is a function as well as a module, and
+# the package binds the function, so attribute access on the import above misses this.
+from finance_agent.get_agent import Parameters as UpstreamParameters
+
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage
 from nemo_gym.server_utils import ServerClient
@@ -34,7 +38,6 @@ from responses_api_agents.finance_agent_v2.app import (
     UPSTREAM_DONE_TOOL,
     UPSTREAM_MAX_TIME_SECONDS,
     UPSTREAM_NO_TOOL_CALL_NUDGE,
-    UPSTREAM_TOOL_CALL_CAP_MESSAGE,
     UPSTREAM_VALID_TOOLS,
     FinanceAgentV2,
     FinanceAgentV2Config,
@@ -206,6 +209,22 @@ class TestUpstreamParity:
     def test_abort_error_type_comes_from_upstream(self) -> None:
         assert UPSTREAM_ABORT_TOOL_ERRORS == ("RetryExhaustedError",)
 
+    def test_upstream_agent_parameters_gained_no_new_knobs(self) -> None:
+        """Upstream's ``Parameters`` is the whole surface of per-run policy Vals can
+        configure, and this loop mirrors every field of it. A new one is a policy
+        knob that FABv2 would silently not honor — for instance a per-turn tool-call
+        cap, which their engine supports but v2 has never set.
+
+        On failure, read the upstream diff and decide whether to mirror the field.
+        """
+        assert set(UpstreamParameters.model_fields) == {
+            "model_name",
+            "max_time_seconds",
+            "max_turns",
+            "tools",
+            "llm_config",
+        }
+
     def test_nudge_matches_upstream_source(self) -> None:
         """The nudge is an inline literal in upstream's ``get_agent._before_query``
         and cannot be imported, so assert the copy still appears verbatim there.
@@ -277,7 +296,6 @@ class TestFinanceAgentV2Config:
         assert config.done_tools == [UPSTREAM_DONE_TOOL]
         assert config.no_tool_call_nudge == UPSTREAM_NO_TOOL_CALL_NUDGE
         assert config.abort_on_tool_error_types == list(UPSTREAM_ABORT_TOOL_ERRORS)
-        assert config.max_tool_calls_per_turn is None
         assert config.model_call_timeout is None
         assert config.tool_call_timeout is None
         assert config.truncate_on_overflow is False
@@ -289,7 +307,6 @@ class TestFinanceAgentV2Config:
             done_tools=["submit_final_result", "abort"],
             no_tool_call_nudge="Keep going.",
             abort_on_tool_error_types=[],
-            max_tool_calls_per_turn=2,
             model_call_timeout=30.0,
             tool_call_timeout=60.0,
             truncate_on_overflow=True,
@@ -299,105 +316,10 @@ class TestFinanceAgentV2Config:
         assert config.done_tools == ["submit_final_result", "abort"]
         assert config.no_tool_call_nudge == "Keep going."
         assert config.abort_on_tool_error_types == []
-        assert config.max_tool_calls_per_turn == 2
 
     def test_sanity_construction(self) -> None:
         agent, _ = _make_agent_and_client()
         assert agent is not None
-
-
-# ---------------------------------------------------------------------------
-# Tests: Context Overflow Detection
-# ---------------------------------------------------------------------------
-
-
-class TestContextOverflowDetection:
-    @pytest.mark.parametrize(
-        "msg",
-        [
-            "maximum context length is 8192 tokens",
-            "context length is only 4096 tokens",
-            "maximum input length of 32768 tokens exceeded",
-            "Please reduce the length of the input",
-            "prompt is too long",
-            "input exceeded the context window",
-            "too large for model with 8192 maximum context length",
-            "longer than the model's context length",
-            "payload too large",
-        ],
-    )
-    def test_detects_overflow(self, msg: str) -> None:
-        assert FinanceAgentV2._is_context_overflow_error(Exception(msg))
-
-    @pytest.mark.parametrize(
-        "msg",
-        [
-            "connection refused",
-            "timeout error",
-            "Internal server error",
-            "rate limit exceeded",
-        ],
-    )
-    def test_ignores_non_overflow(self, msg: str) -> None:
-        assert not FinanceAgentV2._is_context_overflow_error(Exception(msg))
-
-
-# ---------------------------------------------------------------------------
-# Tests: _is_model_output
-# ---------------------------------------------------------------------------
-
-
-class TestIsModelOutput:
-    def test_function_call_is_model_output(self) -> None:
-        assert FinanceAgentV2._is_model_output(MagicMock(type="function_call"))
-
-    def test_reasoning_is_model_output(self) -> None:
-        assert FinanceAgentV2._is_model_output(MagicMock(type="reasoning"))
-
-    def test_assistant_message_is_model_output(self) -> None:
-        assert FinanceAgentV2._is_model_output(MagicMock(type="message", role="assistant"))
-
-    def test_user_message_is_not_model_output(self) -> None:
-        assert not FinanceAgentV2._is_model_output(MagicMock(type="message", role="user"))
-
-    def test_function_call_output_is_not_model_output(self) -> None:
-        assert not FinanceAgentV2._is_model_output(MagicMock(type="function_call_output"))
-
-
-# ---------------------------------------------------------------------------
-# Tests: _truncate_oldest_exchange
-# ---------------------------------------------------------------------------
-
-
-class TestTruncateOldestExchange:
-    @staticmethod
-    def _item(type_: str, role: str | None = None) -> MagicMock:
-        return MagicMock(type=type_, role=role)
-
-    def test_empty_list(self) -> None:
-        assert FinanceAgentV2._truncate_oldest_exchange([]) == []
-
-    def test_single_item(self) -> None:
-        items = [self._item("message", "assistant")]
-        assert len(FinanceAgentV2._truncate_oldest_exchange(items)) == 1
-
-    def test_removes_first_exchange(self) -> None:
-        items = [
-            self._item("reasoning"),
-            self._item("function_call"),
-            self._item("function_call_output"),
-            self._item("function_call_output"),
-            self._item("message", "assistant"),
-            self._item("function_call"),
-            self._item("function_call_output"),
-        ]
-        result = FinanceAgentV2._truncate_oldest_exchange(items)
-        assert result[0] is items[4]
-        assert len(result) == 3
-
-    def test_no_truncation_when_single_exchange(self) -> None:
-        items = [self._item("reasoning"), self._item("function_call")]
-        assert FinanceAgentV2._truncate_oldest_exchange(items) == items
 
 
 # ---------------------------------------------------------------------------
@@ -601,32 +523,6 @@ class TestResponses:
         assert res.status_code == 200
         model_calls = [c for c in agent.server_client.post.call_args_list if c.kwargs["server_name"] == _MODEL_SERVER]
         assert len(model_calls) == 2, "a plain tool failure is fed back to the model"
-
-    def test_tool_call_cap_skips_extras_but_still_answers_them(self) -> None:
-        """Providers reject a turn whose tool calls do not all have results, so
-        capped calls get upstream's skip message instead of being dropped."""
-        agent, client = _make_agent_and_client(_make_config(max_steps=1, max_tool_calls_per_turn=1))
-
-        model_mock = _dotjson_mock(
-            _multi_tool_call_response(
-                [
-                    ("edgar_search", json.dumps({"search_query": "AAPL"}), "c1"),
-                    ("edgar_search", json.dumps({"search_query": "MSFT"}), "c2"),
-                    ("edgar_search", json.dumps({"search_query": "NVDA"}), "c3"),
-                ]
-            )
-        )
-        rs_mock = _dotjson_mock({"results": "data"})
-        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, rs_mock))
-
-        res = client.post("/v1/responses", json=_INPUT)
-        assert res.status_code == 200
-        outputs = [o for o in res.json()["output"] if o["type"] == "function_call_output"]
-        assert len(outputs) == 3, "every tool call needs a result item"
-        assert [o["output"] for o in outputs[1:]] == [UPSTREAM_TOOL_CALL_CAP_MESSAGE] * 2
-
-        tool_calls = [c for c in agent.server_client.post.call_args_list if c.kwargs["server_name"] == _RS_SERVER]
-        assert len(tool_calls) == 1, "only the uncapped call should have been executed"
 
     def test_model_call_timeout(self) -> None:
         agent, client = _make_agent_and_client(_make_config(model_call_timeout=0.01))

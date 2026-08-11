@@ -30,7 +30,6 @@ from resources_servers.finance_agent_v2.cached_tools import (
     CachedEDGARSearch,
     CachedParseHtmlPage,
     CachedPriceHistory,
-    SecFilingSearch,
 )
 
 
@@ -270,55 +269,3 @@ class TestCachedParseHtmlPage:
         await tool._parse_html_page("https://example.com/a")
         await tool._parse_html_page("https://example.com/a")
         assert counter[0] == 2  # general web is never cached
-
-
-# ============================================================================
-# sec_filing_search
-# ============================================================================
-
-
-class TestSecFilingSearch:
-    @pytest.mark.asyncio
-    async def test_search_uses_cache_and_builds_sec_gov_urls(self, tmp_path, monkeypatch):
-        tool = SecFilingSearch(cache=ToolCache(tmp_path), user_agent="ua")
-
-        async def _fake_tickers(self):
-            self._tickers = {"AAPL": {"cik": "0000320193", "name": "Apple Inc."}}
-            return self._tickers
-
-        submissions = {
-            "0000320193": {
-                "000032019324000123": {
-                    "ticker": "AAPL",
-                    "cik": "0000320193",
-                    "form": "10-K",
-                    "filing_date": "2024-11-01",
-                    "report_date": "2024-09-28",
-                    "accession_number": "0000320193-24-000123",
-                    "primary_document": "aapl-20240928.htm",
-                    "filing_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm",
-                }
-            }
-        }
-
-        async def _fake_filings(self, cik, ticker):
-            return submissions[str(cik).zfill(10)]
-
-        monkeypatch.setattr(SecFilingSearch, "_ensure_tickers", _fake_tickers)
-        monkeypatch.setattr(SecFilingSearch, "_get_company_filings", _fake_filings)
-
-        out = await tool.execute({"ticker": "AAPL"}, {}, _LOG)
-        assert "sec.gov/Archives/edgar/data/320193" in out.output
-        assert "10-K" in out.output
-
-    @pytest.mark.asyncio
-    async def test_unknown_ticker_errors(self, tmp_path, monkeypatch):
-        tool = SecFilingSearch(cache=ToolCache(tmp_path), user_agent="ua")
-
-        async def _fake_tickers(self):
-            self._tickers = {}
-            return self._tickers
-
-        monkeypatch.setattr(SecFilingSearch, "_ensure_tickers", _fake_tickers)
-        out = await tool.execute({"ticker": "ZZZZ"}, {}, _LOG)
-        assert "No company found" in out.output

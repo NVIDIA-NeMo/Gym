@@ -85,14 +85,12 @@ try:
         CachedEDGARSearch,
         CachedParseHtmlPage,
         CachedPriceHistory,
-        SecFilingSearch,
     )
 except ImportError:  # pragma: no cover - exercised only under flat entrypoint execution
     from cached_tools import (
         CachedEDGARSearch,
         CachedParseHtmlPage,
         CachedPriceHistory,
-        SecFilingSearch,
     )
 
     from cache import ToolCache
@@ -198,24 +196,6 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         "None falls back to ~/.cache/nemo_gym/finance_agent_v2. Relative paths resolve from cwd.",
     )
 
-    # --- SEC tool surface ----------------------------------------------------
-    enabled_sec_tools: List[str] = Field(
-        default_factory=lambda: ["edgar_search"],
-        description="Which SEC tools to expose to the agent. 'edgar_search' "
-        "(upstream sec-api.io full-text search, byte-parity with Vals — use for eval); "
-        "'sec_filing_search' (data.sec.gov ticker->CIK listing, cheaper/no key, NOT "
-        "byte-parity — use for training/SDG). Adding sec_filing_search changes the tool "
-        "surface vs Vals.",
-    )
-    user_agent: str = Field(
-        default="Gym-SEC-Search/1.0 (research@nvidia.com)",
-        description="User-Agent header for data.sec.gov requests made by sec_filing_search.",
-    )
-    max_filing_results: int = Field(
-        default=200,
-        description="Maximum number of filing metadata entries returned by sec_filing_search.",
-    )
-
     # --- Rollout controls ----------------------------------------------------
     max_rollout_time_seconds: Optional[float] = Field(
         default=None,
@@ -299,8 +279,8 @@ def aggregate_rubric_scores(judgements: Sequence[RubricJudgement]) -> Dict[str, 
     criterion weighs as a miss and gates like one; verify() flags those rows with
     ``judge_error`` rather than dropping them, which would inflate broken runs.
 
-    Module-level and pure so scripts/rescore_rubrics.py scores old rollouts through
-    this exact code instead of a second implementation that could drift.
+    Kept module-level and free of server state so stored verdicts can be rescored
+    offline through this exact code rather than a second implementation that drifts.
     """
     total = len(judgements)
     passed = sum(1 for j in judgements if j.score == 1)
@@ -463,32 +443,19 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             logger.info("No tavily_api_key configured — web_search will be unavailable")
             tools["web_search"] = None
 
-        # edgar_search (sec-api.io) — only exposed when selected (default: eval).
-        if "edgar_search" in self.config.enabled_sec_tools:
-            if self.config.sec_api_key:
-                tools["edgar_search"] = self._try_build(
-                    "edgar_search",
-                    lambda: (
-                        CachedEDGARSearch(sec_api_key=self.config.sec_api_key, cache=cache)
-                        if cache.enabled
-                        else EDGARSearch(sec_api_key=self.config.sec_api_key)
-                    ),
-                )
-            else:
-                logger.info("No sec_api_key configured — edgar_search will be unavailable")
-                tools["edgar_search"] = None
-
-        # sec_filing_search (data.sec.gov) — training/SDG; no key required. Not
-        # byte-parity with Vals, so it is only exposed when explicitly selected.
-        if "sec_filing_search" in self.config.enabled_sec_tools:
-            tools["sec_filing_search"] = self._try_build(
-                "sec_filing_search",
-                lambda: SecFilingSearch(
-                    cache=cache,
-                    user_agent=self.config.user_agent,
-                    max_filing_results=self.config.max_filing_results,
+        # edgar_search (sec-api.io).
+        if self.config.sec_api_key:
+            tools["edgar_search"] = self._try_build(
+                "edgar_search",
+                lambda: (
+                    CachedEDGARSearch(sec_api_key=self.config.sec_api_key, cache=cache)
+                    if cache.enabled
+                    else EDGARSearch(sec_api_key=self.config.sec_api_key)
                 ),
             )
+        else:
+            logger.info("No sec_api_key configured — edgar_search will be unavailable")
+            tools["edgar_search"] = None
 
         # price_history (Tiingo).
         if self.config.pricing_data_api_key:
@@ -989,12 +956,23 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                         pass
                     break
 
-        # A genuine failure, not a judge failure: the loop nudges the agent until
-        # max_steps. Return before spending on the judge.
-        if not generated_answer:
-            return FinanceAgentV2VerifyResponse(**body.model_dump(), reward=0.0)
-
         criteria = self._parse_rubric(body.rubric)
+
+        # A genuine failure, not a judge failure: the loop nudges the agent until
+        # max_steps. Return before spending on the judge. The score fields are
+        # written as explicit zeros rather than left unset, so this rollout counts
+        # in every mean the way it already counts in mean/reward.
+        if not generated_answer:
+            return FinanceAgentV2VerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                rubric_fraction=0.0,
+                rubric_all_pass=False,
+                rubric_partial_credit=0.0,
+                rubric_weighted_fraction=0.0,
+                rubric_total=len(criteria),
+            )
+
         if not criteria:
             return FinanceAgentV2VerifyResponse(
                 **body.model_dump(),
@@ -1068,12 +1046,31 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         if not rollouts:
             return {}
 
-        fractions = [r["rubric_fraction"] for r in rollouts if r.get("rubric_fraction") is not None]
-        all_pass_flags = [bool(r["rubric_all_pass"]) for r in rollouts if r.get("rubric_all_pass") is not None]
-        partial_credits = [r["rubric_partial_credit"] for r in rollouts if r.get("rubric_partial_credit") is not None]
-        weighted_fractions = [
-            r["rubric_weighted_fraction"] for r in rollouts if r.get("rubric_weighted_fraction") is not None
+        # Gave up: nothing was judged and the judge did not fail either. A
+        # pre-weighting rollout also carries no judgements, but it does carry a
+        # score, so a nonzero fraction rules it out — and one that scored zero
+        # belongs in the means at zero regardless of which bucket it lands in.
+        give_ups = [
+            r
+            for r in rollouts
+            if not r.get("rubric_judgements") and not r.get("judge_error") and not r.get("rubric_fraction")
         ]
+
+        def _scores(field: str, zero: Any) -> List[Any]:
+            """Values of ``field`` across rollouts, scoring a give-up as ``zero``.
+
+            Scoring writes those zeros itself; rollouts collected before it did are
+            filled in here, so a give-up weighs in every mean the way it has always
+            weighed in mean/reward. Dropping it would score a run on the subset of
+            questions it managed to answer.
+            """
+            scored = [r[field] for r in rollouts if r.get(field) is not None]
+            return scored + [zero] * sum(1 for r in give_ups if r.get(field) is None)
+
+        fractions = _scores("rubric_fraction", 0.0)
+        all_pass_flags = [bool(flag) for flag in _scores("rubric_all_pass", False)]
+        partial_credits = _scores("rubric_partial_credit", 0.0)
+        weighted_fractions = _scores("rubric_weighted_fraction", 0.0)
         # Scored rollouts only: one with no submission was never eligible to trip a
         # dealbreaker, so counting it would dilute the rate.
         gated = [r for r in rollouts if r.get("rubric_dealbreakers_total")]
@@ -1089,7 +1086,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         # Only resolved criteria carry a meaningful unanimity flag.
         contested = sum(1 for j in resolved if j.get("unanimous") is False)
         judge_error_rollouts = sum(1 for r in rollouts if r.get("judge_error"))
-        no_submission = sum(1 for r in rollouts if not r.get("rubric_judgements") and not r.get("judge_error"))
+        no_submission = len(give_ups)
 
         metrics: Dict[str, Any] = {
             "rubric/rollouts": len(rollouts),

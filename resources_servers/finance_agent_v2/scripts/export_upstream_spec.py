@@ -17,12 +17,11 @@ bumping that pin requires re-running this; prepare.py refuses to run when its
 `_UPSTREAM_SHA` and the snapshot disagree.
 
 Usage (from the resource server venv):
-    python scripts/export_upstream_spec.py [--check]
+    python scripts/export_upstream_spec.py
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
@@ -111,35 +110,16 @@ def build_spec() -> Dict[str, Any]:
 
 
 def serialize(spec: Dict[str, Any]) -> str:
-    return json.dumps(spec, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    # Written on one line: nothing reads this file by hand, and pretty-printing it
+    # turns every upstream bump into a several-hundred-line diff that reviewing
+    # line by line would not validate anyway. The drift test is the real check.
+    return json.dumps(spec, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Do not write; exit non-zero if the committed snapshot differs from the installed package.",
-    )
-    args = parser.parse_args(argv)
-
+def main() -> int:
     payload = serialize(build_spec())
-
-    if args.check:
-        if not SPEC_FPATH.exists():
-            print(f"MISSING: {SPEC_FPATH}", file=sys.stderr)
-            return 1
-        if SPEC_FPATH.read_text(encoding="utf-8") != payload:
-            print(
-                f"STALE: {SPEC_FPATH} differs from the installed finance_agent package.\n"
-                "Re-run `python scripts/export_upstream_spec.py` from the resource server venv.",
-                file=sys.stderr,
-            )
-            return 1
-        print(f"OK: {SPEC_FPATH} matches the installed finance_agent package.")
-        return 0
-
     SPEC_FPATH.write_text(payload, encoding="utf-8")
+
     spec = json.loads(payload)
     print(f"Wrote {SPEC_FPATH}")
     print(f"  upstream_commit_id: {spec['upstream_commit_id']}")
