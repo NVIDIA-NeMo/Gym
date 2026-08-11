@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE=766267172432.dkr.ecr.us-east-1.amazonaws.com/nemo-autobot/agent-sandbox@sha256:cad1aadc9f89dca5b616d11b54a26ebdbb449f98cefde7d63a86934d9a4b4004
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base@sha256:fe75077262fd045ba67c6ada947a72ede195fb054aa1a7d2c498bd21fe4c95bd
 FROM ${BASE_IMAGE}
 
 ARG GYM_SOURCE_SHA=5346c8ffc9e4438959955e5b958a12733ed9abc0
@@ -11,6 +11,12 @@ ARG RUNTIME_UID=65532
 ARG RUNTIME_GID=65532
 
 USER root
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
+    apt-get install --yes --no-install-recommends \
+      bash ca-certificates curl git && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/repository-e2e-gym/bin && \
     /usr/bin/curl --fail --location --silent --show-error \
       https://astral.sh/uv/0.11.19/install.sh --output /tmp/uv-install.sh && \
