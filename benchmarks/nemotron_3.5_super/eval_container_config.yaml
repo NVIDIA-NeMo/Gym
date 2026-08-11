@@ -94,17 +94,7 @@ policy_model:
     vllm_model:
       num_workers: 16
 
-tau2_banking_knowledge_bm25_grep_artificial_analysis_agent:
-  responses_api_agents:
-    tau2:
-      num_workers: 1
-
-tau2_benchmark_agent:
-  responses_api_agents:
-    tau2:
-      num_workers: 1
-
-# TODO @bxyu-nvidia: Remove this to turn on SWE Verified after it is validated.
+# TODO @bxyu-nvidia: Remove this to turn on SWE Verified after it is validated. This is a placeholder for container build.
 opencode_sandboxed_agent_swebench_verified:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
