@@ -30,7 +30,7 @@ Refer to the [RL Framework Integration Guide](https://docs.nvidia.com/nemo/gym/l
 
 ## Use of AI and LLM Tools
 
-We encourage contributors to use AI coding assistants (Copilot, Cursor, Claude, ChatGPT, and so on)
+We encourage contributors to use AI coding assistants (Cursor, Claude, Codex, OpenCode)
 where they genuinely help, but AI assistance does not replace human understanding, judgment, and
 accountability.
 
@@ -39,7 +39,7 @@ maintainer review burden. You are responsible for every line of code you submit,
 whether you or an AI tool wrote it.
 
 Refer to [Use of AI and LLM Tools](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup#use-of-ai-and-llm-tools)
-for what we expect, how to attribute AI assistance, and the quality bar we enforce.
+for the quality bar, and to [`AGENTS.md`](./AGENTS.md) for agent-facing guidance.
 
 ## Licensing of Contributions
 

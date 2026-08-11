@@ -75,15 +75,18 @@ If the build-docs check fails:
 
 ### Contributing documentation (including external contributors)
 
-You do **not** need Fern dashboard org membership or Slack `#fern` access to contribute docs.
+You do **not** need Fern dashboard org membership to contribute docs.
 
-1. Edit MDX under `fern/versions/latest/pages/` (and nav YAML if needed).
-2. Open a pull request from a fork or branch.
-3. Rely on CI: `fern check` and the automatic Fern preview comment use the repository `DOCS_FERN_TOKEN`, including for fork PRs.
+1. Edit MDX under `fern/versions/latest/pages/`.
+2. If you add a page that is not auto-discovered, update the bleeding-edge nav in [`fern/versions/main.yml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/versions/main.yml). Folders mounted with `title-source: frontmatter` usually pick up new pages automatically; otherwise add a `- page:` entry under the right section. See the [Fern docs README](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md) and the `nemo-gym-docs` skill.
+3. Open a pull request from a fork or branch.
+4. Rely on CI: `fern check` and the automatic Fern preview comment use the repository `DOCS_FERN_TOKEN`, including for fork PRs.
 
 Optional local preview follows the Fern README. Full `make docs` / library autodoc (`fern docs md generate`) may require membership in the Fern `nvidia` organization if you hit `HTTP 403: User does not belong to organization`.
 
-**Requesting Fern `nvidia` org or Slack `#fern` access (optional):** open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) on NVIDIA-NeMo/Gym asking to be added to the Fern `nvidia` organization (and `#fern` if you use NVIDIA Slack). Maintainers triage the request. If you already have NVIDIA Slack, you can also ask in `#fern`.
+**Requesting Fern `nvidia` org access (optional):** open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) on NVIDIA-NeMo/Gym asking to be added to the Fern `nvidia` organization. Maintainers triage the request.
+
+**NVIDIA employees:** if you already have NVIDIA Slack, you can also ask in `#fern` for org access or docs help. Slack `#fern` is not required for external contributors.
 
 ### Copyright Header Errors
 
@@ -282,7 +285,9 @@ pre-commit autoupdate             # Update hook versions
 
 ## Use of AI and LLM Tools
 
-We encourage contributors to use AI coding assistants (Copilot, Cursor, Claude, ChatGPT, and so on) where they genuinely help. However, AI assistance does not replace human understanding, judgment, and accountability.
+We encourage contributors to use AI coding assistants (Cursor, Claude, Codex, OpenCode) where they genuinely help. However, AI assistance does not replace human understanding, judgment, and accountability.
+
+Guidance for coding agents lives in [`AGENTS.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/AGENTS.md) at the repo root (and in the [Agent Skills](/contribute/agent-skills)). The notes below are the human-facing quality bar for any PR, with or without AI help.
 
 ### Guiding Principle
 
@@ -296,20 +301,6 @@ You are responsible for every line of code you submit, regardless of whether you
 - **Self-review with real behavior**: Before requesting review, read the diff carefully. For environment or agent changes, run real rollouts with a model and inspect agent and verifier behavior — do not treat green unit tests alone as proof the change is correct. Also run the local checks that mirror CI (tests, pre-commit, DCO sign-off) so automated gates stay green.
 - **Keep PRs focused**: AI tools sometimes make "drive-by improvements" to unrelated code. Strip out any changes that are not directly relevant to the task at hand. If a drive-by change is worth keeping, [open an issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) to track it so it can be reviewed on its own merits. Intentional synthetic scaling of environments is welcome when scoped and tracked via an issue or focused PR; what we discourage is unreviewed bulk diffs with no discussion.
 - **Verify correctness of AI-generated tests**: AI-generated tests can appear to pass while testing nothing meaningful. Ensure assertions are substantive and cover the intended behavior.
-
-### AI Attribution
-
-When AI tools generate a substantial portion of your contribution, disclose it. The pull request template includes an **AI assistance** section — fill it in with the tools you used and how. This keeps attribution visible to reviewers without requiring extra Git ceremony.
-
-If you prefer to attribute at the commit level, you can also add an `Assisted-by:` trailer to the relevant commit messages:
-
-```bash
-git commit -s -m "Add reward function for code evaluation
-
-Assisted-by: GitHub Copilot"
-```
-
-Attribution is not required for routine autocomplete suggestions, only for cases where AI generated significant code blocks, logic, or documentation.
 
 ### When We Request Changes
 
