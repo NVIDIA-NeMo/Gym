@@ -24,8 +24,8 @@ Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
 
 Each recipe first rolls the repo back to the Gym commit its tech report number was
 produced with, leaving the recipes alone. It overwrites tracked files, so commit or stash
-your work first; `git restore .` puts everything back. Files added to Gym after that
-commit stay where they are. Set `PIN_GYM=0` to run against your current checkout instead.
+your work first; `git restore .` puts everything back. Set `PIN_GYM=0` to run against
+your current checkout instead.
 
 ## Prerequisites
 
