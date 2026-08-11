@@ -365,8 +365,10 @@ class ResponsesConverter(BaseModel):
     # =======================================================
 
     def _chat_completion_to_responses_tools(
-        self, chat_completions_tools: List[NeMoGymChatCompletionToolParam]
+        self, chat_completions_tools: Optional[List[NeMoGymChatCompletionToolParam]]
     ) -> List[NeMoGymFunctionToolParam]:
+        if chat_completions_tools is None:
+            return []
         return [tool["function"] | {"type": "function"} for tool in chat_completions_tools]
 
     def chat_completion_to_responses_create_params(

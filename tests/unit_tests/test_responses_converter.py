@@ -391,6 +391,10 @@ def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: Re
     assert len(params.tools) == 1
 
 
+def test_chat_completion_to_responses_tools_accepts_none(converter: ResponsesConverter):
+    assert converter._chat_completion_to_responses_tools(None) == []
+
+
 def test_responses_to_chat_completion_token_id_information_path():
     converter = ResponsesConverter(return_token_id_information=True)
     params = converter.responses_to_chat_completion_create_params(
