@@ -52,6 +52,8 @@ RUN set -eu; \
     rm -rf /tmp/repository-e2e-gym-venvs /tmp/repository-e2e-gym-source; \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/repository-e2e-gym
 
+RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" /opt/nemo-gym /workspace
+
 COPY --chmod=0755 docker/repository-e2e-curl /opt/repository-e2e-gym/bin/curl
 
 ENV PATH=/opt/repository-e2e-gym/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -63,4 +65,8 @@ USER ${RUNTIME_UID}:${RUNTIME_GID}
 RUN test "$(uv --version | awk '{print $2}')" = 0.11.19 && \
     test -x /opt/repository-e2e-gym/dev-venv/bin/python && \
     test -x /opt/repository-e2e-gym/pre-commit-3.6.0/bin/pre-commit && \
-    test -w /opt/repository-e2e-gym/uv-cache
+    test -w /opt/repository-e2e-gym/uv-cache && \
+    touch /opt/nemo-gym/.repository-e2e-write-probe && \
+    rm /opt/nemo-gym/.repository-e2e-write-probe && \
+    touch /workspace/.repository-e2e-write-probe && \
+    rm /workspace/.repository-e2e-write-probe
