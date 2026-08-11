@@ -102,14 +102,5 @@ requires = ["setuptools>=61", "setuptools-scm"]
 where = [".."]
 include = ["local_vllm_model"]
 
-[tool.uv]
-# Re-enable codec-bearing packages blocked by the root nemo-gym override.
-# vlm_eval_kit requires these for vision model evaluation.
-override-dependencies = [
-    "opencv-python>=4.7.0.72",
-    "decord2>=3.0.0",
-    "torchvision",
-]
-
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
