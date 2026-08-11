@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import orjson
+from aiohttp import ClientResponseError
 from omegaconf import DictConfig
 from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
@@ -42,6 +43,7 @@ from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
+    _agent_request_failure_result,
     _get_max_rollout_attempts,
     _rollout_for_wandb,
 )
@@ -457,11 +459,8 @@ def _run_verification_payloads(
             rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
             res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
             try:
-                await raise_for_status(
-                    res
-                )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
-            # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
-            except Exception:
+                await raise_for_status(res)
+            except Exception as e:
                 if is_global_aiohttp_client_request_debug_enabled():
                     print(
                         "[rollout_reverification] /verify failed "
@@ -469,7 +468,11 @@ def _run_verification_payloads(
                         f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
                         flush=True,
                     )
-                raise
+                # Same split as rollout collection: an HTTP error from the resources server is a
+                # failure row, anything else is a bug here and must still end the run.
+                if not isinstance(e, ClientResponseError):
+                    raise
+                return row, _agent_request_failure_result(res, e)
             return row, await get_response_json(res)
 
     return tqdm.as_completed(
