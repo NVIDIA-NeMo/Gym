@@ -33,11 +33,11 @@ RUN cd /tmp/repository-e2e-gym-source && \
     PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
       /opt/repository-e2e-gym/pre-commit-3.6.0/bin/pre-commit install-hooks
 
-# The deterministic contract selects functional shards 1, 2, and 3. Running
-# their native launcher here both validates them online and fills the immutable
-# uv cache that the managed target later consumes without package-index egress.
+# Run every native functional shard while package-index egress is available.
+# This validates the dependency closure and fills the immutable uv cache without
+# coupling the image contents to the contract digest's sampled shard indices.
 RUN cd /tmp/repository-e2e-gym-source && \
-    for shard in 1 2 3; do \
+    for shard in 0 1 2 3 4 5 6 7; do \
       UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
         GYM_CI_UV_VENV_DIR=/tmp/repository-e2e-gym-venvs \
         bash scripts/ci/server_tests.sh "${shard}" 8; \
