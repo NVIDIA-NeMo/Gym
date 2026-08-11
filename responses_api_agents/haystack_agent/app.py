@@ -191,6 +191,12 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         # shared, while authenticated clients are created from each request's context.
         self._pipeline = Pipeline.loads(self._pipeline_text, unsafe=True)
         self._agent, self._generator = self._get_agent_and_generator(self._pipeline)
+        if getattr(self._agent, "user_prompt", None) is not None:
+            raise RuntimeError(
+                "HaystackAgent pipelines must not set Agent.user_prompt. The Responses request's input is the "
+                "complete user context; Haystack appends user_prompt after that input, which would be "
+                "mistaken for generated output when the trajectory is reconstructed."
+            )
         tools = getattr(self._agent, "tools", None)
         if has_context_aware_mcp_toolset(tools):
             configure_mcp_url(tools, self._resources_mcp_url())
