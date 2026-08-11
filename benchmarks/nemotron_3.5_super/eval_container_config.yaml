@@ -54,6 +54,9 @@ policy_base_url: dummy
 policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
 
+# Tau2 and Tau3 servers may take a long time to spin up since we import the Tau repo which has hefty dependencies.
+uvicorn_timeout_worker_healthcheck: 300
+
 # Used in Tau3 Banking
 gpt-5_4-mini-2026-03-17:
   responses_api_models:
