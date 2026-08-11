@@ -84,18 +84,12 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_tokens: int = 16384
     context_window: int = 131072
     openclaw_provider_timeout_seconds: Optional[int] = None
-    # No-progress age before OpenClaw abort-drains a stalled run (`diagnostics.stuckSessionAbortMs`).
-    # None keeps OpenClaw's default of at least 5 minutes and 3x the warn threshold; under a
-    # saturated endpoint that default cuts merely-slow sessions, which grades as a task failure
-    # rather than surfacing as a timeout.
+    # OpenClaw `diagnostics.stuckSessionAbortMs`. None keeps its default.
     openclaw_stuck_session_abort_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
     max_agent_id_length: int = 64
-    # Address the model server under `/ng-rollout/<rollout_id>` so model-call capture can
-    # attribute each call. The prefix is applied only when observability is enabled, which is
-    # also the only time it is needed; set this to False for a model_base_url that is not a
-    # Gym model server, since a direct endpoint has no such route and would 404.
+    # False when model_base_url is not a Gym model server: the prefix route would 404.
     rollout_scoped_model_url: bool = True
 
     @model_validator(mode="after")
@@ -188,13 +182,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError("PinchBench is an external benchmark; use /run.")
 
     def _rollout_scoped_model_base_url(self, rollout_id: Optional[str]) -> str:
-        """Model URL for one rollout, optionally carrying the capture correlation prefix.
-
-        Model-call capture only records calls that arrive under ``/ng-rollout/<id>``; without it
-        the middleware forwards them unattributed, so an agent talking to a Gym model server on a
-        bare URL is invisible to observability. Only valid against a Gym model server -- any other
-        endpoint has no such route and would 404, hence ``rollout_scoped_model_url``.
-        """
+        """Model URL carrying the ``/ng-rollout/<id>`` prefix model-call capture keys on."""
         base = self.config.model_base_url.rstrip("/")
         if not self.config.rollout_scoped_model_url or not rollout_id:
             return base
@@ -720,11 +708,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             raise ValueError("record is missing verifier_metadata.task_id")
 
         run_id = uuid.uuid4().hex
-        # The capture prefix must carry Gym's rollout id -- the task/rollout indices that key
-        # `<rollout_id>.capture.jsonl` and appear as `ng_model_call_capture.rollout_id` on the
-        # collected rollout. `run_id` is a fresh uuid naming this invocation's work and transcript
-        # directories; using it here would write capture files no rollout can be matched back to.
-        # Returns None when observability is off, which leaves the URL unprefixed.
+        # Gym's rollout id, not `run_id`: capture files are keyed on it. None when capture is off.
         rollout_id = self.rollout_id_from_run(body)
         out_dir = Path(self.config.work_root) / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
