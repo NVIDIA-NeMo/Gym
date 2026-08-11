@@ -686,9 +686,13 @@ NeMoGymResponseOutputItem = Annotated[
         NeMoGymResponseToolSearchCall,
         NeMoGymResponseToolSearchOutputItem,
         NeMoGymResponseAdditionalTools,
-        # Local agents use the request input model for function results.
-        # Accept it alongside the SDK output model.
+        # Local agents include prompt messages and function results in returned trajectories.
+        # Accept their request models alongside the SDK output models.
+        NeMoGymEasyInputMessage,
+        NeMoGymMessage,
         NeMoGymFunctionCallOutput,
+        NeMoGymEasyInputMessageForTraining,
+        NeMoGymMessageForTraining,
         NeMoGymResponseOutputMessageForTraining,
         NeMoGymResponseFunctionToolCallForTraining,
         NeMoGymResponseReasoningItemForTraining,
