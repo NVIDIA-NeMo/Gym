@@ -9,8 +9,11 @@
 #                                    Eng PICs Michal Bien, Marta Stepniewska-Dziubinska
 #   @NVIDIA-NeMo/gym_core            Core-Arch + RL — EM Bernard Nguyen,
 #                                    Eng PIC Ananth Subramaniam
-#   @NVIDIA-NeMo/gym_architects      Advisors — backstop for anything unclaimed, and
-#                                    escalation path for cross-lane disputes
+#   @NVIDIA-NeMo/gym_architects      Tech-lead advisors — escalation for cross-lane
+#                                    disputes and last-resort review of unclaimed paths
+#   @NVIDIA-NeMo/project_managers    Leads (EM/PM/TPM) — product/process surfaces that
+#                                    are not a tech-lead escalation (examples, scripts)
+#   @NVIDIA-NeMo/docs_team           TME — docs/ and fern/
 #   @NVIDIA-NeMo/automation          CI, build, and release infrastructure
 #
 # The split follows one principle: Core owns the contracts and the substrate,
@@ -32,9 +35,11 @@
 
 # ── Global backstop ──────────────────────────────────────────────────────────
 # Anything not claimed by a more specific rule (data/, cache/, results/,
-# scripts/, top-level files) routes to the advisors. If a category of unclaimed
-# files starts generating recurring work, give it an explicit owner here rather
-# than leaning on the backstop.
+# top-level files) routes to the tech-lead advisors. Product/process paths that
+# leads (EM/PM/TPM) routinely own are claimed explicitly below rather than
+# falling through here. If a category of unclaimed files starts generating
+# recurring work, give it an explicit owner here rather than leaning on the
+# backstop.
 *                                       @NVIDIA-NeMo/gym_architects
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -121,6 +126,10 @@
 /nemo_gym/skills.py                     @NVIDIA-NeMo/gym_env_benchmarks
 /nemo_gym/rollout_reverification.py     @NVIDIA-NeMo/gym_env_benchmarks
 
+# Core library tests encode integration-test expectations for the Core contract.
+# Per-server tests live under each server directory and inherit that server's owner.
+/tests/                                 @NVIDIA-NeMo/gym_core
+
 # ═════════════════════════════════════════════════════════════════════════════
 # CO-OWNED
 # ═════════════════════════════════════════════════════════════════════════════
@@ -136,12 +145,24 @@
 # Frontier Eval harness against a Core-owned boundary.
 /responses_api_agents/verifiers_agent/  @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/gym_core
 
-# ── Tests ────────────────────────────────────────────────────────────────────
-# Core library tests encode integration-test expectations for the Core contract.
-# Per-server tests live under each server directory and inherit that server's owner.
-/tests/                                 @NVIDIA-NeMo/gym_core
+# ═════════════════════════════════════════════════════════════════════════════
+# DOCS / PRODUCT SURFACES
+# ═════════════════════════════════════════════════════════════════════════════
 
-# ── CI & build ───────────────────────────────────────────────────────────────
+# Docs — TME owns the surface; both lanes review because docs encode the same
+# shared contracts as config_types / global_config (per ownership callouts).
+/docs/                                  @NVIDIA-NeMo/docs_team @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
+/fern/                                  @NVIDIA-NeMo/docs_team @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
+
+# Examples and scripts are frequently owned by leads (EM/PM/TPM), not tech-lead
+# advisors. Keep architects as a secondary reviewer for escalation only.
+/examples/                              @NVIDIA-NeMo/project_managers @NVIDIA-NeMo/gym_architects
+/scripts/                               @NVIDIA-NeMo/project_managers @NVIDIA-NeMo/gym_architects
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CI & BUILD
+# ═════════════════════════════════════════════════════════════════════════════
+
 /.github/                               @NVIDIA-NeMo/automation
 /docker/                                @NVIDIA-NeMo/automation
 /Makefile                               @NVIDIA-NeMo/automation
