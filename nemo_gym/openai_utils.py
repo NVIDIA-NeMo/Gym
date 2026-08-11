@@ -31,6 +31,7 @@ from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
     ChatCompletionMessage,
@@ -45,6 +46,10 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_assistant_message_param import (
     ContentArrayOfContentPart,
 )
+from openai.types.chat.chat_completion_content_part_param import File as ChatCompletionContentPartFileParam
+from openai.types.chat.chat_completion_custom_tool_param import ChatCompletionCustomToolParam
+from openai.types.chat.chat_completion_message_custom_tool_call import ChatCompletionMessageCustomToolCall
+from openai.types.chat.chat_completion_message_custom_tool_call_param import ChatCompletionMessageCustomToolCallParam
 from openai.types.chat.completion_create_params import (
     ChatCompletionAudioParam,
     ChatCompletionPredictionContentParam,
@@ -508,8 +513,21 @@ class NeMoGymChatCompletionMessageToolCall(ChatCompletionMessageToolCall):
     function: NeMoGymFunction
 
 
+class NeMoGymChatCompletionMessageCustomToolCall(ChatCompletionMessageCustomToolCall):
+    pass
+
+
+NeMoGymChatCompletionMessageToolCallUnion = Annotated[
+    Union[
+        NeMoGymChatCompletionMessageToolCall,
+        NeMoGymChatCompletionMessageCustomToolCall,
+    ],
+    Field(discriminator="type"),
+]
+
+
 class NeMoGymChatCompletionMessage(ChatCompletionMessage):
-    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCall]] = None
+    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnion]] = None
 
 
 class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, TokenIDLogProbMixin):
@@ -543,6 +561,19 @@ class NeMoGymChatCompletionToolParam(ChatCompletionToolParam):
     function: Required[NeMoGymFunctionDefinition]
 
 
+class NeMoGymChatCompletionCustomToolParam(ChatCompletionCustomToolParam):
+    pass
+
+
+NeMoGymChatCompletionToolUnionParam = Annotated[
+    Union[
+        NeMoGymChatCompletionToolParam,
+        NeMoGymChatCompletionCustomToolParam,
+    ],
+    Field(discriminator="type"),
+]
+
+
 class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextParam):
     pass
 
@@ -551,9 +582,19 @@ class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageP
     pass
 
 
+class NeMoGymChatCompletionContentPartInputAudioParam(ChatCompletionContentPartInputAudioParam):
+    pass
+
+
+class NeMoGymChatCompletionContentPartFileParam(ChatCompletionContentPartFileParam):
+    pass
+
+
 NeMoGymChatCompletionContentPartParam = Union[
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionContentPartImageParam,
+    NeMoGymChatCompletionContentPartInputAudioParam,
+    NeMoGymChatCompletionContentPartFileParam,
 ]
 
 
@@ -581,10 +622,23 @@ class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallPar
     function: NeMoGymChatCompletionMessageToolCallFunctionParam
 
 
+class NeMoGymChatCompletionMessageCustomToolCallParam(ChatCompletionMessageCustomToolCallParam):
+    pass
+
+
+NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
+    Union[
+        NeMoGymChatCompletionMessageToolCallParam,
+        NeMoGymChatCompletionMessageCustomToolCallParam,
+    ],
+    Field(discriminator="type"),
+]
+
+
 class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam, total=False):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
-    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallParam]] = None
+    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnionParam]] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -642,7 +696,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     stream_options: Optional[ChatCompletionStreamOptionsParam] = None
     temperature: Optional[float] = None
     tool_choice: Optional[ChatCompletionToolChoiceOptionParam] = None
-    tools: Optional[List[NeMoGymChatCompletionToolParam]] = None
+    tools: Optional[List[NeMoGymChatCompletionToolUnionParam]] = None
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
     user: Optional[str] = None

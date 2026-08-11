@@ -31,7 +31,9 @@ from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionMessageCustomToolCall,
     NeMoGymChoice,
     NeMoGymImageGenerationCall,
     NeMoGymLocalShellCall,
@@ -123,6 +125,104 @@ class TestTokenMetadataValidation:
                     "prompt_token_ids": [1],
                 },
             )
+
+
+class TestNeMoGymChatCompletionSchemas:
+    def test_user_audio_and_file_content_parts_round_trip(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": "UklGRg==", "format": "wav"},
+                        },
+                        {
+                            "type": "file",
+                            "file": {"file_id": "file-123"},
+                        },
+                    ],
+                }
+            ],
+            "model": "gpt-test",
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        round_tripped = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate_json(params.model_dump_json())
+
+        assert round_tripped == params
+        assert [part["type"] for part in params.messages[0]["content"]] == ["input_audio", "file"]
+
+    def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "custom",
+                            "custom": {"name": "shell", "input": "echo hello"},
+                        }
+                    ],
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                }
+            ],
+            "model": "gpt-test",
+            "tools": [
+                {
+                    "type": "custom",
+                    "custom": {
+                        "name": "shell",
+                        "description": "Run a shell command",
+                        "format": {"type": "text"},
+                    },
+                }
+            ],
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        round_tripped = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate_json(params.model_dump_json())
+
+        assert round_tripped == params
+        assert params.tools[0]["type"] == "custom"
+        assert params.messages[0]["tool_calls"][0]["type"] == "custom"
+        assert params.messages[0]["generation_token_ids"] == [2]
+
+    def test_custom_response_tool_call_round_trip(self) -> None:
+        payload = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-test",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "custom",
+                                "custom": {"name": "shell", "input": "echo hello"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+        round_tripped = NeMoGymChatCompletion.model_validate_json(completion.model_dump_json())
+
+        assert round_tripped == completion
+        assert isinstance(completion.choices[0].message.tool_calls[0], NeMoGymChatCompletionMessageCustomToolCall)
 
 
 class TestNeMoGymResponseHostedMcpItems:
