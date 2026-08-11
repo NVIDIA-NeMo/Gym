@@ -433,6 +433,13 @@ class TestNeMoGymResponseToolCallItems:
         assert call.type == "web_search_call"
         assert call.status == "completed"
 
+    def test_local_prompt_message_in_response_output_validates(self) -> None:
+        response = NeMoGymResponse.model_validate(
+            _response_with_output([{"type": "message", "role": "user", "content": "environment observation"}])
+        )
+
+        assert isinstance(response.output[0], NeMoGymEasyInputMessage)
+
     def test_remaining_output_call_items_validate(self) -> None:
         response = NeMoGymResponse.model_validate(
             _response_with_output(
