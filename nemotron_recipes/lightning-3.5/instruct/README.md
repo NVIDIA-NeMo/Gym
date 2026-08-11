@@ -22,6 +22,11 @@ Every recipe accepts `LIMIT` for a quick smoke, `OUT` for the output directory,
 `PARALLEL` for concurrency and `RESUME` to continue an interrupted run. Results land in
 `./results/<benchmark>`.
 
+Each recipe checks the repo out at the Gym commit its tech report number was produced
+with, leaving the recipes themselves alone. That modifies tracked files, so commit or
+stash your own changes first; the repo stays at that commit until you check something
+else out. Set `PIN_GYM=0` to run against your current checkout instead.
+
 ## Prerequisites
 
 - **Python 3.13.14 or newer**
@@ -254,16 +259,17 @@ run with `nel eval run` rather than as Gym recipes.
 
 Two things have to be in place first.
 
-**1. NeMo Evaluator, installed from `main`.**
+**1. NeMo Evaluator, pinned to the commit these numbers were produced with.**
 
 ```bash
-pip install "nemo-evaluator[harbor] @ git+https://github.com/NVIDIA-NeMo/Evaluator.git@main"
+pip install "nemo-evaluator[harbor] @ git+https://github.com/NVIDIA-NeMo/Evaluator.git@230c8411fff82fa581195b7d088d7fb67d3bc98c"
 ```
 
-The SWE-bench Multilingual config sets `sandbox.scrub_git_history`, which the 0.3.0
-release on PyPI does not recognise — it refuses to load the file. Do not delete that line to
-silence the error: it strips each task repository's later commits, and without it the
-agent can read the official fix straight out of the git history and score far too high.
+Do not use the 0.3.0 release on PyPI: it does not recognise `sandbox.scrub_git_history`,
+which the SWE-bench Multilingual config sets, and refuses to load the file. Do not delete
+that line to silence the error either — it strips each task repository's later commits,
+and without it the agent can read the official fix straight out of the git history and
+score far too high.
 
 **2. An AWS sandbox.** Every task runs in its own ECS Fargate container, and that
 infrastructure is not created for you. Apply the reference Terraform stack from the

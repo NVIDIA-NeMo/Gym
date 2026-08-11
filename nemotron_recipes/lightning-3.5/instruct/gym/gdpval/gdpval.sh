@@ -103,6 +103,16 @@ if [ "$MODE" = comparison ]; then
   echo "gdpval: comparison against $found rated reference(s)" >&2
 fi
 
+# Pin Gym to the commit the tech report numbers were produced with. Set PIN_GYM=0 to
+# run against your current checkout instead. `nemotron_recipes` is excluded, so this never
+# touches the recipe that is running, and HEAD does not move.
+GYM_PIN="${GYM_PIN:-57c15a22f8b82d3d859b71468fe3329f4e2093b4}"
+if [ "${PIN_GYM:-1}" != 0 ]; then
+  git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
+  git checkout "$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
+  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip)"
+fi
+
 gym eval prepare --benchmark gdpval
 
 gym eval run \

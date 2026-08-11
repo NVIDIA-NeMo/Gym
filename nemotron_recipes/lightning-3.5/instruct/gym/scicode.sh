@@ -33,6 +33,16 @@
 TEST_DATA="${TEST_DATA:?export TEST_DATA (path to SciCode test_data.h5)}"
 [ -r "$TEST_DATA" ] || { echo "test_data.h5 not readable at $TEST_DATA" >&2; exit 1; }
 
+# Pin Gym to the commit the tech report numbers were produced with. Set PIN_GYM=0 to
+# run against your current checkout instead. `nemotron_recipes` is excluded, so this never
+# touches the recipe that is running, and HEAD does not move.
+GYM_PIN="${GYM_PIN:-e446e4f415b9cde0e95bb813c85e9e3e23f5d893}"   # v0.5.0
+if [ "${PIN_GYM:-1}" != 0 ]; then
+  git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
+  git checkout "$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
+  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip)"
+fi
+
 gym eval prepare --benchmark scicode
 
 gym eval run \

@@ -68,6 +68,16 @@ BENCH=pinchbench_benchmark_agent.responses_api_agents.pinchbench
 # strands the per-task transcripts away from the results and collides between runs.
 OUTDIR="$(realpath -m "${OUT:-./results/pinchbench}")"
 
+# Pin Gym to the commit the tech report numbers were produced with. Set PIN_GYM=0 to
+# run against your current checkout instead. `nemotron_recipes` is excluded, so this never
+# touches the recipe that is running, and HEAD does not move.
+GYM_PIN="${GYM_PIN:-86290ee8fdc191f2d27b48bd2e957a25dcbd7fd7}"
+if [ "${PIN_GYM:-1}" != 0 ]; then
+  git rev-parse --verify -q "$GYM_PIN^{commit}" >/dev/null 2>&1 || git fetch origin "$GYM_PIN"
+  git checkout "$GYM_PIN" -- . ':(exclude)nemotron_recipes' || exit 1
+  echo "pinned Gym to $GYM_PIN (recipes untouched; PIN_GYM=0 to skip)"
+fi
+
 gym eval prepare --benchmark pinchbench
 
 gym eval run \
