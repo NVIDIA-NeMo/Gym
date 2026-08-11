@@ -748,6 +748,13 @@ Found global config dict yaml:
             # out empty (see _openai_version_matches_nemo_gym_constraint).
             if _openai_version_matches_nemo_gym_constraint(openai_version):
                 head_server_deps.append(f"openai=={openai_version}")
+            else:
+                print(
+                    f"Not pinning the parent process's openai=={openai_version} into server venvs: "
+                    "it does not satisfy nemo-gym's own openai constraint, so the pin would make every "
+                    "server venv resolution unsatisfiable. Server venvs will resolve openai from "
+                    "nemo-gym's constraint instead."
+                )
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 
             # Constrain python version since ray is sensitive to this.
