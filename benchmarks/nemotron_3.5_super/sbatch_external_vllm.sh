@@ -52,27 +52,15 @@ gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/\$SLURM_JOB_ID/\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
-# +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 gym eval run \
     $@ \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
     +nemo_gym_log_dir=results/\$experiment_name/logs \
-    +skip_venv_if_present=true \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
-    ++overwrite_metrics_conflicts=true \
-    ++split=benchmark \
-    ++use_absolute_ip=true \
-    ++reuse_existing_data_preparation=true \
     ++policy_base_url=http://\$(getent hosts "\$PREFILL_HEAD" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
-    ++policy_api_key=dummy_api_key \
-    ++policy_model_name=$MODEL \
-    ++upload_rollouts_to_wandb=false \
-    ++global_aiohttp_connector_limit_per_host=16384 \
-    ++port_range_low=63000 \
-    ++port_range_high=64000
-
+    ++policy_model_name=$MODEL
 
 if (( $EXPORT_TO_CSV )); then
     python benchmarks/nemotron_3.5_super/export_to_csv.py \

@@ -55,7 +55,16 @@ policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
 
 # Tau2 and Tau3 servers may take a long time to spin up since we import the Tau repo which has hefty dependencies.
-uvicorn_timeout_worker_healthcheck: 300
+uvicorn_timeout_worker_healthcheck: 600  # 10 mins
+upload_rollouts_to_wandb: false  # Rollouts file is massive. We leave on the cluster.
+global_aiohttp_connector_limit_per_host: 16384  # 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
+port_range_low: 63000  # Move into ephemeral ports
+port_range_high: 64000
+overwrite_metrics_conflicts: true
+split: benchmark
+use_absolute_ip: true  # Necessary for communication between harness in sandbox and Gym model servers
+reuse_existing_data_preparation: true
+skip_venv_if_present: true  # Reuse the venvs baked into the container if possible.
 
 # Used in Tau3 Banking
 gpt-5_4-mini-2026-03-17:
