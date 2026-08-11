@@ -13,7 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from types import UnionType
-from typing import Annotated, Any, Dict, List, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints
+from typing import (
+    Annotated,
+    Any,
+    Dict,
+    List,
+    Literal,
+    NotRequired,
+    Required,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 import openai
 import pytest
