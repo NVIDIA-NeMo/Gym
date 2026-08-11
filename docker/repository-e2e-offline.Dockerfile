@@ -122,7 +122,7 @@ RUN set -eu; \
     pids=""; \
     for shard in 0 1 2 3 4 5 6 7; do \
       shard_root="/tmp/repository-e2e-gym-shard-${shard}"; \
-      cp -a --no-preserve=ownership \
+      cp -R --no-preserve=all \
         /tmp/repository-e2e-gym-source "${shard_root}"; \
       ( \
         cd "${shard_root}"; \
