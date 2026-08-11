@@ -106,7 +106,8 @@ RUN cd /tmp/repository-e2e-gym-source && \
     UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
       GYM_CI_DEV_VENV_DIR=/opt/repository-e2e-gym/dev-venv \
       bash scripts/ci/setup_dev.sh && \
-    python -m venv /opt/repository-e2e-gym/pre-commit-3.6.0 && \
+    /opt/repository-e2e-gym/dev-venv/bin/python -m venv \
+      /opt/repository-e2e-gym/pre-commit-3.6.0 && \
     /opt/repository-e2e-gym/pre-commit-3.6.0/bin/python -m pip install \
       --disable-pip-version-check pre-commit==3.6.0 && \
     PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
