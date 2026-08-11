@@ -848,10 +848,7 @@ class TestR2EGymDatasetProcessor:
             processor = R2EGymDatasetProcessor(config=config)
             result = processor.get_run_command()
 
-            assert (
-                "/r2egym_setup/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12"
-                in result.command
-            )
+            assert "/r2egym_setup/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12" in result.command
             assert f"{setup_dir}/R2E-Gym/venv/bin/python" not in result.command
 
 

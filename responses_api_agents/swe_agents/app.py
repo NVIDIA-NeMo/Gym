@@ -563,7 +563,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
         setup_dir = os.path.realpath(str(self.config.r2e_gym_setup_dir))
         resolved = os.path.realpath(f"{setup_dir}/R2E-Gym/venv/bin/python")
         if resolved.startswith(f"{setup_dir}/"):
-            return f"/r2egym_setup{resolved[len(setup_dir):]}"
+            return f"/r2egym_setup{resolved[len(setup_dir) :]}"
         # Interpreter resolves outside the setup dir (non-standard setup); keep
         # the venv wrapper via the fixed bind as the best effort.
         return "/r2egym_setup/R2E-Gym/venv/bin/python"
