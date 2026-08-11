@@ -1,3 +1,50 @@
+# Worked example of parallel tool-call verification.
+#
+# A dataset row asks for parallel calls by setting `expected_action.type` to `function_call_batch`
+# with a `calls` list of the usual `function_call` objects. The verifier matches the response's
+# tool calls against that set as an unordered multiset, so the order the model emits them in does
+# not matter. Rows using plain `function_call` or `message` keep working unchanged.
+#
+# Try it, in two steps like the rest of this server's examples:
+#
+#   gym env start \
+#     --config resources_servers/single_step_tool_use_with_argument_comparison/configs/parallel_tool_calls_single_step_tool_use_with_argument_comparison.yaml \
+#     --model-type openai_model
+#
+#   gym eval run --no-serve \
+#     --agent parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent \
+#     --input resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl \
+#     --output /tmp/parallel_rollouts.jsonl
+#
+# Scoring has two independent stages, both set under `tool_call_comparator_config` below.
+#
+# 1. The cardinality gate decides which response *shapes* are admissible at all:
+#      allow_subset    admits responses that make FEWER calls than expected
+#      allow_superset  admits responses that make MORE calls than expected
+#    Both default to false, so by default the call count must match exactly and anything else
+#    scores 0.
+#
+# 2. parallel_tool_call_reward_mode decides how much credit an admissible response earns:
+#      binary_strict  (default) 1.0 only if every required call matched, else 0.0
+#      fractional               the matched fraction of the required calls
+#      f1                       2 * matched / (expected + actual)
+#
+# The two stages are complementary. Under binary_strict and fractional the gate is a *free pass*:
+# once a shape is admitted, surplus calls cost nothing and allow_subset lets a response earn full
+# credit for emitting only the easiest call. Under f1, the gate instead decides which imperfect
+# shapes are worth *partial* credit, and missing and surplus calls are penalized symmetrically, so
+# only an exact set of calls reaches 1.0.
+#
+# Measured rewards, expecting the 2 calls {alpha, beta}:
+#
+#   response                          gate        binary_strict  fractional     f1
+#   both calls, either order          any         1.000          1.000          1.000
+#   right count, one call wrong       any         0.000          0.500          0.500
+#   only 1 of the 2 calls             allow_subset    1.000      1.000          0.667
+#   both calls + 3 junk calls         allow_superset  1.000      1.000          0.571
+#
+# Prefer f1 for RL: with the permissive gates, the other two modes reward a policy that spams
+# every plausible call, or that emits one call and stops.
 parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_server:
   resources_servers:
     single_step_tool_use_with_argument_comparison:
@@ -5,8 +52,8 @@ parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_serv
       domain: agent
       tool_call_comparator_config:
         word_count_similarity_threshold: 0.1
-        # Admit responses that under- or over-call, and score them by F1 so that missing and
-        # surplus tool calls are penalized symmetrically instead of being a free pass.
+        # Admit under- and over-calling, then let f1 score them proportionally. Drop these three
+        # lines to get the strict default: exact call count, all-or-nothing reward.
         allow_subset: true
         allow_superset: true
         parallel_tool_call_reward_mode: f1
@@ -19,10 +66,15 @@ parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent:
       resources_server:
         type: resources_servers
         name: parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_server
+      # `policy_model` is the name NeMo-RL supplies for its vLLM policy via
+      # responses_api_models/vllm_model/configs/vllm_model_for_training.yaml, so this environment
+      # can be trained against from NeMo-RL without any adapter.
       model_server:
         type: responses_api_models
         name: policy_model
       datasets:
+      # Five rows covering what the verifier distinguishes: three parallel calls, two parallel
+      # calls of one tool, two parallel calls across two tools, one single call, and one message.
       - name: example
         type: example
         jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl
