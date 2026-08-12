@@ -273,7 +273,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
                 file=sys.stderr,
             )
-            install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 15 https://opencode.ai/install \
+            install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
         && echo "Downloaded OpenCode installer to $installer" \
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
