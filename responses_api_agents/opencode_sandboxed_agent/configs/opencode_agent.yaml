@@ -9,7 +9,12 @@ opencode_sandboxed_agent:
         type: responses_api_models
         name: policy_model
 
+      debug: false
+
       opencode_version: 1.17.11
+      remote_opencode_install_script_path: null
+      remote_opencode_binary_path: null
+
       # Taken from https://github.com/sdevare-nv/nv-opencode/blob/f261004b4e4269a6e193fd242e5ec8ced9a7aec0/packages/opencode/src/bench/cli.ts#L198-L325
       opencode_config:
         permission:
