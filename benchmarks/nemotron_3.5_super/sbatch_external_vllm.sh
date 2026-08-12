@@ -42,6 +42,10 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
+if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
+  ulimit -Sn 65535
+fi
+
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
