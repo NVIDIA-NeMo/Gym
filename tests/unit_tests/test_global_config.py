@@ -15,7 +15,7 @@
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, mark, raises
@@ -31,10 +31,12 @@ from nemo_gym.config_types import (
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
+    WANDBConfig,
 )
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    USE_ABSOLUTE_IP,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     find_open_port,
@@ -98,6 +100,38 @@ class TestGlobalConfig:
         global_config_dict = get_global_config_dict()
         assert self._default_global_config_dict_values == global_config_dict
 
+    def test_offline_resolution_uses_invalid_port_without_probing(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+        probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
+        hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
+        wandb_init = MagicMock(side_effect=AssertionError("offline resolution must not initialize W&B"))
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", probe)
+        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", hostname)
+        monkeypatch.setattr(nemo_gym.global_config.wandb, "init", wandb_init)
+        monkeypatch.setattr(WANDBConfig, "is_available", PropertyMock(return_value=True))
+
+        config = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        USE_ABSOLUTE_IP: True,
+                        "worker": {"resources_servers": {"example": {"entrypoint": "app.py", "domain": "other"}}},
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert config.worker.resources_servers.example.port == -1
+        assert config.worker.resources_servers.example.host == "127.0.0.1"
+        probe.assert_not_called()
+        hostname.assert_not_called()
+        wandb_init.assert_not_called()
+        assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
+
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
@@ -149,6 +183,56 @@ class TestGlobalConfig:
             | {
                 "config_paths": ["/var", "var"],
                 "extra_dot_env_key": 2,
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_ordering(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        (tmp_path / "config1.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/config2.yaml
+
+a: 1
+        """)
+        (tmp_path / "config2.yaml").write_text("""a: 2
+b: 2
+        """)
+
+        # Explicitly handle any local .env.yaml files. Either read or don't read.
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        # Override the hydra main wrapper call. At runtime, this will use sys.argv.
+        # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": [f"{tmp_path}/config1.yaml"]})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        # Override OmegaConf.load to avoid file reads.
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [f"{tmp_path}/config1.yaml", f"{tmp_path}/config2.yaml"],
+                "a": 1,
+                "b": 2,
             }
             == global_config_dict
         )

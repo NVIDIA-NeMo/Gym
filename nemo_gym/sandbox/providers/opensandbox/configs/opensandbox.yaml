@@ -32,11 +32,11 @@ sandbox:
       # 0 disables connection reuse.
       max_keepalive_connections: 20
       # null for no cap.
-      max_connections: 100
+      max_connections: null
       connect_retries: 2
       # "aiohttp" routes through the optional httpx-aiohttp bridge, falling
       # back to httpx with a warning when it is not installed.
-      transport_backend: httpx
+      transport_backend: aiohttp
     create:
       request_timeout_s: 1200
       # Must exceed the spec's ready_timeout_s (1200 for mini_swe_agent_2): this

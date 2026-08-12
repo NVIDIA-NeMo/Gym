@@ -55,6 +55,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
     opencode_version: str
+    remote_opencode_install_script_path: Optional[str] = None
+    remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
 
     # Sandbox config
@@ -76,10 +78,14 @@ class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
 
 
 class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
+    # Allow for benchmark params to propagate properly
+    model_config = ConfigDict(extra="allow")
+
     opencode_results_fpath: str
     opencode_run_stdout: str
     opencode_run_stderr: str
-    opencode_no_export_found: bool
+    opencode_finished: bool
+    opencode_export_found: bool
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
@@ -260,13 +266,27 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         opencode_thinking_str = "--thinking"
 
+        if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
+            install_str = f"""bash {self.config.remote_opencode_install_script_path} --binary {self.config.remote_opencode_binary_path}"""
+        else:
+            print(
+                "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
+                file=sys.stderr,
+            )
+            install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
+        && echo "Downloaded OpenCode installer to $installer" \
+        && VERSION={self.config.opencode_version} bash "$installer\""""
+
         # --auto is to approve not explicitly denied requests.
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
-        && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
+        && echo "Optionally activated Conda env" \
+        && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)}
+        && echo "Installed OpenCode" \
+        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
+        && echo "OpenCode run finished"
         """
 
         opencode_config_content = json.dumps(self._create_opencode_config())
@@ -275,30 +295,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
-        # TODO @bxyu-nvidia: This is a dirty hack to retry this first exec after the connect
-        # Eventually as things stabilize we can remove this.
-        tries = 0
-        MAX_TRIES = 10
-        result = None
-        while tries < MAX_TRIES:
-            try:
-                result = await sandbox.exec(
-                    command=command,
-                    timeout_s=self.config.sandbox_timeout,
-                    env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
-                )
-                break
-            except Exception as e:
-                if (
-                    "POD_IP_NOT_AVAILABLE" in str(e)
-                    or "command not found" in str(e)
-                    or "Get command status failed" in str(e)
-                    or "Failed to run command" in str(e)
-                ):
-                    print(f"Exec try #{tries} hit error.", format_exc(), file=sys.stderr)
-                    tries += 1
-                    continue
-                raise e
+        try:
+            result = await sandbox.exec(
+                command=command,
+                timeout_s=self.config.sandbox_timeout,
+                env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
+            )
+        except:
+            result = None
+            print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -313,28 +318,28 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
         except:
             export_result = None
-            print("Failed to export results", file=sys.stderr)
+            print("Failed to export results", format_exc(), file=sys.stderr)
         if self.config.debug and export_result:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         try:
             pwd_result = await sandbox.exec(command="pwd")
-            results_remote_fpath = Path(pwd_result.stdout) / export_fname
+            results_remote_fpath = Path(pwd_result.stdout.strip()) / export_fname
         except:
-            print("Failed to get current working directory", file=sys.stderr)
+            print("Failed to get current working directory", format_exc(), file=sys.stderr)
             results_remote_fpath = None
 
+        results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_local_fpath = results_dir / export_fname
         if results_remote_fpath:
-            results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
-            results_dir.mkdir(parents=True, exist_ok=True)
-            results_local_fpath = results_dir / export_fname
             if self.config.debug:
                 print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
             try:
                 await sandbox.download(str(results_remote_fpath), results_local_fpath)
             except:
-                print(f"Failed to download export results to {results_local_fpath}", file=sys.stderr)
+                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
 
         opencode_export = dict()
         if results_local_fpath.exists():
@@ -342,16 +347,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         output = []
         usage = None
+        opencode_export_found = False
         if opencode_export:
+            opencode_export_found = True
             # Assume only one input message. May change with a system/developer message later on.
             output = self._opencode_export_to_output_items(opencode_export)[1:]
             usage = NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export))
 
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
-            "opencode_results_fpath": str(results_local_fpath),
-            "opencode_run_stdout": result.stdout or "",
-            "opencode_run_stderr": result.stderr or "",
-            "opencode_no_export_found": not bool(opencode_export),
+            "opencode_results_fpath": str(results_local_fpath) if opencode_export_found else "",
+            "opencode_run_stdout": (result.stdout if result else "") or "",
+            "opencode_run_stderr": (result.stderr if result else "") or "",
+            "opencode_export_found": opencode_export_found,
+            "opencode_finished": ("OpenCode run finished" in result.stdout if result else False),
         }
 
         return NeMoGymResponse(
@@ -410,8 +418,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(verify_response)
 
-        # TODO @bxyu-nvidia: Check if sandbox stop is idempotent
-        await sandbox.stop()
+        try:
+            await sandbox.stop()
+        except:
+            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+
         self._sandbox_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
 
         # @bxyu-nvidia: This is scraped from the raw create params. Later on we can dynamically set this if OpenCode exports this :rofl:
