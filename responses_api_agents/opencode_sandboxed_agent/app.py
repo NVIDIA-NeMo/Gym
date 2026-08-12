@@ -45,6 +45,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
@@ -197,14 +198,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
                 messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
             elif message["info"]["role"] == "assistant":
-                from nemo_gym.responses_converter import ResponsesConverter
-
                 converter = ResponsesConverter(return_token_id_information=True)
                 for part in message["parts"]:
-                    if part["type"] == "text" or part["type"] == "reasoning":
+                    if part["type"] == "text":
                         output_items = converter.postprocess_assistant_message_dict(
                             message_dict={
                                 "content": part["text"],
+                                "role": "assistant",
+                            }
+                        )
+                        messages.extend(output_items)
+                    elif part["type"] == "reasoning":
+                        output_items = converter.postprocess_assistant_message_dict(
+                            message_dict={
+                                "content": converter._wrap_reasoning_in_think_tags([part["text"]]),
                                 "role": "assistant",
                             }
                         )
