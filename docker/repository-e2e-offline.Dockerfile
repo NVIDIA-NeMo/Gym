@@ -31,6 +31,8 @@ ARG LIBXCB1_DEB=pool/main/libx/libxcb/libxcb1_1.15-1ubuntu2_amd64.deb
 ARG LIBXCB1_SHA256=e1c6611d11ad7398326f1bf028afc34c3b14c51d917a3426b966ed4b9687fa58
 ARG LIBXDMCP6_DEB=pool/main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_amd64.deb
 ARG LIBXDMCP6_SHA256=bcd336fce11ce2a45f34d0f95e6980af22529f22147e8f98c156e5cee8ee42bb
+ARG LIBXEXT6_DEB=pool/main/libx/libxext/libxext6_1.3.4-1build2_amd64.deb
+ARG LIBXEXT6_SHA256=45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679
 ARG LIBXRENDER1_DEB=pool/main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb
 ARG LIBXRENDER1_SHA256=d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea
 ARG RUNTIME_UID=65532
@@ -147,9 +149,11 @@ RUN set -eu; \
     install_deb "${LIBXCB1_DEB}" "${LIBXCB1_SHA256}"; \
     install_deb "${LIBX11_DATA_DEB}" "${LIBX11_DATA_SHA256}"; \
     install_deb "${LIBX11_6_DEB}" "${LIBX11_6_SHA256}"; \
+    install_deb "${LIBXEXT6_DEB}" "${LIBXEXT6_SHA256}"; \
     install_deb "${LIBXRENDER1_DEB}" "${LIBXRENDER1_SHA256}"; \
     ldconfig && \
     ldconfig -p | grep -F 'libX11.so.6' && \
+    ldconfig -p | grep -F 'libXext.so.6' && \
     ldconfig -p | grep -F 'libXrender.so.1'
 
 ENV PATH=/opt/repository-e2e-gym/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
