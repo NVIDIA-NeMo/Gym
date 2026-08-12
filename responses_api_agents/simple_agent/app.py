@@ -300,7 +300,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
-            json=body.model_dump(),
+            json=body,
             cookies=cookies,
         )
         await raise_for_status(seed_session_response)
