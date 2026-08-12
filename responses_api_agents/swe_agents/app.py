@@ -1595,9 +1595,13 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         config["llm"]["model"] |= {
             "model": self.config.body.model or "",
             "base_url": "",  # May need to populate this
-            "temperature": self.config.inference_params["temperature"],
-            "top_p": self.config.inference_params["top_p"],
         }
+        # temperature/top_p are absent when the caller nulls them (Anthropic
+        # models reject explicit sampling params when thinking is enabled);
+        # tomlkit cannot serialize None, so only set the keys that exist.
+        for _sampling_key in ("temperature", "top_p"):
+            if _sampling_key in self.config.inference_params:
+                config["llm"]["model"][_sampling_key] = self.config.inference_params[_sampling_key]
 
         config_str = tomlkit.dumps(config)
 
