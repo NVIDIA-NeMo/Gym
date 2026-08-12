@@ -75,19 +75,20 @@ SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif",
 # SDK drift tests require every request field to be classified exactly once.
 # Mapped fields have an explicit Responses conversion below.
 # A mapped field may still reject nested values that have no lossless representation.
+# fmt: off
 MAPPED_ANTHROPIC_REQUEST_FIELDS = frozenset(
     {
-        "max_tokens",  # Becomes Responses max_output_tokens.
-        "messages",  # Becomes ordered Responses message, reasoning, and function-call items.
-        "metadata",  # Maps metadata.user_id to Responses user.
-        "model",  # Keeps the requested model name.
+        "max_tokens",     # Becomes Responses max_output_tokens.
+        "messages",       # Becomes ordered Responses message, reasoning, and function-call items.
+        "metadata",       # Maps metadata.user_id to Responses user.
+        "model",          # Keeps the requested model name.
         "output_config",  # Maps supported effort values to Responses reasoning.effort.
-        "service_tier",  # Preserves the shared auto tier.
-        "system",  # Becomes Responses instructions.
-        "temperature",  # Keeps the shared sampling value.
-        "tool_choice",  # Maps tool selection and disable_parallel_tool_use.
-        "tools",  # Maps client function tools to Responses function tools.
-        "top_p",  # Keeps the shared sampling value.
+        "service_tier",   # Preserves the shared auto tier.
+        "system",         # Becomes Responses instructions.
+        "temperature",    # Keeps the shared sampling value.
+        "tool_choice",    # Maps tool selection and disable_parallel_tool_use.
+        "tools",          # Maps client function tools to Responses function tools.
+        "top_p",          # Keeps the shared sampling value.
     }
 )
 
@@ -99,11 +100,11 @@ IGNORED_ANTHROPIC_REQUEST_FIELDS = frozenset({"cache_control"})
 # _validate_anthropic_request raises when any of these fields has a non-null value.
 REJECTED_ANTHROPIC_REQUEST_FIELDS = frozenset(
     {
-        "container",  # Responses cannot select Anthropic container state.
-        "inference_geo",  # Responses has no equivalent inference-routing field.
+        "container",       # Responses cannot select Anthropic container state.
+        "inference_geo",   # Responses has no equivalent inference-routing field.
         "stop_sequences",  # Responses create params have no stop-sequence field.
-        "thinking",  # Anthropic thinking budgets cannot be represented by Responses reasoning config.
-        "top_k",  # Responses has no equivalent sampling field.
+        "thinking",        # Anthropic thinking budgets cannot be represented by Responses reasoning config.
+        "top_k",           # Responses has no equivalent sampling field.
     }
 )
 
@@ -111,13 +112,13 @@ REJECTED_ANTHROPIC_REQUEST_FIELDS = frozenset(
 # Nested attributes are validated before conversion and may reject independently.
 MAPPED_ANTHROPIC_CONTENT_BLOCK_TYPES = frozenset(
     {
-        "document",  # Becomes an input_file part for supported URL or base64 PDF sources.
-        "image",  # Becomes an input_image part for supported URL or base64 image sources.
+        "document",           # Becomes an input_file part for supported URL or base64 PDF sources.
+        "image",              # Becomes an input_image part for supported URL or base64 image sources.
         "redacted_thinking",  # Becomes opaque encrypted reasoning with no summary.
-        "text",  # Becomes an input_text part.
-        "thinking",  # Becomes a reasoning item with a summary and optional signature.
-        "tool_result",  # Becomes a function_call_output item.
-        "tool_use",  # Becomes a function_call item.
+        "text",               # Becomes an input_text part.
+        "thinking",           # Becomes a reasoning item with a summary and optional signature.
+        "tool_result",        # Becomes a function_call_output item.
+        "tool_use",           # Becomes a function_call item.
     }
 )
 
@@ -125,18 +126,19 @@ MAPPED_ANTHROPIC_CONTENT_BLOCK_TYPES = frozenset(
 # The ingress block dispatcher raises instead of flattening them into lossy text.
 REJECTED_ANTHROPIC_CONTENT_BLOCK_TYPES = frozenset(
     {
-        "bash_code_execution_tool_result",  # Contains hosted Bash execution state.
-        "code_execution_tool_result",  # Contains hosted code execution state.
-        "container_upload",  # Refers to Anthropic-managed container state.
-        "mid_conv_system",  # Has no equivalent ordered Responses input role.
-        "search_result",  # Carries hosted search result metadata.
-        "server_tool_use",  # Represents a tool invocation executed by Anthropic.
+        "bash_code_execution_tool_result",         # Contains hosted Bash execution state.
+        "code_execution_tool_result",              # Contains hosted code execution state.
+        "container_upload",                        # Refers to Anthropic-managed container state.
+        "mid_conv_system",                         # Has no equivalent ordered Responses input role.
+        "search_result",                           # Carries hosted search result metadata.
+        "server_tool_use",                         # Represents a tool invocation executed by Anthropic.
         "text_editor_code_execution_tool_result",  # Contains hosted editor execution state.
-        "tool_search_tool_result",  # Contains Anthropic tool-discovery results.
-        "web_fetch_tool_result",  # Contains hosted web-fetch results and metadata.
-        "web_search_tool_result",  # Contains hosted web-search results and metadata.
+        "tool_search_tool_result",                 # Contains Anthropic tool-discovery results.
+        "web_fetch_tool_result",                   # Contains hosted web-fetch results and metadata.
+        "web_search_tool_result",                  # Contains hosted web-search results and metadata.
     }
 )
+# fmt: on
 MAPPED_ANTHROPIC_TOOL_VARIANTS = frozenset({"ToolParam"})
 REJECTED_ANTHROPIC_TOOL_VARIANTS = frozenset(
     {
