@@ -36,14 +36,6 @@ PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
 
 EVAL_COMMAND=$(cat <<EOF
-# TODO @bxyu-nvidia: Remove this once it is baked in the Gym deps
-source /opt/uv_venvs/responses_api_agents/opencode_sandboxed_agent/.venv/bin/activate
-uv pip install httpx-aiohttp
-deactivate
-source /opt/uv_venvs/resources_servers/swebench/.venv/bin/activate
-uv pip install httpx-aiohttp
-deactivate
-
 # Activate environment in container and cd into Gym. The Gym path here may be mounted.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
