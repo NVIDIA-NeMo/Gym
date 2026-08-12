@@ -17,7 +17,21 @@ ARG VERIFIABLE_INSTRUCTIONS_SHA=f46a5ac87b1400a4f8973039844b6be9b56e3faf
 ARG VERIFIERS_SHA=2fbd2b7fab0236cb039c4aa5afb25ad9c5f17134
 ARG DOCKER_CLI_VERSION=27.5.1
 ARG DOCKER_CLI_SHA256=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
-ARG LIBXRENDER1_VERSION=0.9.10-1.1build1
+ARG LIBBSD0_DEB=pool/main/libb/libbsd/libbsd0_0.12.1-1build1_amd64.deb
+ARG LIBBSD0_SHA256=8e97b7d541416512a81e7845c5f21910344c9c5c610893cf265d3298e0caad6b
+ARG LIBMD0_DEB=pool/main/libm/libmd/libmd0_1.1.0-2build1_amd64.deb
+ARG LIBMD0_SHA256=77f8cdbf03a43656bbf6604e18bd16834fc8bf2c949d4fbdf24ac297869b667a
+ARG LIBX11_6_DEB=pool/main/libx/libx11/libx11-6_1.8.7-1build1_amd64.deb
+ARG LIBX11_6_SHA256=397f84347476a3c5786b39f3ff6f0f82866eb3d8be6d2ad3efeadf019efe5b80
+ARG LIBX11_DATA_DEB=pool/main/libx/libx11/libx11-data_1.8.7-1build1_all.deb
+ARG LIBX11_DATA_SHA256=9ae01f7747e7f479394c697c55acf11d3baf139e8e54b7c4adfb55ef9c50de08
+ARG LIBXAU6_DEB=pool/main/libx/libxau/libxau6_1.0.9-1build6_amd64.deb
+ARG LIBXAU6_SHA256=e40d29f1d1a62393bacaedebe0da3d9006084152a9f7e5e029293f08ce1c5c80
+ARG LIBXCB1_DEB=pool/main/libx/libxcb/libxcb1_1.15-1ubuntu2_amd64.deb
+ARG LIBXCB1_SHA256=e1c6611d11ad7398326f1bf028afc34c3b14c51d917a3426b966ed4b9687fa58
+ARG LIBXDMCP6_DEB=pool/main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_amd64.deb
+ARG LIBXDMCP6_SHA256=bcd336fce11ce2a45f34d0f95e6980af22529f22147e8f98c156e5cee8ee42bb
+ARG LIBXRENDER1_DEB=pool/main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb
 ARG LIBXRENDER1_SHA256=d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea
 ARG RUNTIME_UID=65532
 ARG RUNTIME_GID=65532
@@ -104,9 +118,11 @@ RUN if ! getent group "${RUNTIME_GID}" >/dev/null; then \
       /opt/repository-e2e-gym /tmp/repository-e2e-gym-source
 
 # Some native suites inspect the Docker sandbox provider, and rdkit's drawing
-# extension links against libXrender. Install both exact runtime inputs from
-# their official immutable archives without consulting mutable apt metadata.
-RUN /usr/bin/curl --fail --location --silent --show-error \
+# extension links against the X11 client libraries. Install every exact runtime
+# input from its official immutable archive without consulting mutable apt
+# metadata.
+RUN set -eu; \
+    /usr/bin/curl --fail --location --silent --show-error \
       "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
       --output /tmp/docker.tgz && \
     echo "${DOCKER_CLI_SHA256}  /tmp/docker.tgz" | sha256sum --check --strict && \
@@ -115,14 +131,25 @@ RUN /usr/bin/curl --fail --location --silent --show-error \
     rm /tmp/docker.tgz && \
     test "$(/opt/repository-e2e-gym/bin/docker --version | awk '{print $3}' | tr -d ',')" = \
       "${DOCKER_CLI_VERSION}" && \
-    /usr/bin/curl --fail --location --silent --show-error \
-      "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxrender/libxrender1_${LIBXRENDER1_VERSION}_amd64.deb" \
-      --output /tmp/libxrender1.deb && \
-    echo "${LIBXRENDER1_SHA256}  /tmp/libxrender1.deb" | \
-      sha256sum --check --strict && \
-    dpkg-deb --extract /tmp/libxrender1.deb / && \
-    rm /tmp/libxrender1.deb && \
+    install_deb() { \
+      package_path="$1"; expected_sha256="$2"; \
+      archive="/tmp/${package_path##*/}"; \
+      /usr/bin/curl --fail --location --silent --show-error \
+        "https://archive.ubuntu.com/ubuntu/${package_path}" --output "${archive}"; \
+      echo "${expected_sha256}  ${archive}" | sha256sum --check --strict; \
+      dpkg-deb --extract "${archive}" /; \
+      rm "${archive}"; \
+    }; \
+    install_deb "${LIBMD0_DEB}" "${LIBMD0_SHA256}"; \
+    install_deb "${LIBBSD0_DEB}" "${LIBBSD0_SHA256}"; \
+    install_deb "${LIBXAU6_DEB}" "${LIBXAU6_SHA256}"; \
+    install_deb "${LIBXDMCP6_DEB}" "${LIBXDMCP6_SHA256}"; \
+    install_deb "${LIBXCB1_DEB}" "${LIBXCB1_SHA256}"; \
+    install_deb "${LIBX11_DATA_DEB}" "${LIBX11_DATA_SHA256}"; \
+    install_deb "${LIBX11_6_DEB}" "${LIBX11_6_SHA256}"; \
+    install_deb "${LIBXRENDER1_DEB}" "${LIBXRENDER1_SHA256}"; \
     ldconfig && \
+    ldconfig -p | grep -F 'libX11.so.6' && \
     ldconfig -p | grep -F 'libXrender.so.1'
 
 ENV PATH=/opt/repository-e2e-gym/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
