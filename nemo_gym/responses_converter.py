@@ -648,6 +648,21 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
     }
 )
 
+# These item types are not model-generated.
+# They include client-supplied tool results, approvals, and context-management data.
+# Excluding them from the boundary set prevents tool results from starting the sampled segment.
+#
+# The SDK unions do not distinguish generated items from client-supplied items.
+_RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
+    {
+        "computer_call_output",
+        "custom_tool_call_output",
+        "function_call_output",
+        "local_shell_call_output",
+        "mcp_approval_response",
+    }
+)
+
 
 def split_responses_input_output_items(
     items: List[NeMoGymResponseOutputItem],
