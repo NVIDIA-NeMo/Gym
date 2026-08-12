@@ -201,7 +201,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
                 converter = ResponsesConverter(return_token_id_information=True)
                 for part in message["parts"]:
-                    if part["type"] == "text":
+                    if part["type"] == "text" or part["type"] == "reasoning":
                         output_items = converter.postprocess_assistant_message_dict(
                             message_dict={
                                 "content": part["text"],
