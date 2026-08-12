@@ -184,10 +184,7 @@ def test_verifier_dockerfile_resolves_pristine_image_and_deny_network(tmp_path: 
         ),
         logger=logging.getLogger(__name__),
         provider={"opensandbox": {"connection": {"domain": "sandbox"}}},
-        spec={
-            "tmux_bundle_path": "/driver/tmux.tar.gz",
-            "provider_options": {"platform": {"os": "linux", "arch": "amd64"}},
-        },
+        spec={"provider_options": {"platform": {"os": "linux", "arch": "amd64"}}},
     )
 
     spec = environment._sandbox_spec()
@@ -196,7 +193,6 @@ def test_verifier_dockerfile_resolves_pristine_image_and_deny_network(tmp_path: 
     assert spec.resources.memory_mib == 8192
     assert spec.resources.disk_gib == 20
     assert spec.provider_options["network_policy"] == {"defaultAction": "deny"}
-    assert "tmux_bundle_path" not in spec.provider_options
 
 
 def test_agent_environment_has_temporary_install_and_model_egress(tmp_path: Path) -> None:
@@ -347,24 +343,3 @@ async def test_startup_command_retries_transient_backend_failure(monkeypatch) ->
     assert result.return_code == 0
     assert environment.exec.await_count == 2
     sleep.assert_awaited_once_with(1)
-
-
-@pytest.mark.asyncio
-async def test_offline_tmux_bundle_is_uploaded_and_verified(tmp_path: Path) -> None:
-    bundle = tmp_path / "tmux.tar.gz"
-    bundle.write_bytes(b"fixture")
-    environment = object.__new__(PierOpenSandboxEnvironment)
-    environment._spec_config = {"tmux_bundle_path": str(bundle)}
-    environment.exec = AsyncMock(
-        side_effect=[
-            SimpleNamespace(return_code=127, stdout="", stderr="tmux missing"),
-            SimpleNamespace(return_code=0, stdout="tmux 3.2a", stderr=""),
-        ]
-    )
-    environment.upload_file = AsyncMock()
-
-    await environment.ensure_tmux()
-
-    environment.upload_file.assert_awaited_once_with(bundle, "/tmp/deep-swe-tmux.tar.gz")
-    install_command = environment.exec.await_args_list[1].args[0]
-    assert "/usr/local/bin/tmux -V" in install_command

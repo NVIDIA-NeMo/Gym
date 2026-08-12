@@ -56,14 +56,9 @@ deepswe_agent:
         ttl_s: 18000
         ready_timeout_s: 1200
         agent_install_timeout_s: 1800
-        tmux_bundle_path: /workspace/gym-deepswe/cache/deepswe_runtime/tmux-jammy-amd64.tar.gz
         provider_options:
           platform:
             os: linux
             arch: amd64
-          network_policy:
-            defaultAction: deny
         metadata:
-          benchmark: deep-swe
-          harness: pier
           sandbox-api: opensandbox-sdk

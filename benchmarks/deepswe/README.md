@@ -9,13 +9,6 @@ Agent and verifier sandboxes deny network access by default.
 uv run python benchmarks/deepswe/prepare.py
 ```
 
-On the Linux amd64 runner, stage the offline `tmux` bundle:
-
-```bash
-bash benchmarks/deepswe/stage_tmux_bundle.sh \
-  cache/deepswe_runtime/tmux-jammy-amd64.tar.gz
-```
-
 ## Run
 
 ```bash
@@ -25,8 +18,8 @@ export POLICY_API_KEY=...
 ng_e2e_collect_rollouts \
   '+config_paths=[benchmarks/deepswe/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]' \
   ++input_jsonl_fpath=benchmarks/deepswe/data/deepswe_benchmark.jsonl \
-  ++output_jsonl_fpath=results/deepswe-smoke.jsonl \
-  ++max_samples=1 \
+  ++output_jsonl_fpath=results/deepswe.jsonl \
+  ++max_samples=113 \
   ++policy_base_url=https://inference-api.nvidia.com/v1 \
   '++policy_api_key=${oc.env:POLICY_API_KEY}' \
   ++policy_model_name=openai/openai/openai/gpt-5.5

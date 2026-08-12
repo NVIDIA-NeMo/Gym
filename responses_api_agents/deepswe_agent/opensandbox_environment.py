@@ -128,7 +128,6 @@ class PierOpenSandboxEnvironment(BaseEnvironment):
     def _sandbox_spec(self) -> SandboxSpec:
         config = dict(self._spec_config)
         config.pop("image_rewrites", None)
-        config.pop("tmux_bundle_path", None)
         config.pop("agent_install_timeout_s", None)
         provider_options = dict(config.pop("provider_options", {}))
         egress_targets = set(self.network_allowlist.domains)
@@ -167,35 +166,6 @@ class PierOpenSandboxEnvironment(BaseEnvironment):
             entrypoint=config.pop("entrypoint", None),
             provider_options=provider_options,
         )
-
-    async def ensure_tmux(self) -> None:
-        """Install Harbor's terminal dependency from an offline driver bundle."""
-        result = await self._exec_startup("tmux -V", user="root")
-        if result.return_code == 0:
-            return
-
-        bundle_path = self._spec_config.get("tmux_bundle_path")
-        if not bundle_path:
-            raise RuntimeError("tmux is missing from the task image and no tmux_bundle_path is configured")
-        bundle = Path(str(bundle_path))
-        if not bundle.is_file():
-            raise FileNotFoundError(f"DeepSWE tmux bundle does not exist: {bundle}")
-
-        remote_bundle = "/tmp/deep-swe-tmux.tar.gz"
-        await self.upload_file(bundle, remote_bundle)
-        result = await self._exec_startup(
-            "rm -rf /opt/deep-swe-tmux && "
-            "mkdir -p /opt/deep-swe-tmux /usr/local/bin && "
-            f"tar xzf {shlex.quote(remote_bundle)} -C /opt/deep-swe-tmux && "
-            "cp /opt/deep-swe-tmux/bin/tmux /usr/local/bin/tmux && "
-            "chmod 755 /usr/local/bin/tmux /opt/deep-swe-tmux/bin/tmux-real && "
-            f"rm -f {shlex.quote(remote_bundle)} && "
-            "/usr/local/bin/tmux -V",
-            timeout_sec=120,
-            user="root",
-        )
-        if result.return_code != 0:
-            raise RuntimeError(result.stderr or result.stdout or "failed to install offline tmux bundle")
 
     async def _exec_startup(self, command: str, **kwargs: Any) -> ExecResult:
         """Retry transient endpoint failures only for idempotent setup commands."""
