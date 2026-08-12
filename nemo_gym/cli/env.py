@@ -18,26 +18,25 @@ import json
 import os
 import shlex
 from glob import glob
-from os import makedirs
-from os.path import exists
 from pathlib import Path
 from shutil import rmtree
 from signal import SIGINT
 from subprocess import Popen, TimeoutExpired
 from threading import Thread
-from time import sleep, time
+from time import monotonic, sleep, time
 from typing import Dict, List, Optional, Tuple
 
+import requests
 import rich
 import uvicorn
 from devtools import pprint
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.cli.setup_command import run_command, setup_env_command
+from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
+from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -46,11 +45,13 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.environment.scaffold import scaffold_resources_server
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
@@ -75,6 +76,200 @@ from nemo_gym.server_utils import (
 _GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
 # Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
 _FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
+
+
+# Model servers name their upstream endpoint inconsistently: `openai_base_url` (openai_model,
+# azure_openai_model), `base_url` (inference_provider, vllm_model, and the local vLLM servers),
+# `anthropic_base_url`. Matching on the shape of the key rather than a fixed list also covers
+# configs that carry a provider URL literally instead of interpolating `policy_base_url`, which
+# most inference_provider variants do.
+_MODEL_SERVER_TYPE = "responses_api_models"
+_BASE_URL_KEY_SUFFIX = "base_url"
+_ENDPOINT_PROBE_TIMEOUT_SEC: float = 5.0
+_ENDPOINT_POLL_INTERVAL_SEC: float = 3.0
+
+# What a probe found. The distinction that matters is whether waiting could change the answer: a
+# name that does not resolve will not start resolving, while a refused connection may be a server
+# that is still coming up.
+_ENDPOINT_ANSWERING = "answering"
+_ENDPOINT_REFUSED = "refused"
+_ENDPOINT_UNRESOLVABLE = "unresolvable"
+
+
+def _collect_model_endpoints(global_config_dict: DictConfig) -> List[Tuple[str, str]]:
+    """The upstream model endpoints named in the resolved config, as (config key, url) pairs.
+
+    `wait_for_spinup` only polls Gym's own servers, and the Gym-side model server answers as soon
+    as it starts whether or not anything is behind it, so these are the URLs nothing checks.
+
+    `base_url` is typed `Union[str, List[str]]` on vllm_model and the local vLLM servers, where the
+    list form spreads load across replicas. The local ones default to an empty list and are filled
+    in after Gym launches vLLM, so an empty list means "not yet" rather than "misconfigured" and is
+    skipped, as is an unset value.
+
+    The key travels with the url because the endpoint that fails may be a judge or user model, and
+    a message naming `policy_base_url` would then be wrong.
+    """
+    endpoints: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for top_level_path, top_level_value in global_config_dict.items():
+        if top_level_path in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS or not isinstance(top_level_value, DictConfig):
+            continue
+
+        model_servers = top_level_value.get(_MODEL_SERVER_TYPE)
+        if not isinstance(model_servers, DictConfig):
+            continue
+
+        for server_config_dict in model_servers.values():
+            if not isinstance(server_config_dict, DictConfig):
+                continue
+
+            for key, value in server_config_dict.items():
+                if not str(key).endswith(_BASE_URL_KEY_SUFFIX):
+                    continue
+
+                urls = (
+                    [value] if isinstance(value, str) else list(value) if isinstance(value, (list, ListConfig)) else []
+                )
+                for url in urls:
+                    if not isinstance(url, str) or not url:
+                        continue
+                    # `http://x/v1` and `http://x/v1/` probe the same place.
+                    trimmed = url.rstrip("/")
+                    if trimmed in seen:
+                        continue
+                    seen.add(trimmed)
+                    endpoints.append((str(key), url))
+
+    return endpoints
+
+
+def _endpoint_probe_url(base_url: str) -> str:
+    """What to GET to find out whether `base_url` is being served.
+
+    `GET /v1/models` is part of the OpenAI API, so most endpoints behind a `/v1` base URL answer it,
+    but nothing here depends on that: any HTTP response counts as answering, so an endpoint without
+    it replies 404 and still passes. URLs that do not end in `/v1` are probed at their root.
+    """
+    trimmed = base_url.rstrip("/")
+    return f"{trimmed}/models" if trimmed.endswith("/v1") else trimmed
+
+
+def _is_dns_failure(error: BaseException) -> bool:
+    """Whether a `requests` connection error was a name that does not resolve.
+
+    `requests` reports this as a `ConnectionError` like any other, with the resolver failure nested
+    inside, so the cause chain has to be walked rather than the class inspected.
+    """
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ in ("NameResolutionError", "gaierror"):
+            return True
+        nested = next((arg for arg in getattr(error, "args", ()) if isinstance(arg, BaseException)), None)
+        error = nested or error.__cause__ or error.__context__
+    return False
+
+
+def _probe_endpoint(base_url: str, timeout_seconds: float = _ENDPOINT_PROBE_TIMEOUT_SEC) -> str:
+    """Whether anything answers at `base_url`, and if not, whether waiting could help.
+
+    Answering is the bar, not healthy: a 401 or 404 means something is there, and requiring a 200
+    would reject endpoints that need auth. A completed TLS handshake counts too, even against a
+    certificate this process does not trust, which is why `SSLError` is checked before
+    `ConnectionError` it inherits from.
+    """
+    try:
+        requests.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
+        return _ENDPOINT_ANSWERING
+    except requests.exceptions.SSLError:
+        return _ENDPOINT_ANSWERING
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        return _ENDPOINT_UNRESOLVABLE if _is_dns_failure(e) else _ENDPOINT_REFUSED
+    except requests.exceptions.RequestException:
+        # Not probeable at all, such as a bad scheme or a redirect loop. Not a reason to hold up
+        # startup; the request path reports it if it matters.
+        return _ENDPOINT_ANSWERING
+
+
+def _wait_for_model_endpoints(
+    endpoints: List[Tuple[str, str]],
+    timeout_seconds: float,
+    poll_interval_seconds: float = _ENDPOINT_POLL_INTERVAL_SEC,
+    monotonic=monotonic,
+    sleep_fn=sleep,
+) -> List[Tuple[str, str]]:
+    """Wait for every endpoint to answer. Returns the ones that never did.
+
+    Unresolvable names are reported once and not waited on. Refused connections are waited on,
+    because an inference server can take minutes to load weights and someone who starts thirty
+    seconds early should not have to start over.
+    """
+    if timeout_seconds <= 0 or not endpoints:
+        return []
+
+    # The clock starts before the first round, not after it. That round is not free: an
+    # unresolvable name costs a full resolver timeout, so several of them would otherwise push the
+    # real wall time well past the bound the caller asked for.
+    started_at = monotonic()
+
+    waiting = []
+    for key, url in endpoints:
+        result = _probe_endpoint(url)
+        if result == _ENDPOINT_UNRESOLVABLE:
+            print(
+                f"Model endpoint {url} ({key}) does not resolve. Waiting cannot fix a hostname, so it is not retried."
+            )
+        elif result == _ENDPOINT_REFUSED:
+            waiting.append((key, url))
+    if not waiting:
+        return []
+
+    print(
+        f"Waiting for {len(waiting)} model endpoint(s) to answer: "
+        + ", ".join(f"{url} ({key})" for key, url in waiting)
+        + f"\nIf an inference server is still loading weights this is expected. Waiting up to {timeout_seconds:.0f}s..."
+    )
+
+    poll_count = 0
+    while True:
+        if monotonic() - started_at >= timeout_seconds:
+            return waiting
+
+        sleep_fn(poll_interval_seconds)
+        waiting = [(key, url) for key, url in waiting if _probe_endpoint(url) != _ENDPOINT_ANSWERING]
+        if not waiting:
+            print(f"All model endpoints are answering after {monotonic() - started_at:.0f}s.")
+            return []
+
+        poll_count += 1
+        if poll_count % 10 == 0:
+            print(f"  still waiting, {monotonic() - started_at:.0f}s elapsed")
+
+
+# Matches the value `GlobalConfigDictParser` sets, so a caller that builds a config without going
+# through the parser gets the same behaviour instead of silently skipping the check.
+_DEFAULT_MODEL_ENDPOINT_READINESS_TIMEOUT_SEC: float = 600.0
+
+
+def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
+    """How long to wait for model endpoints, from config. 0 or a negative value skips the check.
+
+    An unset key falls back to the same default the config parser applies. A value that is not a
+    number is a configuration mistake, so it is reported as one rather than surfacing as a
+    `ValueError` traceback from `float()`.
+    """
+    value = global_config_dict.get(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME)
+    if value is None:
+        return _DEFAULT_MODEL_ENDPOINT_READINESS_TIMEOUT_SEC
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"`{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` must be a number of seconds, got {value!r}. "
+            "Set it to 0 to skip waiting for model endpoints."
+        ) from None
 
 
 def _resolve_server_dir(rel_path: Path) -> Path:
@@ -265,6 +460,7 @@ class RunHelper:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_spinup()
+            self.wait_for_model_endpoints(global_config_dict)
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
@@ -412,6 +608,38 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
         finally:
             self.shutdown()
 
+    def wait_for_model_endpoints(self, global_config_dict: DictConfig) -> None:
+        """Block until every model endpoint named in the config answers, then return.
+
+        Reads the bound from `model_endpoint_readiness_timeout_seconds`, where 0 skips the check
+        entirely. Raises `ConfigError` naming the endpoints that never answered and the config key
+        each came from. It raises rather than exits because `RunHelper` is imported and driven as a
+        library, so the caller decides what an unreachable endpoint means; the CLI entrypoints turn
+        it into an exit.
+
+        The servers spawned above are shut down first. They hold ports and have neither a process
+        group nor an atexit handler, and every caller reaches its own `shutdown()` only after
+        `start()` returns.
+        """
+        timeout_seconds = _model_endpoint_timeout_seconds(global_config_dict)
+        unreachable = _wait_for_model_endpoints(_collect_model_endpoints(global_config_dict), timeout_seconds)
+        if not unreachable:
+            return
+
+        listed = "\n".join(f"  - {url} (from `{key}`)" for key, url in unreachable)
+        self.shutdown()
+        raise ConfigError(
+            f"""{len(unreachable)} model endpoint(s) never answered within {timeout_seconds:.0f}s:
+{listed}
+
+Nothing accepted a connection there. The server was never started, is still starting up, or the URL
+in your config does not match where it is listening.
+  - Check the config key named beside each URL. Verify with `curl -i <base_url>/models` for a
+    `/v1` endpoint, or `curl -i <base_url>` otherwise.
+  - Any response, including 401 or 404, means something is listening.
+  - Raise `{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` to wait longer, or set it to 0 to skip this check."""
+        )
+
     def check_http_server_statuses(self, successful_servers: List[str]) -> List[Tuple[str, ServerStatus]]:
         statuses = []
         for server_instance_display_config in self._server_instance_display_configs:
@@ -425,6 +653,74 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             statuses.append((name, status))
 
         return statuses
+
+
+@exit_cleanly_on_config_error
+def prefetch(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+):  # pragma: no cover
+    """
+    Pre-warm per-server venvs without starting any servers.
+
+    Accepts the same config format as 'gym env start'. For each server in the config,
+    creates its isolated venv and installs dependencies serially — similar to how
+    RL's prefetch_venvs.py installs actor venvs at container build time.
+
+    No Ray is initialised and no server processes are started. Intended for use in
+    Dockerfile builds so venvs are ready at runtime with no network access needed.
+
+    Configuration Parameter:
+        config_paths (List[str]): Paths to YAML configuration files. Specify via Hydra: `+config_paths="[file1.yaml,file2.yaml]"`
+
+    Examples:
+
+    ```bash
+    # Pre-warm venvs for a specific config
+    config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\\
+    resources_servers/math/configs/math.yaml"
+    gym env prefetch "+config_paths=[${config_paths}]"
+    ```
+    """
+    global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+    GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
+
+    top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
+
+    seen_dirs: set = set()
+    for top_level_path in top_level_paths:
+        server_config_dict = global_config_dict[top_level_path]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+
+        first_key = list(server_config_dict)[0]
+        server_config_dict = server_config_dict[first_key]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+        second_key = list(server_config_dict)[0]
+        server_config_dict = server_config_dict[second_key]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+
+        if "entrypoint" not in server_config_dict:
+            continue
+
+        dir_path = _resolve_server_dir(Path(first_key, second_key))
+        if dir_path in seen_dirs:
+            print(f"Skipping duplicate: {dir_path}")
+            continue
+        seen_dirs.add(dir_path)
+        print(f"Pre-warming venv for: {dir_path}")
+
+        # Run only the setup (venv creation + dep install) — no server start.
+        # Serial execution reduces uv cache size (same reasoning as dry_run in RunHelper.start).
+        setup_cmd = setup_env_command(dir_path, global_config_dict, top_level_path)
+        process = run_command(setup_cmd, dir_path, server_name=top_level_path)
+        returncode = process.wait()
+        if returncode != 0:
+            print(f"ERROR: prefetch failed for {dir_path} (exit {returncode})")
+            raise SystemExit(returncode)
+
+    print("Prefetch complete.")
 
 
 @exit_cleanly_on_config_error
@@ -542,7 +838,17 @@ def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Pop
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     prefix = test_config.entrypoint.replace("/", "\\/")
     resolved_dir = test_config.resolved_dir_path
-    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest"""
+    pytest_args = ""
+    junit_dir_value = os.environ.get("GYM_CI_JUNIT_DIR", "").strip()
+    if junit_dir_value:
+        junit_dir = Path(junit_dir_value).expanduser().resolve()
+        junit_dir.mkdir(parents=True, exist_ok=True)
+        entrypoint = test_config.entrypoint.replace("\\", "/").strip("/")
+        report_name = f"{entrypoint.replace('/', '__')}.xml"
+        junit_path = junit_dir / report_name
+        junit_prefix = entrypoint.replace("/", ".")
+        pytest_args = f" --junitxml={shlex.quote(str(junit_path))} --junit-prefix={shlex.quote(junit_prefix)}"
+    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest{pytest_args}"""
     # Generated server tests import `resources_servers.<name>...`, so the project root (the dir
     # holding the server-type dirs) must be on PYTHONPATH when running from outside a repo checkout.
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
@@ -560,11 +866,13 @@ def test():  # pragma: no cover
 
     try:
         _validate_data_single(test_config)
-    except AssertionError:
-        print(f"Data validation failed for {test_config.entrypoint}. You can rerun just the data validation like:")
-        print("```bash")
-        print(f"gym env test +entrypoint={test_config.entrypoint} +should_validate_data=true")
-        print("```")
+    except AssertionError as e:
+        print(f"""{e}
+Data validation failed for {test_config.entrypoint}. You can rerun just the data validation like:
+```bash
+gym env test +entrypoint={test_config.entrypoint} +should_validate_data=true
+```
+""")
         exit(1)
 
 
@@ -621,6 +929,12 @@ def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> L
         f"shard_index ({shard_index}) must be in [0, num_shards) for num_shards={num_shards}"
     )
     return sorted(dir_paths, key=str)[shard_index::num_shards]
+
+
+def _delete_server_venv(dir_path: Path, global_config_dict: DictConfig) -> None:
+    venv_path = get_venv_path(dir_path, global_config_dict)
+    print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
+    rmtree(venv_path, ignore_errors=True)
 
 
 def test_all():  # pragma: no cover
@@ -690,9 +1004,7 @@ def test_all():  # pragma: no cover
             data_validation_failed.append(dir_path)
 
         if test_all_config.delete_venvs_after_each_test:
-            venv_path = _resolve_server_dir(dir_path) / ".venv"
-            print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
-            rmtree(venv_path, ignore_errors=True)
+            _delete_server_venv(_resolve_server_dir(dir_path), global_config_dict)
 
         times_taken.append((time() - start_time, dir_path))
 
@@ -761,114 +1073,12 @@ def init_resources_server():  # pragma: no cover
 
     dirpath = Path(run_config.entrypoint).resolve()
 
-    if exists(dirpath):
+    if dirpath.exists():
         print(f"Folder already exists: {dirpath}. Exiting init.")
         exit()
 
-    makedirs(dirpath)
-
-    server_type = "resources_servers"
-    server_type_name = dirpath.parts[-1].lower()
-    server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
-
-    configs_dirpath = dirpath / "configs"
-    makedirs(configs_dirpath)
-
-    config_fpath = configs_dirpath / f"{server_type_name}.yaml"
-    with open(config_fpath, "w") as f:
-        f.write(f"""# Resources server: owns this environment's task verification (verify()) and reward.
-{server_type_name}_resources_server:          # instance name — how agents/CLI refer to this server
-  {server_type}:                              # server type: resources_servers | responses_api_agents | responses_api_models
-    {server_type_name}:                        # implementation directory under {server_type}/
-      entrypoint: app.py                        # server entry module
-      domain: other                             # task domain; one of: math, coding, agent, knowledge,
-                                                #   instruction_following, long_context, safety, games, translation,
-                                                #   e2e, rlhf, other. Change 'other' to the closest fit.
-      verified: false                           # set true once the benchmark has been baselined and reviewed
-
-# Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
-{server_type_name}_simple_agent:               # this agent instance's name — pass as --agent to gym eval run
-  responses_api_agents:
-    simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
-      entrypoint: app.py
-      resources_server:                         # the resources server this agent interacts with for tools, state and verification
-        type: resources_servers
-        name: {server_type_name}_resources_server
-      model_server:                             # the model that answers; 'policy_model' is resolved from a model config
-        type: responses_api_models
-        name: policy_model
-      datasets:                                 # one block per split: train | validation | example
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local data file for this split
-        num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
-        license: Apache 2.0                     # required for train/validation; must be an allowed license string
-        # to fetch this split from a registry instead, add a source: block (type: gitlab | huggingface)
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
-        num_repeats: 1
-        license: Apache 2.0
-      - name: example                           # 5 rows committed to git for quick smoke tests
-        type: example
-        jsonl_fpath: resources_servers/{server_type_name}/data/example.jsonl
-        num_repeats: 1
-""")
-
-    app_fpath = dirpath / "app.py"
-    with open(ROOT_DIR / "resources/resources_server_template.py") as f:
-        app_template = f.read()
-    app_content = app_template.replace("ExampleMultiStep", server_type_title)
-    with open(app_fpath, "w") as f:
-        f.write(app_content)
-
-    tests_dirpath = dirpath / "tests"
-    makedirs(tests_dirpath)
-
-    tests_fpath = tests_dirpath / "test_app.py"
-    with open(ROOT_DIR / "resources/resources_server_test_template.py") as f:
-        tests_template = f.read()
-    tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
-    tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
-    with open(tests_fpath, "w") as f:
-        f.write(tests_content)
-
-    requirements_fpath = dirpath / "requirements.txt"
-    with open(requirements_fpath, "w") as f:
-        if (PARENT_DIR / "pyproject.toml").exists():
-            # local nemo gym - detected by ../pyproject.toml exists
-            rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
-            f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
-        else:
-            # pypi path
-            f.write("nemo-gym[dev]\n")
-
-    readme_fpath = dirpath / "README.md"
-    with open(readme_fpath, "w") as f:
-        f.write("""# Description
-
-Data links: ?
-
-# Licensing information
-Code: ?
-Data: ?
-
-Dependencies
-- nemo_gym: Apache 2.0
-?
-""")
-
-    data_dirpath = dirpath / "data"
-    data_dirpath.mkdir(exist_ok=True)
-
-    data_gitignore_fpath = data_dirpath / ".gitignore"
-    with open(data_gitignore_fpath, "w") as f:
-        f.write("""*train.jsonl
-*validation.jsonl
-*train_prepare.jsonl
-*validation_prepare.jsonl
-*example_prepare.jsonl
-""")
+    checkout_root = PARENT_DIR if (PARENT_DIR / "pyproject.toml").is_file() else None
+    scaffold_resources_server(directory=dirpath, checkout_root=checkout_root)
 
 
 @exit_cleanly_on_config_error
@@ -1077,9 +1287,12 @@ def pip_list():  # pragma: no cover
     && source .venv/bin/activate \\
     && {pip_list_cmd}"""
 
-    print(f"  Package list for: {config.entrypoint}")
-    print(f"Virtual environment: {venv_path.absolute()}")
-    print("-" * 72)
+    # Only in the default human view: an explicit --format (json, freeze) is meant to be piped, so stdout
+    # must carry nothing but `uv pip list` output.
+    if not config.format:
+        print(f"  Package list for: {config.entrypoint}")
+        print(f"Virtual environment: {venv_path.absolute()}")
+        print("-" * 72)
 
     proc = run_command(command, dir_path)
     return_code = proc.wait()

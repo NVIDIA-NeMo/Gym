@@ -1,0 +1,108 @@
+# Worked example of parallel tool-call verification.
+#
+# AUTHORING. A dataset row asks for parallel calls by setting `expected_action.type` to
+# `function_call_batch` with a `calls` list of the usual `function_call` objects:
+#
+#   "expected_action": {"type": "function_call_batch", "calls": [
+#       {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Paris\"}"},
+#       {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Tokyo\"}"}]}
+#
+# You MUST write it that way -- it is not inferred. `type` is a required discriminator, and a row
+# left as a plain `function_call` is only ever checked for that one call, no matter how many calls
+# the model emits. See data/parallel_example.jsonl for complete rows.
+#
+# The response side needs nothing: `extract_action` collects every `function_call` item the model
+# emitted and builds the batch itself, so N emitted calls are compared as a set automatically.
+#
+# The two sets are matched as an unordered multiset, so the order the model emits them in does not
+# matter. Rows using plain `function_call` or `message` keep working unchanged.
+#
+# Try it, in two steps like the rest of this server's examples:
+#
+#   gym env start \
+#     --config resources_servers/single_step_tool_use_with_argument_comparison/configs/parallel_tool_calls_single_step_tool_use_with_argument_comparison.yaml \
+#     --model-type openai_model
+#
+#   gym eval run --no-serve \
+#     --agent parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent \
+#     --input resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl \
+#     --output /tmp/parallel_rollouts.jsonl
+#
+# `parallel_tool_call_rewarding` is the master switch, and it defaults to FALSE.
+#
+# While it is off, the number of tool calls a response makes is not part of the verdict at all: the
+# response is asked only whether it made the expected call(s), and surplus calls cost nothing. That
+# is exactly how this server behaved before parallel tool-call support existed, which is why it is
+# the default -- every pre-existing dataset scores identically whether or not this feature is
+# merged. It is also the honest default: chat templates do not render differently for
+# `parallel_tool_calls` (the Nemotron template never references the flag), so a model is never told
+# how many calls it may make, and charging it for an extra call would punish behaviour it had no
+# signal to avoid.
+#
+# This config turns it ON, because counting calls is the entire point of this environment. Once on,
+# two further stages apply, both set under `tool_call_comparator_config` below.
+#
+# 1. The cardinality gate decides which response *shapes* are admissible at all:
+#      allow_subset    admits responses that make FEWER calls than expected
+#      allow_superset  admits responses that make MORE calls than expected
+#    Both default to false, so the call count must match exactly and anything else scores 0.
+#
+# 2. parallel_tool_call_reward_mode decides how much credit an admissible response earns:
+#      binary_strict  (default) 1.0 only if every required call matched, else 0.0
+#      fractional               the matched fraction of the required calls
+#      f1                       2 * matched / (expected + actual)
+#
+# The two stages are complementary. Under binary_strict and fractional the gate is a *free pass*:
+# once a shape is admitted, surplus calls cost nothing and allow_subset lets a response earn full
+# credit for emitting only the easiest call. Under f1, the gate instead decides which imperfect
+# shapes are worth *partial* credit, and missing and surplus calls are penalized symmetrically, so
+# only an exact set of calls reaches 1.0.
+#
+# Measured rewards, expecting the 2 calls {alpha, beta}:
+#
+#   response                          gate        binary_strict  fractional     f1
+#   both calls, either order          any         1.000          1.000          1.000
+#   right count, one call wrong       any         0.000          0.500          0.500
+#   only 1 of the 2 calls             allow_subset    1.000      1.000          0.667
+#   both calls + 3 junk calls         allow_superset  1.000      1.000          0.571
+#
+# Prefer f1 for RL: with the permissive gates, the other two modes reward a policy that spams
+# every plausible call, or that emits one call and stops.
+parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_server:
+  resources_servers:
+    single_step_tool_use_with_argument_comparison:
+      entrypoint: app.py
+      domain: agent
+      tool_call_comparator_config:
+        word_count_similarity_threshold: 0.1
+        # Master switch. Remove this line (or set it false) and this environment scores exactly as
+        # it did before parallel tool-call support: surplus calls cost nothing, and the three
+        # settings below are not consulted at all.
+        parallel_tool_call_rewarding: true
+        # Admit under- and over-calling, then let f1 score them proportionally. Drop these three
+        # lines to get the strict default: exact call count, all-or-nothing reward.
+        allow_subset: true
+        allow_superset: true
+        parallel_tool_call_reward_mode: f1
+      verified: false
+      description: Parallel tool-call verification; the model must emit the expected set of tool calls in a single turn, in any order.
+parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_server
+      # `policy_model` is the name NeMo-RL supplies for its vLLM policy via
+      # responses_api_models/vllm_model/configs/vllm_model_for_training.yaml, so this environment
+      # can be trained against from NeMo-RL without any adapter.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      # Five rows covering what the verifier distinguishes: three parallel calls, two parallel
+      # calls of one tool, two parallel calls across two tools, one single call, and one message.
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl
+        num_repeats: 1
