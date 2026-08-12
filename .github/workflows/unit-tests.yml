@@ -133,6 +133,9 @@ jobs:
         with:
           submodules: 'recursive'
 
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
+
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -212,6 +215,9 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
+
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
 
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
