@@ -266,11 +266,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             opencode_debug_str = "--print-logs --log-level DEBUG"
 
-        # TODO @bxyu-nvidia: We need to manually activate the conda env here for SWE Verified
-        # Eventually this will only be present on the SWE Bench resources server side
-        # For now, the activation is put on the harness side.
-        conda_activate_command_str = "{ source /opt/miniconda3/bin/activate && conda activate testbed || true; }"
-
         opencode_thinking_str = "--thinking"
 
         if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
@@ -287,7 +282,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # --auto is to approve not explicitly denied requests.
         command = f"""
         echo "Shell: $SHELL" \
-        && {conda_activate_command_str} \
         && echo "Optionally activated Conda env" \
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
