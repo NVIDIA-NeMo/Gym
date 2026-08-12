@@ -254,6 +254,21 @@ def test_responses_to_chat_completion_input_image_part(converter: ResponsesConve
     assert {"type": "image_url", "image_url": {"url": "http://img", "detail": "high"}} in parts
 
 
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"type": "input_image", "file_id": "file_123", "detail": "high"},
+        {"type": "input_image", "image_url": "http://img", "detail": "original"},
+    ],
+    ids=["file_id", "original_detail"],
+)
+def test_responses_to_chat_completion_rejects_unrepresentable_input_images(converter: ResponsesConverter, part: dict):
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "type": "message", "content": [part]}])
+
+    with pytest.raises(NotImplementedError):
+        converter.responses_to_chat_completion_create_params(params)
+
+
 def test_responses_to_chat_completion_unsupported_part_raises(converter: ResponsesConverter):
     # Exercise the converter directly with an unsupported content part type. A raw
     # ResponseCreateParams would reject this at schema-validation time, so we call the
@@ -401,6 +416,28 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
     assert params.max_tokens == 128
     assert params.tools[0]["type"] == "function"
     assert params.tools[0]["function"]["name"] == "get_weather"
+    assert params.tools[0]["function"]["strict"] is True
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "custom", "name": "shell"},
+        {
+            "type": "function",
+            "name": "get_weather",
+            "parameters": {},
+            "strict": True,
+            "defer_loading": True,
+        },
+    ],
+    ids=["custom", "deferred_function"],
+)
+def test_responses_to_chat_completion_rejects_unimplemented_tool_conversion(converter: ResponsesConverter, tool: dict):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", tools=[tool])
+
+    with pytest.raises(NotImplementedError):
+        converter.responses_to_chat_completion_create_params(params)
 
 
 @pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
@@ -463,7 +500,7 @@ def test_chat_completion_to_responses_tools_accepts_none(converter: ResponsesCon
     assert converter._chat_completion_to_responses_tools(None) == []
 
 
-@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high"])
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh"])
 def test_reasoning_effort_round_trips_between_request_schemas(converter: ResponsesConverter, effort: str):
     responses_params = converter.chat_completion_to_responses_create_params(
         NeMoGymChatCompletionCreateParamsNonStreaming(
@@ -477,6 +514,67 @@ def test_reasoning_effort_round_trips_between_request_schemas(converter: Respons
 
     chat_params = converter.responses_to_chat_completion_create_params(responses_params)
     assert chat_params.reasoning_effort == effort
+
+
+def test_shared_openai_request_fields_round_trip(converter: ResponsesConverter):
+    chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[{"role": "user", "content": "hi"}],
+        moderation={"model": "omni-moderation-latest"},
+        prompt_cache_key="cache-key",
+        prompt_cache_retention="24h",
+        safety_identifier="safe-user",
+        verbosity="high",
+        tools=[],
+    )
+
+    responses_params = converter.chat_completion_to_responses_create_params(chat_params)
+    assert responses_params.moderation == {"model": "omni-moderation-latest"}
+    assert responses_params.prompt_cache_key == "cache-key"
+    assert responses_params.prompt_cache_retention == "24h"
+    assert responses_params.safety_identifier == "safe-user"
+    assert responses_params.text == {"verbosity": "high"}
+
+    round_tripped = converter.responses_to_chat_completion_create_params(responses_params)
+    assert round_tripped.moderation == chat_params.moderation
+    assert round_tripped.prompt_cache_key == chat_params.prompt_cache_key
+    assert round_tripped.prompt_cache_retention == chat_params.prompt_cache_retention
+    assert round_tripped.safety_identifier == chat_params.safety_identifier
+    assert round_tripped.verbosity == chat_params.verbosity
+
+
+def test_responses_to_chat_completion_rejects_message_phase(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "working", "annotations": []}],
+            }
+        ]
+    )
+
+    with pytest.raises(NotImplementedError, match="phase"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+def test_responses_to_chat_completion_rejects_function_namespace(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run",
+                "namespace": "tools",
+                "arguments": "{}",
+            }
+        ]
+    )
+
+    with pytest.raises(NotImplementedError, match="namespace"):
+        converter.responses_to_chat_completion_create_params(params)
 
 
 def test_responses_to_chat_completion_token_id_information_path():
@@ -999,8 +1097,6 @@ def test_downconverting_an_unsupported_type_names_it_and_the_way_out():
         ("max_tool_calls", 2),
         ("previous_response_id", "resp_1"),
         ("prompt", {"id": "pmpt_1"}),
-        ("reasoning", {"effort": "high"}),
-        ("text", {"verbosity": "high"}),
         ("truncation", "auto"),
     ],
 )
@@ -1008,6 +1104,21 @@ def test_downconverting_present_responses_only_fields_fails_explicitly(
     converter: ResponsesConverter, field: str, value
 ):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", **{field: value})
+
+    with pytest.raises(NotImplementedError, match=field):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+def test_downconverting_text_format_fails_explicitly(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", text={"format": {"type": "json_object"}})
+
+    with pytest.raises(NotImplementedError, match="text format"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+@pytest.mark.parametrize("field", ["context", "generate_summary", "summary"])
+def test_downconverting_responses_only_reasoning_fields_fails_explicitly(converter: ResponsesConverter, field: str):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={field: "auto"})
 
     with pytest.raises(NotImplementedError, match=field):
         converter.responses_to_chat_completion_create_params(params)
