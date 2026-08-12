@@ -924,6 +924,14 @@ class TestOpenHandsHarnessProcessor:
         with pytest.raises(ValueError, match="OpenHands/logs"):
             OpenHandsHarnessProcessor(config=config).setup()
 
+    def test_setup_rejects_nonsearchable_prebuilt_output_directory(self, tmp_path: Path) -> None:
+        setup_dir = self._make_prebuilt_runtime(tmp_path)
+        (setup_dir / "OpenHands/logs").chmod(0o200)
+        config = _minimal_server_config().model_copy(update={"openhands_prebuilt_setup_dir": setup_dir})
+
+        with pytest.raises(ValueError, match="not writable and searchable"):
+            OpenHandsHarnessProcessor(config=config).setup()
+
     def test_setup_rejects_prebuilt_runtime_commit_mismatch(self, tmp_path: Path) -> None:
         setup_dir = self._make_prebuilt_runtime(tmp_path)
         openhands_dir = setup_dir / "OpenHands"

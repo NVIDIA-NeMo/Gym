@@ -1548,8 +1548,8 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             relative_path = output_dir.relative_to(resolved_setup_dir)
             if not output_dir.is_dir():
                 raise ValueError(f"OpenHands prebuilt setup is missing writable directory {relative_path}")
-            if not os.access(output_dir, os.W_OK):
-                raise ValueError(f"OpenHands prebuilt directory is not writable: {relative_path}")
+            if not os.access(output_dir, os.W_OK | os.X_OK):
+                raise ValueError(f"OpenHands prebuilt directory is not writable and searchable: {relative_path}")
 
         def _git(*args: str) -> str:
             result = subprocess_run(
