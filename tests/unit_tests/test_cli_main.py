@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
 import os
 import sys
 import types
+from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
@@ -271,6 +273,43 @@ class TestEnvTestResourceServerFlag:
         target, overrides = _dispatch_for(monkeypatch, ["env", "test", "+entrypoint=resources_servers/gpqa"])
         assert target == "nemo_gym.cli.env:test"
         assert overrides == ["+entrypoint=resources_servers/gpqa"]
+
+    def test_workload_name_runs_manifest_fixture(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "gpqa"])
+        assert target == "nemo_gym.cli.env:test_environment_manifest"
+        assert overrides == ['+onboarding_name="gpqa"']
+
+    def test_direct_onboarding_name_override_runs_manifest_fixture(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "+onboarding_name=gpqa"])
+        assert target == "nemo_gym.cli.env:test_environment_manifest"
+        assert overrides == ["+onboarding_name=gpqa"]
+
+    def test_manifest_fixture_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "test", "gpqa", "--kind", "benchmark", "--update-expected", "--json"],
+        )
+        assert target == "nemo_gym.cli.env:test_environment_manifest"
+        assert set(overrides) == {
+            '+onboarding_name="gpqa"',
+            "+catalog_kind=benchmark",
+            "+update_expected=true",
+            "+json=true",
+        }
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["gpqa", "--resources-server", "mcqa"],
+            ["--kind", "benchmark"],
+            ["--update-expected"],
+            ["--json"],
+        ],
+    )
+    def test_manifest_options_do_not_leak_into_legacy_tests(self, monkeypatch: MonkeyPatch, argv: list[str]) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "test", *argv])
+        with pytest.raises(SystemExit):
+            main()
 
 
 class TestDatasetFlags:
@@ -706,6 +745,113 @@ class TestEnvInitFlags:
         assert target == "nemo_gym.cli.env:init_resources_server"
         assert overrides == ["+entrypoint=resources_servers/my_server"]
 
+    @pytest.mark.parametrize("flag, kind", [("--environment", "environment"), ("--benchmark", "benchmark")])
+    def test_workload_target_dispatches_to_new_scaffold(self, monkeypatch: MonkeyPatch, flag: str, kind: str) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "init", flag, "sample"])
+        assert target == "nemo_gym.cli.env:init_environment"
+        assert overrides == [f"+scaffold_kind={kind}", '+scaffold_name="sample"']
+
+    def test_direct_scaffold_kind_override_dispatches_to_new_scaffold(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "init", "+scaffold_kind=environment", "+scaffold_name=sample"],
+        )
+        assert target == "nemo_gym.cli.env:init_environment"
+        assert overrides == ["+scaffold_kind=environment", "+scaffold_name=sample"]
+
+    def test_workload_scaffold_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "env",
+                "init",
+                "--benchmark",
+                "sample",
+                "--profile",
+                "custom-gym-verifier",
+                "--reuse-verifier",
+                "shared",
+                "--reward-range",
+                "-1",
+                "1",
+                "--lower-is-better",
+            ],
+        )
+        assert target == "nemo_gym.cli.env:init_environment"
+        assert set(overrides) == {
+            "+scaffold_kind=benchmark",
+            '+scaffold_name="sample"',
+            "+profile=custom-gym-verifier",
+            '+reuse_verifier="shared"',
+            "+reward_range=[-1.0,1.0]",
+            "+higher_is_better=false",
+        }
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--environment", "one", "--benchmark", "two"],
+            ["--higher-is-better", "--lower-is-better"],
+            ["--environment", "one", "--resources-server", "two"],
+        ],
+    )
+    def test_mutually_exclusive_flags_are_rejected(self, monkeypatch: MonkeyPatch, argv: list[str]) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "init", *argv])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_profile_is_closed(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "init", "--environment", "sample", "--profile", "other"])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_yaml_scalar_like_name_stays_a_string(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "init", "--environment", "true"])
+        parsed = OverridesParser.create().parse_overrides(overrides)[1]
+        assert parsed.value() == "true"
+
+    def test_scaffold_options_are_rejected_for_legacy_init(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["gym", "env", "init", "--resources-server", "sample", "--profile", "custom-gym-verifier"],
+        )
+        with pytest.raises(SystemExit):
+            main()
+
+
+class TestEnvValidateOnboardingFlags:
+    def test_name_selects_manifest_backed_workload(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "validate", "gpqa", "--kind", "benchmark"])
+        assert target == "nemo_gym.cli.env:validate"
+        assert set(overrides) == {'+onboarding_name="gpqa"', "+catalog_kind=benchmark"}
+
+    def test_manifest_sync_and_json_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "validate", "--manifest", "benchmarks/gpqa/manifest.yaml", "--sync", "--json"],
+        )
+        assert target == "nemo_gym.cli.env:validate"
+        assert set(overrides) == {
+            '+manifest_path="benchmarks/gpqa/manifest.yaml"',
+            "+sync=true",
+            "+json=true",
+        }
+
+
+class TestEnvPublishFlags:
+    def test_name_kind_and_json(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "publish", "gpqa", "--kind", "benchmark", "--json"],
+        )
+        assert target == "nemo_gym.cli.env:publish_environment_manifest"
+        assert set(overrides) == {
+            '+onboarding_name="gpqa"',
+            "+catalog_kind=benchmark",
+            "+json=true",
+        }
+
 
 class TestEnvPackagesFlags:
     def test_flags(self, monkeypatch: MonkeyPatch) -> None:
@@ -721,7 +867,7 @@ class TestJsonFlag:
     @pytest.mark.parametrize(
         "argv, expected_target",
         [
-            (["list", "benchmarks", "--json"], "nemo_gym.cli.eval:list_benchmarks"),
+            (["list", "benchmarks", "--json"], "nemo_gym.cli.env:list_environments"),
             (["list", "agents", "--json"], "nemo_gym.cli.agents:list_agents"),
             (["list", "models", "--json"], "nemo_gym.cli.models:list_models"),
             (["env", "status", "--json"], "nemo_gym.cli.env:status"),
@@ -731,47 +877,50 @@ class TestJsonFlag:
         # Reporting commands surface --json as the reserved `json` config key, read centrally by cli.output.emit.
         target, overrides = _dispatch_for(monkeypatch, argv)
         assert target == expected_target
-        assert overrides == ["+json=true"]
+        expected = ["+catalog_kind=benchmark", "+json=true"] if argv[:2] == ["list", "benchmarks"] else ["+json=true"]
+        assert overrides == expected
 
     def test_no_json_no_override(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["list", "benchmarks"])
-        assert overrides == []
+        assert overrides == ["+catalog_kind=benchmark"]
 
 
 class TestSearch:
-    def test_search_query_only_defaults_to_benchmarks(self, monkeypatch: MonkeyPatch) -> None:
-        # `gym search <query>` (no type) reuses the benchmarks listing — backward compatible.
+    def test_search_query_only_defaults_to_unified_environment_catalog(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym search <query>` (no type) searches the unified environment catalog.
         target, overrides = _dispatch_for(monkeypatch, ["search", "math"])
-        assert target == "nemo_gym.cli.eval:list_benchmarks"
+        assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ['+query="math"']
 
     @pytest.mark.parametrize(
-        "component_type, expected_target",
+        "component_type, expected_target, expected_kind",
         [
-            ("benchmarks", "nemo_gym.cli.eval:list_benchmarks"),
-            ("environments", "nemo_gym.cli.env:list_environments"),
-            ("agents", "nemo_gym.cli.agents:list_agents"),
-            ("models", "nemo_gym.cli.models:list_models"),
-            ("resources-servers", "nemo_gym.cli.resources_servers:list_resources_servers"),
+            ("benchmarks", "nemo_gym.cli.env:list_environments", "benchmark"),
+            ("environments", "nemo_gym.cli.env:list_environments", "environment"),
+            ("agents", "nemo_gym.cli.agents:list_agents", None),
+            ("models", "nemo_gym.cli.models:list_models", None),
+            ("resources-servers", "nemo_gym.cli.resources_servers:list_resources_servers", None),
         ],
     )
-    def test_search_type_routes_to_that_listing(self, monkeypatch, component_type, expected_target) -> None:
+    def test_search_type_routes_to_that_listing(
+        self, monkeypatch, component_type, expected_target, expected_kind
+    ) -> None:
         # `gym search <type> <query>` runs that type's listing, filtered by the query.
         target, overrides = _dispatch_for(monkeypatch, ["search", component_type, "swe"])
         assert target == expected_target
-        assert overrides == ['+query="swe"']
+        assert overrides == ([f"+catalog_kind={expected_kind}"] if expected_kind else []) + ['+query="swe"']
 
     def test_search_json(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["search", "math", "--json"])
         assert set(overrides) == {'+query="math"', "+json=true"}
 
-    @pytest.mark.parametrize("query", ["(A)", "a b", "[x]", "A|B"])
+    @pytest.mark.parametrize("query", ["(A)", "a b", "[x]", "A|B", '"quoted" task'])
     def test_search_query_with_special_chars_is_hydra_safe(self, monkeypatch: MonkeyPatch, query) -> None:
         # The query is quoted so Hydra's override grammar accepts characters that are otherwise syntax,
         # e.g. `gym search agents "(A)"` used to raise an override parse error. The quoted override must
         # both be valid Hydra and round-trip back to the original query string.
         _, overrides = _dispatch_for(monkeypatch, ["search", "agents", query])
-        assert overrides == [f'+query="{query}"']
+        assert overrides == [f"+query={json.dumps(query)}"]
         parsed = OverridesParser.create().parse_overrides(overrides)[0]
         assert parsed.value() == query
 
@@ -1002,6 +1151,51 @@ class TestAssetSelectors:
         # Used by `gym env start` / `gym eval run` for environments/ (see environments/*/README.md).
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--environment", "circle_count"])
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'environments/circle_count/config.yaml'}]"]
+
+    def test_nested_manifest_wins_over_legacy_flavor_with_the_same_name(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        suite = tmp_path / "benchmarks" / "suite"
+        nested = suite / "example"
+        nested.mkdir(parents=True)
+        (suite / "example.yaml").write_text("dataset:\n  type: benchmark\n", encoding="utf-8")
+        (nested / "config.yaml").write_text("dataset:\n  type: benchmark\n", encoding="utf-8")
+        (nested / "manifest.yaml").write_text(
+            json.dumps(
+                {
+                    "name": "suite/example",
+                    "version": "0.1.0",
+                    "kind": "benchmark",
+                    "integration_profile": "custom-gym-verifier",
+                    "domain": "other",
+                    "description": "Nested benchmark",
+                    "modality": "text",
+                    "authors": ["Test"],
+                    "reward": {"range": [0, 1], "higher_is_better": True},
+                    "resources_server": "scorer",
+                    "agent_server": "simple_agent",
+                    "model_server": "policy_model",
+                    "datasets": [
+                        {
+                            "name": "validation",
+                            "type": "benchmark",
+                            "jsonl_fpath": "data.jsonl",
+                            "prepare_script": "prepare.py",
+                        }
+                    ],
+                    "canonical_split": "validation",
+                    "standard_prompt_config": "prompt.yaml",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "start", "--benchmark", "suite/example", "--search-dir", str(tmp_path)],
+        )
+
+        assert overrides == [f"+config_paths=[{(nested / 'config.yaml').resolve()}]"]
 
     def test_selectors_merge_into_single_config_paths(self, monkeypatch: MonkeyPatch) -> None:
         # --config and multiple asset selectors all feed one +config_paths list (Hydra rejects duplicates).
@@ -1236,6 +1430,41 @@ class TestListEnvironmentsRouting:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "--json"])
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+json=true"]
+
+    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "list",
+                "environments",
+                "--domain",
+                "math",
+                "--kind",
+                "benchmark",
+                "--modality",
+                "text",
+                "--licensing",
+                "Apache-2.0",
+                "--status",
+                "experimental",
+                "--lifecycle",
+                "active",
+            ],
+        )
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert set(overrides) == {
+            "+domain=math",
+            "+catalog_kind=benchmark",
+            '+modality="text"',
+            '+licensing="Apache-2.0"',
+            "+status=experimental",
+            "+lifecycle=active",
+        }
+
+    def test_catalog_status_is_closed(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "environments", "--status", "unknown"])
+        with pytest.raises(SystemExit):
+            main()
 
     def test_search_dir_populates_extra_roots_env_during_command_then_restores(self, monkeypatch: MonkeyPatch) -> None:
         # `--search-dir` (repeatable) is folded into NEMO_GYM_EXTRA_ROOTS for the duration of the command (no
