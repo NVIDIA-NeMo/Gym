@@ -308,7 +308,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        request.cookies = cookies
+        request._cookies = cookies
         inner_response = await self.responses(
             request=request,
             response=response,
