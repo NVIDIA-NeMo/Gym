@@ -77,6 +77,7 @@ def _load_json(value: Any) -> dict[str, Any]:
 
 
 def _milliseconds(value: Any) -> Optional[float]:
+    """Convert OpenCode's Date.now()-based epoch milliseconds to seconds."""
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
         return None
     return float(value) / 1000
@@ -121,11 +122,14 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
     gaps: list[ObservationGap] = []
     summary_text: dict[str, list[str]] = {}
     summaries_by_parent: dict[str, list[str]] = {}
+    first_item_id_by_message: dict[tuple[str, str], str] = {}
 
     for row in message_rows:
         message = messages[row["id"]]
         session_id = row["session_id"]
-        if message.get("role") == "assistant":
+        if not isinstance(session_id, str) or session_id not in invocation_status:
+            gaps.append(ObservationGap(code="agent_artifact_record_unowned", detail=row["id"]))
+        elif message.get("role") == "assistant":
             if isinstance(message.get("error"), dict):
                 invocation_status[session_id] = "failed"
             message_time = message.get("time") if isinstance(message.get("time"), dict) else {}
@@ -170,6 +174,7 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
                     type="message",
                 )
                 conversation.append(item)
+                first_item_id_by_message.setdefault((session_id, message_id), row["id"])
             continue
         if ptype == "reasoning" and role == "assistant" and isinstance(text, str) and text.strip():
             conversation.append(
@@ -178,6 +183,7 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
                     summary=[NeMoGymSummary(type="summary_text", text=text)],
                 )
             )
+            first_item_id_by_message.setdefault((session_id, message_id), row["id"])
             continue
         if ptype == "tool" and role == "assistant":
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
@@ -197,7 +203,9 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
                 status=response_status,
             )
             conversation.append(call)
+            first_item_id_by_message.setdefault((session_id, message_id), call_id)
             native_time = state.get("time") if isinstance(state.get("time"), dict) else {}
+            # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
             if native_status == "completed" and native_time.get("compacted") is not None:
                 observed_tool_output = "[Old tool result content cleared]"
             else:
@@ -285,6 +293,10 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
                 )
             )
         trigger = "overflow" if part.get("overflow") is True else "automatic" if part.get("auto") is True else "manual"
+        tail_start_id = part.get("tail_start_id") if isinstance(part.get("tail_start_id"), str) else None
+        first_kept_item_id = (
+            first_item_id_by_message.get((session_id, tail_start_id)) if tail_start_id is not None else None
+        )
         compactions.append(
             ContextCompactionObservation(
                 invocation_id=session_id,
@@ -292,9 +304,17 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
                 trigger=trigger,
                 outcome="completed" if summary else "unknown",
                 summary=summary,
-                first_kept_item_id=(part.get("tail_start_id") if isinstance(part.get("tail_start_id"), str) else None),
+                first_kept_item_id=first_kept_item_id,
             )
         )
+        if tail_start_id is not None and first_kept_item_id is None:
+            gaps.append(
+                ObservationGap(
+                    code="compaction_first_kept_item_unavailable",
+                    invocation_id=session_id,
+                    detail=tail_start_id,
+                )
+            )
         if not summary:
             gaps.append(ObservationGap(code="compaction_summary_unavailable", invocation_id=session_id))
         gaps.append(ObservationGap(code="compaction_token_counts_unavailable", invocation_id=session_id))

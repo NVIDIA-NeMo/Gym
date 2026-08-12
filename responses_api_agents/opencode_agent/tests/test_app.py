@@ -223,7 +223,7 @@ class TestParseOpencodeSession:
                                 "input": {"prompt": "inspect"},
                                 "output": "done",
                                 "metadata": {"sessionId": "child"},
-                                "time": {"start": 1000, "end": 3000},
+                                "time": {"start": 1785813051824, "end": 1785813053824},
                             },
                         },
                         {
@@ -234,7 +234,11 @@ class TestParseOpencodeSession:
                                 "status": "completed",
                                 "input": {"command": "pwd"},
                                 "output": "/workspace",
-                                "time": {"start": 1200, "end": 1600, "compacted": 2500},
+                                "time": {
+                                    "start": 1785813052000,
+                                    "end": 1785813052400,
+                                    "compacted": 1785813052500,
+                                },
                             },
                         },
                     ],
@@ -244,7 +248,7 @@ class TestParseOpencodeSession:
                 (
                     "child",
                     "user",
-                    [{"type": "compaction", "auto": True, "overflow": True, "tail_start_id": "m2"}],
+                    [{"type": "compaction", "auto": True, "overflow": True, "tail_start_id": "m3"}],
                 ),
                 (
                     "child",
@@ -275,15 +279,48 @@ class TestParseOpencodeSession:
             )
             == "[Old tool result content cleared]"
         )
-        assert {tool.tool_call_id: tool.duration_ms for tool in _tool_calls(bundle)} == {
+        tools = {tool.tool_call_id: tool for tool in _tool_calls(bundle)}
+        assert {tool_id: tool.duration_ms for tool_id, tool in tools.items()} == {
             "task-1": 2000,
             "bash-1": 400,
         }
+        assert tools["task-1"].started_at == 1785813051.824
+        assert tools["task-1"].completed_at == 1785813053.824
         compaction = _compactions(bundle)[0]
         assert compaction.trigger == "overflow"
         assert compaction.summary == "condensed context"
-        assert compaction.first_kept_item_id == "m2"
+        assert compaction.first_kept_item_id == "p5"
         assert "compaction_model_call_boundary_unavailable" in {gap.code for gap in bundle.gaps}
+
+    def test_reports_unaddressable_compaction_boundary(self, tmp_path) -> None:
+        db = _session_db(
+            tmp_path,
+            [
+                ("user", [{"type": "text", "text": "keep this"}]),
+                ("user", [{"type": "compaction", "tail_start_id": "m0"}]),
+            ],
+        )
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _compactions(bundle)[0].first_kept_item_id is None
+        assert any(gap.code == "compaction_first_kept_item_unavailable" and gap.detail == "m0" for gap in bundle.gaps)
+
+    def test_preserves_parts_owned_by_session_when_message_is_unowned(self, tmp_path) -> None:
+        import sqlite3
+
+        db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "kept"}])])
+        con = sqlite3.connect(db)
+        con.execute("update message set session_id = NULL where id = 'm0'")
+        con.commit()
+        con.close()
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        root = _invocations(bundle)[0]
+        assert root.status == "unknown"
+        assert root.conversation[0].content[0].text == "kept"
+        assert any(gap.code == "agent_artifact_record_unowned" and gap.detail == "m0" for gap in bundle.gaps)
 
     def test_reports_invalid_timing_and_unresolved_tree_edges(self, tmp_path) -> None:
         db = _session_db(
