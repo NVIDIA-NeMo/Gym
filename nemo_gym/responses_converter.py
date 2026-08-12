@@ -263,8 +263,29 @@ class ResponsesConverter(BaseModel):
         state.flush_assistant()
 
         assert "call_id" in m
+        output = m["output"]
+        if isinstance(output, str):
+            content = output
+        elif isinstance(output, list):
+            unsupported_types = sorted(
+                {part.get("type", "<missing>") for part in output if part.get("type") != "input_text"}
+            )
+            if unsupported_types:
+                raise NotImplementedError(
+                    "Cannot convert Responses function_call_output "
+                    f"for call {m['call_id']!r} to a Chat Completions tool message: "
+                    "Chat tool messages cannot represent content part type(s) "
+                    f"{', '.join(repr(part_type) for part_type in unsupported_types)}"
+                )
+            content = [{"type": "text", "text": part["text"]} for part in output]
+        else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
+            raise TypeError(
+                "Responses function_call_output must be a string or a list of structured content parts, "
+                f"got {type(output).__name__}"
+            )
+
         converted = NeMoGymChatCompletionToolMessageParam(
-            content=m["output"],
+            content=content,
             role="tool",
             tool_call_id=m["call_id"],
         )
@@ -501,10 +522,13 @@ class ResponsesConverter(BaseModel):
             elif role == "assistant":
                 output_items.extend(self.postprocess_assistant_message_dict(message))
             elif role == "tool":
+                content = message["content"]
+                if isinstance(content, list):
+                    content = [{"type": "input_text", "text": part["text"]} for part in content]
                 output_items.append(
                     NeMoGymFunctionCallOutput(
                         call_id=message["tool_call_id"],
-                        output=message["content"],
+                        output=content,
                         status="completed",
                     )
                 )
