@@ -367,7 +367,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stdout": (result.stdout if result else "") or "",
             "opencode_run_stderr": (result.stderr if result else "") or "",
             "opencode_export_found": opencode_export_found,
-            "opencode_finished": ("OpenCode run finished" in result.stdout if result else False),
+            "opencode_finished": ("OpenCode run finished" in (result.stdout or "") if result else False),
         }
 
         return NeMoGymResponse(
