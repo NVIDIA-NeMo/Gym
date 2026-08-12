@@ -26,7 +26,6 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import (
-    RESPONSES_TO_TRAIN,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
@@ -58,6 +57,7 @@ from nemo_gym.openai_utils import (
     Reasoning,
     TokenIDLogProbMixin,
     _validate_atomic_token_metadata,
+    training_variant_of,
 )
 
 
@@ -193,8 +193,18 @@ class ResponsesConverter(BaseModel):
                     self._format_function_call(m, state)
                 case "function_call_output":
                     self._format_function_call_output(m, state)
-                case _:  # pragma: no cover
-                    raise NotImplementedError(f"Unsupported message type: {m}")
+                case _:
+                    # This fires mid-rollout, on whichever model server downconverts.
+                    # Most types that reach it are Responses-only by design.
+                    # They are not an omission here.
+                    # The item itself is left out of the message.
+                    # A compaction record carries an opaque blob, and the tag is what identifies the problem.
+                    raise NotImplementedError(
+                        f"{m['type']!r} has no Chat Completions representation, so this rollout "
+                        f"cannot be downconverted. Route it to a model server that passes "
+                        f"Responses through (nemo_gym serves these unconverted), or add a "
+                        f"`case {m['type']!r}` here if the type does have a chat equivalent."
+                    )
 
             if self.return_token_id_information:
                 token_information = _token_information_from_mapping(m)
@@ -497,7 +507,7 @@ class ResponsesConverter(BaseModel):
         token_information = _token_information_from_mapping(message_dict) if self.return_token_id_information else None
         if token_information is not None:
             last_response_output_item = response_output[-1]
-            train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
+            train_cls = training_variant_of(last_response_output_item.__class__)
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
                 **token_information.model_dump(exclude_none=True),
@@ -614,6 +624,13 @@ class ResponsesConverter(BaseModel):
         )
 
 
+# Responses output-item types that mark the start of the model's own generation.
+# split_responses_input_output_items cuts at the first item of one of these types.
+# Everything before it is replayed prompt.
+# Everything after is the segment carrying sampled tokens.
+#
+# "message" is absent because the role == "assistant" check below already covers an assistant message.
+# A user, system or developer message must not open the segment.
 _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
     {
         "code_interpreter_call",
@@ -627,7 +644,6 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
         "mcp_call",
         "mcp_list_tools",
         "reasoning",
-        "reasoning_item",
         "web_search_call",
     }
 )
@@ -641,10 +657,15 @@ def split_responses_input_output_items(
 
     split_at = len(items)
     for i, item in enumerate(items):
-        if (
-            getattr(item, "role", None) == "assistant"
-            or getattr(item, "type", None) in _RESPONSE_OUTPUT_BOUNDARY_TYPES
-        ):
+        # The role shortcut is for assistant messages only.
+        # Applied to any item carrying a role, it outranks the type set below and decides the split
+        # on its own, so a non-message item that happens to have role == "assistant" would open the
+        # trained segment however it is classified.
+        # Every item type with a role is a message at the pinned SDK, so this is the same behaviour
+        # here, stated in a way later versions cannot subvert.
+        item_type = getattr(item, "type", None)
+        is_assistant_message = item_type == "message" and getattr(item, "role", None) == "assistant"
+        if is_assistant_message or item_type in _RESPONSE_OUTPUT_BOUNDARY_TYPES:
             split_at = i
             break
 

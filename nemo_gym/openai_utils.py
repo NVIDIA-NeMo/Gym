@@ -360,6 +360,40 @@ RESPONSES_TO_TRAIN = {
     NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
 }
 
+# The hosted-tool and client-executed call types have no variant here:
+#   web_search_call, file_search_call, code_interpreter_call, image_generation_call,
+#   mcp_call, computer_call, custom_tool_call, local_shell_call.
+#
+# training_variant_of() is reached only from ResponsesConverter.postprocess_assistant_message_dict,
+# which passes response_output[-1].
+# That list is local to the function.
+# It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage
+# or NeMoGymResponseFunctionToolCall, all registered above.
+#
+# Each variant is also another member of NeMoGymResponseInputItem.
+# That union is validated in smart mode, so an unrecognised item reports the errors of every member.
+# Variants that nothing can emit only make those errors harder to read.
+#
+# The upstream models permit extra fields.
+# An item carrying token IDs without a declared variant still round-trips through its base class.
+# Add a variant when a converter emits that type with sampled token IDs.
+
+
+def training_variant_of(item_cls: type) -> type:
+    """Return the ForTraining subclass that carries token IDs for ``item_cls``.
+
+    Raises NotImplementedError rather than KeyError, so the message can name the class and the fix.
+    Either register the pair in RESPONSES_TO_TRAIN, or stop attaching token IDs to that item.
+    """
+    try:
+        return RESPONSES_TO_TRAIN[item_cls]
+    except KeyError:
+        raise NotImplementedError(
+            f"{item_cls.__name__} has no ForTraining variant, so token IDs and logprobs cannot be "
+            f"attached to it. Add it to RESPONSES_TO_TRAIN in nemo_gym/openai_utils.py if the policy "
+            f"samples this item's tokens; provider-executed hosted calls should not reach this path."
+        ) from None
+
 
 NeMoGymResponseInputItem = Annotated[
     Union[
