@@ -30,13 +30,17 @@ from pathlib import Path
 
 from responses_api_agents.pinchbench.tests.test_app import make_agent
 
+
 _SEEDED_AGENT_ID = "bench-seeded"
 
 
 def _generate_openclaw_config(tmp_path: Path, **agent_kwargs) -> dict:
     agent = make_agent(**agent_kwargs)
     script = (
-        agent._write_direct_exec_wrapper(tmp_path).read_text().split("python3 - <<'PYCFG'\n", 1)[1].split("\nPYCFG", 1)[0]
+        agent._write_direct_exec_wrapper(tmp_path)
+        .read_text()
+        .split("python3 - <<'PYCFG'\n", 1)[1]
+        .split("\nPYCFG", 1)[0]
     )
 
     work_base = tmp_path / "sandbox"
