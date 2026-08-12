@@ -76,6 +76,7 @@ MAPPED_ANTHROPIC_REQUEST_FIELDS = frozenset(
         "messages",
         "metadata",
         "model",
+        "output_config",
         "service_tier",
         "system",
         "temperature",
@@ -84,12 +85,11 @@ MAPPED_ANTHROPIC_REQUEST_FIELDS = frozenset(
         "top_p",
     }
 )
+IGNORED_ANTHROPIC_REQUEST_FIELDS = frozenset({"cache_control"})
 REJECTED_ANTHROPIC_REQUEST_FIELDS = frozenset(
     {
-        "cache_control",
         "container",
         "inference_geo",
-        "output_config",
         "stop_sequences",
         "thinking",
         "top_k",
@@ -171,11 +171,15 @@ REJECTED_RESPONSES_INPUT_ITEM_TYPES = frozenset(
     {
         "code_interpreter_call",
         "computer_call",
+        "computer_call_output",
         "custom_tool_call",
+        "custom_tool_call_output",
         "file_search_call",
         "image_generation_call",
         "local_shell_call",
+        "local_shell_call_output",
         "mcp_approval_request",
+        "mcp_approval_response",
         "mcp_call",
         "mcp_list_tools",
         "web_search_call",
@@ -432,7 +436,8 @@ class AnthropicConverter:
         ``anthropic_body`` is hinted with the Anthropic SDK's native ``MessageCreateParams``
         (a TypedDict union, so it accepts ``stream: true``). It's a type hint only — at runtime
         the value is the raw request dict.
-        Unknown fields fail explicitly so SDK changes cannot be dropped during conversion.
+        Unknown semantic fields fail explicitly so SDK changes cannot be dropped during conversion.
+        Prompt-cache hints are accepted because they do not change the generated response.
         """
         self._validate_anthropic_request(anthropic_body)
         params: Dict[str, Any] = {"input": self._anthropic_messages_to_input_items(anthropic_body)}
@@ -449,6 +454,14 @@ class AnthropicConverter:
             params["temperature"] = anthropic_body["temperature"]
         if anthropic_body.get("top_p") is not None:
             params["top_p"] = anthropic_body["top_p"]
+        output_config = anthropic_body.get("output_config")
+        if output_config:
+            self._reject_non_null_fields(output_config, {"effort"}, "Anthropic output_config")
+            effort = output_config.get("effort")
+            if effort is not None:
+                if effort not in ("low", "medium", "high"):
+                    raise NotImplementedError(f"Unsupported Anthropic output_config effort for Responses: {effort}")
+                params["reasoning"] = {"effort": effort}
         metadata = anthropic_body.get("metadata")
         if metadata and metadata.get("user_id") is not None:
             params["user"] = metadata["user_id"]
@@ -477,7 +490,7 @@ class AnthropicConverter:
         for block in system:
             if block.get("type") != "text":
                 raise NotImplementedError(f"Unsupported Anthropic system block: {block.get('type')}")
-            self._reject_non_null_fields(block, {"text", "type"}, "Anthropic system text block")
+            self._reject_non_null_fields(block, {"cache_control", "text", "type"}, "Anthropic system text block")
             if block.get("text"):
                 texts.append(block["text"])
         return "\n".join(texts)
@@ -516,14 +529,16 @@ class AnthropicConverter:
         for block in blocks:
             block_type = block.get("type")
             if block_type == "text":
-                self._reject_non_null_fields(block, {"text", "type"}, "Anthropic text block")
+                self._reject_non_null_fields(block, {"cache_control", "text", "type"}, "Anthropic text block")
                 pending_parts.append({"type": "input_text", "text": block.get("text", "")})
             elif block_type == "image":
                 pending_parts.append(self._anthropic_image_to_input_part(block))
             elif block_type == "document":
                 pending_parts.append(self._anthropic_document_to_input_part(block))
             elif block_type == "tool_use":
-                self._reject_non_null_fields(block, {"id", "input", "name", "type"}, "Anthropic tool_use block")
+                self._reject_non_null_fields(
+                    block, {"cache_control", "id", "input", "name", "type"}, "Anthropic tool_use block"
+                )
                 flush_message()
                 items.append(
                     NeMoGymResponseFunctionToolCall(
@@ -536,7 +551,15 @@ class AnthropicConverter:
                     )
                 )
             elif block_type == "tool_result":
-                self._reject_non_null_fields(block, {"content", "tool_use_id", "type"}, "Anthropic tool_result block")
+                self._reject_non_null_fields(
+                    block,
+                    {"cache_control", "content", "is_error", "tool_use_id", "type"},
+                    "Anthropic tool_result block",
+                )
+                if block.get("is_error") is True:
+                    raise NotImplementedError(
+                        "Anthropic tool_result is_error=true cannot be represented losslessly in Responses."
+                    )
                 flush_message()
                 items.append(
                     NeMoGymFunctionCallOutput(
@@ -546,7 +569,9 @@ class AnthropicConverter:
                     )
                 )
             elif block_type == "thinking":
-                self._reject_non_null_fields(block, {"signature", "thinking", "type"}, "Anthropic thinking block")
+                self._reject_non_null_fields(
+                    block, {"cache_control", "signature", "thinking", "type"}, "Anthropic thinking block"
+                )
                 flush_message()
                 items.append(
                     NeMoGymResponseReasoningItem(
@@ -557,7 +582,9 @@ class AnthropicConverter:
                     )
                 )
             elif block_type == "redacted_thinking":
-                self._reject_non_null_fields(block, {"data", "type"}, "Anthropic redacted_thinking block")
+                self._reject_non_null_fields(
+                    block, {"cache_control", "data", "type"}, "Anthropic redacted_thinking block"
+                )
                 flush_message()
                 items.append(
                     NeMoGymResponseReasoningItem(
@@ -573,7 +600,7 @@ class AnthropicConverter:
         flush_message()
 
     def _anthropic_image_to_input_part(self, block: Dict[str, Any]) -> Dict[str, Any]:
-        self._reject_non_null_fields(block, {"source", "type"}, "Anthropic image block")
+        self._reject_non_null_fields(block, {"cache_control", "source", "type"}, "Anthropic image block")
         source = block.get("source") or {}
         source_type = source.get("type")
         if source_type == "url":
@@ -598,7 +625,7 @@ class AnthropicConverter:
         }
 
     def _anthropic_document_to_input_part(self, block: Dict[str, Any]) -> Dict[str, Any]:
-        self._reject_non_null_fields(block, {"source", "type"}, "Anthropic document block")
+        self._reject_non_null_fields(block, {"cache_control", "source", "type"}, "Anthropic document block")
         source = block.get("source") or {}
         source_type = source.get("type")
         if source_type == "url":
@@ -620,7 +647,9 @@ class AnthropicConverter:
         for block in content:
             block_type = block.get("type")
             if block_type == "text":
-                self._reject_non_null_fields(block, {"text", "type"}, "Anthropic tool_result text block")
+                self._reject_non_null_fields(
+                    block, {"cache_control", "text", "type"}, "Anthropic tool_result text block"
+                )
                 parts.append({"type": "input_text", "text": block.get("text", "")})
             elif block_type == "image":
                 parts.append(self._anthropic_image_to_input_part(block))
@@ -640,7 +669,7 @@ class AnthropicConverter:
                 raise NotImplementedError(f"Unsupported Anthropic hosted tool type for Responses: {tool_type}")
             self._reject_non_null_fields(
                 tool,
-                {"description", "input_schema", "name", "strict", "type"},
+                {"cache_control", "description", "input_schema", "name", "strict", "type"},
                 "Anthropic function tool",
             )
             responses_tools.append(
@@ -869,7 +898,12 @@ class AnthropicConverter:
             raise NotImplementedError(f"Unsupported Responses service_tier for Anthropic: {service_tier}")
 
     def _validate_anthropic_request(self, body: Dict[str, Any]) -> None:
-        known_fields = MAPPED_ANTHROPIC_REQUEST_FIELDS | REJECTED_ANTHROPIC_REQUEST_FIELDS | {"stream"}
+        known_fields = (
+            MAPPED_ANTHROPIC_REQUEST_FIELDS
+            | IGNORED_ANTHROPIC_REQUEST_FIELDS
+            | REJECTED_ANTHROPIC_REQUEST_FIELDS
+            | {"stream"}
+        )
         for field, value in body.items():
             if value is None:
                 continue

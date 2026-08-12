@@ -28,6 +28,7 @@ from anthropic.types import ContentBlockParam, Message, ToolUnionParam
 from anthropic.types.message_create_params import MessageCreateParamsBase
 
 from nemo_gym.anthropic_converter import (
+    IGNORED_ANTHROPIC_REQUEST_FIELDS,
     MAPPED_ANTHROPIC_CONTENT_BLOCK_TYPES,
     MAPPED_ANTHROPIC_REQUEST_FIELDS,
     MAPPED_ANTHROPIC_STOP_REASONS,
@@ -169,7 +170,14 @@ class TestAnthropicRequestToResponses:
                 "messages": [
                     {
                         "role": "user",
-                        "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "Sunny"}],
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": "Sunny",
+                                "is_error": False,
+                            }
+                        ],
                     }
                 ],
             }
@@ -351,8 +359,6 @@ class TestAnthropicRequestToResponses:
             ("container", "container_1"),
             ("inference_geo", "us"),
             ("thinking", {"type": "adaptive"}),
-            ("output_config", {"effort": "high"}),
-            ("cache_control", {"type": "ephemeral"}),
         ],
     )
     def test_unrepresentable_request_fields_are_rejected(self, field: str, value: object) -> None:
@@ -370,24 +376,6 @@ class TestAnthropicRequestToResponses:
                     "max_tokens": 10,
                 },
                 "citations",
-            ),
-            (
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {"type": "url", "url": "https://example.com/image.png"},
-                                    "cache_control": {"type": "ephemeral"},
-                                }
-                            ],
-                        }
-                    ],
-                    "max_tokens": 10,
-                },
-                "cache_control",
             ),
             (
                 {
@@ -417,7 +405,7 @@ class TestAnthropicRequestToResponses:
                                     "type": "tool_result",
                                     "tool_use_id": "toolu_1",
                                     "content": "bad",
-                                    "is_error": False,
+                                    "is_error": True,
                                 }
                             ],
                         }
@@ -460,6 +448,61 @@ class TestAnthropicRequestToResponses:
                     "service_tier": "standard_only",
                 }
             )
+
+    def test_output_config_effort_is_mapped(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_config": {"effort": "high"},
+            }
+        )
+        assert params.reasoning["effort"] == "high"
+
+        with pytest.raises(NotImplementedError, match="format"):
+            _converter().anthropic_request_to_responses(
+                {
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "output_config": {"format": {"type": "json_schema"}},
+                }
+            )
+
+        with pytest.raises(NotImplementedError, match="max"):
+            _converter().anthropic_request_to_responses(
+                {
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "output_config": {"effort": "max"},
+                }
+            )
+
+    def test_prompt_cache_hints_do_not_block_ingress(self) -> None:
+        cache_control = {"type": "ephemeral"}
+        params = _converter().anthropic_request_to_responses(
+            {
+                "cache_control": cache_control,
+                "max_tokens": 10,
+                "system": [{"type": "text", "text": "Be concise.", "cache_control": cache_control}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "hi", "cache_control": cache_control}],
+                    }
+                ],
+                "tools": [
+                    {
+                        "name": "lookup",
+                        "description": "Look up a value.",
+                        "input_schema": {"type": "object", "properties": {}},
+                        "cache_control": cache_control,
+                    }
+                ],
+            }
+        )
+        assert params.instructions == "Be concise."
+        assert params.input[0].content == "hi"
+        assert params.tools[0]["name"] == "lookup"
 
 
 class TestResponsesToAnthropicResponse:
@@ -860,10 +903,13 @@ class TestSharedHelperBranches:
 
 class TestSchemaClassification:
     def test_anthropic_request_fields_match_pinned_sdk(self) -> None:
-        assert MAPPED_ANTHROPIC_REQUEST_FIELDS | REJECTED_ANTHROPIC_REQUEST_FIELDS == set(
-            get_type_hints(MessageCreateParamsBase)
+        classified = (
+            MAPPED_ANTHROPIC_REQUEST_FIELDS | IGNORED_ANTHROPIC_REQUEST_FIELDS | REJECTED_ANTHROPIC_REQUEST_FIELDS
         )
+        assert classified == set(get_type_hints(MessageCreateParamsBase))
+        assert not MAPPED_ANTHROPIC_REQUEST_FIELDS & IGNORED_ANTHROPIC_REQUEST_FIELDS
         assert not MAPPED_ANTHROPIC_REQUEST_FIELDS & REJECTED_ANTHROPIC_REQUEST_FIELDS
+        assert not IGNORED_ANTHROPIC_REQUEST_FIELDS & REJECTED_ANTHROPIC_REQUEST_FIELDS
 
     def test_anthropic_content_variants_match_pinned_sdk(self) -> None:
         tags = {get_args(get_type_hints(content_type)["type"])[0] for content_type in get_args(ContentBlockParam)}
