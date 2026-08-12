@@ -79,6 +79,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     _num_requests_total: int = 0
     _num_requests_running: int = 0
+    _num_response_requests_total: int = 0
+    _num_response_requests_running: int = 0
 
     async def _create_episode(
         self,
@@ -90,6 +92,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        self._num_response_requests_total += 1
+        self._num_response_requests_running += 1
+        if self._num_response_requests_total % 100 == 0:
+            print(
+                f"Hit in {self.config.name}: Total requests: {self._num_response_requests_total} Running requests: {self._num_response_requests_running}"
+            )
+
         invocation_id = "root"
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
@@ -250,6 +259,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 tool_calls=tool_records,
                 gaps=trajectory_gaps,
             )
+        self._num_response_requests_running -= 1
         return model_response, trajectory, model_server_cookies, resources_server_cookies
 
     async def responses(
