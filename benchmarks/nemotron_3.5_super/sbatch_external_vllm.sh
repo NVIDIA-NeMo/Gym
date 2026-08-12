@@ -10,6 +10,10 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SBATCH_EXCLUDE=${SBATCH_EXCLUDE:-}
+SBATCH_TIME=${SBATCH_TIME:-04:00:00}
+# auto uses NUM_NODES when sbatch advertises --segment; none omits it; a positive integer overrides it.
+VLLM_SLURM_SEGMENT=${VLLM_SLURM_SEGMENT:-auto}
+export UCX_NET_DEVICES="${UCX_NET_DEVICES:-mlx5_0:1}"
 
 SBATCH_EXCLUDE_ARGS=()
 if [[ -n "$SBATCH_EXCLUDE" ]]; then
@@ -104,10 +108,10 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 export VLLM_USE_FASTOKENS=1
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
-# transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
-# host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
+# transports and the selected InfiniBand/RoCE interface; otherwise UCX treats
+# VRAM as host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
 export UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc
-export UCX_NET_DEVICES=mlx5_0:1
+export UCX_NET_DEVICES="\${UCX_NET_DEVICES:-mlx5_0:1}"
 export UCX_IB_ADDR_TYPE=eth
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
@@ -212,6 +216,25 @@ EOF
 )
 
 NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
+SBATCH_SEGMENT_ARGS=()
+case "$VLLM_SLURM_SEGMENT" in
+    auto)
+        sbatch_help=$(sbatch --help 2>&1)
+        if [[ "$sbatch_help" == *"--segment"* ]]; then
+            SBATCH_SEGMENT_ARGS+=(--segment="$NUM_NODES")
+        fi
+        ;;
+    none)
+        ;;
+    *)
+        if [[ ! "$VLLM_SLURM_SEGMENT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: VLLM_SLURM_SEGMENT must be auto, none, or a positive integer." >&2
+            exit 2
+        fi
+        SBATCH_SEGMENT_ARGS+=(--segment="$VLLM_SLURM_SEGMENT")
+        ;;
+esac
+
 batch_command=$(cat <<EOF
 set -euo pipefail
 
@@ -272,17 +295,19 @@ wait "\$server_step"
 EOF
 )
 
-# --segment > 0 otherwise the engine will hang on the second or third engine step.
+# Some Slurm deployments need --segment > 0 to avoid engine hangs, while
+# upstream Slurm does not provide the option. Auto-detection preserves that
+# behavior and omits the argument when the local sbatch does not advertise it.
 VLLM_PD_WORKLOAD="$command" \
 EVAL_COMMAND="$EVAL_COMMAND" \
 VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
-    --time=04:00:00 \
+    --time="$SBATCH_TIME" \
     "${SBATCH_EXCLUDE_ARGS[@]}" \
+    "${SBATCH_SEGMENT_ARGS[@]}" \
     --job-name=gym-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \
     --exclusive \
-    --segment=$NUM_NODES \
     --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'

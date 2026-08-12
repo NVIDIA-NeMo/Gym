@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Canonical Super VL RL v0.25.1 SQSH build for GB200/B200.
+# Canonical Super VL RL v0.25.1 SQSH build for Blackwell GPUs.
 #
 # Usage:
-#   SLURM_ACCOUNT=<account> ./build-super-vl-rl-v0251-thin.sh /path/image.sqsh
+#   CUDA_ARCH=<architecture> SLURM_ACCOUNT=<account> ./build-super-vl-rl-v0251-thin.sh /path/image.sqsh
 #
 # The build always resolves the latest heads of the team release branches,
 # verifies the published TRTLLM-GEN cubin manifest, and rebuilds the small
@@ -21,7 +21,7 @@ export FMHA_MANIFEST_SHA256="${FMHA_MANIFEST_SHA256:-03e0f29f970de40b0fd3c6025a1
 export FMHA_MANIFEST_ENTRIES="${FMHA_MANIFEST_ENTRIES:-19227}"
 
 VLLM_VERSION=0.25.1         # setuptools-scm cannot infer a version from a branch clone
-CUDA_ARCH=10.0a             # Blackwell (GB200/B200); 9.0a for H100
+export CUDA_ARCH="${CUDA_ARCH:-10.0a}"  # 10.0a for GB200/B200; 10.3a for GB300; 9.0a for H100
 BUILD_ROOT=/opt/super-vl-rl
 
 ###############################################################################
