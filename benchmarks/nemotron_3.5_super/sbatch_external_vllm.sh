@@ -42,10 +42,6 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
-  ulimit -Sn 65535
-fi
-
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
@@ -148,8 +144,6 @@ if (( SLURM_PROCID == 0 )); then
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
-        --prometheus-host 0.0.0.0 \
-        --prometheus-port 9000 \
         --log-level error
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
