@@ -15,6 +15,7 @@
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -857,9 +858,15 @@ class TestOpenHandsHarnessProcessor:
         subprocess.run(["git", "add", "README.md"], cwd=openhands_dir, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "runtime"], cwd=openhands_dir, check=True)
         (openhands_dir / ".venv/bin").mkdir(parents=True)
-        (openhands_dir / ".venv/bin/python").touch()
+        openhands_python = openhands_dir / ".venv/bin/python"
+        openhands_python.write_text("#!/bin/sh\nexit 0\n")
+        openhands_python.chmod(0o755)
         (setup_dir / "miniforge3/bin").mkdir(parents=True)
-        (setup_dir / "miniforge3/bin/python").touch()
+        miniforge_python = setup_dir / "miniforge3/bin/python"
+        miniforge_python.write_text("#!/bin/sh\nexit 0\n")
+        miniforge_python.chmod(0o755)
+        for output_dir in (".eval_sessions", "logs", "evaluation/oh"):
+            (openhands_dir / output_dir).mkdir(parents=True)
         return setup_dir
 
     def test_setup_uses_valid_prebuilt_runtime_without_mutation(
@@ -899,6 +906,22 @@ class TestOpenHandsHarnessProcessor:
         config = _minimal_server_config().model_copy(update={"openhands_prebuilt_setup_dir": setup_dir})
 
         with pytest.raises(ValueError, match="miniforge3/bin/python"):
+            OpenHandsHarnessProcessor(config=config).setup()
+
+    def test_setup_rejects_nonexecutable_prebuilt_interpreter(self, tmp_path: Path) -> None:
+        setup_dir = self._make_prebuilt_runtime(tmp_path)
+        (setup_dir / "miniforge3/bin/python").chmod(0o644)
+        config = _minimal_server_config().model_copy(update={"openhands_prebuilt_setup_dir": setup_dir})
+
+        with pytest.raises(ValueError, match="not executable"):
+            OpenHandsHarnessProcessor(config=config).setup()
+
+    def test_setup_rejects_missing_prebuilt_output_directory(self, tmp_path: Path) -> None:
+        setup_dir = self._make_prebuilt_runtime(tmp_path)
+        (setup_dir / "OpenHands/logs").rmdir()
+        config = _minimal_server_config().model_copy(update={"openhands_prebuilt_setup_dir": setup_dir})
+
+        with pytest.raises(ValueError, match="OpenHands/logs"):
             OpenHandsHarnessProcessor(config=config).setup()
 
     def test_setup_rejects_prebuilt_runtime_commit_mismatch(self, tmp_path: Path) -> None:
@@ -1969,6 +1992,34 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             assert "apptainer exec" in result
             assert "--writable-tmpfs" in result
             assert params.container in result
+
+    def test_openhands_mounts_preserve_paths_with_spaces(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir)
+            params.persistent_dir.mkdir(parents=True, exist_ok=True)
+            params.openhands_setup_dir = Path(tmpdir) / "runtime with space"
+            openhands_dir = params.openhands_setup_dir / "OpenHands"
+            for subdir in [".eval_sessions", "logs", "evaluation/oh"]:
+                (openhands_dir / subdir).mkdir(parents=True, exist_ok=True)
+            (params.openhands_setup_dir / "miniforge3").mkdir(parents=True, exist_ok=True)
+
+            result = wrapper._build_apptainer_command(
+                params,
+                ExecuteContainerCommandArgs(
+                    command="echo hello",
+                    expected_file_pattern="/tmp/*.json",
+                    mode="agent",
+                    timeout=300,
+                ),
+            )
+            tokens = shlex.split(result)
+            mount_specs = [tokens[index + 1] for index, token in enumerate(tokens) if token == "--mount"]
+
+            assert any(
+                f"type=bind,src={openhands_dir},dst=/openhands_setup/OpenHands,ro" == mount_spec
+                for mount_spec in mount_specs
+            )
 
     def test_eval_mode_swebench_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)

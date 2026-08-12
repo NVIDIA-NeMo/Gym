@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from shutil import rmtree
-from subprocess import Popen
+from subprocess import Popen, TimeoutExpired
 from subprocess import run as subprocess_run
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
@@ -1521,9 +1521,35 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
             resolved_setup_dir / "miniforge3/bin/python",
         )
         for required_file in required_files:
+            relative_path = required_file.relative_to(resolved_setup_dir)
             if not required_file.is_file():
-                relative_path = required_file.relative_to(resolved_setup_dir)
                 raise ValueError(f"OpenHands prebuilt setup is missing {relative_path}")
+            if not os.access(required_file, os.X_OK):
+                raise ValueError(f"OpenHands prebuilt interpreter is not executable: {relative_path}")
+            try:
+                interpreter_check = subprocess_run(
+                    [str(required_file), "--version"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (OSError, TimeoutExpired) as error:
+                raise ValueError(f"OpenHands prebuilt interpreter could not run: {relative_path}") from error
+            if interpreter_check.returncode != 0:
+                raise ValueError(f"OpenHands prebuilt interpreter could not run: {relative_path}")
+
+        required_output_dirs = (
+            openhands_dir / ".eval_sessions",
+            openhands_dir / "logs",
+            openhands_dir / "evaluation/oh",
+        )
+        for output_dir in required_output_dirs:
+            relative_path = output_dir.relative_to(resolved_setup_dir)
+            if not output_dir.is_dir():
+                raise ValueError(f"OpenHands prebuilt setup is missing writable directory {relative_path}")
+            if not os.access(output_dir, os.W_OK):
+                raise ValueError(f"OpenHands prebuilt directory is not writable: {relative_path}")
 
         def _git(*args: str) -> str:
             result = subprocess_run(
@@ -3357,7 +3383,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         container_script_path = f"/container_scripts/{command.mode}_script.sh"
         mount_args.append(f"--mount type=bind,src={script_path},dst={container_script_path},ro")
 
-        mount_str = " ".join(mount_args)
+        mount_str = " ".join(f"--mount {shlex.quote(mount_arg.removeprefix('--mount '))}" for mount_arg in mount_args)
 
         # _JAVA_OPTIONS bundles JVM-wide settings that benefit Maven, Gradle,
         # and Robolectric-using tests:
