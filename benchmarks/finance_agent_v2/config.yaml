@@ -8,10 +8,11 @@
 config_paths:
   - resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml
 
-# No endpoints or API keys are set here on purpose. The resource server config
-# gives every judge/tool variable a null-safe `oc.select` default, so this config
-# resolves standalone (prepare needs no model); supply real values through your
-# env.yaml (search_judge_model_base_url / _api_key / _name) or an NVFlow overlay.
+# No endpoints or API keys are set here on purpose. The resource server config gives
+# every judge and tool variable a null-safe `oc.select` default, so none of them
+# blocks `gym eval prepare`, which needs no model at all. A run additionally needs a
+# policy endpoint, which has no default: supply it through env.yaml (policy_base_url
+# / policy_api_key), a CLI override, or an NVFlow overlay.
 
 # Isolated copy of the resource server for this benchmark.
 finance_agent_v2_benchmark_resources_server:

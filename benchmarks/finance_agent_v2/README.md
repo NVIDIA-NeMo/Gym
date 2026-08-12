@@ -26,27 +26,17 @@ resources server on externally generated SDG data, so there is no
 
 ## Setup
 
-Nothing is hardcoded in the committed configs, and nothing below is required for
-the config to *resolve*. Each value resolves as config key → shell environment →
-null-safe default. Tool API keys are easiest to export; a key left unset simply
-registers its tool as unavailable instead of failing startup.
+Everything goes in `env.yaml` at the repo root, which is gitignored. Nothing is
+hardcoded in the committed configs, and only the policy endpoint is required for a
+run: a tool key left unset registers its tool as unavailable instead of failing
+startup.
 
-```bash
-export OPENAI_API_KEY=...   # policy + judge
-export SEC_API_KEY=...      # edgar_search (sec-api.io)
-export TAVILY_API_KEY=...   # web_search (Tavily)
-export TIINGO_API_KEY=...   # price_history (Tiingo)
-# Persistent, shared cache root (survives across jobs; served on cache hits):
-export FINANCE_AGENT_V2_CACHE_DIR=/shared/cache/finance_agent_v2
-```
-
-Model endpoints go in `env.yaml` at the repo root (gitignored). The judge is a
-**separate** server from the policy on purpose: if the policy graded its own
-answers, two models evaluated here would be scored by two different judges and the
-numbers would not be comparable.
+The judge is a **separate** server from the policy on purpose. If the policy graded
+its own answers, two models evaluated here would be scored by two different judges
+and the numbers would not be comparable.
 
 ```yaml
-# env.yaml — model endpoints only (tool keys come from the shell, above)
+# env.yaml
 policy_base_url: https://api.openai.com/v1
 policy_api_key: ${oc.env:OPENAI_API_KEY}
 policy_model_name: gpt-5-mini
@@ -54,7 +44,21 @@ policy_model_name: gpt-5-mini
 search_judge_model_base_url: https://api.openai.com/v1
 search_judge_model_api_key: ${oc.env:OPENAI_API_KEY}
 search_judge_model_name: gpt-5-mini
+
+sec_api_key: ${oc.env:SEC_API_KEY}                 # edgar_search (sec-api.io)
+tavily_api_key: ${oc.env:TAVILY_API_KEY}           # web_search (Tavily)
+pricing_data_api_key: ${oc.env:TIINGO_API_KEY}     # price_history (Tiingo)
+
+# Persistent, shared cache root (survives across jobs; served on cache hits):
+finance_agent_v2_cache_dir: /shared/cache/finance_agent_v2
 ```
+
+`${oc.env:VAR}` reads the value at resolve time, so no secret is written to disk;
+replace it with a literal if you prefer. Every key above except the `policy_*` ones
+also resolves straight from the environment, as config key → environment variable →
+null-safe default, so exporting `SEC_API_KEY`, `TAVILY_API_KEY`, `TIINGO_API_KEY` or
+`FINANCE_AGENT_V2_CACHE_DIR` works without naming them here — useful in CI and batch
+jobs where secrets already arrive in the environment.
 
 ## Run
 
