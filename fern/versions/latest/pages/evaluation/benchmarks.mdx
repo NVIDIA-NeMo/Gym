@@ -8,9 +8,9 @@ position: 2
 New to the concepts? Read [Environments vs Benchmarks](/about/concepts/evaluation#environments-vs-benchmarks) first.
 </Info>
 
-A benchmark is a fixed evaluation configuration built on top of an environment's resources server. It adds a frozen dataset split, a `prepare_script` to reproduce that data, and a documented repeat count — so different models and harnesses can be compared fairly across runs and teams.
+A benchmark is a versioned evaluation protocol built on top of an environment's resources server. It declares a canonical dataset split and prompt configuration, a `prepare_script` that reproduces the data, and a documented repeat count so models and harnesses can be compared fairly across runs and teams.
 
-All environments can be used for training. A benchmark is the evaluation-configured overlay on top of the same verifier: same resources server, fixed data.
+All environments can be used for training. A benchmark is the evaluation-configured overlay on top of the same verifier: the same resources server plus a versioned comparison protocol. Benchmarks are not permanently frozen; corrections and improvements may change their data or prompts, but comparison-affecting changes require a new version.
 
 ## How Benchmarks Relate to Environments
 
@@ -41,9 +41,9 @@ Use the CLI to browse what's available before running:
 gym list benchmarks
 
 # Filter to a capability area
-gym search math
-gym search coding
-gym search safety
+gym search benchmarks math
+gym search benchmarks coding
+gym search benchmarks safety
 
 # Machine-readable output for scripting or CI
 gym list benchmarks --json
