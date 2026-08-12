@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
+from aiohttp import ClientResponseError
 from openai.types.responses import (
     ResponseCodeInterpreterToolCall,
     ResponseComputerToolCall,
@@ -47,6 +48,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
     TokenIDLogProbMixin,
+    _non_retryable_rate_limit_reason,
     accumulate_response_usage,
 )
 
@@ -67,6 +69,52 @@ def _response_with_output(output: list) -> dict:
 class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    @pytest.mark.parametrize(
+        ("content", "reason"),
+        [
+            ('{"error":{"code":"budget_exceeded","message":"limit"}}', "budget_exceeded"),
+            ('{"error":{"code":"insufficient_quota","message":"limit"}}', "insufficient_quota"),
+            ('{"error":{"message":"Budget has been exceeded!"}}', "quota_exhausted"),
+        ],
+    )
+    def test_permanent_quota_429_is_not_retryable(self, content: str, reason: str) -> None:
+        assert _non_retryable_rate_limit_reason(429, content) == reason
+
+    def test_transient_rate_limit_remains_retryable(self) -> None:
+        assert _non_retryable_rate_limit_reason(429, '{"error":{"code":"rate_limit"}}') is None
+        assert _non_retryable_rate_limit_reason(503, '{"error":{"code":"budget_exceeded"}}') is None
+
+    async def test_permanent_quota_response_fails_after_one_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        content = b'{"error":{"code":"budget_exceeded","message":"limit"}}'
+
+        class FakeContent:
+            async def read(self) -> bytes:
+                return content
+
+        class FakeResponse:
+            status = 429
+            content = FakeContent()
+
+            def raise_for_status(self) -> None:
+                raise ClientResponseError(None, (), status=self.status, message="Too Many Requests")
+
+        calls = 0
+
+        async def fake_request(**kwargs) -> FakeResponse:
+            del kwargs
+            nonlocal calls
+            calls += 1
+            return FakeResponse()
+
+        monkeypatch.setattr("nemo_gym.openai_utils.request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.test/v1")
+
+        with pytest.raises(ClientResponseError) as error:
+            await client._request_with_retry(method="POST", url="https://example.test/v1/responses")
+
+        assert calls == 1
+        assert error.value.response_content == content
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

@@ -1,0 +1,67 @@
+config_paths:
+  - resources_servers/biomysterybench_judge/configs/biomysterybench_judge.yaml
+
+biomysterybench_anyterminal_claude_code:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Anthropic's 99-task BioMysteryBench run natively in a NeMo Gym sandbox with Claude Code
+      value: Evaluate agentic bioinformatics analysis over anonymized real-world datasets
+
+      resources_server:
+        type: resources_servers
+        name: biomysterybench_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
+      agent_deps_setup_image: biomysterybench-runtime:v12
+      agent_kwargs:
+        model: ${policy_model_name}
+        # Match the published community reproduction ceiling and prevent a
+        # pathological agent loop from occupying a four-hour task timeout.
+        max_turns: 128
+        timeout: 14400
+        system_prompt: |-
+          You are solving a BioMysteryBench bioinformatics task. The anonymized task files are
+          mounted read-only at /data. Analyze the files with terminal tools and write any temporary
+          files under /workspace. You may install additional tools with apt, pip, or conda and may
+          use standard bioinformatics databases for gene lookup, sequence annotation, BLAST, and
+          reference-genome downloads.
+
+          Before installing anything, check the existing environment. It already includes NumPy,
+          pandas, SciPy, scikit-learn, scikit-image, Biopython, pysam, PyBigWig, Sourmash, PyDESeq2,
+          Scanpy, igraph/Leidenalg, R/Bioconductor, samtools, bcftools, bedtools, BWA, Bowtie2,
+          minimap2, BLAST, SeqKit, FastQC, Nextflow, and PLINK.
+
+          Do not look up GEO, SRA, ENA, or BioProject accession IDs to identify the original dataset,
+          source publication, or study metadata. Do not reverse-identify the source study. When the
+          analysis is complete, return a concise final answer that follows the question's requested
+          format. Your final response is graded, not the particular analysis method you choose.
+
+      container_formatter: "docker://{docker_image}"
+      sandbox_provider:
+        docker: {}
+      docker_network: host
+      run_task_tests: false
+      task_data_mount_path: /data
+      include_allowed_domains_in_system_prompt: true
+      tb_agent_timeout: 14400
+      tb_sandbox_ttl: 15300
+      # The task's sandbox limits are conservative ceilings. These expected-working-set
+      # reservations let five local sandboxes fit without lowering their actual limits.
+      ray_memory_reservation_mb: 5120
+      ray_cpu_reservation: 2.5
+      concurrency: 5
+
+      datasets:
+        - name: biomysterybench
+          type: benchmark
+          jsonl_fpath: benchmarks/biomysterybench/data/biomysterybench_official_99.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/biomysterybench/prepare_official.py
+          num_repeats: 5

@@ -1,0 +1,5 @@
+# Keep stateless re-verification isolated from a concurrently running rollout
+# collection, whose head server uses NeMo Gym's default port 11000.
+head_server:
+  host: 127.0.0.1
+  port: 21000

@@ -1,0 +1,19 @@
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      # The official Kimi-K3 vLLM image returns and accepts the current
+      # `reasoning` field. Replay extracted <think> history through that field
+      # so it is rendered as reasoning rather than visible response content.
+      preserve_reasoning_in_assistant_content: false
+      assistant_reasoning_history_field: reasoning
+      namespace_tool_call_ids_with_response_id: true
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

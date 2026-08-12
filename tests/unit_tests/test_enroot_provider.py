@@ -325,7 +325,7 @@ async def test_create_builds_argv_and_runs_probe(
     start_argv = start_rec.calls[0]
     assert start_argv[:2] == [FAKE_BINARY, "start"]
     assert "--rw" in start_argv
-    assert _contains_seq(start_argv, ["-m", f"{staging}:/sandbox"])
+    assert _contains_seq(start_argv, ["-m", f"{staging}:/sandbox:none:x-create=dir,bind,rw"])
     assert _contains_seq(start_argv, ["-m", "/data:/data"])
     assert _contains_seq(start_argv, ["-m", "/host/a:/code/a"])
     assert _contains_seq(start_argv, ["-e", "FOO=bar"])

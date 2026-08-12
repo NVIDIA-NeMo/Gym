@@ -222,6 +222,23 @@ def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tup
     return "incomplete", "result_missing"
 
 
+def _contains_cli_api_error(output_items: list[Any]) -> bool:
+    """Recognize Claude Code's synthetic terminal message for a failed model call.
+
+    Some CLI versions emit an ``API Error: ...`` assistant message and still report a
+    successful process exit/result envelope. Treating that transport diagnostic as the
+    scientific final answer silently converts infrastructure faults into benchmark zeros.
+    """
+
+    for item in reversed(output_items):
+        if getattr(item, "type", None) != "message" or getattr(item, "role", None) != "assistant":
+            continue
+        content = getattr(item, "content", None) or []
+        text = "".join(getattr(part, "text", "") for part in content)
+        return text.lstrip().startswith("API Error:")
+    return False
+
+
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     """Return (user_message, system_message) from a responses body input list."""
     items = list(body_input)
@@ -511,6 +528,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             output_items, run_metadata = parse_stream_json(stdout_text)
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
+            if _contains_cli_api_error(output_items):
+                status, error_type = "failed", "model_api_error"
             run_metadata["status"] = status
             if error_type is not None:
                 run_metadata["error_type"] = error_type
@@ -609,6 +628,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             rollout_id=rollout_id,
             observation_collector=observation_collector,
         )
+
+        if run_metadata.get("status") == "failed":
+            error_type = run_metadata.get("error_type") or "agent_error"
+            raise RuntimeError(f"claude-code invocation failed: {error_type}")
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"

@@ -40,6 +40,7 @@ from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
+    _contains_cli_api_error,
     _extract_instruction,
     _invocation_outcome,
     parse_stream_json,
@@ -109,6 +110,43 @@ class TestSanity:
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
+
+    def test_cli_api_error_message_is_not_a_valid_final_answer(self) -> None:
+        error_output = _output(
+            _event(
+                "assistant",
+                message={"content": [{"type": "text", "text": 'API Error: 500 "backend failed"'}]},
+            )
+        )
+        normal_output = _output(
+            _event("assistant", message={"content": [{"type": "text", "text": "API error rates are low."}]})
+        )
+
+        assert _contains_cli_api_error(error_output) is True
+        assert _contains_cli_api_error(normal_output) is False
+
+    def test_failed_invocation_raises_instead_of_returning_scorable_response(self) -> None:
+        agent = _make_agent()
+        run_claude_code = AsyncMock(
+            return_value=(
+                _output(
+                    _event(
+                        "assistant",
+                        message={"content": [{"type": "text", "text": 'API Error: 500 "backend failed"'}]},
+                    )
+                ),
+                "moonshotai/Kimi-K3",
+                {"status": "failed", "error_type": "model_api_error"},
+            )
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
+        request = MagicMock(path_params={"rollout_id": "test-rollout"})
+
+        with (
+            patch.object(agent, "_run_claude_code", run_claude_code),
+            pytest.raises(RuntimeError, match="model_api_error"),
+        ):
+            asyncio.run(agent.responses(request=request, body=body))
 
 
 class TestBuildCommand:

@@ -1,0 +1,15 @@
+config_paths:
+  - benchmarks/biomysterybench/config.yaml
+
+biomysterybench_smoke_anyterminal_claude_code:
+  _inherit_from: biomysterybench_anyterminal_claude_code
+  responses_api_agents:
+    anyterminal_agent:
+      description: One-task BioMysteryBench smoke run in a native NeMo Gym sandbox with Claude Code
+      datasets:
+        - name: biomysterybench_smoke
+          type: benchmark
+          jsonl_fpath: benchmarks/biomysterybench/data/biomysterybench_official_smoke.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/biomysterybench/prepare_smoke.py
+          num_repeats: 1

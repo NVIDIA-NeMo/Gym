@@ -1,0 +1,27 @@
+# Corrected portable judge for statelessly re-verifying saved Kimi-K3
+# trajectories after the full sandbox collection has completed.
+biomysterybench_kimi_judge:
+  resources_servers:
+    biomysterybench_judge:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Hidden rubric and anti-cheat verification for BioMysteryBench
+      value: Evaluate final biological conclusions from sandboxed BioMysteryBench analyses
+
+      judge_model_server:
+        type: responses_api_models
+        name: biomysterybench_kimi_judge_model
+      judge_responses_create_params:
+        input: []
+        # Kimi can spend more than 2K tokens resolving borderline synonym
+        # cases before emitting the required final Judgement line.  Keep a
+        # larger cap for the uniform stateless re-verification pass so a
+        # correct trajectory is never scored as an invalid truncated judge.
+        max_output_tokens: 8192
+        temperature: 0.0
+      judge_mode: olympiad
+      judge_prompt_path: resources_servers/biomysterybench_judge/prompts/judge.yaml
+      use_chat_completions_for_judge: true
+      detect_forbidden_accession_lookups: true
+      enforce_allowed_domains: true

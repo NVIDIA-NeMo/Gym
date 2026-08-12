@@ -15,8 +15,17 @@ CLAUDE_SPEC="${CLAUDE_SPEC:-@anthropic-ai/claude-code}"
 install_portable_python
 install_nemo_gym_deps
 
-if [ ! -x "$DEPS_DIR/bin/node" ]; then
-    node_url="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+case "$(uname -m)" in
+    x86_64|amd64) node_arch="x64" ;;
+    arm64|aarch64) node_arch="arm64" ;;
+    *)
+        echo "Unsupported architecture for portable Node: $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+
+if ! [ -x "$DEPS_DIR/bin/node" ] || ! "$DEPS_DIR/bin/node" --version >/dev/null 2>&1; then
+    node_url="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"
     echo "Downloading portable node: $node_url"
     curl -fsSL "$node_url" | tar xJ -C "$DEPS_DIR" --strip-components=1
 fi

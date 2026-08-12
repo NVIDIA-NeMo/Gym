@@ -23,7 +23,7 @@ constructing the agent.
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -32,6 +32,8 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.docker import DockerProvider
+from nemo_gym.sandbox.providers.enroot import EnrootProvider
+from nemo_gym.sandbox.providers.enroot import provider as enroot_provider
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
     AnyTerminalAgent,
@@ -39,13 +41,32 @@ from responses_api_agents.anyterminal_agent.app import (
     AnyTerminalInstanceConfig,
     GymAgentHarnessProcessor,
     RunTerminalAgent,
+    TerminalBenchMetrics,
     _build_provider,
+    _failure_routing_from_metrics,
     _format_container,
     _instruction_from_input,
+    _parse_allowed_domains,
+    _prepare_agent_source_tree,
     _read_task_meta,
     _safe_config_json,
+    _sandbox_model_url,
     update_metrics,
 )
+
+
+def test_failure_routing_from_metrics() -> None:
+    assert _failure_routing_from_metrics(TerminalBenchMetrics()) == {}
+    assert _failure_routing_from_metrics(TerminalBenchMetrics(agent_failed=True, mask_sample=True)) == {
+        "_ng_failure_class": "anyterminal_runtime_error"
+    }
+    assert _failure_routing_from_metrics(TerminalBenchMetrics(sandbox_failed=True, mask_sample=True)) == {
+        "_ng_failure_class": "anyterminal_runtime_error"
+    }
+    assert _failure_routing_from_metrics(TerminalBenchMetrics(agent_timed_out=True, mask_sample=True)) == {
+        "_ng_failure_class": "timeout_exceeded",
+        "_ng_failure_terminal": True,
+    }
 
 
 def _config(**overrides) -> AnyTerminalAgentConfig:
@@ -83,6 +104,11 @@ class TestRunnerTemplate:
         # The runner's agent-agnostic contract is to persist the response where the host reads it.
         assert "/trajectories_mount/response.json" in _RUNNER_TEMPLATE
         assert "response.model_dump_json()" in _RUNNER_TEMPLATE
+
+    def test_request_context_has_rollout_id(self) -> None:
+        rendered = self._render()
+        assert 'path_params={"rollout_id": os.environ.get("NGTB_ROLLOUT_ID", "anyterminal")}' in rendered
+        assert "agent.responses(request=request, body=body)" in rendered
 
     def test_sampling_is_forwarded(self) -> None:
         rendered = self._render()
@@ -171,6 +197,8 @@ def _make_instance_config(tmp_path: Path, **overrides) -> AnyTerminalInstanceCon
     verifier_dir.mkdir(parents=True, exist_ok=True)
     metrics_fpath = tmp_path / "metrics.json"
     metrics_fpath.write_text("{}")
+    agent_source_dir = tmp_path / "agent-source"
+    agent_source_dir.mkdir(parents=True, exist_ok=True)
     defaults: dict = dict(
         host="0.0.0.0",
         port=8080,
@@ -185,6 +213,7 @@ def _make_instance_config(tmp_path: Path, **overrides) -> AnyTerminalInstanceCon
         model_server_url="",
         model_name="test-model",
         nemo_gym_root=PARENT_DIR,
+        agent_source_dir=agent_source_dir,
         agent_deps_dir=tmp_path / "deps",
         problem_info={"task_name": "fix-git", "task_dir": str(tmp_path), "docker_image": "ubuntu:22.04"},
         body=_make_body(),
@@ -302,6 +331,11 @@ class TestSafeConfigJson:
         for key in ("my_secret", "auth_token", "password"):
             assert result["agent_kwargs"][key] == "***"
 
+    def test_token_count_fields_are_not_redacted(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, body=_make_body().model_copy(update={"max_output_tokens": 4096}))
+        result = json.loads(_safe_config_json(cfg))
+        assert result["body"]["max_output_tokens"] == 4096
+
     def test_nested_provider_api_key_redacted(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(
             tmp_path,
@@ -355,6 +389,7 @@ class TestBuildProvider:
     def _fake_apptainer_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Constructing ApptainerProvider hard-errors if the real binary isn't on PATH.
         monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda: "/usr/bin/apptainer")
+        monkeypatch.setattr(enroot_provider, "_require_enroot", lambda: "/usr/bin/enroot")
 
     def test_default_is_docker(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
@@ -366,7 +401,8 @@ class TestBuildProvider:
         assert isinstance(provider, ApptainerProvider)
         binds = provider._exec_config.default_binds
         assert any(str(cfg.persistent_dir) in b and "/trajectories_mount" in b for b in binds)
-        assert any(str(cfg.nemo_gym_root) in b and "/nemo_gym_mount" in b for b in binds)
+        assert any(str(cfg.agent_source_dir) in b and "/nemo_gym_mount" in b for b in binds)
+        assert not any(str(cfg.nemo_gym_root) in b for b in binds)
         assert any(str(cfg.agent_deps_dir) in b and "/agent_deps_mount" in b for b in binds)
         assert any(str(cfg.verifier_dir) in b and "/logs/verifier" in b for b in binds)
 
@@ -387,20 +423,120 @@ class TestBuildProvider:
         provider = _build_provider(cfg)
         assert any(str(cfg.persistent_dir) in a for a in provider._create_config.extra_run_args)
         assert any(str(cfg.verifier_dir) in a for a in provider._create_config.extra_run_args)
+        assert any(str(cfg.agent_source_dir) in a for a in provider._create_config.extra_run_args)
+        assert not any(str(cfg.nemo_gym_root) in a for a in provider._create_config.extra_run_args)
+
+    def test_docker_task_data_is_mounted_read_only(self, tmp_path: Path) -> None:
+        data_dir = tmp_path / "task-data"
+        data_dir.mkdir()
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"docker": {}},
+            problem_info={
+                "task_name": "bio-task",
+                "data_dir": str(data_dir),
+                "docker_image": "ubuntu:22.04",
+            },
+        )
+        provider = _build_provider(cfg)
+        assert f"{data_dir.resolve()}:/data:ro" in provider._create_config.extra_run_args
+
+    def test_enroot_binds_runtime_and_task_data(self, tmp_path: Path) -> None:
+        data_dir = tmp_path / "task-data"
+        data_dir.mkdir()
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"enroot": {}},
+            problem_info={
+                "task_name": "bio-task",
+                "data_dir": str(data_dir),
+                "docker_image": "ubuntu:22.04",
+            },
+        )
+        provider = _build_provider(cfg)
+        assert isinstance(provider, EnrootProvider)
+        mounts = provider._exec_config.default_mounts
+        assert f"{cfg.persistent_dir}:/trajectories_mount:none:x-create=dir,bind,rw" in mounts
+        assert f"{cfg.agent_source_dir}:/nemo_gym_mount:none:x-create=dir,bind,ro" in mounts
+        assert f"{cfg.agent_deps_dir}:/agent_deps_mount:none:x-create=dir,bind,ro" in mounts
+        assert f"{cfg.verifier_dir}:/logs/verifier:none:x-create=dir,bind,rw" in mounts
+        assert f"{data_dir.resolve()}:/data:none:x-create=dir,bind,ro" in mounts
+        assert provider._create_config.remap_root is True
+
+    def test_missing_task_data_fails_before_sandbox_start(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            problem_info={
+                "task_name": "bio-task",
+                "data_dir": str(tmp_path / "missing"),
+                "docker_image": "ubuntu:22.04",
+            },
+        )
+        with pytest.raises(FileNotFoundError, match="task data directory"):
+            _build_provider(cfg)
+
+    def test_remote_provider_rejects_host_task_data(self, tmp_path: Path) -> None:
+        data_dir = tmp_path / "task-data"
+        data_dir.mkdir()
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"opensandbox": {}},
+            problem_info={
+                "task_name": "bio-task",
+                "data_dir": str(data_dir),
+                "docker_image": "ubuntu:22.04",
+            },
+        )
+        with pytest.raises(ValueError, match="read-only mounts are not supported"):
+            _build_provider(cfg)
 
     def test_unknown_provider_returned_as_is(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, sandbox_provider={"opensandbox": {"foo": "bar"}})
         assert _build_provider(cfg) == {"opensandbox": {"foo": "bar"}}
 
 
+def test_agent_source_tree_excludes_repo_data_and_unrelated_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_root = tmp_path / "gym"
+    (fake_root / "nemo_gym").mkdir(parents=True)
+    (fake_root / "nemo_gym" / "__init__.py").write_text("")
+    (fake_root / "responses_api_agents" / "claude_code_agent").mkdir(parents=True)
+    (fake_root / "responses_api_agents" / "__init__.py").write_text("")
+    (fake_root / "responses_api_agents" / "claude_code_agent" / "__init__.py").write_text("")
+    (fake_root / "responses_api_agents" / "claude_code_agent" / "app.py").write_text("VALUE = 1\n")
+    (fake_root / "responses_api_agents" / "other_agent").mkdir()
+    (fake_root / "responses_api_agents" / "other_agent" / "secret.py").write_text("SECRET = 1\n")
+    (fake_root / "benchmarks" / "secret_benchmark").mkdir(parents=True)
+    (fake_root / "benchmarks" / "secret_benchmark" / "rubric.jsonl").write_text("answer")
+
+    monkeypatch.setattr("responses_api_agents.anyterminal_agent.app.PARENT_DIR", fake_root)
+    destination = _prepare_agent_source_tree(
+        tmp_path / "isolated-source", "responses_api_agents.claude_code_agent.app"
+    )
+
+    assert (destination / "nemo_gym" / "__init__.py").is_file()
+    assert (destination / "responses_api_agents" / "claude_code_agent" / "app.py").is_file()
+    assert not (destination / "responses_api_agents" / "other_agent").exists()
+    assert not (destination / "benchmarks").exists()
+
+
 # ── _ray_resource_opts ────────────────────────────────────────────────────────────
 
 
 class TestRayResourceOpts:
-    def _params(self, problem_info: dict, agent_overhead_mb: int = 2048) -> AnyTerminalInstanceConfig:
+    def _params(
+        self,
+        problem_info: dict,
+        agent_overhead_mb: int = 2048,
+        ray_memory_reservation_mb: int | None = None,
+        ray_cpu_reservation: float | None = None,
+    ) -> AnyTerminalInstanceConfig:
         return AnyTerminalInstanceConfig.model_construct(
             problem_info=problem_info,
             agent_overhead_mb=agent_overhead_mb,
+            ray_memory_reservation_mb=ray_memory_reservation_mb,
+            ray_cpu_reservation=ray_cpu_reservation,
         )
 
     def test_defaults_to_one_cpu(self) -> None:
@@ -409,9 +545,19 @@ class TestRayResourceOpts:
     def test_custom_cpus(self) -> None:
         assert AnyTerminalAgent._ray_resource_opts(self._params({"cpus": "2.5"}))["num_cpus"] == 2.5
 
+    def test_explicit_ray_cpu_reservation_replaces_task_cpus(self) -> None:
+        opts = AnyTerminalAgent._ray_resource_opts(self._params({"cpus": "4"}, ray_cpu_reservation=3))
+        assert opts["num_cpus"] == 3
+
     def test_memory_includes_overhead(self) -> None:
         opts = AnyTerminalAgent._ray_resource_opts(self._params({"memory_mb": "4096"}))
         assert opts["memory"] == (4096 + 2048) * 1024 * 1024
+
+    def test_explicit_ray_memory_reservation_replaces_task_memory_and_overhead(self) -> None:
+        opts = AnyTerminalAgent._ray_resource_opts(
+            self._params({"memory_mb": "16384"}, ray_memory_reservation_mb=12288)
+        )
+        assert opts["memory"] == 12288 * 1024 * 1024
 
     def test_zero_memory_excluded(self) -> None:
         assert "memory" not in AnyTerminalAgent._ray_resource_opts(self._params({"memory_mb": "0"}))
@@ -459,6 +605,109 @@ class TestHarnessProcessorSetup:
             proc.setup()
         assert "already at" in capsys.readouterr().out
 
+    def _claude_proc(self, **overrides) -> GymAgentHarnessProcessor:
+        return GymAgentHarnessProcessor(
+            config=_config(
+                agent_server_module="responses_api_agents.claude_code_agent.app",
+                agent_server_class="ClaudeCodeAgent",
+                agent_config_class="ClaudeCodeAgentConfig",
+                **overrides,
+            )
+        )
+
+    def test_macos_requires_linux_setup_image(self, tmp_path: Path) -> None:
+        proc = self._claude_proc()
+        with (
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path),
+            patch("responses_api_agents.anyterminal_agent.app.sys.platform", "darwin"),
+        ):
+            with pytest.raises(RuntimeError, match="agent_deps_setup_image"):
+                proc.setup()
+
+    def test_macos_exports_lock_and_bootstraps_in_linux_container(self, tmp_path: Path) -> None:
+        fake_root = tmp_path / "gym"
+        fake_parent = fake_root / "responses_api_agents" / "anyterminal_agent"
+        fake_script = (
+            fake_root / "responses_api_agents" / "claude_code_agent" / "scripts" / "claude_code_agent_deps.sh"
+        )
+        fake_shared = fake_parent / "setup_scripts" / "_portable_python.sh"
+        fake_script.parent.mkdir(parents=True)
+        fake_shared.parent.mkdir(parents=True)
+        fake_script.write_text("#!/bin/bash\n")
+        fake_shared.write_text("#!/bin/bash\n")
+        (fake_root / "uv.lock").write_text("version = 1\n")
+
+        proc = self._claude_proc(agent_deps_setup_image="biomysterybench-runtime:v11")
+        export_proc = MagicMock()
+        export_proc.wait.return_value = 0
+        docker_proc = MagicMock()
+        docker_proc.wait.return_value = 0
+
+        with (
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=fake_parent),
+            patch("responses_api_agents.anyterminal_agent.app.PARENT_DIR", fake_root),
+            patch("responses_api_agents.anyterminal_agent.app.sys.platform", "darwin"),
+            patch(
+                "responses_api_agents.anyterminal_agent.app.Popen",
+                side_effect=[export_proc, docker_proc],
+            ) as popen,
+        ):
+            result = proc.setup()
+
+        deps_dir = fake_parent / "deps" / "anyterminal_claude_code_agent_deps"
+        assert result == deps_dir
+        assert (deps_dir / ".installed").exists()
+
+        export_args = popen.call_args_list[0].args[0]
+        assert export_args[:2] == ["uv", "export"]
+        assert "--locked" in export_args
+        assert popen.call_args_list[0].kwargs["cwd"] == fake_root
+        assert popen.call_args_list[0].kwargs["env"]["UV_PYTHON"]
+
+        docker_args = popen.call_args_list[1].args[0]
+        assert docker_args[:3] == ["docker", "run", "--rm"]
+        assert f"{deps_dir}:/agent_deps" in docker_args
+        assert f"{fake_root}:/nemo_gym:ro" in docker_args
+        assert "NEMO_GYM_REQUIREMENTS=/agent_deps/.bootstrap_requirements.txt" in docker_args
+        assert "biomysterybench-runtime:v11" in docker_args
+
+    def test_linux_exports_lock_and_passes_requirements_to_installer(self, tmp_path: Path) -> None:
+        fake_root = tmp_path / "gym"
+        fake_parent = fake_root / "responses_api_agents" / "anyterminal_agent"
+        fake_script = (
+            fake_root / "responses_api_agents" / "claude_code_agent" / "scripts" / "claude_code_agent_deps.sh"
+        )
+        fake_shared = fake_parent / "setup_scripts" / "_portable_python.sh"
+        fake_script.parent.mkdir(parents=True)
+        fake_shared.parent.mkdir(parents=True)
+        fake_script.write_text("#!/bin/bash\n")
+        fake_shared.write_text("#!/bin/bash\n")
+        (fake_root / "uv.lock").write_text("version = 1\n")
+
+        proc = self._claude_proc()
+        export_proc = MagicMock()
+        export_proc.wait.return_value = 0
+        install_proc = MagicMock()
+        install_proc.wait.return_value = 0
+
+        with (
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=fake_parent),
+            patch("responses_api_agents.anyterminal_agent.app.PARENT_DIR", fake_root),
+            patch("responses_api_agents.anyterminal_agent.app.sys.platform", "linux"),
+            patch(
+                "responses_api_agents.anyterminal_agent.app.Popen",
+                side_effect=[export_proc, install_proc],
+            ) as popen,
+        ):
+            result = proc.setup()
+
+        deps_dir = fake_parent / "deps" / "anyterminal_claude_code_agent_deps"
+        assert result == deps_dir
+        export_args = popen.call_args_list[0].args[0]
+        assert export_args[:2] == ["uv", "export"]
+        installer_env = popen.call_args_list[1].kwargs["env"]
+        assert installer_env["NEMO_GYM_REQUIREMENTS"] == str(deps_dir / ".bootstrap_requirements.txt")
+
 
 # ── GymAgentHarnessProcessor.get_run_command ─────────────────────────────────────
 
@@ -490,10 +739,62 @@ def _sandbox_result(return_code: int = 0, error_type: str | None = None) -> Simp
 
 
 class TestRunAgentEnv:
+    def test_allowed_domains_are_appended_to_system_prompt(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            agent_kwargs={"system_prompt": "Base prompt."},
+            include_allowed_domains_in_system_prompt=True,
+            problem_info={
+                "task_name": "bio-task",
+                "docker_image": "ubuntu:22.04",
+                "allowed_domains": '["NCBI.NLM.NIH.GOV", "pypi.org"]',
+            },
+        )
+
+        kwargs = json.loads(RunTerminalAgent(config=cfg)._agent_env(cfg)["NGTB_AGENT_KWARGS"])
+
+        assert kwargs["system_prompt"].startswith("Base prompt.")
+        assert "ncbi.nlm.nih.gov, pypi.org" in kwargs["system_prompt"]
+        assert "--max-time 60" in kwargs["system_prompt"]
+
+    def test_allowed_domains_are_ignored_unless_enabled(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            agent_kwargs={"system_prompt": "Base prompt."},
+            problem_info={
+                "task_name": "bio-task",
+                "docker_image": "ubuntu:22.04",
+                "allowed_domains": '["ncbi.nlm.nih.gov"]',
+            },
+        )
+        kwargs = json.loads(RunTerminalAgent(config=cfg)._agent_env(cfg)["NGTB_AGENT_KWARGS"])
+        assert kwargs["system_prompt"] == "Base prompt."
+
     def test_model_url_included_when_set(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, model_server_url="http://model:8000")
         env = RunTerminalAgent(config=cfg)._agent_env(cfg)
         assert env["NGTB_MODEL_URL"] == "http://model:8000"
+
+    def test_enroot_agent_environment_activates_bioinformatics_toolchain(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, sandbox_provider={"enroot": {}})
+        env = RunTerminalAgent(config=cfg)._agent_env(cfg)
+        assert env["PATH"].startswith("/opt/conda/bin:/agent_deps_mount/bin:")
+        assert env["MAMBA_ROOT_PREFIX"] == "/opt/conda"
+
+    def test_macos_docker_rewrites_host_loopback(self) -> None:
+        with patch("responses_api_agents.anyterminal_agent.app.sys.platform", "darwin"):
+            assert (
+                _sandbox_model_url("http://127.0.0.1:8000/rollout/v1", {"docker": {}})
+                == "http://host.docker.internal:8000/rollout/v1"
+            )
+
+    def test_macos_apptainer_keeps_host_loopback(self) -> None:
+        with patch("responses_api_agents.anyterminal_agent.app.sys.platform", "darwin"):
+            assert _sandbox_model_url("http://127.0.0.1:8000/v1", {"apptainer": {}}) == "http://127.0.0.1:8000/v1"
+
+    def test_linux_docker_keeps_host_loopback(self) -> None:
+        with patch("responses_api_agents.anyterminal_agent.app.sys.platform", "linux"):
+            assert _sandbox_model_url("http://127.0.0.1:8000/v1", {"docker": {}}) == "http://127.0.0.1:8000/v1"
 
     def test_no_model_url_when_empty(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path, model_server_url="")
@@ -509,6 +810,15 @@ class TestRunAgentEnv:
         env = RunTerminalAgent(config=cfg)._agent_env(cfg)
         assert env["NGTB_MODEL_NAME"] == "my-model"
         assert json.loads(env["NGTB_AGENT_KWARGS"]) == {"model": "my-model"}
+        assert env["NGTB_ROLLOUT_ID"] == cfg.agent_run_id
+
+
+def test_parse_allowed_domains_rejects_non_lists_and_normalizes() -> None:
+    assert _parse_allowed_domains('["NCBI.NLM.NIH.GOV.", "pypi.org", "pypi.org"]') == [
+        "ncbi.nlm.nih.gov",
+        "pypi.org",
+    ]
+    assert _parse_allowed_domains({"not": "a list"}) == []
 
 
 class TestProcessSingleDatapoint:
@@ -549,6 +859,25 @@ class TestProcessSingleDatapoint:
 
         assert result is False
 
+    async def test_native_verifier_mode_skips_task_tests(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, run_task_tests=False)
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result()),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            with (
+                patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock()) as stage_tests,
+                patch.object(RunTerminalAgent, "_run_eval", new=AsyncMock()) as run_eval,
+            ):
+                result = await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        assert result is None
+        stage_tests.assert_not_awaited()
+        run_eval.assert_not_awaited()
+        assert "resolved" not in json.loads(cfg.metrics_fpath.read_text())
+
     async def test_agent_timeout_sets_flag_and_masks(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
         sandbox = SimpleNamespace(
@@ -562,6 +891,22 @@ class TestProcessSingleDatapoint:
 
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["agent_timed_out"] is True
+        assert metrics["mask_sample"] is True
+
+    async def test_agent_nonzero_exit_sets_failure_and_masks(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, run_task_tests=False)
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result(return_code=1)),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["agent_failed"] is True
+        assert metrics["agent_timed_out"] is False
+        assert metrics["sandbox_failed"] is False
         assert metrics["mask_sample"] is True
 
     async def test_sandbox_start_failure_is_isolated(self, tmp_path: Path) -> None:
@@ -583,10 +928,13 @@ class TestProcessSingleDatapoint:
     async def test_remote_provider_stages_and_collects(self, tmp_path: Path) -> None:
         archive = tmp_path / "deps.tar.gz"
         archive.write_bytes(b"deps")
+        source_archive = tmp_path / "source.tar.gz"
+        source_archive.write_bytes(b"source")
         cfg = _make_instance_config(
             tmp_path,
             sandbox_provider={"opensandbox": {}},
             agent_deps_archive=archive,
+            agent_source_archive=source_archive,
         )
         sandbox = SimpleNamespace(
             start=AsyncMock(),
@@ -606,6 +954,7 @@ class TestProcessSingleDatapoint:
         uploaded = {call.args[1] for call in sandbox.upload.await_args_list}
         assert "/trajectories_mount/instruction.txt" in uploaded
         assert "/trajectories_mount/agent_runner.py" in uploaded
+        assert "/tmp/anyterminal-agent-source.tar.gz" in uploaded
         assert "/tmp/anyterminal-agent-deps.tar.gz" in uploaded
         stage_tests.assert_awaited_once()
         collect.assert_awaited_once()

@@ -1,0 +1,15 @@
+config_paths:
+  - benchmarks/biomysterybench/config.yaml
+
+biomysterybench_v11_anyterminal_claude_code:
+  _inherit_from: biomysterybench_anyterminal_claude_code
+  responses_api_agents:
+    anyterminal_agent:
+      description: Corrected BioMysteryBench v11 run natively in a NeMo Gym sandbox with Claude Code
+      datasets:
+        - name: biomysterybench_v11
+          type: benchmark
+          jsonl_fpath: benchmarks/biomysterybench/data/biomysterybench_v11.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/biomysterybench/prepare.py
+          num_repeats: 5

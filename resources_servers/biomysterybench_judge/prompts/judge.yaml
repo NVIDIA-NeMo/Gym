@@ -1,0 +1,21 @@
+user: |-
+  You are grading the final answer to a BioMysteryBench task. The attempted answer was
+  produced after analyzing biological data in a sandbox. Grade only whether the final
+  answer satisfies the provided task-specific rubric. Accept scientifically equivalent
+  names, standard synonyms, harmless formatting differences, and ordering differences
+  when the task does not require an order. Do not award partial credit.
+
+  The execution system separately checks the benchmark's anti-cheating rule. Do not infer
+  cheating from the answer and do not require the attempted answer to explain its method.
+
+  ***
+  The task: {question}
+  ***
+  The grading rubric: {rubric}
+  ***
+  The attempted final answer: {generation}
+  ***
+
+  Briefly reason about semantic equivalence. On the final line, write exactly one of:
+  Judgement: YES
+  Judgement: NO

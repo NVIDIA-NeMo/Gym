@@ -69,7 +69,9 @@ gym eval run --no-serve \
 ```
 
 Each rollout row contains `reward` (0.0 or 1.0), the full agent trajectory, and
-`mask_sample` (set when a timeout made the reward unreliable).
+`mask_sample` (set when a timeout, sandbox failure, or nonzero agent exit made the
+reward unreliable). Masked attempts are infrastructure failures and must not be
+counted as task failures.
 
 ## Agent wiring
 

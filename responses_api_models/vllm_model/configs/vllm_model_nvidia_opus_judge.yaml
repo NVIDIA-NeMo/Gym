@@ -1,0 +1,13 @@
+biomysterybench_opus_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:BMB_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      api_key: ${oc.env:NVIDIA_API_KEY,unset}
+      model: ${oc.env:BMB_JUDGE_MODEL,azure/anthropic/claude-opus-4-6}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

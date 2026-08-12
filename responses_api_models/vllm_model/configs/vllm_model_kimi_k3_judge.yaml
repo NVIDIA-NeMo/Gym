@@ -1,0 +1,15 @@
+biomysterybench_kimi_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:BMB_KIMI_JUDGE_BASE_URL,http://127.0.0.1:18000/v1}
+      api_key: ${oc.env:BMB_KIMI_JUDGE_API_KEY,EMPTY}
+      model: ${oc.env:BMB_KIMI_JUDGE_MODEL,moonshotai/Kimi-K3}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      preserve_reasoning_in_assistant_content: true
+      namespace_tool_call_ids_with_response_id: true
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

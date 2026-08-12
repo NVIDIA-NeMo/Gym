@@ -186,6 +186,78 @@ class TestAnthropicRequestToResponses:
         )
         assert params.input[0].output == "a\nb"
 
+    def test_tool_result_image_is_preserved_as_multimodal_user_message(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_image",
+                                "content": [
+                                    {"type": "text", "text": "Rendered plot"},
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "image/png",
+                                            "data": "aGVsbG8=",
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        assert params.input[0].type == "function_call_output"
+        assert params.input[0].call_id == "toolu_image"
+        assert params.input[0].output == "Rendered plot\n[Image output attached in the following user message.]"
+        assert params.input[1].role == "user"
+        assert params.input[1].content == [
+            {"type": "input_text", "text": "Image output from tool toolu_image:"},
+            {"type": "input_image", "image_url": PNG_DATA_URL, "detail": "auto"},
+        ]
+
+    def test_parallel_image_tool_results_keep_outputs_before_image_message(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "image/png",
+                                            "data": "aGVsbG8=",
+                                        },
+                                    }
+                                ],
+                            },
+                            {"type": "tool_result", "tool_use_id": "toolu_2", "content": "done"},
+                        ],
+                    }
+                ],
+            }
+        )
+
+        assert [item.type for item in params.input] == ["function_call_output", "function_call_output", "message"]
+        assert params.input[0].call_id == "toolu_1"
+        assert params.input[1].call_id == "toolu_2"
+        assert params.input[2].content[1]["type"] == "input_image"
+
     def test_thinking_block_becomes_reasoning_item(self) -> None:
         params = _converter().anthropic_request_to_responses(
             {
@@ -261,7 +333,7 @@ class TestAnthropicRequestToResponses:
         import pytest
 
         with pytest.raises(NotImplementedError):
-            _converter()._anthropic_tool_result_content_to_text([{"type": "image", "source": {}}])
+            _converter()._anthropic_tool_result_content_to_parts([{"type": "video", "source": {}}])
 
 
 class TestResponsesToAnthropicResponse:

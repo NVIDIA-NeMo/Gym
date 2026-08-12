@@ -3405,7 +3405,9 @@ class TestVLLMConverter:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _make_reasoning_history_model(*, preserve_content: bool) -> VLLMModel:
+def _make_reasoning_history_model(
+    *, preserve_content: bool, history_field: str = "both"
+) -> VLLMModel:
     config = VLLMModelConfig(
         host="0.0.0.0",
         port=8080,
@@ -3418,6 +3420,7 @@ def _make_reasoning_history_model(*, preserve_content: bool) -> VLLMModel:
         uses_reasoning_parser=True,
         uses_interleaved_reasoning=True,
         preserve_reasoning_in_assistant_content=preserve_content,
+        assistant_reasoning_history_field=history_field,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -3445,6 +3448,21 @@ class TestAssistantReasoningHistoryPreprocess:
         assert assistant["reasoning_content"] == "reason"
         assert assistant["reasoning"] == "reason"
 
+    def test_current_reasoning_field_avoids_deprecated_duplicate(self) -> None:
+        model = _make_reasoning_history_model(
+            preserve_content=False, history_field="reasoning"
+        )
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(), self._body("<think>reason</think>\n## Action:\nact")
+        )
+
+        assistant = result["messages"][1]
+        assert assistant == {
+            "role": "assistant",
+            "content": "\n## Action:\nact",
+            "reasoning": "reason",
+        }
+
     def test_preserve_mode_keeps_string_history_byte_for_byte(self) -> None:
         model = _make_reasoning_history_model(preserve_content=True)
         original = "<think>reason</think>\n## Action:\nact"
@@ -3460,6 +3478,30 @@ class TestAssistantReasoningHistoryPreprocess:
 
         assistant = result["messages"][1]
         assert assistant == {"role": "assistant", "content": original}
+
+
+def test_namespace_tool_call_ids_with_chat_completion_id() -> None:
+    model = _make_reasoning_history_model(preserve_content=True)
+    completion = {
+        "id": "chatcmpl-unique",
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {"id": "Bash:0", "function": {"name": "Bash", "arguments": "{}"}},
+                        {"id": "Bash:1", "function": {"name": "Bash", "arguments": "{}"}},
+                    ]
+                }
+            }
+        ],
+    }
+
+    model._namespace_tool_call_ids(completion)
+
+    assert [call["id"] for call in completion["choices"][0]["message"]["tool_calls"]] == [
+        "chatcmpl-unique-tool-0",
+        "chatcmpl-unique-tool-1",
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

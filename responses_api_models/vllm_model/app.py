@@ -20,7 +20,7 @@ import logging
 import os
 from copy import deepcopy
 from time import time, time_ns
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
@@ -157,6 +157,16 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Response parsing remains controlled independently by
     # ``uses_reasoning_parser``.
     preserve_reasoning_in_assistant_content: bool = False
+    # Wire field used when replaying extracted assistant reasoning to the
+    # upstream chat endpoint. ``both`` preserves compatibility with older
+    # vLLM releases during the reasoning_content -> reasoning transition;
+    # current endpoints can select their single accepted field explicitly.
+    assistant_reasoning_history_field: Literal["both", "reasoning_content", "reasoning"] = "both"
+    # Some vLLM tool parsers emit response-local ids such as ``Bash:0`` on
+    # every turn. Agent protocols require call ids to be unique across the
+    # conversation, so optionally namespace returned ids with the unique chat
+    # completion id before converting them to Responses/Anthropic tool calls.
+    namespace_tool_call_ids_with_response_id: bool = False
     replace_developer_role_with_system: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
@@ -449,11 +459,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(content)
                     message_dict["content"] = remaining_content
                     if reasoning_matches and self.config.uses_interleaved_reasoning:
-                        message_dict["reasoning_content"] = reasoning_matches[0]
-
-                        # TODO when NeMo RL migrates to vLLM>=0.16.0, remove the reasoning_content support above.
-                        # Starting with vLLM 0.16.0, the `reasoning_content` field has been deprecated in favor of just `reasoning`
-                        message_dict["reasoning"] = reasoning_matches[0]
+                        self._set_assistant_reasoning_history(message_dict, reasoning_matches[0])
                 elif isinstance(content, list):
                     reasoning_content = None
                     for content_item_dict in content:
@@ -467,9 +473,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                         # Even though we set the reasoning content already here, we still loop through all the content item dicts for the assert above.
                         content_item_dict["text"] = remaining_content
                         if reasoning_matches and self.config.uses_interleaved_reasoning:
-                            message_dict["reasoning_content"] = reasoning_matches[0]
-                            # See the TODO wrt reasoning_content above
-                            message_dict["reasoning"] = reasoning_matches[0]
+                            self._set_assistant_reasoning_history(message_dict, reasoning_matches[0])
                 elif not content:
                     # No content or content None is a no-op
                     pass
@@ -553,6 +557,24 @@ class VLLMModel(SimpleResponsesAPIModel):
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
         return body_dict
+
+    def _set_assistant_reasoning_history(self, message_dict: Dict[str, Any], reasoning: str) -> None:
+        """Set only the reasoning history fields accepted by the endpoint."""
+
+        field = self.config.assistant_reasoning_history_field
+        if field in {"both", "reasoning_content"}:
+            message_dict["reasoning_content"] = reasoning
+        if field in {"both", "reasoning"}:
+            message_dict["reasoning"] = reasoning
+
+    def _namespace_tool_call_ids(self, chat_completion_dict: Dict[str, Any]) -> None:
+        """Make response-local tool ids unique across an agent conversation."""
+
+        response_id = chat_completion_dict.get("id") or f"chatcmpl-{time_ns()}"
+        for choice in chat_completion_dict.get("choices", []):
+            tool_calls = (choice.get("message") or {}).get("tool_calls") or []
+            for index, tool_call in enumerate(tool_calls):
+                tool_call["id"] = f"{response_id}-tool-{index}"
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -669,6 +691,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     "raw_response": deepcopy(chat_completion_dict),
                 }
             )
+
+        if self.config.namespace_tool_call_ids_with_response_id:
+            self._namespace_tool_call_ids(chat_completion_dict)
 
         choice_dict = chat_completion_dict["choices"][0]
         if self.config.uses_reasoning_parser:

@@ -86,6 +86,12 @@ The agent runs `claude -p` as an async subprocess for each request. Claude Code 
 
 Claude Code talks to the model via the Anthropic Messages API (`/v1/messages`). This means it can connect to Anthropic's API directly, to any local endpoint that implements `/v1/messages` (vLLM, Ollama), or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server now serves `/v1/messages` by mapping Messages ↔ Responses around its own `responses()` backend.
 
+The ingress mapping preserves base64 images returned inside Anthropic `tool_result`
+blocks by attaching them as multimodal Responses input after the corresponding
+function-call outputs. The downstream model must have vision enabled to consume
+those images. Claude Code CLI transport diagnostics beginning with `API Error:` are
+classified as invocation failures rather than returned as scorable assistant answers.
+
 By default the agent runs with `--bare`, which skips auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md so each scripted call starts clean and fast; Claude still has access to Bash, file read, and file edit tools. This isolation is the default because it keeps evals reproducible — a rollout depends only on the model, the task input, and the explicit config, not on ambient state of the host. This is the recommended mode for scripted and SDK calls per [Claude docs](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode). The runtime is configurable via `bare`, `mcp_config`, and `settings` (see [Runtime capabilities](#runtime-capabilities)).
 
 Claude Code is auto-installed on first startup via npm or a local Node.js binary if not already on PATH.

@@ -349,6 +349,7 @@ class AnthropicConverter:
         blocks each become their own item, preserving order.
         """
         pending_parts: List[Dict[str, Any]] = []
+        deferred_tool_images: List[Dict[str, Any]] = []
 
         def flush_message() -> None:
             if not pending_parts:
@@ -379,10 +380,23 @@ class AnthropicConverter:
                 )
             elif block_type == "tool_result":
                 flush_message()
+                tool_result_text, tool_result_images = self._anthropic_tool_result_content_to_parts(
+                    block.get("content", "")
+                )
+                if tool_result_images:
+                    attachment_note = "[Image output attached in the following user message.]"
+                    tool_result_text = "\n".join(part for part in (tool_result_text, attachment_note) if part)
+                    deferred_tool_images.append(
+                        {
+                            "type": "input_text",
+                            "text": f"Image output from tool {block['tool_use_id']}:",
+                        }
+                    )
+                    deferred_tool_images.extend(tool_result_images)
                 items.append(
                     NeMoGymFunctionCallOutput(
                         call_id=block["tool_use_id"],
-                        output=self._anthropic_tool_result_content_to_text(block.get("content", "")),
+                        output=tool_result_text,
                         type="function_call_output",
                     )
                 )
@@ -399,6 +413,12 @@ class AnthropicConverter:
             else:
                 raise NotImplementedError(f"Unsupported Anthropic content block type for ingress: {block_type}")
         flush_message()
+        if deferred_tool_images:
+            # Responses function-call outputs are text-only. Preserve image-bearing Anthropic
+            # tool results as a user multimodal message immediately after every tool output in
+            # this turn. Deferring the image message until the end also keeps parallel tool
+            # outputs consecutive, as required by OpenAI-compatible chat backends.
+            items.append(NeMoGymEasyInputMessage(role="user", content=deferred_tool_images, type="message"))
 
     def _anthropic_image_to_input_part(self, block: Dict[str, Any]) -> Dict[str, Any]:
         source = block.get("source") or {}
@@ -416,18 +436,20 @@ class AnthropicConverter:
             "detail": "auto",
         }
 
-    def _anthropic_tool_result_content_to_text(self, content: Any) -> str:
+    def _anthropic_tool_result_content_to_parts(self, content: Any) -> tuple[str, List[Dict[str, Any]]]:
         if isinstance(content, str):
-            return content
-        texts = []
+            return content, []
+        texts: List[str] = []
+        images: List[Dict[str, Any]] = []
         for block in content:
-            if block.get("type") == "text":
+            block_type = block.get("type")
+            if block_type == "text":
                 texts.append(block.get("text", ""))
+            elif block_type == "image":
+                images.append(self._anthropic_image_to_input_part(block))
             else:
-                raise NotImplementedError(
-                    f"Unsupported Anthropic tool_result content block for ingress: {block.get('type')}"
-                )
-        return "\n".join(texts)
+                raise NotImplementedError(f"Unsupported Anthropic tool_result content block for ingress: {block_type}")
+        return "\n".join(texts), images
 
     def _anthropic_tools_to_responses(self, tools: Any) -> List[Dict[str, Any]]:
         if not tools:

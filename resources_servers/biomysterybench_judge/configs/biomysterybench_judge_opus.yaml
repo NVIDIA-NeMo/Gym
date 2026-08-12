@@ -1,0 +1,23 @@
+# Optional Opus 4.6 rubric judge for re-verifying saved BioMysteryBench rollouts.
+# Compose this after the benchmark's default config and the dedicated model config.
+biomysterybench_opus_judge:
+  resources_servers:
+    biomysterybench_judge:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Hidden rubric and anti-cheat verification for BioMysteryBench
+      value: Evaluate final biological conclusions from sandboxed BioMysteryBench analyses
+
+      judge_model_server:
+        type: responses_api_models
+        name: biomysterybench_opus_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 2048
+        temperature: 0.0
+      judge_mode: olympiad
+      judge_prompt_path: resources_servers/biomysterybench_judge/prompts/judge.yaml
+      use_chat_completions_for_judge: true
+      detect_forbidden_accession_lookups: true
+      enforce_allowed_domains: true

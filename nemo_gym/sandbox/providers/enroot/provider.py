@@ -114,12 +114,20 @@ def _find_container_init_pid(base_init: str, marker: str) -> int | None:
     concurrency. The ``enroot start`` wrapper also carries the marker but its cmdline
     starts with the enroot binary, not ``sh -c ``, so it is excluded.
     """
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit():
-            continue
-        cmd = _read_proc_cmdline(int(entry.name))
-        if cmd.startswith("sh -c ") and marker in cmd and base_init in cmd:
-            return int(entry.name)
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        # This fallback is only relevant on Linux (notably nested in Pyxis).
+        # Unit tests and callers on platforms without procfs should continue
+        # polling through the normal enroot-list path.
+        return None
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            cmd = _read_proc_cmdline(int(entry.name))
+            if cmd.startswith("sh -c ") and marker in cmd and base_init in cmd:
+                return int(entry.name)
     return None
 
 
@@ -276,7 +284,8 @@ def _is_missing_container(stderr: str) -> bool:
 def _coerce_mounts(value: Any) -> list[str]:
     """Normalize ``spec.provider_options['mounts']`` into a list of enroot fstab entries.
 
-    Accepts a single ``"src:dst[:type:opts]"`` string or a list of them. These are
+    Accepts a single ``"src:dst[:type:opts]"`` string or a list of them. A robust
+    read-only bind is ``src:dst:none:x-create=dir,bind,ro``. These are
     extra per-sandbox mounts, added on top of the staging mount and the
     provider-level ``exec.default_mounts``.
     """
@@ -480,7 +489,7 @@ class EnrootProvider:
             argv.append("--rw")
         if self._create_config.remap_root:
             argv.append("--root")
-        argv += ["-m", f"{staging_dir}:{mount_point}"]
+        argv += ["-m", f"{staging_dir}:{mount_point}:none:x-create=dir,bind,rw"]
         for mount in self._exec_config.default_mounts:
             argv += ["-m", mount]
         for mount in extra_mounts:

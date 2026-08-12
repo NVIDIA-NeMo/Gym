@@ -27,6 +27,7 @@ from typing import (
     Union,
 )
 
+from aiohttp import ClientResponseError
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
@@ -625,6 +626,34 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
+_NON_RETRYABLE_RATE_LIMIT_CODES = {
+    "billing_hard_limit_reached",
+    "budget_exceeded",
+    "insufficient_quota",
+    "quota_exceeded",
+}
+
+
+def _non_retryable_rate_limit_reason(status: int, content: str) -> Optional[str]:
+    """Classify permanent quota/budget 429s that retries cannot resolve."""
+
+    if status != 429:
+        return None
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        payload = {}
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    if not isinstance(error, dict):
+        error = {}
+    code = str(error.get("code") or "").strip().lower()
+    if code in _NON_RETRYABLE_RATE_LIMIT_CODES:
+        return code
+
+    message = str(error.get("message") or content).lower()
+    if "budget has been exceeded" in message or "insufficient quota" in message:
+        return "quota_exhausted"
+    return None
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -661,11 +690,24 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
+                content = (await response.content.read()).decode()
+                non_retryable_reason = _non_retryable_rate_limit_reason(response.status, content)
+                if non_retryable_reason is not None:
+                    print(
+                        f"[model_no_retry url={request_kwargs.get('url')} status={response.status} "
+                        f"kind={non_retryable_reason}]",
+                        flush=True,
+                    )
+                    try:
+                        response.raise_for_status()
+                    except ClientResponseError as error:
+                        error.response_content = content.encode()
+                        raise
+
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
                 if response.status in RATE_LIMIT_ERROR_CODES:
                     max_num_tries += 1
 
-                content = (await response.content.read()).decode()
                 kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
                 print(
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
