@@ -574,25 +574,41 @@ class ResponsesConverter(BaseModel):
         )
 
 
+_RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
+    {
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "function_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "reasoning",
+        "reasoning_item",
+        "web_search_call",
+    }
+)
+
+
 def split_responses_input_output_items(
     items: List[NeMoGymResponseOutputItem],
 ) -> Tuple[List[NeMoGymResponseOutputItem], List[NeMoGymResponseOutputItem]]:
     if not items:
         return [], []
 
+    split_at = len(items)
     for i, item in enumerate(items):
         if (
             getattr(item, "role", None) == "assistant"
-            or getattr(item, "type", None)
-            in {
-                "reasoning",
-                "reasoning_item",
-            }
-            or getattr(item, "type", None) in ("function_call",)
+            or getattr(item, "type", None) in _RESPONSE_OUTPUT_BOUNDARY_TYPES
         ):
+            split_at = i
             break
 
-    return items[:i], items[i:]
+    return items[:split_at], items[split_at:]
 
 
 # Backward-compatible aliases

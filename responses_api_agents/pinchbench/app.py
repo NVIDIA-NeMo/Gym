@@ -11,33 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""NeMo Gym agent wrapping the PinchBench OpenClaw benchmark.
+"""NeMo Gym agent for the PinchBench/OpenClaw benchmark.
 
-External benchmark, integrated at the agent-server level (mirrors
-`swe_agents` / `harbor_agent`): one JSONL record == one PinchBench task, and
-each `/run` launches **one self-contained sandbox per task** (via Gym's provider-neutral
-Sandbox API, PR #1377) that runs the stock PinchBench `benchmark.py` for that single task
-through OpenClaw, tars its result + transcript under the per-sandbox working mount, and exits. The
-sandbox is the per-task isolation boundary (own filesystem → own `~/.openclaw` → own
-gateway), which is how SWE-bench/Terminus avoid cross-rollout races (see README).
-
-The skill is NOT vendored: the image (Dockerfile.benchmark) clones PinchBench at a
-pinned tag (`v2.0.0`) and applies `setup_scripts/nvidia-pinchbench.patch` (the NVIDIA
-OpenAI-compatible-endpoint + judge integration), and bakes in `run_task.sh` at
-`/opt/run_task.sh` — mirroring how `harbor_agent`/`mini_swe_agent` pin a framework
-commit rather than vendoring.
-
-The sandbox provider is config-selected (`sandbox_provider`): `apptainer` (Slurm/HPC) or
-`opensandbox` (cluster), etc. Each per-task sandbox starts its OWN gateway daemon, so it
-never hits the shared-gateway WorkspaceVanishedError cliff. Results are pulled back via
-`AsyncSandbox.download` (no host bind-mount).
-
-See README.md for design + findings (skill patch, gateway, parity).
+One JSONL record per task; each /run launches a provider-neutral sandbox that runs
+the stock PinchBench benchmark.py for that task, then extracts results and transcript.
 """
 
 import asyncio
 import glob
 import json
+import logging
 import shutil
 import tarfile
 import textwrap
@@ -46,7 +29,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -54,7 +37,9 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -67,44 +52,43 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
+from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
+from responses_api_agents.openclaw_agent.observability import (
+    OPENCLAW_OBSERVATION_SOURCE,
+    build_openclaw_observation_tree,
+    build_openclaw_observations,
+    discover_openclaw_session_tree,
+)
+
+
+_SEARCH_KEY_MAP: dict[str, str] = {"brave": "brave_api_key", "tavily": "tavily_api_key"}
+LOG = logging.getLogger(__name__)
 
 
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
-    # Policy model OpenClaw runs against (streaming-capable endpoint, NOT a Gym
-    # non-streaming model server — see README).
     model_base_url: str
     model_api_key: str
     model_name: str
+    model_server: Optional[ModelServerRef] = None
 
-    # Judge for hybrid / llm_judge tasks (OpenAI-compatible endpoint).
     judge_model: str
     judge_base_url: str
     judge_api_key: str
+    judge_model_server: Optional[ModelServerRef] = None
 
-    # Each task runs in its OWN sandbox with its OWN in-sandbox OpenClaw gateway, so the
-    # gateway never shares a workspace across tasks (avoids the WorkspaceVanishedError cliff
-    # a shared 147-task gateway hits). gym-nano scored 0.583 (n=3), at parity with vanilla
-    # standalone PinchBench (0.564). At openclaw 2026.6.5 `openclaw agent` needs a gateway to
-    # persist transcripts, so this is the only supported mode.
     openclaw_mode: Literal["gateway"] = "gateway"
-    gateway_token: str = "pinchbench-local"  # in-sandbox OpenClaw gateway token
+    gateway_token: str = "pinchbench-local"
 
-    # Per-task sandbox via Gym's provider-neutral Sandbox API (PR #1377), replacing direct
-    # docker/apptainer calls. `sandbox_provider` selects + configures the provider (e.g.
-    # {"apptainer": {...}} or {"opensandbox": {...}}); `sandbox_spec` carries the image
-    # (.sif path or docker:// ref), resources, ttl, etc. env + task_id metadata are injected
-    # per task.
     sandbox_provider: dict[str, Any] = {}
     sandbox_spec: dict[str, Any] = {}
-    task_timeout_s: int = 1800  # per-task exec timeout (PinchBench tasks can be long)
-    # Writable, per-sandbox-isolated working mount inside the sandbox. run_task.sh puts
-    # the skill copy, OpenClaw's $HOME, $TMPDIR and benchmark.py's run-root here, and we
-    # pull results from <base>/out/out.tgz. Default matches the apptainer provider's
-    # mount_point (/sandbox); if you override that, set this to match.
+    task_timeout_s: int = 1800
+    # Must match the provider's mount_point.
     sandbox_work_base: str = "/sandbox"
 
-    web_search_provider: str = "brave"
+    web_search_provider: Literal["brave", "tavily"] = "brave"
     brave_api_key: Optional[str] = None
     tavily_api_key: Optional[str] = None
 
@@ -112,16 +96,9 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
-    # Optional OpenClaw provider request timeout in seconds. None keeps OpenClaw's 120s default.
     openclaw_provider_timeout_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
-    # Where per-task transcripts are archived (kept on disk for inspection, like
-    # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
-    # The harness derives its OpenClaw agent id as `bench-<slug(model_name)>` and then
-    # resolves the agent's workspace by matching that id in `openclaw agents list`
-    # output. Long ids do not match, and every task then silently runs against a
-    # fallback workspace it never reads back. Refuse the run instead.
     max_agent_id_length: int = 64
 
     @model_validator(mode="after")
@@ -136,14 +113,38 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_api_key_present(self) -> "PinchBenchAgentConfig":
+        required_key = _SEARCH_KEY_MAP[self.web_search_provider]
+        if not getattr(self, required_key):
+            raise ValueError(f"web_search_provider={self.web_search_provider!r} requires {required_key} to be set.")
+        return self
 
-# The harness's agent-id prefix (`benchmark.py`: agent_id = f"bench-{model_slug}").
+    @model_validator(mode="after")
+    def _validate_sandbox_config(self) -> "PinchBenchAgentConfig":
+        if not self.sandbox_work_base.startswith("/"):
+            raise ValueError(f"sandbox_work_base={self.sandbox_work_base!r} must be an absolute path.")
+        if self.max_tokens > self.context_window:
+            raise ValueError(
+                f"max_tokens={self.max_tokens} exceeds context_window={self.context_window}. "
+                "OpenClaw would reject or misbehave with this configuration."
+            )
+        if self.sandbox_provider:
+            if len(self.sandbox_provider) != 1:
+                raise ValueError(
+                    f"sandbox_provider must contain exactly one provider, got: {sorted(self.sandbox_provider)}"
+                )
+            get_provider_class(next(iter(self.sandbox_provider)))
+        image = self.sandbox_spec.get("image")
+        if image and "://" not in str(image) and not Path(str(image)).exists():
+            raise ValueError(
+                f"sandbox_spec.image={image!r} does not exist on disk. "
+                "Verify the cache mount is configured and the image path is correct."
+            )
+        return self
+
+
 _AGENT_ID_PREFIX = "bench-"
-
-# Failure-routing sentinels read by the rollout dispatcher (nemo_gym.rollout_collection).
-NG_FAILURE_CLASS_KEY = "_ng_failure_class"
-NG_NO_PERSIST_KEY = "_ng_no_persist"
-NG_TERMINAL_KEY = "_ng_failure_terminal"
 
 
 class SandboxKilledError(RuntimeError):
@@ -171,7 +172,11 @@ class PinchBenchVerifyResponse(BaseVerifyResponse):
     grading_breakdown: dict
     grading_notes: str
     status: str
-    raw_rollout: dict  # transcript archive location + compact metadata
+    raw_rollout: dict
+    ng_agent_observations: AgentObservationBundle | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class PinchBenchAgent(SimpleResponsesAPIAgent):
@@ -189,15 +194,24 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         raise NotImplementedError("PinchBench is an external benchmark; use /run.")
 
-    # --- task env ----------------------------------------------------------
-    def _task_env(self, task_id: str) -> dict:
+    def _task_env(self, task_id: str, rollout_id: Optional[str] = None) -> dict:
+        model_base_url = (
+            self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+            if self.config.model_server is not None
+            else self.config.model_base_url
+        )
+        judge_base_url = (
+            self.resolve_model_base_url(self.config.judge_model_server.name, rollout_id)
+            if self.config.judge_model_server is not None
+            else self.config.judge_base_url
+        )
         env = {
             "TASK_ID": task_id,
             "MODEL_NAME": self.config.model_name,
-            "MODEL_BASE_URL": self.config.model_base_url,
+            "MODEL_BASE_URL": model_base_url,
             "MODEL_API_KEY": self.config.model_api_key,
             "JUDGE_MODEL": self.config.judge_model,
-            "JUDGE_BASE_URL": self.config.judge_base_url,
+            "JUDGE_BASE_URL": judge_base_url,
             "JUDGE_API_KEY": self.config.judge_api_key,
             "OPENAI_API_KEY": self.config.model_api_key,
             "PINCHBENCH_WEB_SEARCH_PROVIDER": self.config.web_search_provider,
@@ -205,21 +219,19 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             "PINCHBENCH_CONTEXT_WINDOW": str(self.config.context_window),
             "TIMEOUT_MULT": str(self.config.timeout_multiplier),
             "PINCHBENCH_WORK_BASE": self.config.sandbox_work_base,
+            "OPENCLAW_GATEWAY_TOKEN": self.config.gateway_token,
         }
-        # Each per-task container starts its OWN OpenClaw gateway daemon (per-task, so
-        # it never hits the shared-workspace WorkspaceVanishedError cliff). The client
-        # in-container picks up the token from this env var.
-        env["OPENCLAW_GATEWAY_TOKEN"] = self.config.gateway_token
         if self.config.openclaw_provider_timeout_seconds:
             env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
         if self.config.brave_api_key:
             env["BRAVE_API_KEY"] = self.config.brave_api_key
         if self.config.tavily_api_key:
             env["TAVILY_API_KEY"] = self.config.tavily_api_key
+        if rollout_id is not None:
+            env["NEMO_GYM_OBSERVABILITY_ENABLED"] = "1"
         return env
 
-    # --- per-task sandbox (Gym Sandbox API; provider-neutral) ---------------
-    def _build_spec(self, task_id: str) -> SandboxSpec:
+    def _build_spec(self, task_id: str, rollout_id: Optional[str] = None) -> SandboxSpec:
         cfg = dict(self.config.sandbox_spec)
         return SandboxSpec(
             image=cfg.get("image"),
@@ -228,30 +240,44 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             workdir=cfg.get("workdir"),
             resources=SandboxResources.from_mapping(cfg.get("resources", {})),
             provider_options=cfg.get("provider_options", {}),
-            env=self._task_env(task_id),
+            env=self._task_env(task_id, rollout_id),
             metadata={"task_id": task_id},
         )
 
-    async def _run_in_sandbox(self, task_id: str, out_dir: Path) -> None:
-        """Run one PinchBench task and pull its /out archive back."""
+    async def _run_in_sandbox(
+        self,
+        task_id: str,
+        out_dir: Path,
+        rollout_id: Optional[str] = None,
+    ) -> int | None:
+        """Run one PinchBench task and pull its /out archive back.
+
+        Returns the apptainer exit code when the direct_exec path exits non-zero but
+        still produced an archive (non-clean exit), or None in all other cases.
+        """
         provider = self.config.sandbox_provider or {}
         apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
         if isinstance(apptainer_cfg, dict) and apptainer_cfg.get("direct_exec"):
-            await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg)
-            return
+            return await self._run_in_apptainer_direct(task_id, out_dir, apptainer_cfg, rollout_id=rollout_id)
 
         if not self.config.sandbox_provider:
             raise ValueError("pinchbench requires sandbox_provider (see configs/pinchbench.yaml)")
         archive = f"{self.config.sandbox_work_base.rstrip('/')}/out/out.tgz"
         sb = AsyncSandbox(self.config.sandbox_provider)
         try:
-            await sb.start(self._build_spec(task_id))
-            await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
+            await sb.start(self._build_spec(task_id, rollout_id))
+            exec_result = await sb.exec("bash /opt/run_task.sh", timeout_s=self.config.task_timeout_s)
+            if exec_result.error_type == "timeout":
+                raise TimeoutError("PinchBench sandbox execution timed out")
+            if exec_result.error_type:
+                detail = exec_result.stderr or exec_result.stdout or "unknown sandbox error"
+                raise RuntimeError(f"PinchBench sandbox execution failed ({exec_result.error_type}): {detail}")
             await sb.download(archive, out_dir / "out.tgz")
         finally:
             await sb.stop()
         with tarfile.open(out_dir / "out.tgz") as tf:
             tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
+        return None
 
     def _write_direct_exec_wrapper(self, staging_dir: Path) -> Path:
         wrapper_path = staging_dir / "run_task_efb.sh"
@@ -362,15 +388,18 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         wrapper_path.chmod(0o755)
         return wrapper_path
 
-    async def _run_in_apptainer_direct(self, task_id: str, out_dir: Path, apptainer_cfg: dict[str, Any]) -> None:
+    async def _run_in_apptainer_direct(
+        self,
+        task_id: str,
+        out_dir: Path,
+        apptainer_cfg: dict[str, Any],
+        rollout_id: Optional[str] = None,
+    ) -> int | None:
         image = self.config.sandbox_spec.get("image")
         if not image:
             raise ValueError("pinchbench sandbox_spec.image is required for direct Apptainer exec")
 
         work_base = self.config.sandbox_work_base.rstrip("/") or "/sandbox"
-        if not work_base.startswith("/"):
-            raise ValueError("pinchbench sandbox_work_base must be an absolute path")
-
         staging_dir = out_dir / "sandbox"
         staging_dir.mkdir(parents=True, exist_ok=True)
         wrapper_path = self._write_direct_exec_wrapper(staging_dir)
@@ -382,7 +411,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         elif isinstance(direct_args, str):
             direct_args = direct_args.split()
 
-        task_env = self._task_env(task_id)
+        task_env = self._task_env(task_id, rollout_id)
         argv = ["apptainer", "exec", *[str(arg) for arg in direct_args]]
         argv += ["--bind", f"{staging_dir}:{work_base}"]
         for key, value in task_env.items():
@@ -420,15 +449,27 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         if not archive.exists():
             raise RuntimeError(f"direct apptainer exec did not produce {archive} for task {task_id}")
 
-        shutil.copy2(archive, out_dir / "out.tgz")
-        with tarfile.open(out_dir / "out.tgz") as tf:
-            tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
+        if proc.returncode != 0:
+            print(
+                f"[pinchbench] non-clean apptainer exit (rc={proc.returncode}) for task {task_id} "
+                "but archive present — continuing with result",
+                flush=True,
+            )
 
-    # --- result parsing -----------------------------------------------------
+        shutil.copy2(archive, out_dir / "out.tgz")
+        with tarfile.open(archive) as tf:
+            tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
+        return proc.returncode if proc.returncode != 0 else None
+
     def _parse_result(self, task_id: str, out_dir: Path) -> dict:
         results = [p for p in glob.glob(str(out_dir / "*.json")) if "transcript" not in p]
         if not results:
             return {"reward": 0.0, "grading_type": "unknown", "breakdown": {}, "notes": "", "status": "error"}
+        if len(results) > 1:
+            print(
+                f"[pinchbench] multiple result JSON files for task {task_id}: {results}; using {results[0]}",
+                flush=True,
+            )
         data = json.loads(Path(results[0]).read_text())
         for t in data.get("tasks", []):
             if t.get("task_id") == task_id:
@@ -455,6 +496,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 parts.append(item)
             elif isinstance(item, dict):
                 parts.append(item.get("text") or item.get("output") or "")
+            else:
+                parts.append(getattr(item, "text", None) or getattr(item, "output", None) or "")
         return "\n".join(p for p in parts if p)
 
     @staticmethod
@@ -485,12 +528,13 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _tool_call_arguments(block: dict) -> str:
-        partial_args = block.get("partialArgs")
-        if isinstance(partial_args, str):
-            return partial_args
         args = block.get("arguments")
         if isinstance(args, str):
             return args
+        if args is None:
+            partial_args = block.get("partialArgs")
+            if isinstance(partial_args, str):
+                return partial_args
         if args is None:
             args = {}
         return json.dumps(args, ensure_ascii=False)
@@ -509,17 +553,25 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 return 0
 
         for event in events:
-            message = event.get("message") or {}
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
             if message.get("role") != "assistant":
                 continue
-            usage = message.get("usage") or {}
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
             input_tokens += as_int(usage.get("input") or usage.get("input_tokens") or usage.get("prompt_tokens"))
             output_tokens += as_int(
                 usage.get("output") or usage.get("output_tokens") or usage.get("completion_tokens")
             )
             cached_tokens += as_int(usage.get("cacheRead"))
-            input_details = usage.get("input_tokens_details") or {}
-            output_details = usage.get("output_tokens_details") or {}
+            input_details = usage.get("input_tokens_details")
+            if not isinstance(input_details, dict):
+                input_details = {}
+            output_details = usage.get("output_tokens_details")
+            if not isinstance(output_details, dict):
+                output_details = {}
             cached_tokens += as_int(input_details.get("cached_tokens"))
             reasoning_tokens += as_int(usage.get("reasoning") or output_details.get("reasoning_tokens"))
 
@@ -538,8 +590,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         if tpath.exists():
             for line in tpath.read_text().splitlines():
                 try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
+                    event = json.loads(line)
+                    events.append(event if isinstance(event, dict) else {"raw": line})
+                except (json.JSONDecodeError, RecursionError):
                     events.append({"raw": line})
         return events
 
@@ -557,7 +610,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             if event.get("type") != "message":
                 continue
 
-            message = event.get("message") or {}
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
             role = message.get("role")
             if role == "assistant":
                 reasoning = self._reasoning_text(message)
@@ -644,8 +699,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         return self._response_from_transcript_events(task_id, self._read_transcript_events(task_id, out_dir))
 
     def _collect_transcript(self, task_id: str, out_dir: Path, run_id: str) -> tuple[list, str]:
-        """Read the full archived transcript and persist it to transcripts_dir
-        (kept on disk for inspection, like swe_agents' persistent_dir)."""
+        """Read transcript events and copy the transcript directory to transcripts_dir."""
         tdir = out_dir / "0001_transcripts"
         events = self._read_transcript_events(task_id, out_dir)
         archive = ""
@@ -654,14 +708,16 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.copytree(tdir, dest, dirs_exist_ok=True)
+                session_store = out_dir / "openclaw_sessions"
+                if session_store.exists():
+                    shutil.copytree(session_store, dest / "openclaw_sessions", dirs_exist_ok=True)
                 archive = str(dest)
             except OSError:
                 pass
         return events, archive
 
     def _empty_response(self, task_id: str) -> NeMoGymResponse:
-        """Minimal valid response for the failure path, so /run can return 200
-        with reward 0 (never 500) even when no transcript was ever produced."""
+        """Minimal valid response for the failure path when no transcript was produced."""
         return NeMoGymResponse(
             id=task_id,
             created_at=1.0,
@@ -681,6 +737,81 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             tool_choice="auto",
         )
 
+    def _build_observations(
+        self,
+        body: PinchBenchRunRequest,
+        response: NeMoGymResponse,
+        transcript_events: list[dict[str, Any]],
+        out_dir: Path,
+        run_id: str,
+    ) -> AgentObservationBundle:
+        try:
+            transcript_available = any(event.get("type") == "message" for event in transcript_events)
+            request_input = body.responses_create_params.input
+            request_items = (
+                [NeMoGymEasyInputMessage(role="user", content=request_input)]
+                if isinstance(request_input, str)
+                else list(request_input)
+            )
+            observed_output: list[Any] = []
+            if transcript_available:
+                observed_output = list(response.output)
+                if (
+                    len(observed_output) == 1
+                    and getattr(observed_output[0], "type", None) == "message"
+                    and not self._content_text(getattr(observed_output[0], "content", None))
+                ):
+                    observed_output = []
+
+            root_session_id = next(
+                (
+                    event.get("id")
+                    for event in transcript_events
+                    if event.get("type") == "session" and isinstance(event.get("id"), str)
+                ),
+                run_id,
+            )
+            session_tree, tree_gaps = discover_openclaw_session_tree(
+                out_dir / "openclaw_sessions" / "agents",
+                root_session_id,
+            )
+            if session_tree:
+                tree_inputs = []
+                for invocation_id, parent_id, events in session_tree:
+                    conversation = openclaw_session_conversation(
+                        events,
+                        input_items=request_items if parent_id is None else None,
+                        fallback_output=observed_output if parent_id is None else None,
+                    )
+                    tree_inputs.append((invocation_id, parent_id, conversation, events))
+                observations = build_openclaw_observation_tree(
+                    tree_inputs,
+                    model_ref=self.config.model_server,
+                )
+            else:
+                conversation = openclaw_session_conversation(
+                    transcript_events,
+                    input_items=request_items,
+                    fallback_output=observed_output,
+                )
+                observations = build_openclaw_observations(
+                    root_session_id,
+                    conversation,
+                    transcript_events,
+                    transcript_available=transcript_available,
+                    model_ref=self.config.model_server,
+                )
+            if any(gap.code == "subagent_hierarchy_unavailable" for gap in tree_gaps):
+                observations.gaps = [gap for gap in observations.gaps if gap.code != "subagent_hierarchy_unavailable"]
+            observations.gaps.extend(tree_gaps)
+        except Exception:
+            LOG.exception("failed to build OpenClaw observations")
+            observations = AgentObservationBundle(
+                source=OPENCLAW_OBSERVATION_SOURCE,
+                gaps=[ObservationGap(code="observation_capture_failed")],
+            )
+        return observations
+
     async def run(self, body: PinchBenchRunRequest = Body(), request: Request = None) -> PinchBenchVerifyResponse:
         record = body.model_dump()
         meta = record.get("verifier_metadata") or {}
@@ -696,13 +827,17 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         response = self._empty_response(task_id)
         transcript_events: list = []
         archive_path = ""
+        non_clean_exit_rc: int | None = None
+        observations: Optional[AgentObservationBundle] = None
+        rollout_id = self.rollout_id_from_run(body)
+        observe = rollout_id is not None
         try:
             async with self._sem:
-                await self._run_in_sandbox(task_id, out_dir)  # one sandbox per task
+                non_clean_exit_rc = await self._run_in_sandbox(task_id, out_dir, rollout_id=rollout_id)
             result = self._parse_result(task_id, out_dir)
-            response = self._response_from_transcript(task_id, out_dir)
             transcript_events, archive_path = self._collect_transcript(task_id, out_dir, run_id)
-        except Exception as exc:  # noqa: BLE001 -- never 500; one task must not abort the whole collection (ng_collect is fail-fast)
+            response = self._response_from_transcript_events(task_id, transcript_events)
+        except Exception as exc:  # noqa: BLE001 -- one task error must not abort the batch
             failure_class = _classify_task_failure(exc)
             print(f"[pinchbench-{failure_class}] {task_id}: {type(exc).__name__}: {exc}", flush=True)
             result = {
@@ -718,7 +853,23 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             elif failure_class == "timeout_exceeded":
                 routing[NG_TERMINAL_KEY] = True
         finally:
+            if observe:
+                observations = self._build_observations(
+                    body,
+                    response,
+                    transcript_events,
+                    out_dir,
+                    run_id,
+                )
             shutil.rmtree(out_dir, ignore_errors=True)
+
+        raw_rollout: dict = {
+            "transcript_event_count": len(transcript_events),
+            "archived_to": archive_path,
+            "run_id": run_id,
+        }
+        if non_clean_exit_rc is not None:
+            raw_rollout["non_clean_exit_rc"] = non_clean_exit_rc
 
         return PinchBenchVerifyResponse(
             **record,
@@ -729,11 +880,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             grading_breakdown=result["breakdown"],
             grading_notes=result["notes"],
             status=result["status"],
-            raw_rollout={
-                "transcript_event_count": len(transcript_events),
-                "archived_to": archive_path,
-                "run_id": run_id,
-            },
+            raw_rollout=raw_rollout,
+            **({"ng_agent_observations": observations.model_dump(mode="json")} if observations is not None else {}),
             **routing,
         )
 
