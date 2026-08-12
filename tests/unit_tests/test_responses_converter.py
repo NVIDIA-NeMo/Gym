@@ -14,6 +14,7 @@
 # limitations under the License.
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -625,7 +626,6 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
 @pytest.mark.parametrize(
     "tool",
     [
-        {"type": "custom", "name": "shell"},
         {
             "type": "function",
             "name": "get_weather",
@@ -633,13 +633,188 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
             "strict": True,
             "defer_loading": True,
         },
+        {
+            "type": "custom",
+            "name": "shell",
+            "defer_loading": True,
+        },
     ],
-    ids=["custom", "deferred_function"],
+    ids=["function", "custom"],
 )
-def test_responses_to_chat_completion_rejects_unimplemented_tool_conversion(converter: ResponsesConverter, tool: dict):
+def test_responses_to_chat_completion_rejects_deferred_tool(converter: ResponsesConverter, tool: dict):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", tools=[tool])
 
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="defer_loading"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+@pytest.mark.parametrize(
+    ("chat_tool", "responses_tool"),
+    [
+        (
+            {"type": "function", "function": {"name": "get_weather"}},
+            {"type": "function", "name": "get_weather", "parameters": None, "strict": None},
+        ),
+        (
+            {"type": "custom", "custom": {"name": "shell", "description": "Run a command"}},
+            {"type": "custom", "name": "shell", "description": "Run a command"},
+        ),
+        (
+            {
+                "type": "custom",
+                "custom": {
+                    "name": "parser",
+                    "format": {
+                        "type": "grammar",
+                        "grammar": {
+                            "definition": "start: WORD",
+                            "syntax": "lark",
+                        },
+                    },
+                },
+            },
+            {
+                "type": "custom",
+                "name": "parser",
+                "format": {
+                    "type": "grammar",
+                    "definition": "start: WORD",
+                    "syntax": "lark",
+                },
+            },
+        ),
+    ],
+    ids=["minimal_function", "custom", "custom_grammar"],
+)
+def test_tool_definitions_round_trip(
+    converter: ResponsesConverter,
+    chat_tool: dict,
+    responses_tool: dict,
+):
+    responses_params = converter.chat_completion_to_responses_create_params(
+        NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[chat_tool],
+        )
+    )
+    assert responses_params.tools == [responses_tool]
+
+    chat_params = converter.responses_to_chat_completion_create_params(responses_params)
+    assert chat_params.tools[0]["type"] == chat_tool["type"]
+    tool_type = chat_tool["type"]
+    assert chat_params.tools[0][tool_type]["name"] == chat_tool[tool_type]["name"]
+    if tool_type == "function":
+        assert chat_params.tools[0]["function"].get("parameters") is None
+        assert chat_params.tools[0]["function"].get("strict") is None
+    else:
+        assert chat_params.tools == [chat_tool]
+
+
+@pytest.mark.parametrize(
+    ("chat_choice", "responses_choice"),
+    [
+        (
+            {"type": "function", "function": {"name": "get_weather"}},
+            {"type": "function", "name": "get_weather"},
+        ),
+        (
+            {"type": "custom", "custom": {"name": "shell"}},
+            {"type": "custom", "name": "shell"},
+        ),
+        (
+            {
+                "type": "allowed_tools",
+                "allowed_tools": {
+                    "mode": "required",
+                    "tools": [
+                        {"type": "function", "function": {"name": "get_weather"}},
+                        {"type": "custom", "custom": {"name": "shell"}},
+                    ],
+                },
+            },
+            {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [
+                    {"type": "function", "name": "get_weather"},
+                    {"type": "custom", "name": "shell"},
+                ],
+            },
+        ),
+    ],
+    ids=["named_function", "named_custom", "allowed_tools"],
+)
+def test_tool_choices_round_trip(
+    converter: ResponsesConverter,
+    chat_choice: dict,
+    responses_choice: dict,
+):
+    assert converter._chat_to_responses_tool_choice(chat_choice) == responses_choice
+    assert converter._responses_to_chat_tool_choice(responses_choice) == chat_choice
+
+    chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[{"role": "user", "content": "hi"}],
+        tool_choice=chat_choice,
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+
+    responses_params = converter.chat_completion_to_responses_create_params(chat_params)
+    round_tripped = converter.responses_to_chat_completion_create_params(responses_params)
+    assert json.loads(round_tripped.model_dump_json())["tool_choice"] == chat_choice
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        {"type": "apply_patch"},
+        {"type": "shell"},
+        {"type": "mcp", "server_label": "server"},
+        {"type": "file_search"},
+    ],
+    ids=["apply_patch", "shell", "mcp", "hosted"],
+)
+def test_responses_to_chat_completion_rejects_responses_only_tool_choices(
+    converter: ResponsesConverter,
+    tool_choice: dict,
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        tool_choice=tool_choice,
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": None,
+                "strict": None,
+            }
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="tool choice"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+def test_responses_to_chat_completion_rejects_responses_only_allowed_tool_reference(
+    converter: ResponsesConverter,
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        tool_choice={
+            "type": "allowed_tools",
+            "mode": "auto",
+            "tools": [{"type": "mcp", "server_label": "server"}],
+        },
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": None,
+                "strict": None,
+            }
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="tool reference"):
         converter.responses_to_chat_completion_create_params(params)
 
 
@@ -673,6 +848,31 @@ def test_responses_to_chat_completion_no_tools_rejects_required_tool_choice(
                 model="my-model",
                 tool_choice="required",
                 **tools_kwargs,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        {"type": "function", "name": "get_weather"},
+        {
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{"type": "function", "name": "get_weather"}],
+        },
+    ],
+    ids=["named", "allowed"],
+)
+def test_responses_to_chat_completion_no_tools_rejects_structured_tool_choice(
+    converter: ResponsesConverter,
+    tool_choice: dict,
+):
+    with pytest.raises(ValueError, match="requires at least one tool"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="hi",
+                tool_choice=tool_choice,
             )
         )
 
