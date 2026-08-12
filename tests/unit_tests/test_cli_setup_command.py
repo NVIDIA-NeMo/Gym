@@ -350,6 +350,22 @@ class TestCLISetupCommandRunCommand:
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
 
+    def test_supplied_config_and_streams_avoid_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        popen, get_global_config = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            global_config_dict={"uv_cache_dir": "isolated cache"},
+            stdout_target="isolated stdout",
+            stderr_target="isolated stderr",
+        )
+
+        get_global_config.assert_not_called()
+        assert popen.call_args.kwargs["env"]["UV_CACHE_DIR"] == "isolated cache"
+        assert popen.call_args.kwargs["stdout"] == "isolated stdout"
+        assert popen.call_args.kwargs["stderr"] == "isolated stderr"
+
 
 class TestGetNemoGymInstallFlags:
     """Test _get_nemo_gym_install_flags helper function."""
