@@ -26,9 +26,6 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.21+ supports Python 3.13.14; 0.11.29 is the latest stable.
-  # 0.11.20 had a regression dropping pinned deps (fixed in 0.11.21).
-  UV_INSTALL_URL: "https://astral.sh/uv/0.11.29/install.sh"
 
 jobs:
   detect:
@@ -144,58 +141,60 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-
 
-      - name: Setup for test
+      - name: Install system test dependencies
         run: |
           sudo apt-get update
-          # Curl is required for setup_nvidia.sh to download uv
-          # ca-certificates is there to support curl and mitigate `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt`
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
-          # The flow below should be used and synced with any Docker or container related flows. There is no script here to keep it 100% explicit.
-          # This is how we test and this is how you should use/consume.
-          curl -LsSf "$UV_INSTALL_URL" | sh
-          uv venv
-          source .venv/bin/activate
-          uv sync --extra dev --extra sandbox
 
-      - name: Test
+      - name: Core unit tests
+        if: needs.detect.outputs.run_full == 'true'
+        run: ./scripts/ci/core_unit_tests.sh
+
+      - name: Setup public sandbox test environment
+        if: needs.detect.outputs.run_full == 'true'
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          uv sync --extra dev --extra sandbox --extra openshell
+
+      # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v3.
+      - name: Sandbox unit tests
+        if: needs.detect.outputs.run_full == 'true'
         run: |
           source .venv/bin/activate
+          pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
 
-          # Full suite: core library unit tests run here once; all server tests run in the
-          # parallel `server-suite` matrix.
-          if [[ "${{ needs.detect.outputs.run_full }}" == "true" ]]; then
-            echo "Running core library unit tests without sandbox marker (server suite runs in the sharded matrix)"
-            PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
+      # The changed-server optimization is specific to GitHub pull requests; internal
+      # GitLab merge requests always run the full eight-shard server suite.
+      - name: Changed server tests
+        if: needs.detect.outputs.run_servers == 'true'
+        env:
+          CHANGED_SERVER_FILES: ${{ needs.detect.outputs.server_all_changed_files }}
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          CHANGED_SERVERS=$(echo "$CHANGED_SERVER_FILES" | tr ' ' '\n' | cut -d'/' -f1-2 | sort -u)
 
-            echo "Running sandbox unit tests and appending them to the coverage report"
-            pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
+          echo "Testing changed servers:"
+          while IFS= read -r server; do
+            echo "  - $server"
+          done <<< "$CHANGED_SERVERS"
 
-          # Server-only: test only the changed servers (typically a small set, no sharding needed)
-          elif [[ "${{ needs.detect.outputs.run_servers }}" == "true" ]]; then
-            CHANGED_SERVERS=$(echo "${{ needs.detect.outputs.server_all_changed_files }}" | \
-              tr ' ' '\n' | cut -d'/' -f1-2 | sort -u)
-
-            echo "Testing changed servers:"
-            echo "$CHANGED_SERVERS" | sed 's/^/  - /'
-
-            EXIT_CODE=0
-            for server in $CHANGED_SERVERS; do
-              echo ""
-              echo "================================================"
-              echo "Testing: $server"
-              echo "================================================"
-              if ng_test +entrypoint=$server +delete_venvs_after_each_test=true +should_validate_data=true; then
-                echo "PASS: $server"
-              else
-                echo "FAIL: $server"
-                EXIT_CODE=1
-              fi
-            done
-
-            if [ $EXIT_CODE -ne 0 ]; then
-              echo "Some server tests failed"
-              exit 1
+          EXIT_CODE=0
+          for server in $CHANGED_SERVERS; do
+            echo ""
+            echo "================================================"
+            echo "Testing: $server"
+            echo "================================================"
+            if ng_test +entrypoint="$server" +delete_venvs_after_each_test=true +should_validate_data=true; then
+              echo "PASS: $server"
+            else
+              echo "FAIL: $server"
+              EXIT_CODE=1
             fi
+          done
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "Some server tests failed"
+            exit 1
           fi
 
   # Full server suite, split across NUM_SHARDS parallel runners. Only runs on a full run.
@@ -222,23 +221,13 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-
 
-      - name: Setup for test
+      - name: Install system test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
-          curl -LsSf "$UV_INSTALL_URL" | sh
-          uv venv
-          source .venv/bin/activate
-          uv sync --extra dev
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
-        run: |
-          source .venv/bin/activate
-          ng_test_all \
-            +fail_on_total_and_test_mismatch=true \
-            +delete_venvs_after_each_test=true \
-            +num_shards=${{ env.NUM_SHARDS }} \
-            +shard_index=${{ matrix.shard }}
+        run: ./scripts/ci/server_tests.sh "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}"
 
   # Single aggregated gate for the sharded server suite — make this a required check
   # (in addition to "Test") instead of the individual shard jobs. `always()` so it also

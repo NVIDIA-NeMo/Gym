@@ -1,0 +1,43 @@
+# Finance Agent v2 (FABv2) benchmark: the public 27-question eval overlay on top
+# of the finance_agent_v2 resources server. Both commands run from the repo root
+# venv; prepare.py is standard-library only:
+#   gym eval prepare --benchmark finance_agent_v2   # (re)builds the dataset
+#   gym eval run --benchmark finance_agent_v2       # evaluates against it
+
+# Chain to the existing finance_agent_v2 resources server + finance_agent config.
+config_paths:
+  - resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml
+
+# No endpoints or API keys are set here on purpose. The resource server config gives
+# every judge and tool variable a null-safe `oc.select` default, so none of them
+# blocks `gym eval prepare`, which needs no model at all. A run additionally needs a
+# policy endpoint, which has no default: supply it through env.yaml (policy_base_url
+# / policy_api_key), a CLI override, or an NVFlow overlay.
+
+# Isolated copy of the resource server for this benchmark.
+finance_agent_v2_benchmark_resources_server:
+  _inherit_from: finance_agent_v2_resources_server
+
+# Benchmark agent — inherits the finance_agent_v2 loop, overrides the dataset to
+# the frozen benchmark split and points at the isolated resources server above.
+finance_agent_v2_benchmark_agent:
+  _inherit_from: finance_agent_v2
+  responses_api_agents:
+    finance_agent_v2:
+      resources_server:
+        name: finance_agent_v2_benchmark_resources_server
+      datasets:
+      - name: finance_agent_v2
+        type: benchmark
+        jsonl_fpath: benchmarks/finance_agent_v2/data/vals_v2_public_27q.jsonl
+        # prepare.py bakes the upstream v2 system/question prompts into each
+        # sample's responses_create_params (from benchmarks/finance_agent_v2/
+        # upstream_spec.json), so there is no separate prompt config to apply.
+        prompt_config: null
+        prepare_script: benchmarks/finance_agent_v2/prepare.py
+        num_repeats: 1
+        # Provenance: the public question set + rubrics come from
+        # vals-ai/finance-agent-v2 (MIT), the same repo the tools are imported
+        # from. BenchmarkDatasetConfig does not validate this field, but it is
+        # the only place the dataset's provenance is recorded.
+        license: MIT

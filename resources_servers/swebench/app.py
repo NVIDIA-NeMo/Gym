@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 from pathlib import Path
 from time import time
+from traceback import format_exc
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
@@ -169,7 +171,10 @@ fi
         await self._inner_container.upload(local_path=src, remote_path=str(dest))
 
     async def cleanup(self) -> None:
-        await self._inner_container.stop()
+        try:
+            await self._inner_container.stop()
+        except:
+            print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
 
 # TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
@@ -288,13 +293,16 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             model_patch = body.patch
         else:
             original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
-            original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
             try:
+                original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
                 model_patch = model_patch_result.stdout
             except:
-                pass
-            await original_sandbox.stop()
+                print("Failed to extract patch from container", format_exc(), file=sys.stderr)
+            try:
+                await original_sandbox.stop()
+            except:
+                print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
 
         run_id = request.session[SESSION_ID_KEY]
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)

@@ -1,6 +1,6 @@
 ---
 title: "Environments"
-description: "Environments decompose into dataset, agent harness, verifier, and state — unifying evaluation, agent optimization, and training."
+description: "Environments define tasks, verification, tools, and state for evaluation and training."
 position: 1.5
 ---
 
@@ -16,13 +16,12 @@ The term *environment* comes from reinforcement learning, where it describes the
 
 The concept is the same today but the usage of environments has expanded beyond RL to include much more, such as model evaluation, agent evaluation, agent harness optimization, and synthetic data generation.
 
-Accordingly, an environment contains everything required for an agent to complete a task:
+Accordingly, an environment defines the world an agent acts on:
 - Dataset
-- Agent Harness
 - Verifier
-- State
+- Tools and state
 
-The model powering the agent is external to the environment. It generates a response (actions), which the environment processes. The environment updates its internal state, returns observations (tool results, error messages, state changes), and produces a reward (a numerical score of how well the agent performed).
+The model and agent harness are external to the environment. The harness drives the model's actions against the environment; the environment updates its state, returns observations, and produces a reward.
 
 ## Anatomy of an Environment
 
@@ -32,9 +31,9 @@ A collection of tasks (prompts for the agent to solve), along with metadata and 
 
 Tasks can vary structurally: single-turn question answering, multi-step tool use, multi-turn dialogue, agentic workflows with sandboxed execution, and more.
 
-### Agent Harness
+### Agent Harness (Agent Side)
 
-Agent = model + agent harness. The agent harness defines how the model interacts with the environment. Language models perform stateless inference; the harness is what turns a model into an agent — it loops model calls, routes tool use, manages context, and decides when the task is done.
+Agent = model + agent harness. The harness is composed with an environment but is not owned by it. Language models perform stateless inference; the harness turns a model into an agent by looping model calls, routing tool use, managing context, and deciding when the task is done.
 
 Harnesses exist on a spectrum. A simple harness just loops model calls until the task is complete. Other harnesses like Claude Code or OpenClaw include tools, planning, memory, self-correction, skills and more.
 
