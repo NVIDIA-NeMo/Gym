@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from shutil import rmtree
-from subprocess import Popen
+from subprocess import Popen, TimeoutExpired
 from subprocess import run as subprocess_run
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
@@ -116,6 +116,13 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
     agent_framework_commit: str = Field(
         default="HEAD", description="Which commit to use when cloning the SWE-agent/OpenHands repo"
+    )
+    openhands_prebuilt_setup_dir: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Absolute path to a prebuilt OpenHands runtime. When set, Gym validates and uses it "
+            "without cloning, updating, or copying the runtime."
+        ),
     )
     # Container configuration
     container_formatter: str | list[str] = Field(
@@ -1498,6 +1505,86 @@ fi
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
+    def _validate_prebuilt_setup(self, setup_dir: Path) -> Path:
+        if not setup_dir.is_absolute():
+            raise ValueError("openhands_prebuilt_setup_dir must be an absolute path")
+        try:
+            resolved_setup_dir = setup_dir.resolve(strict=True)
+        except OSError as error:
+            raise ValueError(f"OpenHands prebuilt setup does not exist: {setup_dir}") from error
+        if not resolved_setup_dir.is_dir():
+            raise ValueError(f"OpenHands prebuilt setup is not a directory: {resolved_setup_dir}")
+
+        openhands_dir = resolved_setup_dir / "OpenHands"
+        required_files = (
+            openhands_dir / ".venv/bin/python",
+            resolved_setup_dir / "miniforge3/bin/python",
+        )
+        for required_file in required_files:
+            relative_path = required_file.relative_to(resolved_setup_dir)
+            if not required_file.is_file():
+                raise ValueError(f"OpenHands prebuilt setup is missing {relative_path}")
+            if not os.access(required_file, os.X_OK):
+                raise ValueError(f"OpenHands prebuilt interpreter is not executable: {relative_path}")
+            try:
+                interpreter_check = subprocess_run(
+                    [str(required_file), "--version"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (OSError, TimeoutExpired) as error:
+                raise ValueError(f"OpenHands prebuilt interpreter could not run: {relative_path}") from error
+            if interpreter_check.returncode != 0:
+                raise ValueError(f"OpenHands prebuilt interpreter could not run: {relative_path}")
+
+        required_output_dirs = (
+            openhands_dir / ".eval_sessions",
+            openhands_dir / "logs",
+            openhands_dir / "evaluation/oh",
+        )
+        for output_dir in required_output_dirs:
+            relative_path = output_dir.relative_to(resolved_setup_dir)
+            if not output_dir.is_dir():
+                raise ValueError(f"OpenHands prebuilt setup is missing writable directory {relative_path}")
+            if not os.access(output_dir, os.W_OK | os.X_OK):
+                raise ValueError(f"OpenHands prebuilt directory is not writable and searchable: {relative_path}")
+
+        def _git(*args: str) -> str:
+            result = subprocess_run(
+                ["git", "-C", str(openhands_dir), *args],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise ValueError(f"Invalid prebuilt OpenHands Git worktree: {detail}")
+            return result.stdout.strip()
+
+        git_root = Path(_git("rev-parse", "--show-toplevel"))
+        try:
+            is_openhands_root = os.path.samefile(git_root, openhands_dir)
+        except OSError:
+            is_openhands_root = False
+        if not is_openhands_root:
+            raise ValueError(f"Prebuilt OpenHands path is not a Git worktree root: {openhands_dir}")
+
+        target = self.config.agent_framework_commit
+        try:
+            resolved_target = _git("rev-parse", "--verify", f"{target}^{{commit}}")
+        except ValueError as error:
+            raise ValueError(f"Prebuilt OpenHands could not resolve configured commit {target!r}") from error
+        current_commit = _git("rev-parse", "HEAD")
+        if current_commit != resolved_target:
+            raise ValueError(
+                "Prebuilt OpenHands commit mismatch: "
+                f"runtime={current_commit}, configured={resolved_target} ({target})"
+            )
+
+        return resolved_setup_dir
+
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
 
@@ -1544,6 +1631,9 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         print(f"OpenHands now at commit {new_commit[:12]} (target={target})", flush=True)
 
     def setup(self) -> Path:
+        if self.config.openhands_prebuilt_setup_dir is not None:
+            return self._validate_prebuilt_setup(self.config.openhands_prebuilt_setup_dir)
+
         setup_dir = self.parent_dir / "swe_openhands_setup"
 
         with file_lock(setup_dir, "OpenHands setup"):
@@ -3293,7 +3383,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         container_script_path = f"/container_scripts/{command.mode}_script.sh"
         mount_args.append(f"--mount type=bind,src={script_path},dst={container_script_path},ro")
 
-        mount_str = " ".join(mount_args)
+        mount_str = " ".join(f"--mount {shlex.quote(mount_arg.removeprefix('--mount '))}" for mount_arg in mount_args)
 
         # _JAVA_OPTIONS bundles JVM-wide settings that benefit Maven, Gradle,
         # and Robolectric-using tests:
