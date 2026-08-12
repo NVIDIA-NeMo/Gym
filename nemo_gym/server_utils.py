@@ -152,7 +152,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
 
     num_requests = [0]
 
-    from sys import environ
+    from os import environ
 
     is_rollout_collection = environ.get("IS_ROLLOUT_COLLECTION") == "1"
     if is_rollout_collection:
