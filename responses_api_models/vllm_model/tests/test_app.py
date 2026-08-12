@@ -54,6 +54,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -217,7 +218,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -271,7 +272,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -324,7 +325,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -384,7 +385,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -464,7 +465,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -530,7 +531,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -593,7 +594,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -655,7 +656,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -735,7 +736,7 @@ PARAMETERIZE_DATA = [
         ),
         NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             created_at=FIXED_TIME,
             model="dummy_model",
             tools=[],
@@ -896,7 +897,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=input_tools,
             created_at=FIXED_TIME,
@@ -1072,7 +1073,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=[],
             created_at=FIXED_TIME,
@@ -1303,7 +1304,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=input_tools,
             created_at=FIXED_TIME,
@@ -1824,7 +1825,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=input_tools,
             created_at=FIXED_TIME,
@@ -1969,7 +1970,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=input_tools,
             created_at=FIXED_TIME,
@@ -2080,7 +2081,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=input_tools,
             created_at=FIXED_TIME,
@@ -2275,7 +2276,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=input_tools,
             created_at=FIXED_TIME,
@@ -2420,7 +2421,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=input_tools,
             created_at=FIXED_TIME,
@@ -2531,7 +2532,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **COMMON_RESPONSE_PARAMS,
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=input_tools,
             created_at=FIXED_TIME,
@@ -2629,7 +2630,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **(COMMON_RESPONSE_PARAMS | {"status": "incomplete"}),
-            id="resp_123",
+            id="chtcmpl-123",
             object="response",
             tools=[],
             created_at=FIXED_TIME,
@@ -5861,3 +5862,47 @@ class TestPrefixSupplyRejectsResponsesNative:
                 supply_prefix_token_ids=True,
                 is_responses_native=True,
             )
+
+
+class TestCompletionIdPropagation:
+    """The backend completion id must survive conversion: it becomes the Response
+    id (minted `resp_` only when the backend provides none) and is stamped as
+    `completion_id` on the promoted *ForTraining output item, so trainers can
+    join per-turn items back to the model call that produced them."""
+
+    def _convert(self, completion_id: str, monkeypatch):
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        converter = ResponsesConverter(return_token_id_information=True, uses_reasoning_parser=False)
+        completion = NeMoGymChatCompletion(
+            id=completion_id,
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessageForTraining(
+                        role="assistant",
+                        content="hi",
+                        prompt_token_ids=[1, 2],
+                        generation_token_ids=[3],
+                        generation_log_probs=[-0.1],
+                    ),
+                )
+            ],
+            created=FIXED_TIME,
+            model="dummy_model",
+            object="chat.completion",
+        )
+        params = NeMoGymResponseCreateParamsNonStreaming(input="hello", model="dummy_model")
+        return converter.chat_completion_to_response(params, completion)
+
+    def test_backend_id_propagates(self, monkeypatch):
+        response = self._convert("chtcmpl-join-key", monkeypatch)
+        assert response.id == "chtcmpl-join-key"
+        (item,) = response.output
+        assert item.completion_id == "chtcmpl-join-key"
+
+    def test_missing_backend_id_falls_back_to_minted(self, monkeypatch):
+        response = self._convert("", monkeypatch)
+        assert response.id == f"resp_{FIXED_UUID}"
+        (item,) = response.output
+        assert item.completion_id is None
