@@ -82,6 +82,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     _num_response_requests_total: int = 0
     _num_response_requests_running: int = 0
 
+    _seed_session_time_taken: int = 0
+    _num_response_requests_running: int = 0
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -299,16 +302,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         cookies = request.cookies
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body,
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
+        # seed_session_response = await self.server_client.post(
+        #     server_name=self.config.resources_server.name,
+        #     url_path="/seed_session",
+        #     json=body,
+        #     cookies=cookies,
+        # )
+        # await raise_for_status(seed_session_response)
+        # cookies = seed_session_response.cookies
 
-        request._cookies = cookies
+        # request._cookies = cookies
         inner_response = await self.responses(
             request=request,
             response=response,
