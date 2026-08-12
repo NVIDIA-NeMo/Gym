@@ -70,6 +70,117 @@ from nemo_gym.openai_utils import (
 
 
 SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+MAPPED_ANTHROPIC_REQUEST_FIELDS = frozenset(
+    {
+        "max_tokens",
+        "messages",
+        "metadata",
+        "model",
+        "service_tier",
+        "system",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_p",
+    }
+)
+REJECTED_ANTHROPIC_REQUEST_FIELDS = frozenset(
+    {
+        "cache_control",
+        "container",
+        "inference_geo",
+        "output_config",
+        "stop_sequences",
+        "thinking",
+        "top_k",
+    }
+)
+MAPPED_ANTHROPIC_CONTENT_BLOCK_TYPES = frozenset(
+    {"document", "image", "redacted_thinking", "text", "thinking", "tool_result", "tool_use"}
+)
+REJECTED_ANTHROPIC_CONTENT_BLOCK_TYPES = frozenset(
+    {
+        "bash_code_execution_tool_result",
+        "code_execution_tool_result",
+        "container_upload",
+        "mid_conv_system",
+        "search_result",
+        "server_tool_use",
+        "text_editor_code_execution_tool_result",
+        "tool_search_tool_result",
+        "web_fetch_tool_result",
+        "web_search_tool_result",
+    }
+)
+MAPPED_ANTHROPIC_TOOL_VARIANTS = frozenset({"ToolParam"})
+REJECTED_ANTHROPIC_TOOL_VARIANTS = frozenset(
+    {
+        "CodeExecutionTool20250522Param",
+        "CodeExecutionTool20250825Param",
+        "CodeExecutionTool20260120Param",
+        "MemoryTool20250818Param",
+        "ToolBash20250124Param",
+        "ToolSearchToolBm25_20251119Param",
+        "ToolSearchToolRegex20251119Param",
+        "ToolTextEditor20250124Param",
+        "ToolTextEditor20250429Param",
+        "ToolTextEditor20250728Param",
+        "WebFetchTool20250910Param",
+        "WebFetchTool20260209Param",
+        "WebFetchTool20260309Param",
+        "WebSearchTool20250305Param",
+        "WebSearchTool20260209Param",
+    }
+)
+MAPPED_ANTHROPIC_STOP_REASONS = frozenset({"end_turn", "max_tokens", "refusal", "tool_use"})
+REJECTED_ANTHROPIC_STOP_REASONS = frozenset({"pause_turn", "stop_sequence"})
+
+MAPPED_RESPONSES_REQUEST_FIELDS = frozenset(
+    {
+        "input",
+        "instructions",
+        "max_output_tokens",
+        "model",
+        "parallel_tool_calls",
+        "service_tier",
+        "stream",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_p",
+        "user",
+    }
+)
+REJECTED_RESPONSES_REQUEST_FIELDS = frozenset(
+    {
+        "background",
+        "include",
+        "max_tool_calls",
+        "metadata",
+        "previous_response_id",
+        "prompt",
+        "reasoning",
+        "store",
+        "text",
+        "top_logprobs",
+        "truncation",
+    }
+)
+MAPPED_RESPONSES_INPUT_ITEM_TYPES = frozenset({"function_call", "function_call_output", "message", "reasoning"})
+REJECTED_RESPONSES_INPUT_ITEM_TYPES = frozenset(
+    {
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "web_search_call",
+    }
+)
 
 
 class AnthropicConverter:
@@ -86,11 +197,13 @@ class AnthropicConverter:
         extra_body: Dict[str, Any],
     ) -> Dict[str, Any]:
         body_dict = body.model_dump(exclude_unset=True)
+        self._validate_responses_request(body_dict, model)
         anthropic_body = dict(extra_body)
+        max_output_tokens = body_dict.pop("max_output_tokens", None)
         anthropic_body.update(
             {
                 "model": model,
-                "max_tokens": body_dict.pop("max_output_tokens", None) or max_tokens,
+                "max_tokens": max_output_tokens if max_output_tokens is not None else max_tokens,
                 "messages": [],
             }
         )
@@ -118,6 +231,7 @@ class AnthropicConverter:
                     [self._function_call_to_tool_use(item)],
                 )
             elif item_type == "function_call_output":
+                self._validate_function_call_output_item(item)
                 self._append_content(
                     anthropic_body["messages"],
                     "user",
@@ -125,7 +239,7 @@ class AnthropicConverter:
                         {
                             "type": "tool_result",
                             "tool_use_id": item["call_id"],
-                            "content": item["output"],
+                            "content": self._function_call_output_to_anthropic(item["output"]),
                         }
                     ],
                 )
@@ -139,6 +253,7 @@ class AnthropicConverter:
         self._validate_sampling_params_for_model(model, anthropic_body)
         self._copy_tools(body_dict, anthropic_body)
         self._copy_tool_choice(body_dict, anthropic_body)
+        self._copy_user_and_service_tier(body_dict, anthropic_body)
         self._copy_thinking_params(
             anthropic_body=anthropic_body,
             thinking=thinking,
@@ -198,6 +313,7 @@ class AnthropicConverter:
         request_body: NeMoGymResponseCreateParamsNonStreaming,
         model: str,
     ) -> NeMoGymResponse:
+        self._validate_anthropic_response(anthropic_response)
         output = self._anthropic_content_to_output_items(anthropic_response.get("content", []))
         if not output:
             self._flush_text_output([""], output)
@@ -235,18 +351,18 @@ class AnthropicConverter:
         )
 
     def _anthropic_content_to_output_items(self, content: List[Dict[str, Any]]) -> List[Any]:
-        """Anthropic assistant content blocks -> ordered Responses output items.
-
-        Shared by egress ``anthropic_to_responses`` and ingress ``anthropic_request_to_responses``
-        (for assistant turns in the input trajectory).
-        """
+        """Convert Anthropic response content blocks to ordered Responses output items."""
         output: List[Any] = []
         pending_text: List[str] = []
         for block in content:
             block_type = block.get("type")
             if block_type == "text":
+                self._reject_non_null_fields(block, {"text", "type"}, "Anthropic response text block")
                 pending_text.append(block.get("text", ""))
             elif block_type == "thinking":
+                self._reject_non_null_fields(
+                    block, {"signature", "thinking", "type"}, "Anthropic response thinking block"
+                )
                 self._flush_text_output(pending_text, output)
                 output.append(
                     NeMoGymResponseReasoningItem(
@@ -260,7 +376,21 @@ class AnthropicConverter:
                         encrypted_content=block.get("signature"),
                     )
                 )
+            elif block_type == "redacted_thinking":
+                self._reject_non_null_fields(block, {"data", "type"}, "Anthropic response redacted_thinking block")
+                self._flush_text_output(pending_text, output)
+                output.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        summary=[],
+                        encrypted_content=block["data"],
+                        status="completed",
+                    )
+                )
             elif block_type == "tool_use":
+                self._reject_non_null_fields(
+                    block, {"id", "input", "name", "type"}, "Anthropic response tool_use block"
+                )
                 self._flush_text_output(pending_text, output)
                 output.append(
                     NeMoGymResponseFunctionToolCall(
@@ -278,7 +408,11 @@ class AnthropicConverter:
         return output
 
     def _incomplete_details_from_stop_reason(self, stop_reason: Optional[str]) -> Optional[Dict[str, str]]:
-        if stop_reason in ("max_tokens", "model_context_window_exceeded"):
+        if stop_reason in REJECTED_ANTHROPIC_STOP_REASONS:
+            raise NotImplementedError(f"Unsupported Anthropic stop_reason for Responses: {stop_reason}")
+        if stop_reason not in MAPPED_ANTHROPIC_STOP_REASONS and stop_reason is not None:
+            raise NotImplementedError(f"Unknown Anthropic stop_reason for Responses: {stop_reason}")
+        if stop_reason == "max_tokens":
             return {"reason": "max_output_tokens"}
         if stop_reason == "refusal":
             return {"reason": "content_filter"}
@@ -297,9 +431,10 @@ class AnthropicConverter:
 
         ``anthropic_body`` is hinted with the Anthropic SDK's native ``MessageCreateParams``
         (a TypedDict union, so it accepts ``stream: true``). It's a type hint only — at runtime
-        the value is the raw request dict; we read fields defensively so the proxy stays
-        permissive toward unknown / future-beta fields the Claude Code CLI may send.
+        the value is the raw request dict.
+        Unknown fields fail explicitly so SDK changes cannot be dropped during conversion.
         """
+        self._validate_anthropic_request(anthropic_body)
         params: Dict[str, Any] = {"input": self._anthropic_messages_to_input_items(anthropic_body)}
 
         instructions = self._anthropic_system_to_instructions(anthropic_body.get("system"))
@@ -314,6 +449,14 @@ class AnthropicConverter:
             params["temperature"] = anthropic_body["temperature"]
         if anthropic_body.get("top_p") is not None:
             params["top_p"] = anthropic_body["top_p"]
+        metadata = anthropic_body.get("metadata")
+        if metadata and metadata.get("user_id") is not None:
+            params["user"] = metadata["user_id"]
+        service_tier = anthropic_body.get("service_tier")
+        if service_tier is not None:
+            if service_tier != "auto":
+                raise NotImplementedError(f"Unsupported Anthropic service_tier for Responses: {service_tier}")
+            params["service_tier"] = "auto"
 
         tools = self._anthropic_tools_to_responses(anthropic_body.get("tools"))
         if tools:
@@ -321,6 +464,7 @@ class AnthropicConverter:
         tool_choice = self._anthropic_tool_choice_to_responses(anthropic_body.get("tool_choice"))
         if tool_choice is not None:
             params["tool_choice"] = tool_choice
+            params["parallel_tool_calls"] = not anthropic_body["tool_choice"].get("disable_parallel_tool_use", False)
 
         return NeMoGymResponseCreateParamsNonStreaming(**params)
 
@@ -329,12 +473,22 @@ class AnthropicConverter:
             return ""
         if isinstance(system, str):
             return system
-        return "\n".join(block["text"] for block in system if block.get("type") == "text" and block.get("text"))
+        texts = []
+        for block in system:
+            if block.get("type") != "text":
+                raise NotImplementedError(f"Unsupported Anthropic system block: {block.get('type')}")
+            self._reject_non_null_fields(block, {"text", "type"}, "Anthropic system text block")
+            if block.get("text"):
+                texts.append(block["text"])
+        return "\n".join(texts)
 
     def _anthropic_messages_to_input_items(self, anthropic_body: Dict[str, Any]) -> List[Any]:
         items: List[Any] = []
         for message in anthropic_body.get("messages", []):
             role = message["role"]
+            if role not in ("user", "assistant"):
+                raise NotImplementedError(f"Unsupported Anthropic message role for Responses: {role}")
+            self._reject_non_null_fields(message, {"content", "role"}, "Anthropic message")
             content = message.get("content", "")
             if isinstance(content, str):
                 items.append(NeMoGymEasyInputMessage(role=role, content=content, type="message"))
@@ -362,10 +516,14 @@ class AnthropicConverter:
         for block in blocks:
             block_type = block.get("type")
             if block_type == "text":
+                self._reject_non_null_fields(block, {"text", "type"}, "Anthropic text block")
                 pending_parts.append({"type": "input_text", "text": block.get("text", "")})
             elif block_type == "image":
                 pending_parts.append(self._anthropic_image_to_input_part(block))
+            elif block_type == "document":
+                pending_parts.append(self._anthropic_document_to_input_part(block))
             elif block_type == "tool_use":
+                self._reject_non_null_fields(block, {"id", "input", "name", "type"}, "Anthropic tool_use block")
                 flush_message()
                 items.append(
                     NeMoGymResponseFunctionToolCall(
@@ -378,15 +536,17 @@ class AnthropicConverter:
                     )
                 )
             elif block_type == "tool_result":
+                self._reject_non_null_fields(block, {"content", "tool_use_id", "type"}, "Anthropic tool_result block")
                 flush_message()
                 items.append(
                     NeMoGymFunctionCallOutput(
                         call_id=block["tool_use_id"],
-                        output=self._anthropic_tool_result_content_to_text(block.get("content", "")),
+                        output=self._anthropic_tool_result_content_to_responses(block.get("content", "")),
                         type="function_call_output",
                     )
                 )
             elif block_type == "thinking":
+                self._reject_non_null_fields(block, {"signature", "thinking", "type"}, "Anthropic thinking block")
                 flush_message()
                 items.append(
                     NeMoGymResponseReasoningItem(
@@ -396,51 +556,104 @@ class AnthropicConverter:
                         type="reasoning",
                     )
                 )
+            elif block_type == "redacted_thinking":
+                self._reject_non_null_fields(block, {"data", "type"}, "Anthropic redacted_thinking block")
+                flush_message()
+                items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        summary=[],
+                        encrypted_content=block["data"],
+                        status="completed",
+                        type="reasoning",
+                    )
+                )
             else:
                 raise NotImplementedError(f"Unsupported Anthropic content block type for ingress: {block_type}")
         flush_message()
 
     def _anthropic_image_to_input_part(self, block: Dict[str, Any]) -> Dict[str, Any]:
+        self._reject_non_null_fields(block, {"source", "type"}, "Anthropic image block")
         source = block.get("source") or {}
-        if source.get("type") != "base64":
-            raise NotImplementedError("Anthropic ingress supports base64 image sources only.")
-        media_type = source["media_type"]
-        if media_type not in SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES:
-            raise ValueError(
-                f"Unsupported Anthropic image media type. Supported types: "
-                f"{sorted(SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES)}."
-            )
+        source_type = source.get("type")
+        if source_type == "url":
+            self._reject_non_null_fields(source, {"type", "url"}, "Anthropic URL image source")
+            image_url = source["url"]
+        elif source_type == "base64":
+            self._reject_non_null_fields(source, {"data", "media_type", "type"}, "Anthropic base64 image source")
+            media_type = source["media_type"]
+            if media_type not in SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES:
+                raise ValueError(
+                    f"Unsupported Anthropic image media type. Supported types: "
+                    f"{sorted(SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES)}."
+                )
+            image_url = self._build_data_url(media_type, source["data"])
+            self._parse_data_url(image_url, SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES, "image")
+        else:
+            raise NotImplementedError(f"Unsupported Anthropic image source type: {source_type}")
         return {
             "type": "input_image",
-            "image_url": self._build_image_data_url(media_type, source["data"]),
+            "image_url": image_url,
             "detail": "auto",
         }
 
-    def _anthropic_tool_result_content_to_text(self, content: Any) -> str:
+    def _anthropic_document_to_input_part(self, block: Dict[str, Any]) -> Dict[str, Any]:
+        self._reject_non_null_fields(block, {"source", "type"}, "Anthropic document block")
+        source = block.get("source") or {}
+        source_type = source.get("type")
+        if source_type == "url":
+            self._reject_non_null_fields(source, {"type", "url"}, "Anthropic URL document source")
+            return {"type": "input_file", "file_url": source["url"]}
+        if source_type == "base64":
+            self._reject_non_null_fields(source, {"data", "media_type", "type"}, "Anthropic base64 document source")
+            if source.get("media_type") != "application/pdf":
+                raise ValueError("Anthropic base64 documents must use application/pdf.")
+            file_data = self._build_data_url("application/pdf", source["data"])
+            self._parse_data_url(file_data, {"application/pdf"}, "file")
+            return {"type": "input_file", "file_data": file_data}
+        raise NotImplementedError(f"Unsupported Anthropic document source type: {source_type}")
+
+    def _anthropic_tool_result_content_to_responses(self, content: Any) -> Any:
         if isinstance(content, str):
             return content
-        texts = []
+        parts = []
         for block in content:
-            if block.get("type") == "text":
-                texts.append(block.get("text", ""))
+            block_type = block.get("type")
+            if block_type == "text":
+                self._reject_non_null_fields(block, {"text", "type"}, "Anthropic tool_result text block")
+                parts.append({"type": "input_text", "text": block.get("text", "")})
+            elif block_type == "image":
+                parts.append(self._anthropic_image_to_input_part(block))
+            elif block_type == "document":
+                parts.append(self._anthropic_document_to_input_part(block))
             else:
-                raise NotImplementedError(
-                    f"Unsupported Anthropic tool_result content block for ingress: {block.get('type')}"
-                )
-        return "\n".join(texts)
+                raise NotImplementedError(f"Unsupported Anthropic tool_result content block for ingress: {block_type}")
+        return parts
 
     def _anthropic_tools_to_responses(self, tools: Any) -> List[Dict[str, Any]]:
         if not tools:
             return []
         responses_tools = []
         for tool in tools:
+            tool_type = tool.get("type")
+            if tool_type not in (None, "custom"):
+                raise NotImplementedError(f"Unsupported Anthropic hosted tool type for Responses: {tool_type}")
+            self._reject_non_null_fields(
+                tool,
+                {"description", "input_schema", "name", "strict", "type"},
+                "Anthropic function tool",
+            )
             responses_tools.append(
                 {
                     "type": "function",
                     "name": tool["name"],
                     "description": tool.get("description"),
-                    "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
-                    "strict": False,
+                    "parameters": (
+                        tool["input_schema"]
+                        if tool.get("input_schema") is not None
+                        else {"type": "object", "properties": {}}
+                    ),
+                    "strict": tool.get("strict", False),
                 }
             )
         return responses_tools
@@ -449,6 +662,12 @@ class AnthropicConverter:
         if tool_choice is None:
             return None
         choice_type = tool_choice.get("type")
+        allowed_fields = {"type"}
+        if choice_type in ("auto", "any", "tool"):
+            allowed_fields.add("disable_parallel_tool_use")
+        if choice_type == "tool":
+            allowed_fields.add("name")
+        self._reject_non_null_fields(tool_choice, allowed_fields, "Anthropic tool_choice")
         if choice_type == "auto":
             return "auto"
         if choice_type == "none":
@@ -459,7 +678,7 @@ class AnthropicConverter:
             return {"type": "function", "name": tool_choice["name"]}
         raise NotImplementedError(f"Unsupported Anthropic tool_choice for ingress: {tool_choice}")
 
-    def _build_image_data_url(self, media_type: str, data: str) -> str:
+    def _build_data_url(self, media_type: str, data: str) -> str:
         return f"data:{media_type};base64,{data}"
 
     ############################################################################
@@ -469,8 +688,7 @@ class AnthropicConverter:
         """Inverse of ``anthropic_to_responses`` (the response direction).
 
         Renders a downstream ``/v1/responses`` result as a complete Anthropic Messages response
-        object (non-streaming shape). Token-id / logprob fields are intentionally dropped here;
-        they are carried out-of-band by the ingress server's side channel.
+        object (non-streaming shape).
 
         The assembled object is validated by constructing ``NeMoGymAnthropicMessage`` (a thin
         subclass of the Anthropic SDK's ``Message``) — catching malformed blocks / bad
@@ -493,6 +711,13 @@ class AnthropicConverter:
                 raise NotImplementedError(f"Unsupported Responses output item for Anthropic response: {item_type}")
 
         usage = response.usage.model_dump() if response.usage is not None else None
+        cached_tokens = ((usage or {}).get("input_tokens_details") or {}).get("cached_tokens", 0)
+        input_tokens = (usage or {}).get("input_tokens", 0)
+        if cached_tokens > input_tokens:
+            raise ValueError("Responses cached_tokens cannot exceed input_tokens.")
+        reasoning_tokens = ((usage or {}).get("output_tokens_details") or {}).get("reasoning_tokens", 0)
+        if reasoning_tokens:
+            raise NotImplementedError("Anthropic usage cannot represent Responses reasoning_tokens.")
         message = NeMoGymAnthropicMessage.model_validate(
             {
                 "id": f"msg_{uuid4().hex}",
@@ -503,7 +728,8 @@ class AnthropicConverter:
                 "stop_reason": self._stop_reason_from_response(response, has_tool_use),
                 "stop_sequence": None,
                 "usage": {
-                    "input_tokens": (usage or {}).get("input_tokens", 0),
+                    "cache_read_input_tokens": cached_tokens,
+                    "input_tokens": input_tokens - cached_tokens,
                     "output_tokens": (usage or {}).get("output_tokens", 0),
                 },
             }
@@ -517,10 +743,17 @@ class AnthropicConverter:
         return items
 
     def _output_message_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if item.get("status") not in (None, "completed"):
+            raise NotImplementedError(f"Unsupported Responses output message status: {item.get('status')}")
+        self._reject_atomic_metadata(item, "Responses output message")
         blocks = []
         for part in item.get("content", []):
             part_type = part.get("type")
             if part_type == "output_text":
+                if part.get("annotations"):
+                    raise NotImplementedError("Anthropic text blocks cannot represent Responses output annotations.")
+                if part.get("logprobs") is not None:
+                    raise NotImplementedError("Anthropic text blocks cannot represent Responses output logprobs.")
                 blocks.append({"type": "text", "text": part.get("text", "")})
             elif part_type == "refusal":
                 blocks.append({"type": "text", "text": part.get("refusal", "")})
@@ -535,6 +768,8 @@ class AnthropicConverter:
             return "max_tokens"
         if reason == "content_filter":
             return "refusal"
+        if reason is not None:
+            raise NotImplementedError(f"Unsupported Responses incomplete reason for Anthropic: {reason}")
         if has_tool_use:
             return "tool_use"
         return "end_turn"
@@ -584,6 +819,8 @@ class AnthropicConverter:
             return {"type": "text", "text": ""}
         if block_type == "thinking":
             return {"type": "thinking", "thinking": ""}
+        if block_type == "redacted_thinking":
+            return {"type": "redacted_thinking", "data": block["data"]}
         if block_type == "tool_use":
             return {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
@@ -593,7 +830,12 @@ class AnthropicConverter:
         if block_type == "text":
             return [{"type": "text_delta", "text": block.get("text", "")}]
         if block_type == "thinking":
-            return [{"type": "thinking_delta", "thinking": block.get("thinking", "")}]
+            deltas = [{"type": "thinking_delta", "thinking": block.get("thinking", "")}]
+            if block.get("signature") is not None:
+                deltas.append({"type": "signature_delta", "signature": block["signature"]})
+            return deltas
+        if block_type == "redacted_thinking":
+            return []
         if block_type == "tool_use":
             return [{"type": "input_json_delta", "partial_json": json.dumps(block.get("input", {}))}]
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
@@ -611,12 +853,69 @@ class AnthropicConverter:
             item.model_dump(exclude_unset=True) if hasattr(item, "model_dump") else item for item in response_input
         ]
 
+    def _validate_responses_request(self, body: Dict[str, Any], model: str) -> None:
+        known_fields = MAPPED_RESPONSES_REQUEST_FIELDS | REJECTED_RESPONSES_REQUEST_FIELDS
+        for field, value in body.items():
+            if value is None:
+                continue
+            if field not in known_fields:
+                raise NotImplementedError(f"Unknown Responses request field for Anthropic: {field}")
+            if field in REJECTED_RESPONSES_REQUEST_FIELDS:
+                raise NotImplementedError(f"Unsupported Responses request field for Anthropic: {field}")
+        if body.get("model") is not None and body["model"] != model:
+            raise ValueError("Responses request model must match the configured Anthropic model.")
+        service_tier = body.get("service_tier")
+        if service_tier not in (None, "auto"):
+            raise NotImplementedError(f"Unsupported Responses service_tier for Anthropic: {service_tier}")
+
+    def _validate_anthropic_request(self, body: Dict[str, Any]) -> None:
+        known_fields = MAPPED_ANTHROPIC_REQUEST_FIELDS | REJECTED_ANTHROPIC_REQUEST_FIELDS | {"stream"}
+        for field, value in body.items():
+            if value is None:
+                continue
+            if field not in known_fields:
+                raise NotImplementedError(f"Unknown Anthropic request field for Responses: {field}")
+            if field in REJECTED_ANTHROPIC_REQUEST_FIELDS:
+                raise NotImplementedError(f"Unsupported Anthropic request field for Responses: {field}")
+        metadata = body.get("metadata")
+        if metadata:
+            self._reject_non_null_fields(metadata, {"user_id"}, "Anthropic request metadata")
+
+    def _validate_anthropic_response(self, response: Dict[str, Any]) -> None:
+        self._reject_non_null_fields(
+            response,
+            {"content", "id", "model", "role", "stop_reason", "type", "usage"},
+            "Anthropic response",
+        )
+        usage = response.get("usage")
+        if usage:
+            self._reject_non_null_fields(
+                usage,
+                {"cache_read_input_tokens", "input_tokens", "output_tokens"},
+                "Anthropic response usage",
+            )
+
+    def _reject_non_null_fields(self, value: Dict[str, Any], allowed: set[str], context: str) -> None:
+        unsupported = sorted(
+            field for field, field_value in value.items() if field not in allowed and field_value is not None
+        )
+        if unsupported:
+            raise NotImplementedError(f"{context} contains unsupported fields: {unsupported}")
+
+    def _reject_atomic_metadata(self, item: Dict[str, Any], context: str) -> None:
+        unsupported = [field for field in ("token_ids", "logprobs") if field in item and item.get(field) is not None]
+        if unsupported:
+            raise NotImplementedError(f"{context} contains unsupported training metadata: {unsupported}")
+
     def _append_message_item(
         self,
         item: Dict[str, Any],
         messages: List[Dict[str, Any]],
         system_parts: List[str],
     ) -> None:
+        self._reject_atomic_metadata(item, "Responses input message")
+        if item.get("status") not in (None, "completed"):
+            raise NotImplementedError(f"Unsupported Responses input message status: {item.get('status')}")
         role = item["role"]
         content = item.get("content", "")
         if role in ("system", "developer"):
@@ -644,9 +943,15 @@ class AnthropicConverter:
         for part in content:
             part_type = part.get("type")
             if part_type in ("input_text", "output_text", "text"):
+                if part.get("annotations"):
+                    raise NotImplementedError("Anthropic text blocks cannot represent Responses annotations.")
+                if part.get("logprobs") is not None:
+                    raise NotImplementedError("Anthropic text blocks cannot represent Responses logprobs.")
                 blocks.append({"type": "text", "text": part["text"]})
             elif part_type == "input_image" and role == "user":
                 blocks.append(self._input_image_to_anthropic_block(part))
+            elif part_type == "input_file" and role == "user":
+                blocks.append(self._input_file_to_anthropic_block(part))
             elif part_type == "refusal" and role == "assistant":
                 blocks.append({"type": "text", "text": part["refusal"]})
             else:
@@ -654,12 +959,17 @@ class AnthropicConverter:
         return blocks
 
     def _input_image_to_anthropic_block(self, part: Dict[str, Any]) -> Dict[str, Any]:
+        if part.get("file_id") is not None:
+            raise NotImplementedError("Anthropic image blocks cannot represent Responses file_id.")
+        if part.get("detail") not in (None, "auto"):
+            raise NotImplementedError(f"Anthropic image blocks cannot represent detail={part.get('detail')}.")
         image_url = part.get("image_url")
         if isinstance(image_url, dict):
             image_url = image_url.get("url")
         if not isinstance(image_url, str):
-            raise ValueError("Responses input_image.image_url must be a base64 data URL string.")
-
+            raise ValueError("Responses input_image.image_url must be a URL string.")
+        if not image_url.startswith("data:"):
+            return {"type": "image", "source": {"type": "url", "url": image_url}}
         media_type, data = self._parse_image_data_url(image_url)
         return {
             "type": "image",
@@ -670,30 +980,51 @@ class AnthropicConverter:
             },
         }
 
-    def _parse_image_data_url(self, image_url: str) -> tuple[str, str]:
-        if not image_url.startswith("data:"):
-            raise ValueError("Anthropic image inputs require base64 data URLs; remote image URLs are not supported.")
+    def _input_file_to_anthropic_block(self, part: Dict[str, Any]) -> Dict[str, Any]:
+        if part.get("file_id") is not None:
+            raise NotImplementedError("Anthropic document blocks cannot represent Responses file_id.")
+        if part.get("filename") is not None:
+            raise NotImplementedError("Anthropic document blocks cannot represent Responses filename.")
+        file_url = part.get("file_url")
+        file_data = part.get("file_data")
+        if file_url is not None and file_data is not None:
+            raise ValueError("Responses input_file must provide only one of file_url or file_data.")
+        if file_url is not None:
+            return {"type": "document", "source": {"type": "url", "url": file_url}}
+        if file_data is not None:
+            media_type, data = self._parse_data_url(file_data, {"application/pdf"}, "file")
+            return {
+                "type": "document",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            }
+        raise ValueError("Responses input_file requires file_url or file_data for Anthropic.")
 
-        header, separator, data = image_url.partition(",")
+    def _parse_image_data_url(self, image_url: str) -> tuple[str, str]:
+        return self._parse_data_url(image_url, SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES, "image")
+
+    def _parse_data_url(self, data_url: str, supported_media_types: set[str], content_kind: str) -> tuple[str, str]:
+        if not data_url.startswith("data:"):
+            raise ValueError(f"Responses input_{content_kind} data must be a base64 data URL.")
+
+        header, separator, data = data_url.partition(",")
         if not separator or not data:
-            raise ValueError("Responses input_image.image_url must include base64 image data.")
+            raise ValueError(f"Responses input_{content_kind} data URL must include base64 data.")
 
         metadata = header[len("data:") :].split(";")
         media_type = metadata[0].lower()
         if media_type == "image/jpg":
             media_type = "image/jpeg"
         if "base64" not in metadata[1:]:
-            raise ValueError("Responses input_image.image_url must be base64 encoded.")
-        if media_type not in SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES:
+            raise ValueError(f"Responses input_{content_kind} data must be base64 encoded.")
+        if media_type not in supported_media_types:
             raise ValueError(
-                "Unsupported Anthropic image media type. Supported types: "
-                f"{sorted(SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES)}."
+                f"Unsupported Anthropic {content_kind} media type. Supported types: {sorted(supported_media_types)}."
             )
 
         try:
             base64.b64decode(data, validate=True)
         except binascii.Error as exc:
-            raise ValueError("Responses input_image.image_url contains invalid base64 image data.") from exc
+            raise ValueError(f"Responses input_{content_kind} data contains invalid base64 data.") from exc
 
         return media_type, data
 
@@ -713,19 +1044,33 @@ class AnthropicConverter:
         return [{"type": "text", "text": text} for text in system_parts if text]
 
     def _reasoning_item_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
-        blocks = []
-        for summary in item.get("summary", []):
-            # Anthropic's ThinkingBlock requires a signature; open-model backends don't
-            # produce one, so default to "" (the synthesized SSE never emits it anyway).
-            block = {
+        self._reject_atomic_metadata(item, "Responses reasoning item")
+        if item.get("content") is not None:
+            raise NotImplementedError("Anthropic thinking blocks cannot represent Responses reasoning content.")
+        if item.get("status") not in (None, "completed"):
+            raise NotImplementedError(f"Unsupported Responses reasoning status: {item.get('status')}")
+        summaries = item.get("summary", [])
+        if not summaries:
+            if item.get("encrypted_content") is None:
+                raise ValueError("Responses reasoning without a summary requires encrypted_content.")
+            return [{"type": "redacted_thinking", "data": item["encrypted_content"]}]
+        if len(summaries) != 1:
+            raise NotImplementedError("Anthropic thinking blocks cannot represent multiple Responses summaries.")
+        summary = summaries[0]
+        if summary.get("type") != "summary_text":
+            raise NotImplementedError(f"Unsupported Responses reasoning summary type: {summary.get('type')}")
+        return [
+            {
                 "type": "thinking",
                 "thinking": summary["text"],
                 "signature": item.get("encrypted_content") or "",
             }
-            blocks.append(block)
-        return blocks
+        ]
 
     def _function_call_to_tool_use(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        self._reject_atomic_metadata(item, "Responses function_call")
+        if item.get("status") not in (None, "completed"):
+            raise NotImplementedError(f"Unsupported Responses function_call status: {item.get('status')}")
         return {
             "type": "tool_use",
             "id": item["call_id"],
@@ -738,6 +1083,26 @@ class AnthropicConverter:
         if not isinstance(parsed, dict):
             raise ValueError(f"Anthropic tool_use input must be a JSON object, got {type(parsed).__name__}")
         return parsed
+
+    def _function_call_output_to_anthropic(self, output: Any) -> Any:
+        if isinstance(output, str):
+            return output
+        blocks = []
+        for part in output:
+            part_type = part.get("type")
+            if part_type == "input_text":
+                blocks.append({"type": "text", "text": part["text"]})
+            elif part_type == "input_image":
+                blocks.append(self._input_image_to_anthropic_block(part))
+            elif part_type == "input_file":
+                blocks.append(self._input_file_to_anthropic_block(part))
+            else:
+                raise NotImplementedError(f"Unsupported Responses function output part: {part_type}")
+        return blocks
+
+    def _validate_function_call_output_item(self, item: Dict[str, Any]) -> None:
+        if item.get("status") not in (None, "completed"):
+            raise NotImplementedError(f"Unsupported Responses function_call_output status: {item.get('status')}")
 
     def _copy_sampling_params(self, body_dict: Dict[str, Any], anthropic_body: Dict[str, Any]) -> None:
         for source, target in (
@@ -759,28 +1124,55 @@ class AnthropicConverter:
                 raise NotImplementedError(f"Unsupported Responses API tool type for Anthropic: {tool.get('type')}")
             anthropic_tool = {
                 "name": tool["name"],
-                "input_schema": tool.get("parameters") or {"type": "object", "properties": {}},
+                "input_schema": (
+                    tool["parameters"] if tool.get("parameters") is not None else {"type": "object", "properties": {}}
+                ),
             }
-            if tool.get("description"):
+            if tool.get("description") is not None:
                 anthropic_tool["description"] = tool["description"]
+            if tool.get("strict") is not None:
+                anthropic_tool["strict"] = tool["strict"]
             anthropic_tools.append(anthropic_tool)
         anthropic_body["tools"] = anthropic_tools
 
     def _copy_tool_choice(self, body_dict: Dict[str, Any], anthropic_body: Dict[str, Any]) -> None:
         tool_choice = body_dict.get("tool_choice")
-        if tool_choice is None:
+        parallel_tool_calls = body_dict.get("parallel_tool_calls")
+        if tool_choice is None and parallel_tool_calls is None:
             return
+        choice: Dict[str, Any]
         if isinstance(tool_choice, str):
             if tool_choice == "required":
-                anthropic_body["tool_choice"] = {"type": "any"}
+                choice = {"type": "any"}
             elif tool_choice in ("auto", "none"):
-                anthropic_body["tool_choice"] = {"type": tool_choice}
+                choice = {"type": tool_choice}
             else:
                 raise NotImplementedError(f"Unsupported tool_choice for Anthropic: {tool_choice}")
         elif isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
-            anthropic_body["tool_choice"] = {"type": "tool", "name": tool_choice["name"]}
+            choice = {"type": "tool", "name": tool_choice["name"]}
+        elif tool_choice is None:
+            choice = {"type": "auto"}
         else:
             raise NotImplementedError(f"Unsupported tool_choice for Anthropic: {tool_choice}")
+        if parallel_tool_calls is not None:
+            if choice["type"] == "none" and not parallel_tool_calls:
+                raise NotImplementedError("Anthropic tool_choice none cannot carry a parallel-tool setting.")
+            if choice["type"] != "none":
+                choice["disable_parallel_tool_use"] = not parallel_tool_calls
+        anthropic_body["tool_choice"] = choice
+
+    def _copy_user_and_service_tier(self, body_dict: Dict[str, Any], anthropic_body: Dict[str, Any]) -> None:
+        user = body_dict.get("user")
+        if user is not None:
+            metadata = anthropic_body.get("metadata")
+            if metadata is None:
+                metadata = {}
+                anthropic_body["metadata"] = metadata
+            if metadata.get("user_id") not in (None, user):
+                raise ValueError("Responses user conflicts with Anthropic metadata.user_id.")
+            metadata["user_id"] = user
+        if body_dict.get("service_tier") is not None:
+            anthropic_body["service_tier"] = "auto"
 
     def _flush_text_output(self, pending_text: List[str], output: List[Any]) -> None:
         if not pending_text:
@@ -791,8 +1183,9 @@ class AnthropicConverter:
                 content=[
                     NeMoGymResponseOutputText(
                         annotations=[],
-                        text="".join(pending_text),
+                        text=text,
                     )
+                    for text in pending_text
                 ],
                 role="assistant",
                 status="completed",
@@ -804,13 +1197,15 @@ class AnthropicConverter:
     def _usage_to_responses_usage(self, usage: Optional[Dict[str, Any]]) -> Optional[NeMoGymResponseUsage]:
         if usage is None:
             return None
-        input_tokens = usage.get("input_tokens", 0)
+        uncached_input_tokens = usage.get("input_tokens", 0)
+        cached_input_tokens = usage.get("cache_read_input_tokens") or 0
+        # Anthropic reports cached and uncached tokens separately:
+        # https://platform.claude.com/docs/en/build-with-claude/prompt-caching#tracking-cache-performance
+        input_tokens = uncached_input_tokens + cached_input_tokens
         output_tokens = usage.get("output_tokens", 0)
         return NeMoGymResponseUsage(
             input_tokens=input_tokens,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(
-                cached_tokens=usage.get("cache_read_input_tokens", 0)
-            ),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_input_tokens),
             output_tokens=output_tokens,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=input_tokens + output_tokens,

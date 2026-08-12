@@ -21,11 +21,28 @@ two directions against drift.
 """
 
 import json
+from typing import get_args, get_type_hints
 
-from anthropic.types import Message
+import pytest
+from anthropic.types import ContentBlockParam, Message, ToolUnionParam
+from anthropic.types.message_create_params import MessageCreateParamsBase
 
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.anthropic_converter import (
+    MAPPED_ANTHROPIC_CONTENT_BLOCK_TYPES,
+    MAPPED_ANTHROPIC_REQUEST_FIELDS,
+    MAPPED_ANTHROPIC_STOP_REASONS,
+    MAPPED_ANTHROPIC_TOOL_VARIANTS,
+    MAPPED_RESPONSES_INPUT_ITEM_TYPES,
+    MAPPED_RESPONSES_REQUEST_FIELDS,
+    REJECTED_ANTHROPIC_CONTENT_BLOCK_TYPES,
+    REJECTED_ANTHROPIC_REQUEST_FIELDS,
+    REJECTED_ANTHROPIC_STOP_REASONS,
+    REJECTED_ANTHROPIC_TOOL_VARIANTS,
+    REJECTED_RESPONSES_INPUT_ITEM_TYPES,
+    REJECTED_RESPONSES_REQUEST_FIELDS,
+    AnthropicConverter,
+)
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseInputItem
 
 
 PNG_DATA_URL = "data:image/png;base64,aGVsbG8="  # "hello"
@@ -86,21 +103,17 @@ class TestAnthropicRequestToResponses:
         )
         assert params.instructions is None
 
-    def test_system_role_message_passes_through(self) -> None:
-        # Anthropic allows a "system" role inside messages (distinct from the top-level system
-        # param); it is forwarded as a system input item rather than dropped or merged.
-        params = _converter().anthropic_request_to_responses(
-            {
-                "max_tokens": 10,
-                "messages": [
-                    {"role": "system", "content": "stay terse"},
-                    {"role": "user", "content": "hi"},
-                ],
-            }
-        )
-        assert params.input[0].role == "system"
-        assert params.input[0].content == "stay terse"
-        assert params.input[1].role == "user"
+    def test_system_role_message_is_rejected(self) -> None:
+        with pytest.raises(NotImplementedError, match="message role"):
+            _converter().anthropic_request_to_responses(
+                {
+                    "max_tokens": 10,
+                    "messages": [
+                        {"role": "system", "content": "stay terse"},
+                        {"role": "user", "content": "hi"},
+                    ],
+                }
+            )
 
     def test_user_text_and_image_blocks(self) -> None:
         params = _converter().anthropic_request_to_responses(
@@ -166,7 +179,7 @@ class TestAnthropicRequestToResponses:
         assert out.call_id == "toolu_1"
         assert out.output == "Sunny"
 
-    def test_tool_result_block_list_content_is_flattened(self) -> None:
+    def test_tool_result_block_list_content_stays_structured(self) -> None:
         params = _converter().anthropic_request_to_responses(
             {
                 "max_tokens": 10,
@@ -184,7 +197,53 @@ class TestAnthropicRequestToResponses:
                 ],
             }
         )
-        assert params.input[0].output == "a\nb"
+        assert params.input[0].output == [
+            {"type": "input_text", "text": "a"},
+            {"type": "input_text", "text": "b"},
+        ]
+
+    def test_structured_tool_result_preserves_media_and_documents(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": [
+                                    {"type": "text", "text": "a"},
+                                    {
+                                        "type": "image",
+                                        "source": {"type": "url", "url": "https://example.com/image.png"},
+                                    },
+                                    {
+                                        "type": "document",
+                                        "source": {"type": "url", "url": "https://example.com/file.pdf"},
+                                    },
+                                    {
+                                        "type": "document",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "application/pdf",
+                                            "data": "aGVsbG8=",
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        assert params.input[0].output == [
+            {"type": "input_text", "text": "a"},
+            {"type": "input_image", "image_url": "https://example.com/image.png", "detail": "auto"},
+            {"type": "input_file", "file_url": "https://example.com/file.pdf"},
+            {"type": "input_file", "file_data": "data:application/pdf;base64,aGVsbG8="},
+        ]
 
     def test_thinking_block_becomes_reasoning_item(self) -> None:
         params = _converter().anthropic_request_to_responses(
@@ -203,20 +262,45 @@ class TestAnthropicRequestToResponses:
         assert item.summary[0].text == "hmm"
         assert item.encrypted_content == "sig-1"
 
+    def test_redacted_thinking_becomes_encrypted_reasoning(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "redacted_thinking", "data": "encrypted"}],
+                    }
+                ],
+            }
+        )
+        item = params.input[0]
+        assert item.summary == []
+        assert item.encrypted_content == "encrypted"
+
     def test_tools_and_tool_choice_variants(self) -> None:
         conv = _converter()
         params = conv.anthropic_request_to_responses(
             {
                 "max_tokens": 10,
                 "messages": [{"role": "user", "content": "x"}],
-                "tools": [{"name": "f", "description": "d", "input_schema": {"type": "object", "properties": {}}}],
-                "tool_choice": {"type": "any"},
+                "tools": [
+                    {
+                        "name": "f",
+                        "description": "d",
+                        "input_schema": {"type": "object", "properties": {}},
+                        "strict": True,
+                    }
+                ],
+                "tool_choice": {"type": "any", "disable_parallel_tool_use": True},
             }
         )
         assert params.tools[0]["type"] == "function"
         assert params.tools[0]["name"] == "f"
         assert params.tools[0]["parameters"] == {"type": "object", "properties": {}}
+        assert params.tools[0]["strict"] is True
         assert params.tool_choice == "required"
+        assert params.parallel_tool_calls is False
 
         assert conv._anthropic_tool_choice_to_responses({"type": "auto"}) == "auto"
         assert conv._anthropic_tool_choice_to_responses({"type": "none"}) == "none"
@@ -244,10 +328,8 @@ class TestAnthropicRequestToResponses:
             _converter()._anthropic_tool_choice_to_responses({"type": "weird"})
 
     def test_unsupported_image_source_raises(self) -> None:
-        import pytest
-
         with pytest.raises(NotImplementedError):
-            _converter()._anthropic_image_to_input_part({"source": {"type": "url", "url": "http://x"}})
+            _converter()._anthropic_image_to_input_part({"source": {"type": "file", "file_id": "file_1"}})
 
     def test_unsupported_image_media_type_raises(self) -> None:
         import pytest
@@ -258,10 +340,126 @@ class TestAnthropicRequestToResponses:
             )
 
     def test_unsupported_tool_result_block_raises(self) -> None:
-        import pytest
-
         with pytest.raises(NotImplementedError):
-            _converter()._anthropic_tool_result_content_to_text([{"type": "image", "source": {}}])
+            _converter()._anthropic_tool_result_content_to_responses([{"type": "search_result"}])
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("top_k", 3),
+            ("stop_sequences", ["stop"]),
+            ("container", "container_1"),
+            ("inference_geo", "us"),
+            ("thinking", {"type": "adaptive"}),
+            ("output_config", {"effort": "high"}),
+            ("cache_control", {"type": "ephemeral"}),
+        ],
+    )
+    def test_unrepresentable_request_fields_are_rejected(self, field: str, value: object) -> None:
+        with pytest.raises(NotImplementedError, match=field):
+            _converter().anthropic_request_to_responses(
+                {"max_tokens": 10, "messages": [{"role": "user", "content": "hi"}], field: value}
+            )
+
+    @pytest.mark.parametrize(
+        "body,match",
+        [
+            (
+                {
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "x", "citations": []}]}],
+                    "max_tokens": 10,
+                },
+                "citations",
+            ),
+            (
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {"type": "url", "url": "https://example.com/image.png"},
+                                    "cache_control": {"type": "ephemeral"},
+                                }
+                            ],
+                        }
+                    ],
+                    "max_tokens": 10,
+                },
+                "cache_control",
+            ),
+            (
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "document",
+                                    "source": {"type": "url", "url": "https://example.com/file.pdf"},
+                                    "title": "report",
+                                }
+                            ],
+                        }
+                    ],
+                    "max_tokens": 10,
+                },
+                "title",
+            ),
+            (
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_1",
+                                    "content": "bad",
+                                    "is_error": False,
+                                }
+                            ],
+                        }
+                    ],
+                    "max_tokens": 10,
+                },
+                "is_error",
+            ),
+            (
+                {
+                    "messages": [{"role": "user", "content": "x"}],
+                    "max_tokens": 10,
+                    "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                },
+                "hosted tool",
+            ),
+        ],
+    )
+    def test_nested_unrepresentable_metadata_is_rejected(self, body: dict, match: str) -> None:
+        with pytest.raises(NotImplementedError, match=match):
+            _converter().anthropic_request_to_responses(body)
+
+    def test_metadata_and_auto_service_tier_are_mapped(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hi"}],
+                "metadata": {"user_id": "user-1"},
+                "service_tier": "auto",
+            }
+        )
+        assert params.user == "user-1"
+        assert params.service_tier == "auto"
+
+        with pytest.raises(NotImplementedError, match="standard_only"):
+            _converter().anthropic_request_to_responses(
+                {
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "service_tier": "standard_only",
+                }
+            )
 
 
 class TestResponsesToAnthropicResponse:
@@ -290,7 +488,7 @@ class TestResponsesToAnthropicResponse:
         assert tool_use["id"] == "toolu_1"
         assert tool_use["input"] == {"a": 1}
         assert out["stop_reason"] == "tool_use"
-        assert out["usage"] == {"input_tokens": 5, "output_tokens": 7}
+        assert out["usage"] == {"cache_read_input_tokens": 0, "input_tokens": 5, "output_tokens": 7}
 
     def test_reasoning_becomes_thinking_block(self) -> None:
         conv, resp = self._response_from_anthropic(
@@ -341,7 +539,7 @@ class TestResponsesToAnthropicResponse:
             model="m",
         )
         out = conv.responses_to_anthropic_response(resp, model="m")
-        assert out["usage"] == {"input_tokens": 0, "output_tokens": 0}
+        assert out["usage"] == {"cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}
 
     def test_reasoning_without_signature_defaults_to_empty(self) -> None:
         # Open-model reasoning carries no Anthropic signature, but the typed Message build
@@ -455,7 +653,10 @@ class TestAnthropicResponseToSSE:
             }
         )
         delta_events = [d for t, d in events if t == "content_block_delta"]
-        assert delta_events[0]["delta"] == {"type": "thinking_delta", "thinking": "ponder"}
+        assert [event["delta"] for event in delta_events] == [
+            {"type": "thinking_delta", "thinking": "ponder"},
+            {"type": "signature_delta", "signature": "s"},
+        ]
 
     def test_unsupported_block_for_sse_raises(self) -> None:
         import pytest
@@ -484,9 +685,10 @@ class TestRoundTrips:
                     "name": "lookup",
                     "description": "Look up weather.",
                     "input_schema": {"type": "object", "properties": {}},
+                    "strict": False,
                 }
             ],
-            "tool_choice": {"type": "auto"},
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": False},
         }
         params = conv.anthropic_request_to_responses(original)
         rebuilt = conv.responses_to_anthropic(
@@ -500,9 +702,51 @@ class TestRoundTrips:
         assert rebuilt["system"] == [{"type": "text", "text": "Be helpful."}]
         assert rebuilt["messages"] == original["messages"]
         assert rebuilt["tools"] == [
-            {"name": "lookup", "description": "Look up weather.", "input_schema": {"type": "object", "properties": {}}}
+            {
+                "name": "lookup",
+                "description": "Look up weather.",
+                "input_schema": {"type": "object", "properties": {}},
+                "strict": False,
+            }
         ]
-        assert rebuilt["tool_choice"] == {"type": "auto"}
+        assert rebuilt["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": False}
+
+    def test_structured_tool_result_round_trip_preserves_order(self) -> None:
+        converter = _converter()
+        original_content = [
+            {"type": "text", "text": "first"},
+            {
+                "type": "image",
+                "source": {"type": "url", "url": "https://example.com/image.png"},
+            },
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "aGVsbG8=",
+                },
+            },
+        ]
+        params = converter.anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": original_content,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        rebuilt = converter.responses_to_anthropic(params, "claude-sonnet-4-6", 10, None, None, {})
+        assert rebuilt["messages"][0]["content"][0]["content"] == original_content
 
     def test_response_round_trip_preserves_content(self) -> None:
         conv = _converter()
@@ -519,6 +763,22 @@ class TestRoundTrips:
         rebuilt = conv.responses_to_anthropic_response(resp, model="m")
         assert rebuilt["content"] == anthropic_response["content"]
         assert rebuilt["stop_reason"] == "tool_use"
+
+    def test_response_round_trip_preserves_adjacent_text_blocks(self) -> None:
+        converter = _converter()
+        anthropic_response = {
+            "content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 2},
+        }
+        response = converter.anthropic_to_responses(
+            anthropic_response,
+            request_body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            model="m",
+        )
+        assert (
+            converter.responses_to_anthropic_response(response, model="m")["content"] == anthropic_response["content"]
+        )
 
 
 class TestSharedHelperBranches:
@@ -596,3 +856,39 @@ class TestSharedHelperBranches:
         anthropic_body: dict = {}
         conv._copy_tool_choice({"tool_choice": "required"}, anthropic_body)
         assert anthropic_body["tool_choice"] == {"type": "any"}
+
+
+class TestSchemaClassification:
+    def test_anthropic_request_fields_match_pinned_sdk(self) -> None:
+        assert MAPPED_ANTHROPIC_REQUEST_FIELDS | REJECTED_ANTHROPIC_REQUEST_FIELDS == set(
+            get_type_hints(MessageCreateParamsBase)
+        )
+        assert not MAPPED_ANTHROPIC_REQUEST_FIELDS & REJECTED_ANTHROPIC_REQUEST_FIELDS
+
+    def test_anthropic_content_variants_match_pinned_sdk(self) -> None:
+        tags = {get_args(get_type_hints(content_type)["type"])[0] for content_type in get_args(ContentBlockParam)}
+        assert MAPPED_ANTHROPIC_CONTENT_BLOCK_TYPES | REJECTED_ANTHROPIC_CONTENT_BLOCK_TYPES == tags
+        assert not MAPPED_ANTHROPIC_CONTENT_BLOCK_TYPES & REJECTED_ANTHROPIC_CONTENT_BLOCK_TYPES
+
+    def test_anthropic_tool_variants_match_pinned_sdk(self) -> None:
+        variants = {tool_type.__name__ for tool_type in get_args(ToolUnionParam)}
+        assert MAPPED_ANTHROPIC_TOOL_VARIANTS | REJECTED_ANTHROPIC_TOOL_VARIANTS == variants
+        assert not MAPPED_ANTHROPIC_TOOL_VARIANTS & REJECTED_ANTHROPIC_TOOL_VARIANTS
+
+    def test_anthropic_stop_reasons_match_pinned_sdk(self) -> None:
+        stop_reason_annotation = Message.model_fields["stop_reason"].annotation
+        stop_reason_literal = next(arg for arg in get_args(stop_reason_annotation) if get_args(arg))
+        assert MAPPED_ANTHROPIC_STOP_REASONS | REJECTED_ANTHROPIC_STOP_REASONS == set(get_args(stop_reason_literal))
+        assert not MAPPED_ANTHROPIC_STOP_REASONS & REJECTED_ANTHROPIC_STOP_REASONS
+
+    def test_responses_request_fields_match_pinned_models(self) -> None:
+        assert MAPPED_RESPONSES_REQUEST_FIELDS | REJECTED_RESPONSES_REQUEST_FIELDS == set(
+            NeMoGymResponseCreateParamsNonStreaming.model_fields
+        )
+        assert not MAPPED_RESPONSES_REQUEST_FIELDS & REJECTED_RESPONSES_REQUEST_FIELDS
+
+    def test_responses_input_variants_match_pinned_models(self) -> None:
+        union = get_args(NeMoGymResponseInputItem)[0]
+        tags = {get_args(item_type.model_fields["type"].annotation)[0] for item_type in get_args(union)}
+        assert MAPPED_RESPONSES_INPUT_ITEM_TYPES | REJECTED_RESPONSES_INPUT_ITEM_TYPES == tags
+        assert not MAPPED_RESPONSES_INPUT_ITEM_TYPES & REJECTED_RESPONSES_INPUT_ITEM_TYPES
