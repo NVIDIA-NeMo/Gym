@@ -221,7 +221,9 @@ ENV PRE_COMMIT_HOME=/opt/repository-e2e-gym/pre-commit-home \
     UV_CACHE_DIR=/opt/repository-e2e-gym/uv-cache \
     UV_OFFLINE=1
 
-RUN test "$(uv --version | awk '{print $2}')" = 0.11.19 && \
+RUN ln -s ../dev-venv/bin/python /opt/repository-e2e-gym/bin/python3 && \
+    python3 --version | grep -E '^Python 3[.]12[.]' && \
+    test "$(uv --version | awk '{print $2}')" = 0.11.19 && \
     test -x /opt/repository-e2e-gym/dev-venv/bin/python && \
     test -x /opt/repository-e2e-gym/pre-commit-3.6.0/bin/pre-commit && \
     test -w /opt/repository-e2e-gym/uv-cache && \
