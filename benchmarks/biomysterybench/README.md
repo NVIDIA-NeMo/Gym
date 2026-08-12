@@ -2,10 +2,10 @@
 
 Native NeMo Gym integration for Anthropic's gated
 [BioMysteryBench-full](https://huggingface.co/datasets/Anthropic/BioMysteryBench-full).
-It uses `anyterminal_agent` with a native Gym sandbox and resources-server verifier.
+It uses a sandboxed Claude Code harness and a benchmark-owned resources server.
 
-Each policy-agent sandbox receives one extracted task directory read-only at `/data` and a
-writable `/workspace`. The answer rubric remains on the Gym host. After the sandbox exits, the
+The BioMysteryBench resources server creates each policy sandbox and stages one task at `/data`.
+Claude Code uses `/workspace` for temporary files. The answer rubric remains on the Gym host. The
 captured final response is sent to `biomysterybench_judge`, which performs binary rubric grading
 and checks captured tool calls for prohibited active GEO/SRA/ENA/BioProject lookups. Each task's
 network allowlist is appended to the agent prompt, and explicit off-list URLs in captured tool calls
@@ -34,7 +34,7 @@ docker build \
   benchmarks/biomysterybench
 ```
 
-Task data is mounted at runtime, so the shared image never contains gated data or answer rubrics.
+Task data is staged at runtime, so the shared image never contains gated data or answer rubrics.
 
 ## Credentials and model configuration
 
@@ -86,6 +86,7 @@ Run the one-task, one-repeat test benchmark first:
 ```bash
 uv run gym eval run \
   --benchmark biomysterybench_test \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
   --model-type vllm_model \
   --model azure/anthropic/claude-opus-4-6 \
   --model-url https://inference-api.nvidia.com/v1 \
@@ -100,6 +101,7 @@ Run the complete published-release benchmark:
 ```bash
 uv run gym eval run \
   --benchmark biomysterybench \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
   --model-type vllm_model \
   --model azure/anthropic/claude-opus-4-6 \
   --model-url https://inference-api.nvidia.com/v1 \

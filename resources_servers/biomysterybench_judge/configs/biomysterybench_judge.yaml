@@ -22,3 +22,14 @@ biomysterybench_judge:
       use_chat_completions_for_judge: true
       detect_forbidden_accession_lookups: true
       enforce_allowed_domains: true
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 15300
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 32
+        provider_options: {}
+        metadata:
+          benchmark: biomysterybench

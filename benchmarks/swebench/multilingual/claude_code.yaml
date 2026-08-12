@@ -1,0 +1,27 @@
+config_paths:
+  - responses_api_agents/claude_code_sandboxed_agent/configs/claude_code_agent.yaml
+  - resources_servers/swebench/configs/swebench.yaml
+
+claude_code_swebench_multilingual_resources_server:
+  _inherit_from: swebench_resources_server
+
+claude_code_sandboxed_agent_swebench_multilingual:
+  _inherit_from: claude_code_sandboxed_agent
+  responses_api_agents:
+    claude_code_sandboxed_agent:
+      description: SWE-Bench Multilingual run with Claude Code in benchmark-owned sandboxes
+      resources_server:
+        type: resources_servers
+        name: claude_code_swebench_multilingual_resources_server
+      system_prompt: |-
+        You are fixing a bug in the repository at /testbed. Edit the source files to fix the root
+        cause, then verify. You MUST actually apply the fix with your file-editing tools. Do not
+        just describe it.
+      max_turns: 100
+      sandbox_timeout: 1800
+      datasets:
+        - name: swebench_multilingual
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl
+          prepare_script: benchmarks/swebench/multilingual/prepare.py
+          num_repeats: 3

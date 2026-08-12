@@ -1,0 +1,24 @@
+config_paths:
+  - responses_api_agents/claude_code_sandboxed_agent/configs/claude_code_agent.yaml
+  - resources_servers/terminalbench/configs/terminalbench.yaml
+
+terminalbench_claude_code_resources_server:
+  _inherit_from: terminalbench_resources_server
+
+terminalbench_claude_code:
+  _inherit_from: claude_code_sandboxed_agent
+  responses_api_agents:
+    claude_code_sandboxed_agent:
+      description: TerminalBench run with Claude Code in a benchmark-owned sandbox
+      resources_server:
+        type: resources_servers
+        name: terminalbench_claude_code_resources_server
+      max_turns: null
+      sandbox_timeout: 12500
+      concurrency: 6
+      datasets:
+        - name: terminalbench
+          type: benchmark
+          jsonl_fpath: benchmarks/terminalbench/data/terminalbench.jsonl
+          prepare_script: benchmarks/terminalbench/prepare.py
+          num_repeats: 1

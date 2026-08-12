@@ -1,0 +1,1 @@
+"""TerminalBench resources server tests."""

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare gated BioMysteryBench data for native AnyTerminal execution.
+"""Prepare gated BioMysteryBench data for native NeMo Gym execution.
 
 The benchmark is evaluation-only.  Preparation downloads the pinned gated
 Hugging Face artifacts, safely extracts each selected archive, and writes a
@@ -250,6 +250,11 @@ def _gym_row(
 ) -> dict:
     allowed_domains = _allowed_domains(row["allowed_domains"])
     resources = _resource_defaults(int(extraction["uncompressed_bytes"]))
+    network_policy = (
+        "\n\nNetwork policy: only connect to these task-approved domains: "
+        + ", ".join(allowed_domains)
+        + ". Do not connect to other domains. Use explicit connection and total timeouts for every network command."
+    )
     return {
         "id": row["id"],
         "question": row["question"],
@@ -258,7 +263,7 @@ def _gym_row(
         "allowed_domains": allowed_domains,
         "dataset_revision": revision,
         "responses_create_params": {
-            "input": [{"role": "user", "content": row["question"]}],
+            "input": [{"role": "user", "content": row["question"] + network_policy}],
             "metadata": {
                 "instance_id": f"biomysterybench::{row['id']}",
                 "task_name": row["id"],

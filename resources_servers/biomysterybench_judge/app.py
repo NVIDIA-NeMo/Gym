@@ -13,15 +13,32 @@ from __future__ import annotations
 
 import json
 import re
-from typing import ClassVar, List, Optional
+import sys
+import tarfile
+import tempfile
+from asyncio import to_thread
+from pathlib import Path
+from traceback import format_exc
+from typing import Any, ClassVar, Dict, List, Optional
 from urllib.parse import urlsplit
 
+from fastapi import Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse, ReverifyMode
+from nemo_gym.base_resources_server import (
+    BaseRunRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ReverifyMode,
+)
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.frontierscience_judge.app import (
     FrontierScienceJudgeConfig,
     FrontierScienceJudgeServer,
@@ -58,6 +75,16 @@ class BioMysteryBenchJudgeConfig(FrontierScienceJudgeConfig):
         default=True,
         description="Fail captured tool calls whose explicit URLs target a domain outside allowed_domains.",
     )
+    sandbox_provider: Optional[str] = None
+    sandbox_config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BioMysteryBenchSeedSessionRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class BioMysteryBenchSeedSessionResponse(BaseSeedSessionResponse):
+    sandbox_handle: Dict[str, Any]
 
 
 class BioMysteryBenchJudgeVerifyRequest(BaseVerifyRequest):
@@ -153,6 +180,106 @@ def detect_disallowed_domains(body: BioMysteryBenchJudgeVerifyRequest) -> list[s
 class BioMysteryBenchJudgeServer(FrontierScienceJudgeServer):
     config: BioMysteryBenchJudgeConfig
 
+    def model_post_init(self, context: Any, /) -> None:
+        self._sandboxes: Dict[str, AsyncSandbox] = {}
+        super().model_post_init(context)
+
+    @staticmethod
+    def _request_metadata(body: BioMysteryBenchSeedSessionRequest) -> dict[str, Any]:
+        return dict(body.responses_create_params.metadata or {})
+
+    @staticmethod
+    def _archive_data(data_dir: Path) -> Path:
+        archive_dir = data_dir.parent.parent / "sandbox_archives"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        marker = data_dir / ".biomysterybench-extracted.json"
+        try:
+            marker_data = json.loads(marker.read_text()) if marker.is_file() else {}
+        except (OSError, ValueError):
+            marker_data = {}
+        archive_hash = str(marker_data.get("archive_sha256") or "unknown")
+        archive = archive_dir / f"{data_dir.name}-{archive_hash}.tar.gz"
+        if archive.is_file():
+            return archive
+        with tempfile.NamedTemporaryFile(dir=archive_dir, suffix=".tar.gz", delete=False) as stream:
+            temporary = Path(stream.name)
+        try:
+            with tarfile.open(temporary, "w:gz") as bundle:
+                bundle.add(data_dir, arcname=".")
+            temporary.replace(archive)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return archive
+
+    async def _create_sandbox(self, metadata: dict[str, Any]) -> AsyncSandbox:
+        if not self.config.sandbox_provider:
+            raise ValueError("sandbox_provider is required for BioMysteryBench rollout collection")
+        global_config = get_global_config_dict()
+        provider_config = resolve_provider_config(self.config.sandbox_provider, global_config)
+        provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
+        config = self.config.sandbox_config
+        resources = dict(config.get("resources") or {})
+        if metadata.get("cpus") is not None:
+            resources["cpu"] = float(metadata["cpus"])
+        if metadata.get("memory_mb") is not None:
+            resources["memory_mib"] = int(float(metadata["memory_mb"]))
+        if metadata.get("storage_mb") is not None:
+            storage_mb = int(float(metadata["storage_mb"]))
+            resources["disk_gib"] = max(1, (storage_mb + 1023) // 1024)
+
+        spec = SandboxSpec(
+            image=str(metadata.get("docker_image") or "ubuntu:22.04").removeprefix("docker://"),
+            ttl_s=config.get("ttl_s"),
+            ready_timeout_s=config.get("ready_timeout_s"),
+            workdir=str(metadata.get("workdir") or "/workspace"),
+            metadata=provider_metadata
+            | dict(config.get("metadata") or {})
+            | {
+                "benchmark": "biomysterybench",
+                "instance_id": str(metadata.get("instance_id") or "unknown")[:63],
+            },
+            resources=SandboxResources.from_mapping(resources),
+            provider_options=dict(config.get("provider_options") or {}),
+        )
+        sandbox = AsyncSandbox(provider_config, spec)
+        await sandbox.start()
+
+        data_dir = Path(str(metadata["data_dir"])).expanduser().resolve()
+        if not data_dir.is_dir():
+            await sandbox.stop()
+            raise FileNotFoundError(f"BioMysteryBench data directory does not exist: {data_dir}")
+        archive = await to_thread(self._archive_data, data_dir)
+        await sandbox.upload(archive, "/tmp/biomysterybench-data.tar.gz")
+        result = await sandbox.exec(
+            "rm -rf /data && mkdir -p /data && "
+            "tar -xzf /tmp/biomysterybench-data.tar.gz -C /data && chmod -R a-w /data",
+            timeout_s=1800,
+            user="root",
+        )
+        if result.return_code != 0:
+            await sandbox.stop()
+            raise RuntimeError(result.stderr or "failed to stage BioMysteryBench data")
+        return sandbox
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: BioMysteryBenchSeedSessionRequest,
+    ) -> BioMysteryBenchSeedSessionResponse:
+        sandbox = await self._create_sandbox(self._request_metadata(body))
+        self._sandboxes[request.session[SESSION_ID_KEY]] = sandbox
+        return BioMysteryBenchSeedSessionResponse(sandbox_handle=await sandbox.serialize(scope="operate"))
+
+    async def _stop_sandbox(self, request: Request | None) -> None:
+        if request is None:
+            return
+        sandbox = self._sandboxes.pop(request.session.get(SESSION_ID_KEY), None)
+        if sandbox is not None:
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop BioMysteryBench sandbox", format_exc(), file=sys.stderr)
+
     async def _call_judge(self, judge_prompt: str) -> str:
         """Call NVIDIA-hosted Anthropic models with one sampling control.
 
@@ -220,7 +347,11 @@ class BioMysteryBenchJudgeServer(FrontierScienceJudgeServer):
         key.update(highest_k_metrics(agent_metrics, "majority@{k}", exclude_names=["no_answer"]))
         return key
 
-    async def verify(self, body: BioMysteryBenchJudgeVerifyRequest) -> BioMysteryBenchJudgeVerifyResponse:
+    async def verify(
+        self,
+        body: BioMysteryBenchJudgeVerifyRequest,
+        request: Request = None,
+    ) -> BioMysteryBenchJudgeVerifyResponse:
         raw_text = extract_text_from_response(body.response, strip_thinking=False)
         generation = extract_text_from_response(body.response)
         has_open = "<think>" in raw_text or "<thinking>" in raw_text
@@ -232,6 +363,8 @@ class BioMysteryBenchJudgeServer(FrontierScienceJudgeServer):
         evidence = detect_forbidden_lookup(body) if self.config.detect_forbidden_accession_lookups else []
         if self.config.enforce_allowed_domains:
             evidence.extend(detect_disallowed_domains(body))
+
+        await self._stop_sandbox(request)
 
         judge_text = ""
         verdict = None

@@ -87,8 +87,8 @@ def test_prepare_and_merge_preserve_official_indices(tmp_path: Path) -> None:
     ]
     assert len(first_preprocessed) == manifest["shards"][0]["expected_rollout_count"]
     assert all("_ng_task_index" not in row and "_ng_rollout_index" not in row for row in first_preprocessed)
-    assert all(row["agent_ref"]["name"] == "biomysterybench_anyterminal_claude_code" for row in first_preprocessed)
-    assert all(row["agent_ref"]["name"] == "biomysterybench_anyterminal_claude_code" for row in first_materialized)
+    assert all(row["agent_ref"]["name"] == "biomysterybench_claude_code" for row in first_preprocessed)
+    assert all(row["agent_ref"]["name"] == "biomysterybench_claude_code" for row in first_materialized)
     assert all(
         row["responses_create_params"]["metadata"]["data_dir"] == str((data_root / row["id"]).resolve())
         for row in first_materialized

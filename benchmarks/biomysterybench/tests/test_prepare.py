@@ -137,4 +137,5 @@ class TestGymRow:
         assert row["responses_create_params"]["metadata"]["data_dir"] == str(data_dir.resolve())
         assert row["allowed_domains"] == ["ncbi.nlm.nih.gov", "pypi.org"]
         assert json.loads(row["responses_create_params"]["metadata"]["allowed_domains"]) == row["allowed_domains"]
+        assert "ncbi.nlm.nih.gov, pypi.org" in serialized_policy_params
         assert all(isinstance(value, str) for value in row["responses_create_params"]["metadata"].values())

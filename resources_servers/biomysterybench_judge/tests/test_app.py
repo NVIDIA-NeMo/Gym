@@ -16,11 +16,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.biomysterybench_judge.app import (
     BioMysteryBenchJudgeConfig,
     BioMysteryBenchJudgeServer,
     BioMysteryBenchJudgeVerifyRequest,
+    BioMysteryBenchSeedSessionRequest,
     detect_disallowed_domains,
     detect_forbidden_lookup,
 )
@@ -28,6 +29,29 @@ from resources_servers.biomysterybench_judge.app import (
 
 def test_reverification_is_declared_stateless() -> None:
     assert BioMysteryBenchJudgeConfig.REVERIFY_MODE.value == "stateless"
+
+
+async def test_seed_session_returns_benchmark_sandbox_handle(tmp_path) -> None:
+    server = _server()
+    sandbox = AsyncMock()
+    sandbox.serialize.return_value = {"sandbox_id": "box", "workdir": "/workspace"}
+    request = MagicMock(session={SESSION_ID_KEY: "session"})
+    body = BioMysteryBenchSeedSessionRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input=[],
+            metadata={
+                "instance_id": "biomysterybench::hb013",
+                "docker_image": "biomysterybench-runtime:v12",
+                "data_dir": str(tmp_path),
+            },
+        )
+    )
+
+    with patch.object(server, "_create_sandbox", new=AsyncMock(return_value=sandbox)):
+        response = await server.seed_session(request, body)
+
+    assert response.sandbox_handle["sandbox_id"] == "box"
+    assert server._sandboxes["session"] is sandbox
 
 
 def _message(text: str) -> NeMoGymResponseOutputMessage:
@@ -199,12 +223,7 @@ class TestAllowedDomainDetection:
     def test_internal_docker_proxy_is_not_treated_as_external_destination(self) -> None:
         request = _request(
             _function_call(
-                {
-                    "command": (
-                        "curl -x http://host.docker.internal:15645 "
-                        "https://ftp.ncbi.nlm.nih.gov/blast/db/"
-                    )
-                }
+                {"command": ("curl -x http://host.docker.internal:15645 https://ftp.ncbi.nlm.nih.gov/blast/db/")}
             ),
             allowed_domains=["ftp.ncbi.nlm.nih.gov"],
         )

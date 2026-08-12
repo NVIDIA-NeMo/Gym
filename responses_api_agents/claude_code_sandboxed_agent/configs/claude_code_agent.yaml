@@ -1,0 +1,23 @@
+claude_code_sandboxed_agent:
+  responses_api_agents:
+    claude_code_sandboxed_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Claude Code running inside a benchmark-owned sandbox
+      value: Evaluate Claude Code across sandboxed benchmarks
+
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      model: ${policy_model_name}
+      claude_code_version: null
+      max_turns: 100
+      system_prompt: null
+      sandbox_timeout: 14400
+      sandbox_provider: sandbox
+      concurrency: 32
+      datasets: []

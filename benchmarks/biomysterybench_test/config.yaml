@@ -1,11 +1,11 @@
 config_paths:
   - benchmarks/biomysterybench/config.yaml
 
-biomysterybench_test_anyterminal_claude_code:
-  _inherit_from: biomysterybench_anyterminal_claude_code
+biomysterybench_test_claude_code:
+  _inherit_from: biomysterybench_claude_code
   responses_api_agents:
-    anyterminal_agent:
-      description: One-task BioMysteryBench test in a native NeMo Gym sandbox with Claude Code
+    claude_code_sandboxed_agent:
+      description: One-task BioMysteryBench test with Claude Code in a benchmark-owned sandbox
       datasets:
         - name: biomysterybench_test
           type: benchmark

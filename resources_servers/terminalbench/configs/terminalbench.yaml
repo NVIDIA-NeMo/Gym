@@ -1,0 +1,21 @@
+terminalbench_resources_server:
+  resources_servers:
+    terminalbench:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: TerminalBench sandbox setup and task verification
+      value: Evaluate terminal task completion in benchmark-owned sandboxes
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 14400
+        ready_timeout_s: 1200
+        resources:
+          cpu: 2
+          memory_mib: 4096
+          disk_gib: 20
+        provider_options: {}
+        metadata:
+          benchmark: terminalbench
+      evaluation_timeout: 300

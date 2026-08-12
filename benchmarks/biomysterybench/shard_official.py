@@ -30,7 +30,7 @@ OFFICIAL_REPEATS = 5
 DEFAULT_EXPECTED = BENCHMARK_DIR / "data" / RELEASES["official-99"].output_filename
 BIOMYSTERY_AGENT_REF = {
     "type": "responses_api_agents",
-    "name": "biomysterybench_anyterminal_claude_code",
+    "name": "biomysterybench_claude_code",
 }
 
 
