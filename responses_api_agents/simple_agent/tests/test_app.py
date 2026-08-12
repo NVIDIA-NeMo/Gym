@@ -621,6 +621,7 @@ class TestApp:
             "output": [
                 {
                     "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
+                    "content": None,
                     "encrypted_content": None,
                     "summary": [
                         {
@@ -863,6 +864,7 @@ class TestApp:
             "output": [
                 {
                     "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
+                    "content": None,
                     "encrypted_content": None,
                     "summary": [
                         {
