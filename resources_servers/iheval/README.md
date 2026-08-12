@@ -6,63 +6,107 @@ system / user / tool instructions across *aligned*, *conflict*, and *reference*
 settings. This server ports **all** IHEval tasks and settings to NeMo Gym —
 including multi-turn rule-following and the reference cross-row concatenation.
 
-## Differences from the original benchmark (and what they mean for you)
+The gym-native metrics path reproduces the upstream **task-macro** aggregation
+exactly and reports all three category scores (`aligned_score`,
+`conflict_score`, `reference_score`) plus the headline `result_score`. That is
+the recommended way to run this benchmark and is described first.
 
-The **per-row scoring is identical** to the original — the same rule-based
-checkers produce the same reward for each example. The differences are all about
-**how those rewards are aggregated** and **how the eval is driven**. Read this
-before comparing a gym number to a published IHEval number.
+## Run (gym-native — the exact IHEval numbers)
 
-1. **Aggregation: task-macro vs. flat per-row mean.**
-   The original headline is a *task-macro*: it averages rows within each
-   (task, setting) group, then averages those group scores across a task's
-   settings, then averages across tasks — so **every task and setting is weighted
-   equally regardless of how many rows it has**. The gym-native metrics path
-   reproduces this exactly. A driver that simply averages the reward column
-   instead produces a **flat per-row mean**, where every row counts equally and
-   larger tasks/settings dominate.
-   - *What it means:* the two numbers agree only when row counts are balanced
-     across groups. They can diverge on the full mixed dataset. For the **exact**
-     upstream number, use the gym-native metrics path (`compute_metrics`); a flat
-     per-row mean is a close *approximation*, not the same statistic.
+All IHEval scorers are rule-based (F1 / ROUGE / IFEval / TensorTrust), so
+verification needs no judge model — only the policy model generates.
 
-2. **The headline is the conflict score.** The original reports separate
-   reference / aligned / conflict columns; gym's single `result_score` is the
-   **conflict** score (in the default `hierarchy` mode), because instruction
-   hierarchy is what the conflict setting stresses.
-   - *What it means:* don't compare gym's `result_score` against the original's
-     aligned or reference numbers — match it to the original's **conflict** column.
-   - To make a flat per-row-mean driver report (an approximation of) that conflict
-     score directly, run it over the **conflict-only** dataset
-     (`data/test_conflict.jsonl`) rather than the full mixed dataset. Because the
-     conflict subset is roughly task-balanced, the flat mean lands within a small
-     fraction of a point of the exact conflict task-macro.
+**1. Start the servers** (resources server + agent + policy model):
 
-3. **The "reference" setting is inherently cross-row.** The original derives
-   reference scores by concatenating each row's prediction with *other* rows'
-   predictions and re-scoring — something a single per-row verifier cannot see.
-   The exact reference numbers are therefore reconstructed only in the gym-native
-   metrics path; a per-row reward for a reference row is just its standalone
-   component.
-   - *What it means:* trust the reference aggregates only from the gym-native
-     path; a plain per-row-mean driver does not reproduce them.
+```bash
+gym env start --resources-server iheval --model-type vllm_model
+```
 
-4. **Multi-turn is a single generation over a pre-canned history**, not a live
-   multi-turn rollout. The prior user turns and fixed assistant replies are
-   built into the input; the model only generates (and is scored on) the final
-   turn, with the same checker as single-turn.
-   - *What it means:* scoring matches upstream, but the model does not itself
-     produce the earlier turns.
+Set `OPEN_ROUTER_KEY` if using an OpenRouter-backed model server. To bring up
+just the scorer (you own generation and only call `/verify`), use the serve-only
+config: `gym env start --resources-server iheval/iheval_serve`.
 
-5. **Generation and serving parameters are the runner's responsibility.** The
-   benchmark logic is model-agnostic: sampling parameters (temperature, top_p,
-   max_tokens), whether reasoning/thinking is enabled, and the inference backend
-   are all chosen by whoever runs the eval, not fixed by the benchmark.
-   - *What it means:* to reproduce a specific published score you must match those
-     generation settings yourself — differences there (not the scoring) explain
-     most run-to-run gaps.
+**2. Collect rollouts and aggregate** over the full dataset:
 
-The sections below give the mechanics behind each point.
+```bash
+gym eval run --no-serve \
+    --agent iheval_simple_agent \
+    --input resources_servers/iheval/data/test.jsonl \
+    --output results/iheval_rollouts.jsonl \
+    --num-repeats 1
+```
+
+At the end you get the **task-macro** metrics (illustrative values):
+
+```text
+Key metrics for iheval_simple_agent:
+{
+    "result_score": 0.7217,       # headline (conflict, in the default hierarchy mode)
+    "conflict_score": 0.7217,
+    "aligned_score": 0.8134,
+    "reference_score": 0.7660,
+    "mean_reward": 0.7421,        # flat per-row mean, for reference only
+    "conflict/get-webpage/score": 0.8471,
+    "conflict/single-turn/score": 0.5855,
+    ...
+}
+Aggregate metrics: results/iheval_rollouts_aggregate_metrics.json
+```
+
+Those values come from the resources server's `compute_metrics` /
+`get_key_metrics` (invoked via `/aggregate_metrics` after rollout collection).
+The written file `results/iheval_rollouts_aggregate_metrics.json` holds, per
+agent:
+
+* `agent_metrics` — the full `compute_metrics` dict: `result_score`,
+  `aligned_score` / `conflict_score` / `reference_score`, the per-task
+  `{category}/{task}/score` breakdowns, the `diff_aligned` / `diff_conflict`
+  (category − reference) deltas, the reconstructed `reference/<task>/average`
+  cross-row metrics, and `mean_reward` plus per-`task`/`domain`/`setting` flat
+  means for inspection.
+* `key_metrics` — the headline selection above (`result_score` first).
+
+> **Run over the full `data/test.jsonl`** (all three settings — aligned,
+> conflict, reference) to get all three category scores. A conflict-only subset
+> can only ever produce `conflict_score`.
+
+For sharded jobs, pass `--disable-aggregation` to `gym eval run` and compute the
+global metrics once all shards finish with `gym eval aggregate`.
+
+## Result score and the three category scores (`accuracy_mode`)
+
+Aggregation is **task-macro**, matching the upstream headline exactly: rows are
+averaged within each (task, setting) group, those group scores are averaged
+across a task's settings, and those are averaged across tasks — so **every task
+and setting is weighted equally regardless of how many rows it has**. Row counts
+never dilute a score, and reference is a raw-task-ability baseline that never
+enters `result_score`.
+
+The headline `result_score` is selected by the resources-server config's
+**`accuracy_mode`** (default `hierarchy`):
+
+* **`hierarchy`** (default) — the **conflict-setting** score, since instruction
+  hierarchy is precisely what the conflict setting stresses. Following upstream
+  `average_final_score.py`, `result_score` = `conflict_score`: the mean over
+  tasks of each task's conflict score, where a task's conflict score is the mean
+  over its conflict-setting `average`s.
+* **`hierarchy_sysprompt`** — `mean(aligned_score, conflict_score)`. Credits both
+  instruction-hierarchy following (Conflict) *and* system-prompt instruction
+  following (Aligned — obeying the system message when nothing conflicts).
+
+Set it in `configs/iheval*.yaml` (or override per run, e.g.
+`++iheval.resources_servers.iheval.accuracy_mode=hierarchy_sysprompt`).
+`aligned_score` / `conflict_score` / `reference_score` and the aligned/conflict
+− reference diffs are always reported alongside, regardless of `accuracy_mode`.
+
+Per-setting `average` matches upstream per task type:
+
+* verb-extract / translation / lang-detect / safety / slack-user / get-webpage —
+  mean of per-row rewards (equals upstream's strict/loose mean by construction).
+* single-turn / multi-turn (rule-following) — the prompt/instruction × strict/loose
+  mean, with **instruction-level accuracy weighted by instruction count**
+  (`sum(followed) / sum(total)`), matching `record_scores.py`.
+* reference category — the cross-row concatenation `average` (see below).
 
 ## Tasks
 
@@ -95,21 +139,6 @@ as Responses-API `function_call` / `function_call_output` items in the input,
 preserving the privilege boundary between the user instruction and the tool
 output (critical for the prompt-injection *conflict* setting).
 
-## Data
-
-```bash
-# Downloads github.com/ytyz1307zzh/IHEval and writes data/test.jsonl,
-# data/test_conflict.jsonl + data/example.jsonl. Set IHEVAL_REPO_DIR to use an
-# existing checkout.
-python resources_servers/iheval/prepare_iheval.py
-```
-
-`data/example.jsonl` (5 mixed rows) is committed for smoke testing;
-`data/test.jsonl` (~19k rows across all eight tasks) and
-`data/test_conflict.jsonl` (the `conflict/*` subset) are generated locally.
-The conflict-only file exists so a per-row-mean driver reports
-the average conflict score directly — see **Result score** below.
-
 ## Multi-turn rule-following
 
 Included. Upstream's `conversation_history` (the prior user turns **and** the
@@ -117,12 +146,13 @@ fixed assistant replies) is pre-canned in the data — the model only generates
 the final turn, which is scored with the same IFEval checker as `single-turn`.
 So it maps to a single generation over a pre-filled multi-turn context (built
 into `responses_create_params.input` by `prepare_iheval.py`), not a live
-multi-turn rollout.
+multi-turn rollout. Scoring matches upstream; the model just does not itself
+produce the earlier turns.
 
 ## Reference cross-row concatenation
 
-Included, but reconstructed at aggregation time rather than per-row — because it
-is **inherently cross-row**. Upstream (`calc_reference_score.py` /
+Included and reconstructed **exactly** at aggregation time — because it is
+inherently cross-row. Upstream (`calc_reference_score.py` /
 `calc_mix_reference_score.py`) scores each data row by concatenating its
 prediction with the *anchor rows'* predictions (`strong_user_instruction` /
 `weak_user_instruction`) and re-scoring; the six-component `average` therefore
@@ -133,7 +163,7 @@ So:
 
 * **Per-row reward** for a reference row = the standalone `no_user_instruction`
   component (with the `español:` / `Verbs:` prefix stripping upstream applies) —
-  a valid RL signal.
+  a valid RL signal. `verify()` also stashes the stripped prediction + gold.
 * **`compute_metrics`** collects the stashed stripped predictions + golds across
   all rollouts and reconstructs the exact upstream number, emitted as
   `reference/verb-extract/average`, `reference/translation/average`, and
@@ -142,54 +172,26 @@ So:
   `calc_mix_reference_score`).
 
 The reconstruction has been verified to match the upstream algorithm exactly.
-Note: these reference aggregates surface in the **gym-native** metrics path
-(`gym eval` / `ng_reward_profile` / the `/compute_metrics` endpoint). A driver
-that only averages per-row rewards (e.g. a plain mean) will
-report the per-row `no_user_instruction` component instead.
 
-## Result score (`accuracy_mode`)
+## Data
 
-The headline `result_score` is selected by the resources-server config's
-**`accuracy_mode`** (default `hierarchy`):
+```bash
+# Downloads github.com/ytyz1307zzh/IHEval and writes data/test.jsonl,
+# data/test_conflict.jsonl + data/example.jsonl. Set IHEVAL_REPO_DIR to use an
+# existing checkout.
+python resources_servers/iheval/prepare_iheval.py
+```
 
-* **`hierarchy`** (default) — the **conflict-setting** score, since instruction
-  hierarchy is precisely what the conflict setting stresses. Following upstream
-  `average_final_score.py`, `result_score` = `conflict_score`: the mean over
-  tasks of each task's conflict score, where a task's conflict score is the mean
-  over its conflict-setting `average`s.
-* **`hierarchy_sysprompt`** — `mean(aligned_score, conflict_score)`. Credits both
-  instruction-hierarchy following (Conflict) *and* system-prompt instruction
-  following (Aligned — obeying the system message when nothing conflicts).
+`data/example.jsonl` (5 mixed rows) is committed for smoke testing;
+`data/test.jsonl` (~19k rows across all eight tasks, all three settings) and
+`data/test_conflict.jsonl` (the `conflict/*` subset) are generated locally. Use
+`data/test.jsonl` for the full IHEval metric.
 
-Row counts do **not** dilute either — each setting is weighted equally within a
-task, and each task equally overall. Reference is a raw-task-ability baseline and
-never enters `result_score`.
+## Test
 
-Set it in `configs/iheval*.yaml` (or override per run, e.g.
-`++iheval.resources_servers.iheval.accuracy_mode=hierarchy_sysprompt`).
-
-Per-setting `average` matches upstream per task type:
-
-* verb-extract / translation / lang-detect / safety / slack-user / get-webpage —
-  mean of per-row rewards (equals upstream's strict/loose mean by construction).
-* single-turn / multi-turn (rule-following) — the prompt/instruction × strict/loose
-  mean, with **instruction-level accuracy weighted by instruction count**
-  (`sum(followed) / sum(total)`), matching `record_scores.py`.
-* reference category — the cross-row concatenation `average` (see above).
-
-Also reported: `aligned_score`, `reference_score`, the per-task
-`{category}/{task}/score` breakdowns, and the `diff_aligned` / `diff_conflict`
-(category − reference) deltas — the upstream "Agg." / "Diff." block.
-`get_key_metrics` surfaces `result_score` first.
-
-> Caveat: these aggregates come from the **gym-native** metrics path (`gym eval`
-> / `ng_reward_profile` / `/compute_metrics`). A driver that only means per-row
-> rewards over the whole dataset reports a flat
-> all-settings mean, not the conflict result score.
-
-
-`compute_metrics` also reports `mean_reward` plus per-`task`, per-`domain`, and
-per-`setting` breakdowns for inspection.
+```bash
+gym env test --resources-server iheval
+```
 
 ## Example rollouts and metrics
 
@@ -212,25 +214,42 @@ Note: `example.jsonl` contains only aligned-setting rows, so the headline
 `result_score` (conflict score) is not present in `example_metrics.json`. Run
 against `data/test.jsonl` with a full model eval for the complete IHEval metric.
 
-## Run
-
-```bash
-# Full eval (resources server + model)
-gym env start --resources-server iheval --model-type vllm_model
-
-# Serve-only (no model needed — all scorers are rule-based)
-gym env start --resources-server iheval/iheval_serve
-```
-
-Set `OPEN_ROUTER_KEY` if using an OpenRouter-backed model server.
-
-## Test
-
-```bash
-gym env test --resources-server iheval
-```
-
 ## Scoring source
 
 The IFEval rule-following checkers under `ifeval/` are vendored from upstream
 (Apache-2.0); see `ifeval/PROVENANCE.md`.
+
+---
+
+## Appendix: driving IHEval from an external per-row driver (e.g. nel)
+
+The per-row scoring above is identical no matter what drives the eval. But some
+external drivers (e.g. nemo-evaluator / `nel`) only **mean the per-row reward
+column** — they read `reward` from `/verify` and never call the gym server's
+`compute_metrics` / `/aggregate_metrics`. None of the following affects the
+gym-native flow above; it only matters if you read a driver's own report instead
+of `results/..._aggregate_metrics.json`.
+
+1. **Aggregation: task-macro vs. flat per-row mean.** A driver that averages the
+   reward column produces a **flat per-row mean**, where larger tasks/settings
+   dominate. It agrees with the task-macro only when row counts are balanced
+   across groups; on the full mixed dataset the two diverge. For the exact
+   upstream number, read the gym-native aggregate file.
+
+2. **The headline is the conflict score.** The upstream headline is the conflict
+   task-macro. To make a flat-mean driver approximate it directly, point the
+   driver at the **conflict-only** dataset (`data/test_conflict.jsonl`) instead
+   of the full mixed dataset — the conflict subset is roughly task-balanced, so
+   the flat mean lands within a small fraction of a point of the exact conflict
+   task-macro. This is an approximation, not the exact statistic, and it yields
+   only the conflict number (not aligned/reference).
+
+3. **The "reference" setting is inherently cross-row.** A per-row driver reports
+   only the standalone `no_user_instruction` component for a reference row; the
+   exact reference aggregates are reconstructed only in the gym-native path.
+
+4. **Generation and serving parameters are the runner's responsibility.**
+   Sampling parameters (temperature, top_p, max_tokens), whether reasoning is
+   enabled, and the inference backend are chosen by whoever runs the eval, not
+   fixed by the benchmark — differences there (not the scoring) explain most
+   run-to-run gaps against a published number.
