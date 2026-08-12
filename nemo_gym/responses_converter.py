@@ -507,14 +507,7 @@ class ResponsesConverter(BaseModel):
         token_information = _token_information_from_mapping(message_dict) if self.return_token_id_information else None
         if token_information is not None:
             last_response_output_item = response_output[-1]
-<<<<<<< HEAD
-            train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
-=======
             train_cls = training_variant_of(last_response_output_item.__class__)
-            extra_training_fields = {}
-            if "routed_experts" in message_dict and message_dict["routed_experts"] is not None:
-                extra_training_fields["routed_experts"] = message_dict["routed_experts"]
->>>>>>> 6bd05e3a (fix(responses): remove reasoning_item from the boundary set, and name the training-variant error)
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
                 **token_information.model_dump(exclude_none=True),
