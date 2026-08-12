@@ -105,15 +105,6 @@ def test_task_env_prefixes_configured_gym_model_servers():
     assert env["JUDGE_BASE_URL"] == "http://judge/ng-rollout/7-2/v1"
 
 
-def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
-    agent = make_agent(openclaw_provider_timeout_seconds=14400)
-    wrapper = agent._write_direct_exec_wrapper(tmp_path)
-    wrapper_text = wrapper.read_text()
-
-    assert 'custom_provider["timeoutSeconds"] = provider_timeout_s' in wrapper_text
-    assert 'defaults["timeoutSeconds"] = provider_timeout_s' in wrapper_text
-
-
 def test_build_spec_from_config(tmp_path):
     image = tmp_path / "pinchbench.sif"
     image.touch()

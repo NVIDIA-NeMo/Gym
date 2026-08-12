@@ -68,16 +68,28 @@ def test_agents_list_entries_never_carry_a_timeout(tmp_path):
     assert "timeoutSeconds" not in _seeded_agent(config)
 
 
-def test_the_ceiling_lands_on_agent_defaults(tmp_path):
-    config = _generate_openclaw_config(tmp_path, openclaw_provider_timeout_seconds=14400)
-
-    assert config["agents"]["defaults"]["timeoutSeconds"] == 14400
-
-
 def test_the_watchdog_lands_on_the_provider(tmp_path):
-    config = _generate_openclaw_config(tmp_path, openclaw_provider_timeout_seconds=14400)
+    config = _generate_openclaw_config(tmp_path, openclaw_provider_timeout_seconds=300)
 
-    assert config["models"]["providers"]["custom"]["timeoutSeconds"] == 14400
+    assert config["models"]["providers"]["custom"]["timeoutSeconds"] == 300
+
+
+def test_the_ceiling_lands_on_agent_defaults(tmp_path):
+    config = _generate_openclaw_config(tmp_path, openclaw_agent_timeout_seconds=86400)
+
+    assert config["agents"]["defaults"]["timeoutSeconds"] == 86400
+
+
+def test_the_watchdog_does_not_move_the_ceiling(tmp_path):
+    config = _generate_openclaw_config(tmp_path, openclaw_provider_timeout_seconds=300)
+
+    assert "timeoutSeconds" not in config["agents"]["defaults"]
+
+
+def test_the_ceiling_does_not_move_the_watchdog(tmp_path):
+    config = _generate_openclaw_config(tmp_path, openclaw_agent_timeout_seconds=86400)
+
+    assert "timeoutSeconds" not in config["models"]["providers"]["custom"]
 
 
 def test_no_timeout_is_written_when_it_is_unset(tmp_path):
@@ -88,14 +100,35 @@ def test_no_timeout_is_written_when_it_is_unset(tmp_path):
     assert "timeoutSeconds" not in config["models"]["providers"]["custom"]
 
 
-def test_the_baked_patch_only_sets_the_ceiling_when_overridden():
+def test_the_baked_patch_only_sets_the_ceiling_from_its_own_knob():
     """The patch runs at image build, so it has no in-repo runtime to exercise.
 
-    Writing the ceiling unconditionally clamps OpenClaw's gateway run timeout
-    from its 600s default down to the 120s provider default, cutting long tasks
-    short and grading the partial work as a failure.
+    Driving the ceiling off the provider knob clamps OpenClaw's gateway run
+    timeout to the 120s provider default, cutting long tasks short and grading
+    the partial work as a failure.
     """
     added = [line[1:] for line in _BAKED_PATCH.read_text().splitlines() if line.startswith("+")]
     ceiling_write = next(index for index, line in enumerate(added) if _CEILING_WRITE in line)
 
-    assert added[ceiling_write - 1].strip() == "if provider_timeout_override:"
+    assert added[ceiling_write - 1].strip() == "if agent_timeout_override:"
+
+
+def test_the_judge_timeout_reaches_the_sandbox():
+    env = make_agent(openclaw_judge_timeout_seconds=600)._task_env("task_x")
+
+    assert env["PINCHBENCH_JUDGE_TIMEOUT_SECONDS"] == "600"
+
+
+def test_the_judge_timeout_is_absent_when_unset():
+    env = make_agent()._task_env("task_x")
+
+    assert "PINCHBENCH_JUDGE_TIMEOUT_SECONDS" not in env
+
+
+def test_the_baked_patch_reads_the_judge_timeout_from_the_environment():
+    """lib_grading hardcodes DEFAULT_JUDGE_TIMEOUT_SECONDS, so the patch must
+    make it configurable; the judge runs a full OpenClaw session and its
+    timeout is otherwise unreachable from the benchmark config."""
+    added = [line[1:] for line in _BAKED_PATCH.read_text().splitlines() if line.startswith("+")]
+
+    assert any("PINCHBENCH_JUDGE_TIMEOUT_SECONDS" in line for line in added)
