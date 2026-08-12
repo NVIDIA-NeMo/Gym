@@ -382,11 +382,10 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
                 if round_idx < max_refine_rounds - 1:
                     prior_summary = self._summarize_prior(refine_rounds)
 
-            # Chain-level reward = resolved by the (cumulative) final state; broadcast
-            # to every round's sample. With fixed-length padding this keeps each
-            # rollout's per-group count constant, so the GRPO baseline stays unbiased.
+            # Each real refinement round owns its verifier reward. A later rescue
+            # must not turn an unresolved earlier round into a positive example.
+            # Fixed-length padding remains transport-only and is masked below.
             chain_metrics = _build_chain_metrics(refine_rounds, max_refine_rounds, self.config.refine_strategy)
-            reward = 1.0 if chain_metrics["chain_resolved"] else 0.0
 
             results: list[SWEBenchRefineVerifyResponse] = []
             for round_idx in range(max_refine_rounds):
@@ -406,7 +405,7 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
                     SWEBenchRefineVerifyResponse(
                         responses_create_params=responses_create_params,
                         response=response,
-                        reward=reward,
+                        reward=0.0 if is_padded else (1.0 if metrics.resolved else 0.0),
                         **metrics.model_dump(),
                         instance_config=instance_config,
                         group_hash=group_hash,
