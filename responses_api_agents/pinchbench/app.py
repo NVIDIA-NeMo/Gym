@@ -362,9 +362,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             defaults.setdefault("models", {})[agent_model] = {"params": runtime_params}
             defaults.setdefault("model", {})["primary"] = agent_model
             if provider_timeout_s is not None:
-                # Only agents.defaults accepts timeoutSeconds; OpenClaw's agents.list
-                # entry schema is strict and rejects it, invalidating the whole config.
-                # defaults already covers every list entry that does not override it.
                 defaults["timeoutSeconds"] = provider_timeout_s
             if stuck_abort_s is not None:
                 cfg.setdefault("diagnostics", {})["stuckSessionAbortMs"] = stuck_abort_s * 1000

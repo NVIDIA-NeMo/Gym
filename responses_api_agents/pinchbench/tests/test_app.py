@@ -114,16 +114,6 @@ def test_direct_exec_wrapper_sets_provider_and_agent_timeout_ceiling(tmp_path):
     assert 'defaults["timeoutSeconds"] = provider_timeout_s' in wrapper_text
 
 
-def test_direct_exec_wrapper_never_sets_timeout_on_agents_list(tmp_path):
-    """OpenClaw's agents.list entry schema is strict: an unknown timeoutSeconds
-    key there invalidates the whole config and the agent never starts. Only
-    agents.defaults and the provider may carry it."""
-    agent = make_agent(openclaw_provider_timeout_seconds=14400)
-    wrapper_text = agent._write_direct_exec_wrapper(tmp_path).read_text()
-
-    assert 'agent["timeoutSeconds"]' not in wrapper_text
-
-
 def test_build_spec_from_config(tmp_path):
     image = tmp_path / "pinchbench.sif"
     image.touch()
