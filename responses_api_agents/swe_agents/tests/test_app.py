@@ -673,6 +673,36 @@ class TestNVInternalDatasetProcessor:
             result = processor.get_run_command()
             assert "test_x.py,test_y.py" in result.command
 
+    def test_get_run_command_serializes_jest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(
+                tmpdir,
+                {
+                    "run_script.sh": (
+                        "#!/bin/bash\n"
+                        "npx jest tests/\n"
+                        "yarn jest --maxWorkers=2 suite/\n"
+                        ". /root/.nvm/nvm.sh && jest --config verbose_jest.config.json\n"
+                        "elif grep -q '\"jest\"' package.json; then\n"
+                        '"preset": "ts-jest",\n'
+                        "config_jest\n"
+                        "echo done"
+                    )
+                },
+            )
+            processor.get_run_command()
+            script = (processor.config.persistent_dir / "run_script.sh").read_text()
+            assert "npx jest --runInBand --forceExit tests/" in script
+            # An explicit worker count is respected; only --forceExit is added.
+            assert "yarn jest --forceExit --maxWorkers=2 suite/" in script
+            # Bare command-position jest (on PATH after nvm sourcing) is rewritten too.
+            assert "&& jest --runInBand --forceExit --config verbose_jest.config.json" in script
+            # Mentions that are not invocations stay untouched.
+            assert "elif grep -q '\"jest\"' package.json; then" in script
+            assert '"preset": "ts-jest",' in script
+            assert "config_jest\n" in script
+            assert "echo done" in script
+
     def test_get_run_command_no_repo_cmd(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             processor = self._make_processor(
