@@ -281,6 +281,8 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     docker_network: Optional[str] = "host"
     sandbox_model_base_url: Optional[str] = None
     tb_agent_timeout: int = 1800
+    # When set, overrides the per-task agent_timeout_sec from the dataset for every task.
+    global_agent_timeout: Optional[int] = None
     tb_eval_timeout: int = 300
     tb_sandbox_ttl: int = 7200
     agent_overhead_mb: int = 2048  # extra container memory on top of the task's memory_mb for the
@@ -689,9 +691,11 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
         agent_run_id = f"{task_name}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 
-        # Per-task timeouts override config defaults when available.
+        # Per-task timeouts override config defaults when available, unless global_agent_timeout is set.
         config_overrides = {}
-        if problem_info.get("agent_timeout_sec"):
+        if self.config.global_agent_timeout is not None:
+            config_overrides["tb_agent_timeout"] = self.config.global_agent_timeout
+        elif problem_info.get("agent_timeout_sec"):
             config_overrides["tb_agent_timeout"] = int(float(problem_info["agent_timeout_sec"]))
         if problem_info.get("verifier_timeout_sec"):
             config_overrides["tb_eval_timeout"] = int(float(problem_info["verifier_timeout_sec"]))
