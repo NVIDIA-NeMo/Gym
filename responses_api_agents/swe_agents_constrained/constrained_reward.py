@@ -56,7 +56,12 @@ def grade_and_shape(
     }
 
     try:
-        constraints = coerce_constraint_declarations(json.loads(metadata.get("constraints", "[]") or "[]"))
+        # Canonical rows carry a JSON string (Responses metadata is
+        # Dict[str, str]); tolerate an already-parsed list from older files.
+        raw = metadata.get("constraints", "[]") or "[]"
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        constraints = coerce_constraint_declarations(raw)
         if not constraints:
             return fields
         steps = parse_trajectory(output_items)

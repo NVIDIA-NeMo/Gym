@@ -123,6 +123,19 @@ class TestGradeAndShape:
         assert fields["constraint_alpha"] == 0.5
         assert fields["reward"] == 1.5
 
+    def test_list_typed_constraints_tolerated(self, core):
+        # Older generated files carry constraints as a native list rather than
+        # a JSON string; grading must accept both.
+        fields = grade_and_shape(
+            _trajectory(True),
+            {"constraints": [{"type": "no_force_git_commands", "params": {}}], "constraint_alpha": "1.0"},
+            task_reward=1.0,
+            default_alpha=1.0,
+            grading_core=core,
+        )
+        assert fields["constraint_graded"] is True
+        assert fields["reward"] == 2.0
+
     def test_grading_error_passes_task_reward_through(self, core):
         fields = grade_and_shape(
             _trajectory(True),
