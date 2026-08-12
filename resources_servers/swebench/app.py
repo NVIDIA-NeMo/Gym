@@ -220,6 +220,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
+        await eval_sandbox.pty.create()
+
         if MAP_REPO_TO_EXT.get(test_spec.repo) == "java":
             await self._apply_sandbox_patches(eval_sandbox)
 
@@ -253,10 +255,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
         # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
-        # This may be overfit and needs to be config'd or detected.
-        # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
-        # For now, the activation is put on the harness side.
-        # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
+        if MAP_REPO_TO_EXT.get(test_spec.repo) == "py":
+            pty_session = eval_sandbox._pty_sessions[0]
+            await eval_sandbox.pty.exec("source /opt/miniconda3/bin/activate && conda activate testbed", pty_session)
 
         return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
