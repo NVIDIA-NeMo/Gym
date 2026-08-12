@@ -24,6 +24,7 @@ import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
+from scipy import stats
 from wandb import Histogram
 
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
@@ -202,16 +203,27 @@ class RewardProfiler:
 
         return Histogram(data)
 
+    def confidence_interval(self, df: DataFrame) -> Tuple[Series, Series]:
+        # to do - make sure this test is correct
+        ci_low, ci_high = stats.t.interval(
+            confidence=0.95,
+            df=df.count() - 1,  # degrees of freedom per column
+            loc=df.mean(),
+            scale=stats.sem(df, nan_policy="omit"),
+        )
+        return Series(ci_low, index=df.columns), Series(ci_high, index=df.columns)
+
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
-        stat_index = ["mean", "max", "min", "median", "std", "histogram"]
+        stat_index = ["mean", "max", "min", "median", "std", "ci_low_95", "ci_high_95", "histogram"]
         d: List[Series] = [
             df.mean(),
             df.max(),
             df.min(),
             df.median(),
             df.std(),
+            *self.confidence_interval(df),
             df.apply(self.histogram, axis=0),
-        ]
+        ]  # type: ignore
 
         # Std is nore interpretable using 0 rather than NaN for no std
         if d[4].isna().all():
