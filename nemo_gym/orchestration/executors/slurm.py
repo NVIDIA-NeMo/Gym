@@ -23,11 +23,33 @@ import rich
 
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.connection import get_connection
+from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 
 
 _SBATCH_JOB_ID_RE = re.compile(r"Submitted batch job (\d+)")
+
+
+def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
+    entries = [("driver", m) for m in config.driver.mounts]
+    for name, service in config.services.items():
+        entries += [(f"services.{name}", m) for m in service.mounts]
+    srcs_by_label = [(label, mount.split(":")[0]) for label, mount in entries]
+    if not srcs_by_label:
+        return
+
+    if isinstance(conn, LocalConnection):
+        missing = {src for _, src in srcs_by_label if not Path(src).exists()}
+    else:
+        # SSHConnection.run() pipes commands as a bash script, so || works fine.
+        checks = [f'test -e {shlex.quote(src)} || echo "__GYM_MISSING:{src}"' for _, src in srcs_by_label]
+        output = conn.run(checks)
+        missing = {line[len("__GYM_MISSING:") :] for line in output.splitlines() if line.startswith("__GYM_MISSING:")}
+
+    if missing:
+        bad = [(label, src) for label, src in srcs_by_label if src in missing]
+        details = "\n".join(f"  {label}: {src!r}" for label, src in bad)
+        raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
 class SlurmExecutor(BaseExecutor):
@@ -50,6 +72,7 @@ class SlurmExecutor(BaseExecutor):
         with tempfile.TemporaryDirectory(prefix="gym-submit-") as staging_str:
             staging = self._stage(config, compute, remote_run_dir, Path(staging_str))
             with get_connection(compute.hostname) as conn:
+                _validate_mounts(config, conn)
                 conn.copy(staging, remote_run_dir)
                 output = conn.run(
                     [
