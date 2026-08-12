@@ -89,10 +89,10 @@ genrm_model:
       openai_api_key: ${nv_inference_api_key}
       max_concurrent_requests: 16
 
-policy_model:
-  responses_api_models:
-    vllm_model:
-      num_workers: 16
+# policy_model:
+#   responses_api_models:
+#     vllm_model:
+#       num_workers: 16
 
 # TODO @bxyu-nvidia: Remove this to turn on SWE Verified after it is validated. This is a placeholder for container build.
 opencode_sandboxed_agent_swebench_verified:
