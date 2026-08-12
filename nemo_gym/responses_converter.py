@@ -23,6 +23,7 @@ import re
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from openai.types.responses.response_create_params import ToolParam
 from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import (
@@ -37,12 +38,12 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionToolMessageParam,
     NeMoGymChatCompletionToolParam,
+    NeMoGymChatCompletionToolUnionParam,
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChoice,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymFunctionDefinition,
-    NeMoGymFunctionToolParam,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
@@ -277,30 +278,42 @@ class ResponsesConverter(BaseModel):
             if text.get("verbosity") is not None:
                 responses_create_params["verbosity"] = text["verbosity"]
 
+        tool_choice = self._responses_to_chat_tool_choice(responses_create_params.pop("tool_choice", None))
         tools = responses_create_params.pop("tools", None)
         if tools:
             responses_create_params["tools"] = []
             for tool_dict in tools:
                 tool_type = tool_dict.get("type")
-                if tool_type != "function":
+                if tool_type not in {"function", "custom"}:
                     raise NotImplementedError(
                         f"Responses tool type {tool_type!r} has no implemented Chat Completions conversion."
                     )
                 if tool_dict.get("defer_loading"):
                     raise NotImplementedError(
-                        "Responses function tools with defer_loading enabled have no Chat Completions representation."
+                        f"Responses {tool_type} tools with defer_loading enabled "
+                        "have no Chat Completions representation."
                     )
                 tool_dict = tool_dict.copy()
                 tool_dict.pop("type", None)
                 tool_dict.pop("defer_loading", None)
-                responses_create_params["tools"].append(
-                    NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
-                )
+                if tool_type == "function":
+                    tool_dict = {key: value for key, value in tool_dict.items() if value is not None}
+                    converted_tool = NeMoGymChatCompletionToolParam(
+                        type="function",
+                        function=NeMoGymFunctionDefinition(**tool_dict),
+                    )
+                else:
+                    converted_tool = {
+                        "type": "custom",
+                        "custom": self._responses_custom_tool_to_chat(tool_dict),
+                    }
+                responses_create_params["tools"].append(converted_tool)
+            if tool_choice is not None:
+                responses_create_params["tool_choice"] = tool_choice
         else:
-            if responses_create_params.get("tool_choice") == "required":
-                raise ValueError("tool_choice='required' requires at least one tool")
+            if tool_choice not in (None, "auto", "none"):
+                raise ValueError(f"tool_choice={tool_choice!r} requires at least one tool")
 
-            responses_create_params.pop("tool_choice", None)
             responses_create_params.pop("parallel_tool_calls", None)
 
         chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
@@ -469,12 +482,89 @@ class ResponsesConverter(BaseModel):
     # Chat Completion create params to Response create params
     # =======================================================
 
+    @staticmethod
+    def _tool_reference_to_responses(tool: dict) -> dict:
+        tool_type = tool.get("type")
+        if tool_type not in {"function", "custom"}:
+            raise NotImplementedError(f"Chat tool reference type {tool_type!r} has no Responses representation.")
+        return {"type": tool_type, **tool[tool_type]}
+
+    @staticmethod
+    def _tool_reference_to_chat(tool: dict) -> dict:
+        tool_type = tool.get("type")
+        if tool_type not in {"function", "custom"}:
+            raise NotImplementedError(f"Responses tool reference type {tool_type!r} has no Chat representation.")
+        return {"type": tool_type, tool_type: {key: value for key, value in tool.items() if key != "type"}}
+
+    @staticmethod
+    def _chat_custom_tool_to_responses(tool: dict) -> dict:
+        converted = dict(tool)
+        tool_format = converted.get("format")
+        if tool_format is not None and tool_format["type"] == "grammar":
+            converted["format"] = {"type": "grammar", **tool_format["grammar"]}
+        return converted
+
+    @staticmethod
+    def _responses_custom_tool_to_chat(tool: dict) -> dict:
+        converted = dict(tool)
+        tool_format = converted.get("format")
+        if tool_format is not None and tool_format["type"] == "grammar":
+            converted["format"] = {
+                "type": "grammar",
+                "grammar": {key: value for key, value in tool_format.items() if key != "type"},
+            }
+        return converted
+
+    def _chat_to_responses_tool_choice(self, tool_choice: Any) -> Any:
+        if tool_choice is None or isinstance(tool_choice, str):
+            return tool_choice
+
+        tool_type = tool_choice.get("type")
+        if tool_type in {"function", "custom"}:
+            return self._tool_reference_to_responses(tool_choice)
+        if tool_type == "allowed_tools":
+            allowed_tools = tool_choice["allowed_tools"]
+            return {
+                "type": "allowed_tools",
+                "mode": allowed_tools["mode"],
+                "tools": [self._tool_reference_to_responses(tool) for tool in allowed_tools["tools"]],
+            }
+        raise NotImplementedError(f"Chat tool choice type {tool_type!r} has no Responses representation.")
+
+    def _responses_to_chat_tool_choice(self, tool_choice: Any) -> Any:
+        if tool_choice is None or isinstance(tool_choice, str):
+            return tool_choice
+
+        tool_type = tool_choice.get("type")
+        if tool_type in {"function", "custom"}:
+            return self._tool_reference_to_chat(tool_choice)
+        if tool_type == "allowed_tools":
+            return {
+                "type": "allowed_tools",
+                "allowed_tools": {
+                    "mode": tool_choice["mode"],
+                    "tools": [self._tool_reference_to_chat(tool) for tool in tool_choice["tools"]],
+                },
+            }
+        raise NotImplementedError(f"Responses tool choice type {tool_type!r} has no Chat representation.")
+
     def _chat_completion_to_responses_tools(
-        self, chat_completions_tools: Optional[List[NeMoGymChatCompletionToolParam]]
-    ) -> List[NeMoGymFunctionToolParam]:
+        self, chat_completions_tools: Optional[List[NeMoGymChatCompletionToolUnionParam]]
+    ) -> List[ToolParam]:
         if chat_completions_tools is None:
             return []
-        return [tool["function"] | {"type": "function"} for tool in chat_completions_tools]
+
+        converted_tools = []
+        for tool in chat_completions_tools:
+            tool_type = tool["type"]
+            tool_definition = dict(tool[tool_type])
+            if tool_type == "function":
+                tool_definition.setdefault("parameters", None)
+                tool_definition.setdefault("strict", None)
+            else:
+                tool_definition = self._chat_custom_tool_to_responses(tool_definition)
+            converted_tools.append({"type": tool_type, **tool_definition})
+        return converted_tools
 
     def chat_completion_to_responses_create_params(
         self,
@@ -499,7 +589,7 @@ class ResponsesConverter(BaseModel):
             text={"verbosity": chat_completion_create_params.verbosity}
             if chat_completion_create_params.verbosity is not None
             else None,
-            tool_choice=chat_completion_create_params.tool_choice
+            tool_choice=self._chat_to_responses_tool_choice(chat_completion_create_params.tool_choice)
             if chat_completion_create_params.tool_choice is not None
             else "auto",
             tools=self._chat_completion_to_responses_tools(chat_completion_create_params.tools),
