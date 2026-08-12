@@ -77,6 +77,9 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
+    _num_requests_total: int = 0
+    _num_requests_running: int = 0
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -275,6 +278,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        self._num_requests_total += 1
+        self._num_requests_running += 1
+        if self._num_requests_total % 100 == 0:
+            print(
+                f"Hit in {self.config.name}: Total requests: {self._num_requests_total} Running requests: {self._num_requests_running}"
+            )
+
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
@@ -341,6 +351,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             else:
                 trajectory.gaps.append(ObservationGap(code="resolution_unavailable", invocation_id="root"))
             result["ng_trajectory"] = trajectory.model_dump(mode="json")
+        self._num_requests_running -= 1
         return SimpleAgentVerifyResponse.model_validate(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
