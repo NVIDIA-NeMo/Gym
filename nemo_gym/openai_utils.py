@@ -82,6 +82,12 @@ from openai.types.responses.response_create_params import (
 from openai.types.responses.response_function_call_output_item_list_param import (
     ResponseFunctionCallOutputItemListParam,
 )
+from openai.types.responses.response_input_item import (
+    ComputerCallOutput,
+    LocalShellCallOutput,
+    McpApprovalResponse,
+    ResponseCustomToolCallOutput,
+)
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
@@ -93,6 +99,9 @@ from openai.types.responses.response_output_item import (
     McpListTools,
 )
 from openai.types.responses.response_output_text_param import Annotation, Logprob
+from openai.types.responses.response_reasoning_item import (
+    Content as ReasoningContent,
+)
 from openai.types.responses.response_reasoning_item import (
     Summary,
 )
@@ -182,6 +191,7 @@ class NeMoGymResponseReasoningItem(BaseModel):
     summary: List[NeMoGymSummary]
     type: Literal["reasoning"] = "reasoning"
     encrypted_content: Optional[str] = None
+    content: Optional[List[ReasoningContent]] = None
 
     # As of Wed Sep 17, 2025, the OpenAI API with GPT-5 returns None for this status rather than a valid value here.
     # On subsequent calls to the OpenAI endpoints within a rollout, the status parameter is not accepted i.e. the OpenAI API returns a bad request when the status parameter is populated.
@@ -328,6 +338,24 @@ class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
     """A client-executed custom tool call (OpenAI Responses ``custom_tool_call`` output item)."""
 
 
+# These models represent client-supplied results for the calls above.
+# The installed SDK defines them in ``response_input_item``.
+class NeMoGymComputerCallOutput(ComputerCallOutput):
+    """The client's result of a computer-use action (``computer_call_output`` item)."""
+
+
+class NeMoGymResponseCustomToolCallOutput(ResponseCustomToolCallOutput):
+    """The client's result of a custom tool call (``custom_tool_call_output`` item)."""
+
+
+class NeMoGymLocalShellCallOutput(LocalShellCallOutput):
+    """The client's result of a local shell command (``local_shell_call_output`` item)."""
+
+
+class NeMoGymMcpApprovalResponse(McpApprovalResponse):
+    """The client's answer to a hosted-MCP approval request (``mcp_approval_response`` item)."""
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -415,6 +443,10 @@ NeMoGymResponseInputItem = Annotated[
         NeMoGymResponseCodeInterpreterToolCall,
         NeMoGymLocalShellCall,
         NeMoGymResponseCustomToolCall,
+        NeMoGymComputerCallOutput,
+        NeMoGymResponseCustomToolCallOutput,
+        NeMoGymLocalShellCallOutput,
+        NeMoGymMcpApprovalResponse,
         # Training variants.
         NeMoGymEasyInputMessageForTraining,
         NeMoGymMessageForTraining,
