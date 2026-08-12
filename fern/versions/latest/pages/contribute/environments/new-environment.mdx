@@ -41,6 +41,33 @@ Every profile also requires a `resources_server`, an `agent_server`, and at leas
 
 The profile is an authored classification, not a runtime dispatcher. This initial contract does not infer a profile from configuration, resolve concrete component versions, declare capabilities, derive which components are pinned or swappable, enforce component swaps, or validate `grading_mode` against a resources server's vocabulary. Runtime behavior remains config-driven.
 
+## Validation Layers
+
+Environment validation is progressive. Manifest conformance checks the workload declaration. Static manifest validation checks whether that declaration matches the repository configuration. Verifier fixtures exercise representative scoring behavior, while evaluation runs and reward profiling establish runtime behavior and grading quality.
+
+Static manifest validation runs without starting the workload. It:
+
+- validates the manifest schema and workload identity;
+- resolves Gym configuration and inheritance without runtime side effects;
+- compares manifest composition mirrors with the authoritative configuration;
+- parses referenced preparation and rollout-driver hooks without importing or executing them; and
+- streams declared JSONL data, applies benchmark prompts row by row, and checks the resulting rollout inputs.
+
+With synchronization enabled, it writes corrected composition mirrors atomically only after every static check passes. Authored metadata remains unchanged.
+
+It does not import components, start services, execute preparation code, call a model, run an evaluation, probe model or resources endpoints, or check evaluation-output writability. Runtime pre-run readiness is a separate validation layer. Component versions and capabilities, profile inference and pinning, and `adopted_from` source resolution are deferred from this initial static validation. Scorer behavior and grading quality require the later validation layers.
+
+## Verifier Fixture Contract
+
+The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:
+
+- a full-reward case that reaches the declared upper endpoint;
+- a zero-reward case that reaches the declared lower endpoint;
+- a malformed request that fails as declared; and
+- for a seeded environment, the same request producing the same reward after an explicit reseed on fresh server instances.
+
+Fixture execution is in-process and does not start Gym services. Updating expected rewards is explicit and atomic; range, endpoint, malformed-input, and determinism checks still apply. Static discovery checks that a resources-server entrypoint declares the fixture; executing it verifies the contract. A shared fixture attests the scorer itself, so a workload that overrides `grading_mode` needs workload-specific cases.
+
 ## Guiding Principles
 
 Adding a new training environment is similar to [Adding A Benchmark](/contribute/environments/adding-a-benchmark) with respect to the reward profiling and software correctness aspects. However, for adding a new training environment, you must additionally run training with your environment in isolation in order to determine the environment functionality and correctness.

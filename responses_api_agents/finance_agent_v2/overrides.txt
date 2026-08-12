@@ -1,0 +1,9 @@
+# model-library declares openai[aiohttp]>=2.28.0, but nemo-gym pins openai to a
+# vLLM-compatible version, so the two cannot resolve together. The upstream code
+# runs fine on the older client; only the declared floor conflicts.
+#
+# uv --override replaces every declared constraint on openai, including nemo-gym's,
+# so this mirrors the cap in the root pyproject.toml instead of merely dropping the
+# floor: `openai<3.0` here would silently install a far newer client. Bump this
+# together with nemo-gym's pin; tests/test_app.py asserts the two stay in sync.
+openai[aiohttp]<=2.7.2
