@@ -9,10 +9,14 @@
 #                                    Eng PICs Michal Bien, Marta Stepniewska-Dziubinska
 #   @NVIDIA-NeMo/gym_core            Core-Arch + RL — EM Bernard Nguyen,
 #                                    Eng PIC Ananth Subramaniam
-#   @NVIDIA-NeMo/gym_architects      Tech-lead advisors — escalation for cross-lane
-#                                    disputes and backstop for unclaimed paths
-#   @NVIDIA-NeMo/gym_leads           Leads (EM/PM/TPM) — docs surfaces (docs/, fern/),
-#                                    which leads edit often and which are not a tech-lead call
+#   @NVIDIA-NeMo/gym_architects      Advisors — request for ambiguous, cross-lane,
+#                                    or escalated changes; cross-ownership of the repo
+#   @NVIDIA-NeMo/gym_leads           Leads (EM/PM/TPM) — request mostly for
+#                                    documentation, RFCs, and processes
+#   @NVIDIA-NeMo/gym_maintainers     Maintainers — repository-wide merge authority
+#                                    through gym_approvers
+#   @NVIDIA-NeMo/gym_approvers       Merge approvers — union of Architects, Leads,
+#                                    and Gym Maintainers
 #   @NVIDIA-NeMo/automation          CI, build, and release infrastructure
 #
 # The split follows one principle: Core owns the contracts and the substrate,
@@ -28,16 +32,20 @@
 #   2. Well-isolated changes that do not touch core features may be reviewed by
 #      other frequent contributors without the code owner.
 #
-# GitHub applies the LAST matching pattern for a path, so rules run
-# general -> specific. Every team below has write access to this repo; a team
-# without write access is silently ignored by CODEOWNERS.
-
-# ── Global backstop ──────────────────────────────────────────────────────────
-# Anything not claimed by a more specific rule (data/, cache/, results/,
-# examples/, scripts/, top-level files) routes to the tech-lead advisors. If a
-# category of unclaimed files starts generating recurring work, give it an
-# explicit owner here rather than leaning on the backstop.
-*                                       @NVIDIA-NeMo/gym_architects
+# CODEOWNERS routes component experts for review; these requests are advisory.
+# Merge approval is enforced separately by the main-branch ruleset, which requires
+# one approval from @NVIDIA-NeMo/gym_approvers. That team is the union of
+# Architects, Leads, and Gym Maintainers.
+#
+# "Require review from Code Owners" must remain disabled. Team review
+# auto-assignment can turn component-team requests into named reviewers. Every
+# CODEOWNERS team below has write access; otherwise GitHub silently ignores it.
+#
+# Supporting and low-risk paths are intentionally unowned: root tests, docs/,
+# fern/, examples/, data/, cache/, results/, scripts/, and top-level files. They
+# should not add approval requirements beyond those of the implementation they
+# accompany. If one of these paths needs recurring specialist review, add an
+# explicit rule rather than a catch-all.
 
 # ═════════════════════════════════════════════════════════════════════════════
 # FRONTIER EVAL
@@ -113,7 +121,10 @@
 /nemo_gym/model_registry.py             @NVIDIA-NeMo/gym_core
 /nemo_gym/resources_server_registry.py  @NVIDIA-NeMo/gym_core
 /nemo_gym/mcp_auto_exposure.py          @NVIDIA-NeMo/gym_core
-/nemo_gym/orchestration/                @NVIDIA-NeMo/gym_core
+# Orchestration is driven by Frontier Eval on top of Core infrastructure. Route
+# review requests to FE; request Core separately when infrastructure semantics are
+# involved.
+/nemo_gym/orchestration/                @NVIDIA-NeMo/gym_env_benchmarks
 /nemo_gym/rollout_correlation.py        @NVIDIA-NeMo/gym_core
 /nemo_gym/rollout_observability.py      @NVIDIA-NeMo/gym_core
 /nemo_gym/decorators.py                 @NVIDIA-NeMo/gym_core
@@ -123,16 +134,12 @@
 /nemo_gym/skills.py                     @NVIDIA-NeMo/gym_env_benchmarks
 /nemo_gym/rollout_reverification.py     @NVIDIA-NeMo/gym_env_benchmarks
 
-# Core library tests encode integration-test expectations for the Core contract.
-# Per-server tests live under each server directory and inherit that server's owner.
-/tests/                                 @NVIDIA-NeMo/gym_core
-
 # ═════════════════════════════════════════════════════════════════════════════
 # CO-OWNED
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Shared runtime contracts. Core owns the contract, Frontier Eval builds directly
-# against it, so both lanes are required reviewers.
+# Shared runtime contracts route advisory review requests to both lanes. Merge
+# approval remains with gym_approvers through the main-branch ruleset.
 /nemo_gym/__init__.py                   @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
 /nemo_gym/config_types.py               @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
 /nemo_gym/global_config.py              @NVIDIA-NeMo/gym_core @NVIDIA-NeMo/gym_env_benchmarks
@@ -141,17 +148,6 @@
 # The verifiers harness is the framework side of the NeMo-RL integration: a
 # Frontier Eval harness against a Core-owned boundary.
 /responses_api_agents/verifiers_agent/  @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/gym_core
-
-# ═════════════════════════════════════════════════════════════════════════════
-# DOCS
-# ═════════════════════════════════════════════════════════════════════════════
-
-# Docs are owned by leads (EM/PM/TPM), who edit them often; this keeps docs out
-# of the tech-lead backstop. Docs changes that restate a shared runtime contract
-# still need both lanes, same as config_types.py — a policy rule this file cannot
-# express.
-/docs/                                  @NVIDIA-NeMo/gym_leads
-/fern/                                  @NVIDIA-NeMo/gym_leads
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CI & BUILD
