@@ -225,7 +225,7 @@ jobs:
           test -f resources_servers/hello_world/configs/hello_world.yaml
           test -d resources_servers/hello_world/tests
           grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
-          echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"verifier_metadata":{}}' \
+          echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"expected_answer":"Mock response.","verifier_metadata":{}}' \
             > resources_servers/hello_world/data/example.jsonl
 
       - name: Test ng_run + ng_collect_rollouts with built-in server
