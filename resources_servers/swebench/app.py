@@ -257,7 +257,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
         if MAP_REPO_TO_EXT.get(test_spec.repo) == "py":
-            await eval_sandbox.pty.exec("source /opt/miniconda3/bin/activate && conda activate testbed", pty_session)
+            await eval_sandbox.pty.exec(
+                "source /opt/miniconda3/bin/activate && conda activate testbed", session=pty_session
+            )
 
         return SWEBenchSeedSessionResponse(
             sandbox_handle=eval_sandbox._handle.sandbox_id,
