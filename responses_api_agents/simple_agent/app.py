@@ -324,7 +324,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         # await raise_for_status(response)
         # model_response_json = await get_response_json(response)
         model_response_json = inner_response.model_dump()
-        cookies = response.cookies
+        # TODO @bxyu-nvidia: Use starlette.requests.cookie_parser
+        # cookies = response.cookies
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
