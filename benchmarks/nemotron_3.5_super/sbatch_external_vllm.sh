@@ -42,6 +42,8 @@ PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
 
 EVAL_COMMAND=$(cat <<EOF
+set -euo pipefail
+
 # Activate environment in container and cd into Gym. The Gym path here may be mounted.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
