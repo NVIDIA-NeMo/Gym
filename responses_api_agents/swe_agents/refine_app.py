@@ -373,13 +373,6 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
                         "metrics": metrics,
                         "instance_config": metadata["instance_config"],
                         "verify_feedback": metadata.get("verify_feedback"),
-                        "no_progress_tail_call_ids": json.loads(
-                            metadata.get("no_progress_tail_call_ids", "[]")
-                        ),
-                        "no_progress_tail_type": metadata.get(
-                            "no_progress_tail_type"
-                        )
-                        or None,
                     }
                 )
                 self._dump_refine_round(group_hash, round_idx, refine_rounds[-1])
@@ -403,16 +396,12 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
                 if is_padded:
                     responses_create_params, response = _build_padding_transport(src["response"])
                     instance_config = None
-                    no_progress_tail_call_ids = []
-                    no_progress_tail_type = None
                 else:
                     responses_create_params = copy.deepcopy(src["responses_create_params"])
                     response = src["response"]
                     instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(
                         src["instance_config"]
                     ).model_dump()
-                    no_progress_tail_call_ids = src["no_progress_tail_call_ids"]
-                    no_progress_tail_type = src["no_progress_tail_type"]
                 results.append(
                     SWEBenchRefineVerifyResponse(
                         responses_create_params=responses_create_params,
@@ -425,8 +414,6 @@ class SWEBenchRefineWrapper(SWEBenchWrapper):
                         loss_multiplier=0.0 if is_padded else 1.0,
                         refine_round_idx=round_idx,
                         is_padded=is_padded,
-                        no_progress_tail_call_ids=no_progress_tail_call_ids,
-                        no_progress_tail_type=no_progress_tail_type,
                         **chain_metrics,
                     )
                 )
