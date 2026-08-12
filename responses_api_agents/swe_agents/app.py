@@ -117,6 +117,13 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     agent_framework_commit: str = Field(
         default="HEAD", description="Which commit to use when cloning the SWE-agent/OpenHands repo"
     )
+    openhands_prebuilt_setup_dir: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Absolute path to a prebuilt OpenHands runtime. When set, Gym validates and uses it "
+            "without cloning, updating, or copying the runtime."
+        ),
+    )
     # Container configuration
     container_formatter: str | list[str] = Field(
         default="docker://swebench/sweb.eval.x86_64.{instance_id}", description="Container path template"
@@ -1498,6 +1505,60 @@ fi
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
+    def _validate_prebuilt_setup(self, setup_dir: Path) -> Path:
+        if not setup_dir.is_absolute():
+            raise ValueError("openhands_prebuilt_setup_dir must be an absolute path")
+        try:
+            resolved_setup_dir = setup_dir.resolve(strict=True)
+        except OSError as error:
+            raise ValueError(f"OpenHands prebuilt setup does not exist: {setup_dir}") from error
+        if not resolved_setup_dir.is_dir():
+            raise ValueError(f"OpenHands prebuilt setup is not a directory: {resolved_setup_dir}")
+
+        openhands_dir = resolved_setup_dir / "OpenHands"
+        required_files = (
+            openhands_dir / ".venv/bin/python",
+            resolved_setup_dir / "miniforge3/bin/python",
+        )
+        for required_file in required_files:
+            if not required_file.is_file():
+                relative_path = required_file.relative_to(resolved_setup_dir)
+                raise ValueError(f"OpenHands prebuilt setup is missing {relative_path}")
+
+        def _git(*args: str) -> str:
+            result = subprocess_run(
+                ["git", "-C", str(openhands_dir), *args],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise ValueError(f"Invalid prebuilt OpenHands Git worktree: {detail}")
+            return result.stdout.strip()
+
+        git_root = Path(_git("rev-parse", "--show-toplevel"))
+        try:
+            is_openhands_root = os.path.samefile(git_root, openhands_dir)
+        except OSError:
+            is_openhands_root = False
+        if not is_openhands_root:
+            raise ValueError(f"Prebuilt OpenHands path is not a Git worktree root: {openhands_dir}")
+
+        target = self.config.agent_framework_commit
+        try:
+            resolved_target = _git("rev-parse", "--verify", f"{target}^{{commit}}")
+        except ValueError as error:
+            raise ValueError(f"Prebuilt OpenHands could not resolve configured commit {target!r}") from error
+        current_commit = _git("rev-parse", "HEAD")
+        if current_commit != resolved_target:
+            raise ValueError(
+                "Prebuilt OpenHands commit mismatch: "
+                f"runtime={current_commit}, configured={resolved_target} ({target})"
+            )
+
+        return resolved_setup_dir
+
     def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
         """Ensure OpenHands checkout matches config.agent_framework_commit.
 
@@ -1544,6 +1605,9 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         print(f"OpenHands now at commit {new_commit[:12]} (target={target})", flush=True)
 
     def setup(self) -> Path:
+        if self.config.openhands_prebuilt_setup_dir is not None:
+            return self._validate_prebuilt_setup(self.config.openhands_prebuilt_setup_dir)
+
         setup_dir = self.parent_dir / "swe_openhands_setup"
 
         with file_lock(setup_dir, "OpenHands setup"):

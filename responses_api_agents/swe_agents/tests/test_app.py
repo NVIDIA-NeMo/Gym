@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -227,6 +228,19 @@ class TestSWEBenchWrapperConfig:
         assert config.debug is False
         assert config.agent_framework_repo is None
         assert config.agent_framework_commit == "HEAD"
+        assert config.openhands_prebuilt_setup_dir is None
+
+    def test_prebuilt_openhands_setup_dir(self) -> None:
+        config = SWEBenchWrapperConfig(
+            host="localhost",
+            port=9003,
+            name="test_agent",
+            entrypoint="responses_api_agents/swe_agents",
+            model_server=ModelServerRef(type="responses_api_models", name="test"),
+            openhands_prebuilt_setup_dir=Path("/opt/openhands-runtime"),
+        )
+
+        assert config.openhands_prebuilt_setup_dir == Path("/opt/openhands-runtime")
 
     def test_custom_values(self) -> None:
         config = SWEBenchWrapperConfig(
@@ -831,6 +845,85 @@ class TestR2EGymDatasetProcessor:
 
 
 class TestOpenHandsHarnessProcessor:
+    @staticmethod
+    def _make_prebuilt_runtime(tmp_path: Path) -> Path:
+        setup_dir = tmp_path / "runtime"
+        openhands_dir = setup_dir / "OpenHands"
+        openhands_dir.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=openhands_dir, check=True)
+        subprocess.run(["git", "config", "user.name", "test"], cwd=openhands_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=openhands_dir, check=True)
+        (openhands_dir / "README.md").write_text("runtime\n")
+        subprocess.run(["git", "add", "README.md"], cwd=openhands_dir, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "runtime"], cwd=openhands_dir, check=True)
+        (openhands_dir / ".venv/bin").mkdir(parents=True)
+        (openhands_dir / ".venv/bin/python").touch()
+        (setup_dir / "miniforge3/bin").mkdir(parents=True)
+        (setup_dir / "miniforge3/bin/python").touch()
+        return setup_dir
+
+    def test_setup_uses_valid_prebuilt_runtime_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        setup_dir = self._make_prebuilt_runtime(tmp_path)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=setup_dir / "OpenHands",
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        config = _minimal_server_config().model_copy(
+            update={
+                "agent_framework_commit": head,
+                "openhands_prebuilt_setup_dir": setup_dir,
+            }
+        )
+        processor = OpenHandsHarnessProcessor(config=config)
+        monkeypatch.setattr(processor, "_run_setup_command", MagicMock())
+        monkeypatch.setattr(processor, "_sync_openhands_to_config_commit", MagicMock())
+
+        assert processor.setup() == setup_dir
+        processor._run_setup_command.assert_not_called()
+        processor._sync_openhands_to_config_commit.assert_not_called()
+
+    def test_setup_rejects_relative_prebuilt_runtime(self, tmp_path: Path) -> None:
+        config = _minimal_server_config().model_copy(update={"openhands_prebuilt_setup_dir": Path("relative/runtime")})
+
+        with pytest.raises(ValueError, match="absolute"):
+            OpenHandsHarnessProcessor(config=config).setup()
+
+    def test_setup_rejects_incomplete_prebuilt_runtime(self, tmp_path: Path) -> None:
+        setup_dir = self._make_prebuilt_runtime(tmp_path)
+        (setup_dir / "miniforge3/bin/python").unlink()
+        config = _minimal_server_config().model_copy(update={"openhands_prebuilt_setup_dir": setup_dir})
+
+        with pytest.raises(ValueError, match="miniforge3/bin/python"):
+            OpenHandsHarnessProcessor(config=config).setup()
+
+    def test_setup_rejects_prebuilt_runtime_commit_mismatch(self, tmp_path: Path) -> None:
+        setup_dir = self._make_prebuilt_runtime(tmp_path)
+        openhands_dir = setup_dir / "OpenHands"
+        configured_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=openhands_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        (openhands_dir / "second.txt").write_text("new runtime\n")
+        subprocess.run(["git", "add", "second.txt"], cwd=openhands_dir, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "new runtime"], cwd=openhands_dir, check=True)
+        config = _minimal_server_config().model_copy(
+            update={
+                "agent_framework_commit": configured_commit,
+                "openhands_prebuilt_setup_dir": setup_dir,
+            }
+        )
+
+        with pytest.raises(ValueError, match="commit mismatch"):
+            OpenHandsHarnessProcessor(config=config).setup()
+
     def test_get_run_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(tmpdir)
