@@ -29,7 +29,7 @@ services:
 
 driver:
   policy_model: vllm_model
-  container: python:3.12
+  container: python:3.13
   gym_install:
     ref: main
   benchmarks:

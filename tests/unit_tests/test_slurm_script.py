@@ -21,6 +21,7 @@ from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
+    _node_totals,
     _render_directives,
     _render_pool_directives,
     _render_service_command,
@@ -621,6 +622,149 @@ def test_validate_mounts_no_mounts_passes():
     conn = MagicMock()
     _validate_mounts(config, conn)
     conn.run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _render_service_command — multi-node flags
+# ---------------------------------------------------------------------------
+
+
+def test_render_service_command_multi_node_adds_nodes_and_ntasks():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model", nodes=4, ntasks=4)
+    assert "--nodes=4" in out
+    assert "--ntasks=4" in out
+
+
+def test_render_service_command_multi_node_flags_before_container_image():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model", nodes=4, ntasks=4)
+    assert out.index("--nodes=4") < out.index("--container-image=")
+
+
+def test_render_service_command_single_node_omits_node_flags():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model", nodes=1, ntasks=1)
+    assert "--nodes=" not in out
+    assert "--ntasks=" not in out
+
+
+def test_render_service_command_no_nodes_kwarg_omits_node_flags():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model")
+    assert "--nodes=" not in out
+    assert "--ntasks=" not in out
+
+
+# ---------------------------------------------------------------------------
+# _node_totals
+# ---------------------------------------------------------------------------
+
+
+def test_node_totals_empty_pools():
+    compute = SlurmComputeConfig(type="slurm", account="acct")
+    assert _node_totals(compute) == (0, 0)
+
+
+def test_node_totals_single_pool():
+    compute = SlurmComputeConfig(
+        type="slurm",
+        account="acct",
+        node_pools={"main": NodePool(partition="gpu", nodes=4, ntasks_per_node=2)},
+    )
+    assert _node_totals(compute) == (4, 8)
+
+
+def test_node_totals_multiple_pools():
+    compute = SlurmComputeConfig(
+        type="slurm",
+        account="acct",
+        node_pools={
+            "gpu": NodePool(partition="gpu", nodes=4, ntasks_per_node=1),
+            "cpu": NodePool(partition="cpu", nodes=2, ntasks_per_node=2),
+        },
+    )
+    assert _node_totals(compute) == (6, 8)
+
+
+# ---------------------------------------------------------------------------
+# build_sbatch_script — multi-node srun flags
+# ---------------------------------------------------------------------------
+
+
+def _multi_node_config():
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                }
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "ntasks_per_node": 1}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+
+
+def test_build_sbatch_script_multi_node_vllm_srun_gets_node_flags(bench_dir):
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    assert "--nodes=4" in vllm_line
+    assert "--ntasks=4" in vllm_line
+
+
+def test_build_sbatch_script_multi_node_driver_srun_gets_nodes_1(bench_dir):
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    driver_line = next(line for line in script.splitlines() if "python:3.12" in line)
+    assert "--nodes=1" in driver_line
+    assert "--ntasks=1" in driver_line
+
+
+def test_build_sbatch_script_multi_node_node_flags_before_container_image(bench_dir):
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    assert vllm_line.index("--nodes=4") < vllm_line.index("--container-image=")
+
+
+def test_build_sbatch_script_single_node_pool_omits_node_flags_from_srun(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 1, "ntasks_per_node": 4}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    driver_line = next(line for line in script.splitlines() if "python:3.12" in line)
+    assert "--nodes=" not in vllm_line
+    assert "--nodes=" not in driver_line
 
 
 # ---------------------------------------------------------------------------

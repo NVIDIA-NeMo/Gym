@@ -100,16 +100,19 @@ def _render_service_command(
     command: str,
     env: dict[str, str] | None = None,
     mounts: list[str] | None = None,
+    nodes: int | None = None,
+    ntasks: int | None = None,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
+    node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap --no-container-mount-home{mounts_flag} --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap --no-container-mount-home{node_flags}{mounts_flag} --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -139,6 +142,12 @@ _BUILDERS = {
 }
 
 
+def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
+    total_nodes = sum(pool.nodes for pool in compute.node_pools.values())
+    total_ntasks = sum(pool.nodes * pool.ntasks_per_node for pool in compute.node_pools.values())
+    return total_nodes, total_ntasks
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -148,9 +157,18 @@ def build_sbatch_script(
 ) -> str:
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
+    total_nodes, total_ntasks = _node_totals(compute)
+    is_multi_node = total_nodes > 1
+
     service_commands = "\n\n".join(
         _render_service_command(
-            name, service.container, _BUILDERS[type(service)](service), service.env or None, service.mounts or None
+            name,
+            service.container,
+            _BUILDERS[type(service)](service),
+            service.env or None,
+            service.mounts or None,
+            nodes=total_nodes if is_multi_node else None,
+            ntasks=total_ntasks if is_multi_node else None,
         )
         for name, service in config.services.items()
     )
@@ -179,12 +197,13 @@ def build_sbatch_script(
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
+    driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""
     driver_mounts_flag = (
         f" --container-mounts={','.join(shlex.quote(m) for m in config.driver.mounts)}" if config.driver.mounts else ""
     )
     driver_command = (
         f"{gym_cmd}\n"
-        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_mounts_flag} --container-image={shlex.quote(config.driver.container)} "
+        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag} --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
 
