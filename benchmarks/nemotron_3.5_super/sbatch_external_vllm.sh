@@ -9,6 +9,12 @@ MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+SBATCH_EXCLUDE=${SBATCH_EXCLUDE:-}
+
+SBATCH_EXCLUDE_ARGS=()
+if [[ -n "$SBATCH_EXCLUDE" ]]; then
+    SBATCH_EXCLUDE_ARGS+=(--exclude="$SBATCH_EXCLUDE")
+fi
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -106,6 +112,23 @@ export UCX_RNDV_THRESH=0
 
 source "$VLLM_CONFIG"
 
+wait_for_vllm_health() {
+    local role=\$1
+    local url=\$2
+    local pid=\$3
+
+    until curl -fs "\$url" >/dev/null; do
+        if ! kill -0 "\$pid" 2>/dev/null; then
+            local status=0
+            wait "\$pid" || status=\$?
+            (( status != 0 )) || status=1
+            echo "ERROR: \$role vLLM process exited before becoming healthy (status=\$status)." >&2
+            return "\$status"
+        fi
+        sleep 5
+    done
+}
+
 this_node_hostname=\$(hostname)
 # Split nodes here by index
 if (( SLURM_PROCID == 0 )); then
@@ -126,12 +149,8 @@ if (( SLURM_PROCID == 0 )); then
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-    until curl -fs "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" >/dev/null; do
-        sleep 5
-    done
-    until curl -fs "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" >/dev/null; do
-        sleep 5
-    done
+    wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
+    wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid"
 
     # --intra-node-data-parallel-size must match the data-parallel-size-local above.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
@@ -201,6 +220,7 @@ DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}"
 PREFILL_HEAD="\$PREFILL_HEAD" \
 DECODE_HEAD="\$DECODE_HEAD" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+    --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
     --container-mounts=$MOUNTS \
@@ -257,6 +277,7 @@ VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
     --time=04:00:00 \
+    "${SBATCH_EXCLUDE_ARGS[@]}" \
     --job-name=gym-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \
