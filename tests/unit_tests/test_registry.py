@@ -14,8 +14,18 @@
 # limitations under the License.
 from pathlib import Path
 
+import pytest
+
+import nemo_gym.registry as registry_module
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.registry import _discover_environments_in_dir, discover_environments
+from nemo_gym.environment.manifest import dump_manifest
+from nemo_gym.registry import (
+    RegistryError,
+    _discover_environments_in_dir,
+    discover_environment_catalog,
+    discover_environments,
+    resolve_catalog_entry,
+)
 
 
 def _make_env(environments_dir: Path, name: str, config_body: str) -> Path:
@@ -43,6 +53,52 @@ _ENV_CONFIG = """{name}:
         type: responses_api_models
         name: policy_model
 """
+
+
+def _manifest(name: str, kind: str = "environment", **updates) -> dict:
+    dataset = {
+        "name": name,
+        "type": "benchmark" if kind == "benchmark" else "example",
+        "jsonl_fpath": f"{kind}s/{name}/data/example.jsonl",
+    }
+    data = {
+        "name": name,
+        "version": "0.1.0",
+        "kind": kind,
+        "integration_profile": "custom-gym-verifier",
+        "domain": "other",
+        "description": f"{name} manifest entry",
+        "modality": "text",
+        "licensing": "Apache-2.0",
+        "authors": ["Test Author"],
+        "reward": {"range": [0, 1], "higher_is_better": True},
+        "resources_server": name.replace("/", "_"),
+        "agent_server": "simple_agent",
+        "model_server": "policy_model",
+        "datasets": [dataset],
+    }
+    if kind == "benchmark":
+        prompt = f"benchmarks/{name}/prompt.yaml"
+        dataset.update(prepare_script=f"benchmarks/{name}/prepare.py", prompt_config=prompt)
+        data.update(canonical_split="test", standard_prompt_config=prompt)
+    data.update(updates)
+    return data
+
+
+def _write_manifest(
+    root: Path,
+    tree: str,
+    path_name: str,
+    data: dict,
+    *,
+    with_config: bool = True,
+) -> Path:
+    manifest_path = root / tree / path_name / "manifest.yaml"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(dump_manifest(data), encoding="utf-8")
+    if with_config:
+        manifest_path.with_name("config.yaml").write_text("{}\n", encoding="utf-8")
+    return manifest_path
 
 
 class TestDiscoverEnvironments:
@@ -132,6 +188,193 @@ class TestDiscoverEnvironmentsAcrossRoots:
         monkeypatch.chdir(tmp_path)
 
         assert "cwd_env" in discover_environments()
+
+
+class TestEnvironmentCatalog:
+    def test_discovers_manifest_and_legacy_union(self, tmp_path: Path, monkeypatch) -> None:
+        manifest_path = _write_manifest(tmp_path, "environments", "manifest_env", _manifest("manifest_env"))
+        _make_env(tmp_path / "environments", "legacy_env", _ENV_CONFIG.format(name="legacy_env"))
+        benchmark = tmp_path / "benchmarks" / "legacy_benchmark" / "config.yaml"
+        benchmark.parent.mkdir(parents=True)
+        benchmark.write_text(
+            "bench_agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      domain: math\n"
+            "      description: Legacy benchmark\n"
+            "      datasets:\n"
+            "      - {name: test, type: benchmark, jsonl_fpath: data.jsonl}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = {(entry.kind, entry.name): entry for entry in discover_environment_catalog()}
+
+        assert set(entries) == {
+            ("environment", "manifest_env"),
+            ("environment", "legacy_env"),
+            ("benchmark", "legacy_benchmark"),
+        }
+        manifest_entry = entries[("environment", "manifest_env")]
+        assert manifest_entry.status == "experimental"
+        assert manifest_entry.manifest_path == manifest_path
+        assert manifest_entry.version == "0.1.0"
+        assert manifest_entry.integration_profile == "custom-gym-verifier"
+        legacy_benchmark = entries[("benchmark", "legacy_benchmark")]
+        assert legacy_benchmark.status == "no-manifest"
+        assert legacy_benchmark.domain == "math"
+        assert legacy_benchmark.description == "Legacy benchmark"
+
+    def test_nested_manifest_identity_uses_its_relative_path(self, tmp_path: Path, monkeypatch) -> None:
+        _write_manifest(tmp_path, "environments", "suite/alpha", _manifest("suite/alpha"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entry = resolve_catalog_entry("suite/alpha")
+
+        assert entry.path == tmp_path / "environments" / "suite" / "alpha"
+
+    @pytest.mark.parametrize(
+        ("tree", "path_name", "manifest"),
+        [
+            ("environments", "path-name", _manifest("declared-name")),
+            ("benchmarks", "wrong-kind", _manifest("wrong-kind", "environment")),
+        ],
+    )
+    def test_rejects_manifest_identity_that_disagrees_with_path(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        tree: str,
+        path_name: str,
+        manifest: dict,
+    ) -> None:
+        _write_manifest(tmp_path, tree, path_name, manifest)
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="catalog path"):
+            discover_environment_catalog()
+
+    def test_manifest_requires_a_sibling_config(self, tmp_path: Path, monkeypatch) -> None:
+        _write_manifest(
+            tmp_path,
+            "environments",
+            "missing_config",
+            _manifest("missing_config"),
+            with_config=False,
+        )
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="sibling config.yaml"):
+            discover_environment_catalog()
+
+    def test_malformed_manifest_does_not_break_catalog_discovery(self, tmp_path: Path, monkeypatch) -> None:
+        directory = tmp_path / "environments" / "draft"
+        directory.mkdir(parents=True)
+        (directory / "manifest.yaml").write_text("name: [invalid\n", encoding="utf-8")
+        (directory / "config.yaml").write_text("{}\n", encoding="utf-8")
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = discover_environment_catalog()
+
+        assert resolve_catalog_entry("draft", "environment", entries=entries).status == "no-manifest"
+
+    def test_root_precedence_wins_before_manifest_precedence(self, tmp_path: Path, monkeypatch) -> None:
+        high = tmp_path / "high"
+        low = tmp_path / "low"
+        _make_env(high / "environments", "shared", _ENV_CONFIG.format(name="shared"))
+        _write_manifest(low, "environments", "shared", _manifest("shared"))
+        _write_manifest(high, "environments", "manifest_wins", _manifest("manifest_wins"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        entries = {(entry.kind, entry.name): entry for entry in discover_environment_catalog()}
+
+        assert entries[("environment", "shared")].status == "no-manifest"
+        assert entries[("environment", "shared")].path == high / "environments" / "shared"
+        assert entries[("environment", "manifest_wins")].status == "experimental"
+
+    def test_benchmark_manifest_suppresses_only_its_sibling_config(self, tmp_path: Path, monkeypatch) -> None:
+        _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark"))
+        flavored = tmp_path / "benchmarks" / "suite" / "strict.yaml"
+        flavored.write_text(
+            "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = {(entry.kind, entry.name): entry for entry in discover_environment_catalog()}
+
+        assert entries[("benchmark", "suite")].status == "experimental"
+        assert entries[("benchmark", "suite/strict")].status == "no-manifest"
+        assert ("benchmark", "suite/manifest") not in entries
+
+    def test_resolution_requires_kind_only_for_cross_kind_collision(self, tmp_path: Path, monkeypatch) -> None:
+        _write_manifest(tmp_path, "environments", "shared", _manifest("shared"))
+        _write_manifest(tmp_path, "benchmarks", "shared", _manifest("shared", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = discover_environment_catalog()
+        with pytest.raises(RegistryError, match="ambiguous"):
+            resolve_catalog_entry("shared", entries=entries)
+        assert resolve_catalog_entry("shared", "environment", entries=entries).kind == "environment"
+        assert resolve_catalog_entry("shared", "benchmark", entries=entries).kind == "benchmark"
+
+    def test_manifest_metadata_is_available_through_legacy_environment_api(self, tmp_path: Path) -> None:
+        manifest_path = _write_manifest(tmp_path, "environments", "alpha", _manifest("alpha"))
+
+        environments = _discover_environments_in_dir(tmp_path / "environments")
+
+        assert environments["alpha"].manifest_path == manifest_path
+        assert environments["alpha"].status == "experimental"
+
+    def test_discovers_only_runnable_resource_server_configs(self, tmp_path: Path, monkeypatch) -> None:
+        configs = tmp_path / "resources_servers" / "mcqa" / "configs"
+        configs.mkdir(parents=True)
+        configs.joinpath("mcqa.yaml").write_text(
+            "resource:\n"
+            "  resources_servers:\n"
+            "    mcqa: {entrypoint: app.py, domain: knowledge, description: Multiple choice scoring}\n"
+            "agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      datasets:\n"
+            "      - {name: train, type: train, jsonl_fpath: train.jsonl}\n",
+            encoding="utf-8",
+        )
+        configs.joinpath("science.yaml").write_text(
+            "resource:\n"
+            "  resources_servers:\n"
+            "    mcqa: {entrypoint: app.py, domain: knowledge}\n"
+            "agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      datasets:\n"
+            "      - {name: test, type: benchmark, jsonl_fpath: test.jsonl}\n",
+            encoding="utf-8",
+        )
+        pure = tmp_path / "resources_servers" / "judge" / "configs"
+        pure.mkdir(parents=True)
+        pure.joinpath("judge.yaml").write_text(
+            "judge:\n  resources_servers:\n    judge: {entrypoint: app.py, domain: other}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = {(entry.kind, entry.name): entry for entry in discover_environment_catalog()}
+
+        assert set(entries) == {
+            ("environment", "resources_servers/mcqa"),
+            ("benchmark", "resources_servers/mcqa/science"),
+        }
+        assert entries[("environment", "resources_servers/mcqa")].resources_server_selector == "mcqa"
+        science = entries[("benchmark", "resources_servers/mcqa/science")]
+        assert science.resources_server_selector == "mcqa/science"
+        assert science.path == tmp_path / "resources_servers" / "mcqa"
+
+        deduplicated = registry_module._discover_resource_workloads(
+            tmp_path / "resources_servers",
+            claimed=frozenset({("environment", "mcqa")}),
+        )
+        assert set(deduplicated) == {("benchmark", "resources_servers/mcqa/science")}
 
 
 class TestReadEnvironmentDetails:
