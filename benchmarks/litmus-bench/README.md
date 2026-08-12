@@ -39,3 +39,65 @@ the prompt. Use `--max-output-tokens` to select a smaller budget for a run.
 ## License
 
 Dataset: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+
+## ADME Tier-5 runs
+
+The `adme_tier5_{direct,analogue,comparison}_sub10` exports use the same
+`litmus_agent` verifier. They contain Gym-formatted prompts, answer-extraction
+regexes, and per-row scoring tolerances, so no domain-specific resources server
+or agent is needed. `prepare_adme_tier5.py` validates the rows, removes stale
+`agent_ref` values, and materializes one benchmark artifact at a time.
+
+Ten-question examples for each category are committed under `data/examples`.
+Larger splits default to `~/chemLLM_setup/adme_tier5/data`; override their
+source root with `ADME_TIER5_SOURCE_DIR`. Select the source split with
+`ADME_TIER5_SPLIT` (`validation` by default).
+
+Prepare the committed examples through Gym:
+
+```bash
+ADME_TIER5_SPLIT=example gym eval prepare --config benchmarks/litmus-bench/config_adme_direct.yaml
+ADME_TIER5_SPLIT=example gym eval prepare --config benchmarks/litmus-bench/config_adme_analogue.yaml
+ADME_TIER5_SPLIT=example gym eval prepare --config benchmarks/litmus-bench/config_adme_comparison.yaml
+```
+
+Running `ADME_TIER5_SPLIT=example python
+benchmarks/litmus-bench/prepare_adme_tier5.py` directly prepares all three.
+
+### NVIDIA inference gateway
+
+The gateway exposes Chat Completions, so use Gym's `vllm_model` bridge. Keep the
+credential in the environment and let OmegaConf resolve it at runtime so the
+secret is not exposed in the process command line:
+
+```bash
+: "${NVIDIA_API_KEY:?Set NVIDIA_API_KEY first}"
+
+gym eval run \
+  --config benchmarks/litmus-bench/config_adme_direct.yaml \
+  --model-type vllm_model \
+  --model-url https://inference-api.nvidia.com \
+  --model azure/openai/gpt-5.5 \
+  --split benchmark \
+  --output results/adme-tier5-direct_gpt55_rollouts.jsonl \
+  --concurrency 8 \
+  --max-output-tokens 8192 \
+  '++policy_api_key=${oc.env:NVIDIA_API_KEY}' \
+  ++policy_model.responses_api_models.vllm_model.extra_body.reasoning_effort=medium
+```
+
+Each config already requests five rollouts per question; do not also pass
+`--num-repeats 5`, which would multiply the protocol to 25. Repeat with the
+analogue and comparison configs. A single `gym eval run` starts the environment,
+collects rollouts, and scores them.
+
+Reward profiling consumes the materialized inputs written beside the rollout
+file, not the original prepared benchmark file:
+
+```bash
+gym eval profile \
+  --inputs results/adme-tier5-direct_gpt55_rollouts_materialized_inputs.jsonl \
+  --rollouts results/adme-tier5-direct_gpt55_rollouts.jsonl
+```
+
+Use multiple repeats for meaningful per-task reward variance.
