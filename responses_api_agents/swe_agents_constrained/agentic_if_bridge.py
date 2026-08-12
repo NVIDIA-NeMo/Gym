@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 
-_GYM_ROOT = Path(__file__).resolve().parents[3]
+_GYM_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_CHECKOUT = _GYM_ROOT.parent / "agentic-if"
 
 _resolved_repo: Optional[Path] = None
@@ -67,10 +67,10 @@ def ensure_agentic_if(repo_path: Optional[str] = None) -> Path:
     repo = find_agentic_if_repo(repo_path)
     if repo is None:
         raise FileNotFoundError(
-            "agentic-if checkout not found. The swerl_constrained server verifies constraints "
+            "agentic-if checkout not found. The swe_agents_constrained wrapper grades constraints "
             "with the verifier registry in the agentic-if repo (instruction_pool/rubrics/). "
             "Clone it next to the Gym repo, or set AGENTIC_IF_REPO=/path/to/agentic-if, "
-            "or set agentic_if_repo in the server config."
+            "or set agentic_if_repo in the agent config."
         )
     if str(repo) not in sys.path:
         sys.path.append(str(repo))

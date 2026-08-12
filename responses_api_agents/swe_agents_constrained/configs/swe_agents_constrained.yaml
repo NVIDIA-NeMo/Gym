@@ -1,0 +1,50 @@
+# Constraint-aware SWE-bench wrapper: OpenHands multi-turn rollout + SWE-bench
+# harness task reward, shaped by agentic-if format-constraint grading:
+#   reward = task * (1 + constraint_alpha * constraint)
+# Constraints are declared per task in responses_create_params.metadata
+# (see app.py docstring). Requires an agentic-if checkout (AGENTIC_IF_REPO env
+# var, agentic_if_repo below, or a sibling ../agentic-if).
+swe_agents_constrained:
+  responses_api_agents:
+    swe_agents_constrained:
+      entrypoint: app.py
+
+      # Constraint reward configuration
+      agentic_if_repo: null
+      constraint_alpha: 1.0
+
+      # Agent framework configuration (mirrors swe_agents swebench_multi_tools)
+      agent_framework: openhands
+      agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
+      agent_max_turns: 100
+      agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
+      agent_framework_commit: 7466868e24e12480a1bffbbf5b543b6e4c4eacf8  # pragma: allowlist secret
+
+      # Container configuration
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 65536
+      command_exec_timeout: 300
+
+      dataset_path: ???
+
+      agent_prompt_overrides:
+      # CodeAct agent
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
+        system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
+        agent_cls: CodeActAgent
+        diversify_tool_names: false
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        # Example dataset for quick testing. Constraint-augmented training
+        # rows are built by the agentic-if dataset pipeline (instruction text
+        # injected into the prompt, declarations in metadata).
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents_constrained/data/example.jsonl
