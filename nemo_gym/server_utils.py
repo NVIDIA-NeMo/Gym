@@ -146,10 +146,15 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     )
 
     num_workers = get_nemo_gym_fastapi_num_workers()
+
+    # TODO @bxyu-nvidia: remove
+    print(
+        f"Limit: {cfg.global_aiohttp_connector_limit}\nLimit per host: {cfg.global_aiohttp_connector_limit_per_host}\nNum workers: {num_workers}"
+    )
     client_session = ClientSession(
         connector=TCPConnector(
-            limit=cfg.global_aiohttp_connector_limit // num_workers,
-            limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
+            limit=cfg.global_aiohttp_connector_limit,
+            limit_per_host=cfg.global_aiohttp_connector_limit_per_host,
             keepalive_timeout=15.0,
             socket_factory=_make_keepalive_socket_factory(
                 idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
