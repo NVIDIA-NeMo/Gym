@@ -18,8 +18,6 @@ import json
 import os
 import shlex
 from glob import glob
-from os import makedirs
-from os.path import exists
 from pathlib import Path
 from shutil import rmtree
 from signal import SIGINT
@@ -37,7 +35,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
+from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
@@ -48,6 +46,7 @@ from nemo_gym.cli.utils import (
     render_component_inspection,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.environment.scaffold import scaffold_resources_server
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
@@ -1074,114 +1073,12 @@ def init_resources_server():  # pragma: no cover
 
     dirpath = Path(run_config.entrypoint).resolve()
 
-    if exists(dirpath):
+    if dirpath.exists():
         print(f"Folder already exists: {dirpath}. Exiting init.")
         exit()
 
-    makedirs(dirpath)
-
-    server_type = "resources_servers"
-    server_type_name = dirpath.parts[-1].lower()
-    server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
-
-    configs_dirpath = dirpath / "configs"
-    makedirs(configs_dirpath)
-
-    config_fpath = configs_dirpath / f"{server_type_name}.yaml"
-    with open(config_fpath, "w") as f:
-        f.write(f"""# Resources server: owns this environment's task verification (verify()) and reward.
-{server_type_name}_resources_server:          # instance name — how agents/CLI refer to this server
-  {server_type}:                              # server type: resources_servers | responses_api_agents | responses_api_models
-    {server_type_name}:                        # implementation directory under {server_type}/
-      entrypoint: app.py                        # server entry module
-      domain: other                             # task domain; one of: math, coding, agent, knowledge,
-                                                #   instruction_following, long_context, safety, games, translation,
-                                                #   e2e, rlhf, other. Change 'other' to the closest fit.
-      verified: false                           # set true once the benchmark has been baselined and reviewed
-
-# Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
-{server_type_name}_simple_agent:               # this agent instance's name — pass as --agent to gym eval run
-  responses_api_agents:
-    simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
-      entrypoint: app.py
-      resources_server:                         # the resources server this agent interacts with for tools, state and verification
-        type: resources_servers
-        name: {server_type_name}_resources_server
-      model_server:                             # the model that answers; 'policy_model' is resolved from a model config
-        type: responses_api_models
-        name: policy_model
-      datasets:                                 # one block per split: train | validation | example
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local data file for this split
-        num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
-        license: Apache 2.0                     # required for train/validation; must be an allowed license string
-        # to fetch this split from a registry instead, add a source: block (type: gitlab | huggingface)
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
-        num_repeats: 1
-        license: Apache 2.0
-      - name: example                           # 5 rows committed to git for quick smoke tests
-        type: example
-        jsonl_fpath: resources_servers/{server_type_name}/data/example.jsonl
-        num_repeats: 1
-""")
-
-    app_fpath = dirpath / "app.py"
-    with open(ROOT_DIR / "resources/resources_server_template.py") as f:
-        app_template = f.read()
-    app_content = app_template.replace("ExampleMultiStep", server_type_title)
-    with open(app_fpath, "w") as f:
-        f.write(app_content)
-
-    tests_dirpath = dirpath / "tests"
-    makedirs(tests_dirpath)
-
-    tests_fpath = tests_dirpath / "test_app.py"
-    with open(ROOT_DIR / "resources/resources_server_test_template.py") as f:
-        tests_template = f.read()
-    tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
-    tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
-    with open(tests_fpath, "w") as f:
-        f.write(tests_content)
-
-    requirements_fpath = dirpath / "requirements.txt"
-    with open(requirements_fpath, "w") as f:
-        if (PARENT_DIR / "pyproject.toml").exists():
-            # local nemo gym - detected by ../pyproject.toml exists
-            rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
-            f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
-        else:
-            # pypi path
-            f.write("nemo-gym[dev]\n")
-
-    readme_fpath = dirpath / "README.md"
-    with open(readme_fpath, "w") as f:
-        f.write("""# Description
-
-Data links: ?
-
-# Licensing information
-Code: ?
-Data: ?
-
-Dependencies
-- nemo_gym: Apache 2.0
-?
-""")
-
-    data_dirpath = dirpath / "data"
-    data_dirpath.mkdir(exist_ok=True)
-
-    data_gitignore_fpath = data_dirpath / ".gitignore"
-    with open(data_gitignore_fpath, "w") as f:
-        f.write("""*train.jsonl
-*validation.jsonl
-*train_prepare.jsonl
-*validation_prepare.jsonl
-*example_prepare.jsonl
-""")
+    checkout_root = PARENT_DIR if (PARENT_DIR / "pyproject.toml").is_file() else None
+    scaffold_resources_server(directory=dirpath, checkout_root=checkout_root)
 
 
 @exit_cleanly_on_config_error
