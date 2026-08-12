@@ -52,6 +52,11 @@ finance_agent:
   responses_api_agents:
     finance_agent:
       entrypoint: app.py
+      # Loop policy mirroring vals-ai/finance-agent: bounded by turns rather than
+      # wall clock, and every tool error is handed back to the model.
+      no_tool_call_nudge: Continue.
+      max_time_seconds: null
+      abort_on_tool_error_types: []
       max_steps: 50
       truncate_on_overflow: false
       tool_call_timeout: 300
