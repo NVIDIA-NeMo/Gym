@@ -39,4 +39,5 @@ if __name__ == "__main__":
 
     avg_metrics = {k: v / num_rows for k, v in metrics.items()}
 
+    print(f"Found {num_rows} rows in results.")
     print(json.dumps(avg_metrics, indent=4))
