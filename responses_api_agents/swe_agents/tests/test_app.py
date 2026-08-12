@@ -1271,6 +1271,46 @@ class TestOpenCodeHarnessProcessor:
             assert not (config.persistent_dir / "replay_messages.json").exists()
             assert "replay_messages.json" not in self._read_agent_script(config)
 
+    def test_get_run_command_mounts_subagent_manifest_and_enables_task_tool(self, _stub_model_server_lookup) -> None:
+        replay_messages = [{"role": "user", "content": "Fix bug"}]
+        replay_subagents = {
+            "version": 1,
+            "root_session_id": "recorded_root",
+            "sessions": [
+                {
+                    "session_id": "recorded_child",
+                    "parent_session_id": "recorded_root",
+                    "spawn_call_id": "call_child",
+                    "spawn_index": 0,
+                    "messages": [{"role": "user", "content": "Inspect parser"}],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                problem_info={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["docker://custom/{instance_id}"],
+                    "replay_messages": json.dumps(replay_messages),
+                    "replay_subagent_manifest": json.dumps(replay_subagents),
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+
+            manifest_path = config.persistent_dir / "replay_subagents.json"
+            assert json.loads(manifest_path.read_text()) == replay_subagents
+            script = self._read_agent_script(config)
+            assert "ENABLE_SUBAGENTS=1" in script
+            assert "replay_subagents.json" in script
+            assert script.index("replay_messages.json") < script.index("replay_subagents.json")
+
 
 ########################################
 # _extract_instance_dict tests
@@ -1393,7 +1433,7 @@ class TestMaybeBuildReplayMessages:
 ########################################
 
 
-def _write_completion(path: Path, *, session_id, parent_session_id, turn, content_text="hello"):
+def _write_completion(path: Path, *, session_id, parent_session_id, turn, content_text="hello", **metadata):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -1406,6 +1446,7 @@ def _write_completion(path: Path, *, session_id, parent_session_id, turn, conten
                 "parent_session_id": parent_session_id,
                 "turn": turn,
                 "timestamp": 1.0,
+                **metadata,
             }
         )
     )
@@ -1592,6 +1633,37 @@ class TestGetAllSessionTrajectories:
         )
         w = self._wrapper(tmp_path)
         assert w.get_all_session_trajectories_from_completions(tmp_path, inst) == []
+
+    def test_preserves_replay_linkage_and_global_order_metadata(self, tmp_path) -> None:
+        inst = "replayed"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        _write_completion(
+            comp_dir / "child.json",
+            session_id="live_child",
+            parent_session_id="live_root",
+            turn=2,
+            recorded_session_id="recorded_child",
+            recorded_parent_session_id="recorded_root",
+            spawn_call_id="call_child",
+            spawn_index=1,
+            subagent_type="explore",
+            replay_prefix_message_count=7,
+            global_turn=12,
+            session_start_global_turn=8,
+        )
+
+        out = self._wrapper(tmp_path).get_all_session_trajectories_from_completions(tmp_path, inst)
+        for key, value in {
+            "recorded_session_id": "recorded_child",
+            "recorded_parent_session_id": "recorded_root",
+            "spawn_call_id": "call_child",
+            "spawn_index": 1,
+            "subagent_type": "explore",
+            "replay_prefix_message_count": 7,
+            "global_turn": 12,
+            "session_start_global_turn": 8,
+        }.items():
+            assert out[0][key] == value
 
     def test_returns_empty_when_dir_missing(self, tmp_path) -> None:
         w = self._wrapper(tmp_path)
@@ -2573,6 +2645,14 @@ class TestSWEBenchWrapperRun:
     @pytest.mark.asyncio
     async def test_run_resolved(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
+        subagents = [
+            {
+                "session_id": "child",
+                "parent_session_id": "root",
+                "messages": [{"role": "user", "content": "inspect"}],
+                "tools": [],
+            }
+        ]
 
         mock_response = NeMoGymResponse(
             id="swebench-test",
@@ -2587,6 +2667,7 @@ class TestSWEBenchWrapperRun:
                 "input": "[]",
                 "metrics": json.dumps({"resolved": True, "patch_exists": True}),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                "subagent_trajectories": json.dumps(subagents),
             },
         )
 
@@ -2611,6 +2692,8 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
+            assert result.subagent_trajectories == subagents
+            assert json.loads(result.responses_create_params.metadata["subagent_trajectories"]) == subagents
 
     @pytest.mark.asyncio
     async def test_run_not_resolved(self, monkeypatch) -> None:

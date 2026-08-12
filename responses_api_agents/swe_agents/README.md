@@ -272,13 +272,15 @@ When `opencode_subagents_enabled: true`, the wrapper exports `ENABLE_SUBAGENTS=1
 - `_openhands_dir_copy_from_host` groups completion files by `session_id` and copies only the most recent turn per session back to the host (that file's `messages` carries the full cumulative history for the session).
 - `get_openhands_trajectory_from_completions` (used to build the API response's `output`) selects the **main** session — the one with no `parent_session_id` — falling back to the last file on disk for payloads that predate session tagging (the OpenHands path).
 - `get_all_session_trajectories_from_completions` returns every session found on disk. `SWEBenchWrapper._inner_responses` filters this to sessions that *do* have a `parent_session_id` (i.e. subagent sessions only) and surfaces them as `subagent_trajectories` in the response metadata / `run()` output — see [Output format](#output-format).
+- Replay requests may pass that `subagent_trajectories` metadata back unchanged. `opencode_replay.py` resolves every recorded child to the exact `task` tool-call ID that created it, rather than trusting metadata-array order. The link works recursively for nested children and distinguishes multiple children launched in one assistant turn.
+- `run()` also copies the JSON string into the returned `responses_create_params.metadata`, so new rollout rows are replay-ready. For older rows such as `opencode_multi_tools_0625_glm_5_2_full_blend.other.jsonl`, copy the sibling top-level `subagent_trajectories` value into that metadata key before submitting the replay request.
 
 ### Termination
 
 There is **no explicit `finish` tool** in the opencode bench path — by design. The trajectory ends via one of four signals:
 
 1. **Natural idle.** The model emits an assistant turn with no tool calls. opencode's `processor.ts` finishes that step, the session transitions to `status.idle`, the `opencode run` subprocess exits 0, our `bench/cli.ts` `finally` block runs `git diff` against the workspace, and writes `output.jsonl`. This is the same idle signal opencode's user-facing `cli/cmd/run.ts` uses (`if event.type === "session.status" && status.type === "idle" → break`).
-2. **Max-turns hit.** The agent config sets `steps: agent_max_turns`. When opencode exceeds it the session errors → idle → subprocess exits (often non-zero). `finally` still captures `git diff`; `output.jsonl.error` becomes `"opencode_exit_<N>"`.
+2. **Max-turn guidance.** The primary agent config sets `steps: agent_max_turns`. At `step >= steps`, opencode appends its `MAX_STEPS` instruction telling the model to stop using tools and return a text summary. This is a soft terminal instruction, not a hard loop cutoff: a compliant text-only response transitions to idle, while another tool call can keep the loop running until a different termination signal fires. Built-in subagents have independent session counters and currently have no `steps` override.
 3. **Crash / unhandled error inside opencode.** Same as max-turns — `finally` captures the patch, `error` is set, partial `llm_completions/<id>/*.json` files written by the provider before the crash are still on disk.
 4. **SIF wall-clock timeout** — the gym `timeout --signal=TERM --kill-after=30 ...` wrapper used by the openhands path applies here too; `_openhands_dir_copy_from_host` glob-copies whatever completions landed.
 
@@ -310,7 +312,7 @@ Both harnesses support resuming a partial trajectory: the request's `body.input`
 
 **`body.model` is optional in replay mode.** Replay JSONLs intentionally omit `model` because the upstream `openai_model` proxy force-overrides to its configured backend. OpenHands coerces `body.model or ""` when writing `oh_config.toml`; opencode falls back to `default_model_name` resolved from the model server config. Both fall back to the agent's `model_server.name` when constructing `NeMoGymResponse.model`.
 
-**`agent_max_turns` is shared between the replayed prefix and the live continuation, for both harnesses.** Neither `_setup_params` nor either `HarnessProcessor` inflates `agent_max_turns` based on how many turns are being replayed — a replayed turn consumes exactly one unit of iteration budget, the same as a live turn (OpenHands: `agent_controller.py`'s `IterationControlFlag.step()` runs before the replay-vs-live branch in `_step()`; opencode: `runLoop`'s `step++` runs before the replay-vs-live branch inside `doStream()`). If you set `agent_max_turns` to the same value the original run used, the resumed run will have little to no budget left for live continuation — pass a larger value (e.g. original turns used + desired continuation budget) when building a replay request.
+**Replay turns consume the same session-local step budget as live turns.** Neither `_setup_params` nor either `HarnessProcessor` inflates `agent_max_turns` based on replay length (OpenHands increments before its replay/live branch; opencode increments in `runLoop` before calling the replay-aware provider). For opencode, `agent_max_turns` is configured on the primary `swe-bench` agent only; every child session starts its own counter and the built-in subagents are currently uncapped. The configured opencode limit is also soft, as described under [Termination](#termination).
 
 ### OpenHands replay
 
@@ -320,12 +322,28 @@ Both harnesses support resuming a partial trajectory: the request's `body.input`
 
 ### opencode replay
 
-1. `OpenCodeHarnessProcessor.get_run_command` writes the replay JSON to `<persistent_dir>/replay_messages.json` and forwards the mounted path as positional arg #13 (`REPLAY_MESSAGES_PATH`) to `run_infer.sh`, which forwards it to `bench/cli.ts` as `--replay-messages-file`. Positional arg #12 (`SYSTEM_PROMPT_PATH`) is emitted as an empty-string placeholder when unset so the shift index lands correctly.
+1. `OpenCodeHarnessProcessor.get_run_command` writes the main replay JSON to `<persistent_dir>/replay_messages.json` and forwards it as positional arg #13 (`REPLAY_MESSAGES_PATH`). When `subagent_trajectories` metadata is present, `_setup_params` also builds a causal manifest, writes `<persistent_dir>/replay_subagents.json`, and passes it as positional arg #14 (`REPLAY_SUBAGENTS_PATH`). `run_infer.sh` forwards these as `--replay-messages-file` / `--replay-subagents-file` and enables the `task` tool automatically.
 2. The replay's own system message is written to `<persistent_dir>/replay_system_prompt.txt` and pinned as `resolved_system_prompt_template`, same rationale and same unconditional-override behavior as OpenHands — reused via the shared `_extract_replay_system_content` helper. The existing mount logic in `_build_apptainer_command` already bind-mounts it to `/opencode_setup/opencode/system_prompt.txt` for the opencode path; no separate mount was needed.
-3. `bench/cli.ts` parses the replay file: the **first** `user` message's literal text becomes the initial prompt passed to `opencode run` (instead of the gym-rendered `user_message.txt` template); every subsequent `assistant` message becomes a scripted "replay turn" (system / tool / later-user messages are skipped, mirroring OpenHands' skip rules).
-4. **Tool calls are re-executed for real, not replayed from recorded text.** The `nemo-gym` provider (`NemoGymLanguageModel.doStream`) is replay-aware: for the first *K* model calls in the "main" session it synthesizes the same kind of single-shot `LanguageModelV3` stream it already builds for real responses (text / tool-call parts), but sourced from the scripted replay turn instead of a live HTTP call — no network request, no `llm_completions` dump written for these turns. Because opencode's real tool-execution machinery (`resolveTools()` in `session/prompt.ts`, driven by the AI SDK's `streamText`) is completely unmodified and still processes these synthesized `tool-call` stream parts, each replayed tool call actually runs against the fresh container's filesystem — this is required for correctness, since the final patch comes from `git diff` at the end and the live continuation needs the workspace to actually be in the state the recorded conversation implies. Recorded tool-call `id`s are preserved verbatim so they still match `body.input`'s `call_id`s for the input/output split above. Once the scripted turns are exhausted, `doStream` falls through unchanged to the normal live HTTP path, and opencode's own `runLoop` (which re-reads full session history every step) naturally continues the same single `session.prompt()` call into live generation — no changes needed to opencode's session/processor/HTTP layers.
-5. Because replay turns don't write `llm_completions` dumps, the **first** dump on disk is the first live call, whose `messages` already contain the full replay prefix (it's all in opencode's own session history by then) — so `get_openhands_trajectory_from_completions`'s `first_prefix_count` derivation (used by the input/output split above) needs no opencode-specific handling.
-6. Unlike OpenHands, opencode's bench path doesn't support tool-name diversification, so replay assumes the seed trajectory was itself produced by an opencode run (same tool names: `bash`, `read`, `write`, `edit`, `glob`, `grep`, `apply_patch`, ...).
+3. `bench/cli.ts` parses the main replay and every manifest session into a separate scripted assistant-turn queue. The first user message is supplied by the real parent `task` call; later child user messages are regenerated by replaying parent `task(task_id=...)` calls, so they are not injected twice.
+4. **Each live child is bound by `(recorded parent session, originating task call ID)`.** The task tool persists its creating call ID on the child user message, `session/llm.ts` forwards it in `x-parent-tool-call-id`, and the provider maps that live child session to the matching recorded queue. This is independent of metadata-array or parallel completion order and applies recursively. Recorded `task_id` values used to resume a child are rewritten to the corresponding live session ID.
+5. **Tool calls are re-executed for real, not replayed from recorded text.** The provider synthesizes normal `LanguageModelV3` responses from each session's queue, so opencode's unmodified tool machinery executes them against the fresh sandbox. Recorded tool-call IDs are preserved. Once one session's queue is exhausted, only that session falls through to live HTTP generation.
+6. Scripted turns do not write completion dumps. The first live dump for each replayed child records the prefix boundary plus stable recorded-session/spawn metadata; Gym carries fully replayed children forward unchanged and appends only each child's new live continuation.
+7. Unlike OpenHands, opencode's bench path doesn't support tool-name diversification, so replay assumes the seed trajectory was itself produced by an opencode run (same tool names: `bash`, `read`, `write`, `edit`, `glob`, `grep`, `apply_patch`, ...).
+
+#### Building replay prefixes from completed opencode rollouts
+
+`make_opencode_replay_prefixes.py` converts completed Gym rollout rows into new replay inputs while keeping all OpenCode-specific causal state in `responses_create_params.metadata`. For example:
+
+```bash
+PYTHONPATH=. python responses_api_agents/swe_agents/make_opencode_replay_prefixes.py \
+  /path/to/completed-opencode-rollouts.jsonl \
+  /path/to/replay-prefixes.jsonl \
+  --source-lines 44,96
+```
+
+The default `first-task-batch` strategy ends the main prefix after the first complete tool turn containing one or more `task` calls. `last-tool-turn` instead branches after the rollout's last complete tool turn. A complete turn includes every result from a parallel function-call group; cutting between sibling calls or results is rejected.
+
+For legacy rows, the helper moves the top-level `subagent_trajectories` into request metadata as a JSON envelope. It orders children by the parent's task-call IDs, truncates a resumed child's messages at the selected invocation boundary, and applies the same rule recursively to nested children. Completed response, reward, and verifier artifacts are deliberately omitted from the generated input row.
 
 ---
 
@@ -656,7 +674,7 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
   "final_eval_apptainer_spinup_time":  9.7,
   "final_eval_time": 87.2,
   "instance_config": { /* the full per-instance SWEBenchWrapperInstanceConfig */ },
-  "subagent_trajectories": null // (opencode only, when opencode_subagents_enabled) list of {session_id, parent_session_id, messages, tools}
+  "subagent_trajectories": null // opencode list of causal session records; replay adds spawn_call_id/spawn_index
 }
 ```
 

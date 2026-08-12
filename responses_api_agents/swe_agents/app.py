@@ -63,6 +63,12 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_first_server_config_dict
+from responses_api_agents.swe_agents.opencode_replay import (
+    build_replay_subagent_manifest,
+    merge_replay_subagent_trajectories,
+    parse_replay_subagent_manifest,
+    parse_replay_subagent_payload,
+)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -2054,6 +2060,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         # _build_apptainer_command already bind-mounts resolved_system_prompt_template
         # to /opencode_setup/opencode/system_prompt.txt for the opencode path.
         replay_messages_mounted_path = ""
+        replay_subagents_mounted_path = ""
         replay_messages_list = _parse_replay_messages(data_point)
         if replay_messages_list:
             replay_messages_host_path = self.config.persistent_dir / "replay_messages.json"
@@ -2065,6 +2072,12 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
                 sp_host_path = self.config.persistent_dir / "replay_system_prompt.txt"
                 sp_host_path.write_text(replay_system_content)
                 self.config.resolved_system_prompt_template = str(sp_host_path)
+
+            replay_subagent_manifest = parse_replay_subagent_manifest(data_point)
+            if replay_subagent_manifest:
+                replay_subagents_host_path = self.config.persistent_dir / "replay_subagents.json"
+                replay_subagents_host_path.write_text(json.dumps(replay_subagent_manifest))
+                replay_subagents_mounted_path = f"{self.config.base_mounted_dir}/replay_subagents.json"
 
         workspace_path = _resolve_opencode_workspace_path(data_point)
         user_message = _render_opencode_user_message(
@@ -2148,7 +2161,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
             f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
             f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
-            f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled else '0'} && "
+            f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled or replay_subagents_mounted_path else '0'} && "
             "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
             "mkdir -p /root/.cache/opencode && "
             "echo '{}' >/root/.cache/opencode/models.json && "
@@ -2170,7 +2183,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"    {user_message_in_sif} "  # $11: pre-rendered user message file
         )
 
-        # Positional args 12..13 of run_infer.sh. Empty = shell-side default.
+        # Positional args 12..14 of run_infer.sh. Empty = shell-side default.
         # Emit up to the LAST non-empty slot so a trailing placeholder is only
         # inserted when a later arg (REPLAY_MESSAGES_PATH at #13) needs it at
         # the right shift index.
@@ -2178,6 +2191,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         positional_args = [
             "/opencode_setup/opencode/system_prompt.txt" if sp_set else "",  # 12 SYSTEM_PROMPT_PATH
             replay_messages_mounted_path or "",  # 13 REPLAY_MESSAGES_PATH
+            replay_subagents_mounted_path or "",  # 14 REPLAY_SUBAGENTS_PATH
         ]
         last_set = max((i for i, a in enumerate(positional_args) if a), default=-1)
         for a in positional_args[: last_set + 1]:
@@ -3000,14 +3014,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             by_session[sess_id] = data
         for sess_id, data in by_session.items():
             messages, tools = self._materialize_trajectory(data)
-            out.append(
-                {
-                    "session_id": sess_id,
-                    "parent_session_id": data.get("parent_session_id"),
-                    "messages": messages,
-                    "tools": tools,
-                }
-            )
+            entry = {
+                "session_id": sess_id,
+                "parent_session_id": data.get("parent_session_id"),
+                "messages": messages,
+                "tools": tools,
+            }
+            for key in [
+                "recorded_session_id",
+                "recorded_parent_session_id",
+                "spawn_call_id",
+                "spawn_index",
+                "subagent_type",
+                "replay_prefix_message_count",
+                "global_turn",
+                "session_start_global_turn",
+            ]:
+                if data.get(key) is not None:
+                    entry[key] = data[key]
+            out.append(entry)
         return out
 
     ########################################
@@ -3498,6 +3523,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         replay_messages_json = self._maybe_build_replay_messages(body)
         if replay_messages_json is not None:
             problem_info = {**problem_info, "replay_messages": replay_messages_json}
+            subagent_payload = parse_replay_subagent_payload(problem_info)
+            if subagent_payload:
+                replay_subagent_manifest = build_replay_subagent_manifest(
+                    json.loads(replay_messages_json),
+                    subagent_payload,
+                )
+                if replay_subagent_manifest:
+                    problem_info = {
+                        **problem_info,
+                        "replay_subagent_manifest": json.dumps(replay_subagent_manifest),
+                    }
 
         # Create persistent directory for I/O and logs in local workspace
         instance_dir = f"{instance_id}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
@@ -3584,6 +3620,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             generation_apptainer_spinup_timestamp_mounted_fpath=base_mounted_dir
             / "generation_apptainer_spinup_timestamp",
         )
+
+        if parse_replay_subagent_manifest(problem_info):
+            params.opencode_subagents_enabled = True
 
         params.metrics_fpath.write_text("{}")
 
@@ -3756,12 +3795,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "metrics": json.dumps(updated_metrics),
             "instance_config": params.model_dump_json(),
         }
-        if params.opencode_subagents_enabled:
-            subagent_trajectories = [
+        replay_subagent_manifest = parse_replay_subagent_manifest(params.problem_info)
+        if params.opencode_subagents_enabled or replay_subagent_manifest:
+            captured_subagents = [
                 entry
                 for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, params.instance_id)
                 if entry.get("parent_session_id")
             ]
+            if captured_subagents:
+                captured_manifest = build_replay_subagent_manifest(
+                    chat_completions_trajectory,
+                    {"sessions": captured_subagents},
+                    strict=False,
+                )
+                if captured_manifest:
+                    captured_subagents = captured_manifest["sessions"]
+            subagent_trajectories = merge_replay_subagent_trajectories(
+                replay_subagent_manifest,
+                captured_subagents,
+            )
             metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)
 
         return NeMoGymResponse(
@@ -3792,6 +3844,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             subagent_trajectories = None
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
+                # Make the returned create params replay-ready. Historical
+                # rollout rows exposed this only as a sibling result field,
+                # which meant callers had to copy it into request metadata
+                # manually before branching the trajectory.
+                responses_create_params["metadata"] = {
+                    **(responses_create_params.get("metadata") or {}),
+                    "subagent_trajectories": metadata["subagent_trajectories"],
+                }
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
