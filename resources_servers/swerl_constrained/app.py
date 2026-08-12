@@ -14,16 +14,31 @@
 # limitations under the License.
 """SWE constrained resources server.
 
-Extends swerl_gen with constraint rewards. Constraints are declared per-task
-inside ``metadata.constraints`` (list of constraint names) and an optional
-``metadata.constraint_weight`` (float, default 0.3).
+Extends swerl_gen with agentic-if constraint rewards. Constraints are declared
+per-task in ``metadata.constraints`` using the agentic-if schema::
 
-Final reward = task_reward * (1 - w) + mean(constraint_scores) * w
+    constraints: [{"type": "<canonical id>", "params": {...}}, ...]
 
-Supported constraints (deterministic, no LLM call needed):
-  - minimal_editing       : penalizes patches much larger than the golden reference
-  - no_hardcoded_secrets  : penalizes patches that introduce literal credentials
+Canonical ids and verifiers live in the agentic-if repo
+(instruction_pool/rubrics/) — this server imports them rather than vendoring,
+so constraint semantics have a single source of truth. Grading is
+trajectory-based: scope filtering, injection awareness, N/A handling, and
+per-step partial credit all follow agentic-if grade_constraints().
+
+Reward is the shaped multiplicative formula from agentic-if reward.py::
+
+    reward = task_reward * (1 + alpha * constraint_reward)
+
+task_reward = 0 always yields reward 0 (no constraint reward hacking), and
+constraint pressure never zeroes the task gradient on hard SWE tasks. When no
+constraint had a gradeable step (any_graded=False), the constraint term is
+dropped — "not measured" is not perfect compliance.
+
+Optional metadata keys: ``constraint_alpha`` (default from config),
+``grading_mode`` ("fraction" | "binary"), ``step_aggregation`` ("mean" | "all"),
+``injection_mode``, ``injection_step``.
 """
+
 import base64
 import json
 import logging
@@ -40,20 +55,20 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     SimpleResourcesServer,
 )
+from resources_servers.swerl_constrained.eval.agentic_if_bridge import (
+    coerce_constraint_declarations,
+    load_grading_core,
+)
 from resources_servers.swerl_gen.eval.process_patch import (
     extract_pred_patch,
     extract_pred_patch_relaxed_formatting,
 )
 from resources_servers.swerl_gen.eval.singularity_utils import compute_score
-from resources_servers.swerl_constrained.eval.constraints import (
-    CONSTRAINT_REGISTRY,
-    run_constraints,
-)
 
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CONSTRAINT_WEIGHT = 0.3
+DEFAULT_CONSTRAINT_ALPHA = 1.0  # FORMAT mode default (agentic-if reward.py)
 
 
 class SWEConstrainedResourcesServerConfig(BaseResourcesServerConfig):
@@ -61,6 +76,10 @@ class SWEConstrainedResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_timeout: int = 600
     debug: bool = False
     relaxed_formatting: bool = False
+    # Path to the agentic-if checkout (absolute, or relative to the Gym repo
+    # root). AGENTIC_IF_REPO env var takes precedence.
+    agentic_if_repo: Optional[str] = None
+    constraint_alpha: float = DEFAULT_CONSTRAINT_ALPHA
 
 
 class SWEConstrainedRunRequest(BaseRunRequest):
@@ -80,12 +99,22 @@ class SWEConstrainedVerifyResponse(BaseMultiRewardVerifyResponse):
     #   reward: float
     #   reward_components: dict[str, float]
     task_reward: float
-    constraint_reward: float
+    constraint_reward: Optional[float] = None
+    # False when no constraint had a gradeable in-scope step: "format not
+    # measured", NOT perfect compliance. The constraint term is dropped from
+    # the reward in that case.
+    constraint_graded: bool = False
+    constraint_alpha: float = DEFAULT_CONSTRAINT_ALPHA
     model_patch: Optional[str] = None
     model_output: Optional[str] = None
     verification_result: Optional[dict[str, Any]] = None
     verification_time: Optional[float] = None
-    constraint_details: dict[str, Any] = {}
+    # Per-constraint pass/fail, partial-credit scores, applicability, and
+    # human-readable violations from agentic-if grade_constraints().
+    constraint_results: dict[str, bool] = {}
+    constraint_scores: dict[str, float] = {}
+    constraint_applicable: dict[str, bool] = {}
+    violations: list[str] = []
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
@@ -111,22 +140,79 @@ class SWEConstrainedResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context):
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+        # Fail fast at startup if the agentic-if checkout is missing.
+        (
+            self._parse_trajectory,
+            self._grade_constraints,
+            self._compute_reward,
+            self._injection_mode_cls,
+        ) = load_grading_core(self.config.agentic_if_repo)
+
+    def _grade(self, body: SWEConstrainedVerifyRequest) -> Any:
+        constraints = coerce_constraint_declarations(body.metadata.get("constraints", []))
+        steps = self._parse_trajectory(body.response.output)
+        return self._grade_constraints(
+            steps,
+            constraints,
+            injection_mode=self._injection_mode_cls(
+                body.metadata.get("injection_mode", self._injection_mode_cls.SYSTEM_PROMPT)
+            ),
+            injection_step=int(body.metadata.get("injection_step", 0)),
+            grading_mode=body.metadata.get("grading_mode", "fraction"),
+            step_aggregation=body.metadata.get("step_aggregation", "mean"),
+        )
+
+    def _build_response(
+        self,
+        body: SWEConstrainedVerifyRequest,
+        task_reward: float,
+        grading: Any,
+        alpha: float,
+        **extra: Any,
+    ) -> SWEConstrainedVerifyResponse:
+        if grading.any_graded:
+            shaped = self._compute_reward(task_reward, grading.reward, alpha=alpha)
+            reward = shaped.total
+            constraint_reward: Optional[float] = grading.reward
+        else:
+            reward = task_reward
+            constraint_reward = None
+
+        reward_components = {"task": task_reward}
+        if grading.any_graded:
+            reward_components["constraint"] = grading.reward
+            for name, score in grading.constraint_scores.items():
+                if grading.constraint_applicable.get(name):
+                    reward_components[f"constraint_{name}"] = score
+
+        return SWEConstrainedVerifyResponse(
+            **body.model_dump(),
+            reward=reward,
+            reward_components=reward_components,
+            task_reward=task_reward,
+            constraint_reward=constraint_reward,
+            constraint_graded=grading.any_graded,
+            constraint_alpha=alpha,
+            constraint_results=grading.constraint_results,
+            constraint_scores=grading.constraint_scores,
+            constraint_applicable=grading.constraint_applicable,
+            violations=grading.violations,
+            **extra,
+        )
 
     async def verify(self, body: SWEConstrainedVerifyRequest) -> SWEConstrainedVerifyResponse:
-        constraints: list[str] = body.metadata.get("constraints", [])
-        constraint_weight: float = float(body.metadata.get("constraint_weight", DEFAULT_CONSTRAINT_WEIGHT))
-        golden_patch: Optional[str] = body.instance.get("patch")
+        alpha = float(body.metadata.get("constraint_alpha", self.config.constraint_alpha))
 
-        unknown = [c for c in constraints if c not in CONSTRAINT_REGISTRY]
-        if unknown:
-            log.warning("Unknown constraints will be skipped: %s", unknown)
+        # Constraint grading runs on the trajectory regardless of patch
+        # extraction: with the shaped formula, task_reward=0 zeroes the total,
+        # but the per-constraint diagnostics stay available for RL logging.
+        grading = self._grade(body)
 
-        # --- extract model output ---
         predict_str = _extract_last_assistant_text(body)
         if not predict_str:
-            return self._zero_reward(body, constraint_weight, constraints, "empty model output")
+            log.debug("Zero task reward (empty model output)")
+            return self._build_response(body, 0.0, grading, alpha)
 
-        # --- extract patch ---
         try:
             if self.config.relaxed_formatting:
                 extracted = extract_pred_patch_relaxed_formatting(
@@ -144,11 +230,11 @@ class SWEConstrainedResourcesServer(SimpleResourcesServer):
             extracted = None
 
         if extracted is None:
-            return self._zero_reward(body, constraint_weight, constraints, "patch extraction failed")
+            log.debug("Zero task reward (patch extraction failed)")
+            return self._build_response(body, 0.0, grading, alpha, model_output=predict_str)
 
         model_patch: str = extracted["model_patch"]
 
-        # --- sandbox task evaluation ---
         extra_info = {"instance_info": body.instance, "image": body.metadata.get("image", "")}
         extra_info_b64 = base64.b64encode(json.dumps(extra_info).encode()).decode()
 
@@ -165,52 +251,15 @@ class SWEConstrainedResourcesServer(SimpleResourcesServer):
             task_reward_raw, verification_result = await future
             verification_time = time.time() - start
 
-        task_reward = float(task_reward_raw)
-
-        # --- constraint evaluation ---
-        constraint_results = run_constraints(constraints, model_patch, golden_patch)
-        valid_scores = [r["score"] for r in constraint_results.values() if r["score"] is not None]
-        constraint_reward = sum(valid_scores) / len(valid_scores) if valid_scores else 1.0
-
-        # --- combine ---
-        if constraints:
-            reward = task_reward * (1.0 - constraint_weight) + constraint_reward * constraint_weight
-        else:
-            reward = task_reward
-
-        reward_components = {"task": task_reward, "constraint": constraint_reward}
-        for name, result in constraint_results.items():
-            if result["score"] is not None:
-                reward_components[f"constraint_{name}"] = result["score"]
-
-        return SWEConstrainedVerifyResponse(
-            **body.model_dump(),
-            reward=reward,
-            reward_components=reward_components,
-            task_reward=task_reward,
-            constraint_reward=constraint_reward,
+        return self._build_response(
+            body,
+            float(task_reward_raw),
+            grading,
+            alpha,
             model_patch=model_patch,
             model_output=predict_str,
             verification_result=verification_result,
             verification_time=verification_time,
-            constraint_details=constraint_results,
-        )
-
-    def _zero_reward(
-        self,
-        body: SWEConstrainedVerifyRequest,
-        constraint_weight: float,
-        constraints: list[str],
-        reason: str,
-    ) -> SWEConstrainedVerifyResponse:
-        log.debug("Zero reward (%s)", reason)
-        return SWEConstrainedVerifyResponse(
-            **body.model_dump(),
-            reward=0.0,
-            reward_components={"task": 0.0, "constraint": 0.0},
-            task_reward=0.0,
-            constraint_reward=0.0,
-            constraint_details={c: {"score": None, "detail": {"error": reason}} for c in constraints},
         )
 
 

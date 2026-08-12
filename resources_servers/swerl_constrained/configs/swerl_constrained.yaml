@@ -5,15 +5,20 @@ swerl_constrained_resources_server:
       domain: coding
       verified: false
       description: >
-        Sandboxed SWE-bench patch evaluation with per-task behavioral constraints.
-        Scores both task completion (sandbox test harness) and constraint adherence
-        (deterministic patch analysis). Constraints are declared in metadata.constraints.
+        Sandboxed SWE-bench patch evaluation with per-task agentic-if constraints.
+        Scores task completion (sandbox test harness) and constraint adherence
+        (agentic-if verifier registry, trajectory-graded). Constraints are declared
+        in metadata.constraints as [{type, params}] with canonical agentic-if ids;
+        reward = task * (1 + alpha * constraint). Requires an agentic-if checkout
+        (AGENTIC_IF_REPO env var, agentic_if_repo config, or ../agentic-if).
       value: Improve SWE capabilities with constraint-aware reward shaping
       env: singularity
       num_processes: 2048
       sandbox_timeout: 900
       debug: false
       relaxed_formatting: false
+      agentic_if_repo: null
+      constraint_alpha: 1.0
 
 swerl_constrained_simple_agent:
   responses_api_agents:

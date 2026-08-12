@@ -2,116 +2,115 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
-from resources_servers.swerl_constrained.eval.constraints import (
-    check_minimal_editing,
-    check_no_secret_literals_in_code,
-    run_constraints,
+from resources_servers.swerl_constrained.eval.agentic_if_bridge import (
+    coerce_constraint_declarations,
+    find_agentic_if_repo,
+    load_grading_core,
 )
 
 
-SMALL_PATCH = """\
+requires_agentic_if = pytest.mark.skipif(
+    find_agentic_if_repo() is None,
+    reason="agentic-if checkout not found (clone next to Gym or set AGENTIC_IF_REPO)",
+)
+
+
+class TestCoerceConstraintDeclarations:
+    def test_new_schema_passthrough(self):
+        raw = [{"type": "unified_diff", "params": {"strict": True}}]
+        assert coerce_constraint_declarations(raw) == [{"type": "unified_diff", "params": {"strict": True}}]
+
+    def test_legacy_bare_string(self):
+        assert coerce_constraint_declarations(["no_secret_literals_in_code"]) == [
+            {"type": "no_secret_literals_in_code", "params": {}}
+        ]
+
+    def test_missing_params_defaults_empty(self):
+        assert coerce_constraint_declarations([{"type": "numbered_plan"}]) == [{"type": "numbered_plan", "params": {}}]
+
+    def test_empty(self):
+        assert coerce_constraint_declarations([]) == []
+        assert coerce_constraint_declarations(None) == []
+
+    def test_malformed_raises(self):
+        with pytest.raises(ValueError):
+            coerce_constraint_declarations([{"params": {}}])
+
+
+def _final_answer_items(text: str) -> list[dict]:
+    return [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}]
+
+
+CLEAN_DIFF_ANSWER = """\
+Here is the fix:
+```diff
 diff --git a/foo.py b/foo.py
 --- a/foo.py
 +++ b/foo.py
 @@ -1,3 +1,3 @@
 -raise RuntimeError("not installed")
 +raise ImportError("not installed")
+```
 """
 
-BIG_PATCH = "\n".join(
-    ["diff --git a/foo.py b/foo.py", "--- a/foo.py", "+++ b/foo.py", "@@ -1,100 +1,100 @@"]
-    + [f"+line {i}" for i in range(150)]
-)
-
-GOLDEN_PATCH = """\
-diff --git a/foo.py b/foo.py
---- a/foo.py
-+++ b/foo.py
-@@ -1,3 +1,3 @@
--raise RuntimeError("not installed")
-+raise ImportError("not installed")
-"""
-
-SECRET_PATCH = """\
-diff --git a/config.py b/config.py
---- a/config.py
-+++ b/config.py
-@@ -1 +1,2 @@
-+API_KEY = "sk-abcdefgh12345678abcdefgh12345678"
-"""
-
-ENV_PATCH = """\
-diff --git a/config.py b/config.py
---- a/config.py
-+++ b/config.py
-@@ -1 +1,2 @@
-+API_KEY = os.environ["API_KEY"]
+SECRET_ANSWER = """\
+Here is the fix:
+```python
+API_KEY = "sk-abcdefgh12345678abcdefgh12345678"
+```
 """
 
 
-class TestMinimalEditing:
-    def test_same_size_as_golden(self):
-        score, detail = check_minimal_editing(SMALL_PATCH, GOLDEN_PATCH)
-        assert score == 1.0
-        assert detail["ratio"] <= 2.0
+@requires_agentic_if
+class TestGradingIntegration:
+    @pytest.fixture(scope="class")
+    def core(self):
+        parse_trajectory, grade_constraints, compute_reward, injection_mode_cls = load_grading_core()
+        return parse_trajectory, grade_constraints, compute_reward, injection_mode_cls
 
-    def test_large_patch_vs_small_golden(self):
-        score, detail = check_minimal_editing(BIG_PATCH, GOLDEN_PATCH)
-        assert score == 0.0
+    def test_no_secret_literals_violation(self, core):
+        parse_trajectory, grade_constraints, _, _ = core
+        steps = parse_trajectory(_final_answer_items(SECRET_ANSWER))
+        grading = grade_constraints(steps, [{"type": "no_secret_literals_in_code", "params": {}}])
+        assert grading.any_graded
+        assert grading.constraint_results["no_secret_literals_in_code"] is False
+        assert grading.reward == 0.0
 
-    def test_no_golden_small_patch(self):
-        score, _ = check_minimal_editing(SMALL_PATCH, None)
-        assert score == 1.0
+    def test_no_secret_literals_clean(self, core):
+        parse_trajectory, grade_constraints, _, _ = core
+        steps = parse_trajectory(_final_answer_items(CLEAN_DIFF_ANSWER))
+        grading = grade_constraints(steps, [{"type": "no_secret_literals_in_code", "params": {}}])
+        assert grading.any_graded
+        assert grading.constraint_results["no_secret_literals_in_code"] is True
+        assert grading.reward == 1.0
 
-    def test_no_golden_huge_patch(self):
-        huge = "\n".join([f"+line {i}" for i in range(300)])
-        score, _ = check_minimal_editing(huge, None)
-        assert score == 0.0
+    def test_retired_constraint_is_unknown(self, core):
+        # minimal_editing was retired from the canonical pool; declaring it is
+        # a dataset bug and must surface as a violation, not a silent skip.
+        parse_trajectory, grade_constraints, _, _ = core
+        steps = parse_trajectory(_final_answer_items(CLEAN_DIFF_ANSWER))
+        grading = grade_constraints(steps, [{"type": "minimal_editing", "params": {}}])
+        assert grading.constraint_results["minimal_editing"] is False
+        assert any("Unknown constraint" in v for v in grading.violations)
 
-    def test_none_patch(self):
-        score, _ = check_minimal_editing(None, None)
-        assert score == 1.0
+    def test_shaped_reward_formula(self, core):
+        _, _, compute_reward, _ = core
+        assert compute_reward(0.0, 1.0, alpha=1.0).total == 0.0  # no constraint reward hacking
+        assert compute_reward(1.0, 1.0, alpha=1.0).total == 2.0
+        assert compute_reward(1.0, 0.0, alpha=1.0).total == 1.0
+        assert compute_reward(0.5, 1.0, alpha=0.5).total == pytest.approx(0.75)
 
-    def test_mid_range_score_between_zero_and_one(self):
-        mid_patch = "\n".join([f"+line {i}" for i in range(6)])
-        golden = "\n".join([f"+line {i}" for i in range(2)])
-        score, detail = check_minimal_editing(mid_patch, golden)
-        assert 0.0 < score < 1.0
-
-
-class TestNoSecretLiteralsInCode:
-    def test_clean_patch(self):
-        score, detail = check_no_secret_literals_in_code(SMALL_PATCH, None)
-        assert score == 1.0
-        assert detail["violations"] == []
-
-    def test_secret_in_added_line(self):
-        score, detail = check_no_secret_literals_in_code(SECRET_PATCH, None)
-        assert score == 0.0
-        assert len(detail["violations"]) > 0
-
-    def test_env_var_read_not_flagged(self):
-        score, detail = check_no_secret_literals_in_code(ENV_PATCH, None)
-        assert score == 1.0
-        assert detail["violations"] == []
-
-    def test_none_patch(self):
-        score, _ = check_no_secret_literals_in_code(None, None)
-        assert score == 1.0
-
-
-class TestRunConstraints:
-    def test_all_known(self):
-        results = run_constraints(["minimal_editing", "no_secret_literals_in_code"], SMALL_PATCH, GOLDEN_PATCH)
-        assert set(results.keys()) == {"minimal_editing", "no_secret_literals_in_code"}
-        for r in results.values():
-            assert r["score"] is not None
-
-    def test_unknown_constraint(self):
-        results = run_constraints(["does_not_exist"], SMALL_PATCH, None)
-        assert results["does_not_exist"]["score"] is None
-        assert "error" in results["does_not_exist"]["detail"]
-
-    def test_empty_constraints(self):
-        results = run_constraints([], SMALL_PATCH, None)
-        assert results == {}
+    def test_fraction_grading_partial_credit(self, core):
+        parse_trajectory, grade_constraints, _, _ = core
+        steps = parse_trajectory(_final_answer_items(SECRET_ANSWER))
+        grading = grade_constraints(
+            steps,
+            [
+                {"type": "no_secret_literals_in_code", "params": {}},
+                {"type": "unified_diff", "params": {}},
+            ],
+            grading_mode="fraction",
+            step_aggregation="mean",
+        )
+        graded = [s for name, s in grading.constraint_scores.items() if grading.constraint_applicable.get(name)]
+        assert grading.reward == pytest.approx(sum(graded) / len(graded))
