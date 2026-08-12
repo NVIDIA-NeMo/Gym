@@ -1748,6 +1748,14 @@ fi
         report_path.write_text(json.dumps(report, indent=2))
 
 
+# Exit status of the agent phase inside a tb_single_exec merged command. `timeout`
+# exits 124 when the agent window is exhausted; the runner reads this to set
+# `agent_timed_out`, which the merged command's own success would otherwise hide.
+TB_AGENT_RC_FILENAME = "tb_agent_rc.txt"
+TB_AGENT_RC_MOUNTED_PATH = f"/trajectories_mount/{TB_AGENT_RC_FILENAME}"
+TB_TIMEOUT_EXIT_CODE = 124
+
+
 # Size of the per-instance ext3 overlay shared between the Terminal-Bench agent
 # and eval containers. Holds the agent's writes to the task filesystem so the
 # eval phase can grade live state. Tunable; tasks rarely write more than a few
@@ -3125,6 +3133,20 @@ class RunOpenHandsAgent(BaseModel):
         except Exception:
             pass
 
+    def _tb_agent_phase_timed_out(self) -> Optional[bool]:
+        """Did the agent phase of a tb_single_exec run exhaust its window?
+
+        Reads the exit status the merged command recorded before `|| true` would have
+        swallowed it. `timeout` exits 124 on expiry. Returns None when the marker is
+        absent or unreadable, so a missing file is "unknown" rather than "did not time
+        out" — `update_and_read_metrics` strips None, leaving the field unset.
+        """
+        rc_path = self.config.persistent_dir / TB_AGENT_RC_FILENAME
+        try:
+            return int(rc_path.read_text().strip()) == TB_TIMEOUT_EXIT_CODE
+        except Exception:
+            return None
+
     async def _process_single_datapoint_terminal_bench(self) -> Optional[Path]:
         """Shared-overlay orchestration for Terminal-Bench tasks.
 
@@ -3182,6 +3204,12 @@ class RunOpenHandsAgent(BaseModel):
                     return None
                 metrics.openhands_run_time += time.time()
                 metrics.patch_exists = True
+                # The merged command succeeds even when the AGENT phase was killed by its
+                # `timeout` wrapper, because the script goes on to run the verifier. Recover
+                # the agent's real exit status so an exhausted agent window is recorded as a
+                # timeout instead of a genuine reward-0 attempt (it usually has an empty
+                # trajectory, which must be maskable downstream).
+                metrics.agent_timed_out = self._tb_agent_phase_timed_out()
                 # best-effort agent metrics (patch / error) from the agent's output file
                 try:
                     agent_out = glob.glob(agent_cmd.expected_file_pattern, recursive=True)
@@ -4381,10 +4409,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # unresolved task is a valid outcome, not a container error.
         if params.tb_single_exec and params.problem_info.get("dataset_name") == "terminal-bench":
             settle = int(params.tb_service_settle_sec)
+            # Record the agent phase's real exit status before `|| true` swallows it. The
+            # agent runs under `timeout --signal=TERM`, which exits 124 when the window is
+            # exhausted; without this the merged command still succeeds (it goes on to the
+            # eval phase), `_finish_container_command` raises nothing, and the rollout is
+            # recorded as a genuine reward-0 attempt rather than a timeout. Empty-trajectory
+            # timeouts must stay distinguishable so they can be masked in training.
             merged_inner = (
                 "set +e\n( "
                 + params.agent_command.command
-                + "\n) || true\n"
+                + f"\n)\necho $? > {TB_AGENT_RC_MOUNTED_PATH} 2>/dev/null || true\n"
                 + f'echo "[tb_single_exec] agent phase done; settling services {settle}s"\n'
                 + f"sleep {settle}\n"
                 + params.eval_command.command

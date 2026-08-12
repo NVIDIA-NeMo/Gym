@@ -40,7 +40,11 @@ pytest.importorskip("tomlkit")
 from responses_api_agents.swe_agents.app import (  # noqa: E402
     _TB_TERMINAL_TOOL_OUTPUT,
     AGENT_VISIBLE_INSTANCE_FIELDS,
+    TB_AGENT_RC_FILENAME,
+    TB_AGENT_RC_MOUNTED_PATH,
+    TB_TIMEOUT_EXIT_CODE,
     ExecuteContainerCommandArgs,
+    RunOpenHandsAgent,
     SWEBenchWrapper,
     TerminalBenchDatasetProcessor,
     _append_terminal_tool_outputs,
@@ -540,6 +544,41 @@ class TerminalBenchIsolationTests(unittest.TestCase):
             self.assertIn("dst=/logs/verifier", merged)
             # Same shared overlay as every other terminal-bench exec.
             self.assertIn(f"--overlay {persistent / 'agent_overlay.img'}", merged)
+
+    def test_single_exec_records_the_agent_phase_exit_status(self):
+        """An exhausted agent window must stay distinguishable from a real failure.
+
+        In tb_single_exec the merged command runs the verifier after the agent, so it
+        exits 0 even when `timeout` killed the agent. Without capturing the agent's own
+        exit status the rollout looks like a genuine reward-0 attempt, and empty-trajectory
+        timeouts silently become training signal.
+        """
+        # Contract between the two halves: the in-container script writes the mounted
+        # path, the host-side runner reads persistent_dir/<filename>. persistent_dir is
+        # bind-mounted at /trajectories_mount, so these must name the same file.
+        self.assertEqual(TB_AGENT_RC_MOUNTED_PATH, f"/trajectories_mount/{TB_AGENT_RC_FILENAME}")
+        self.assertEqual(TB_TIMEOUT_EXIT_CODE, 124)  # GNU coreutils `timeout` expiry
+
+        runner = SimpleNamespace()
+        with tempfile.TemporaryDirectory() as tmp:
+            persistent = Path(tmp)
+            runner.config = SimpleNamespace(persistent_dir=persistent)
+            probe = RunOpenHandsAgent._tb_agent_phase_timed_out
+
+            # No marker (e.g. two-exec, or the echo never ran) -> unknown, not False.
+            self.assertIsNone(probe(runner))
+
+            rc_file = persistent / "tb_agent_rc.txt"
+            rc_file.write_text("124\n")  # `timeout` expiry
+            self.assertIs(probe(runner), True)
+
+            for rc in ("0", "1", "137"):
+                with self.subTest(rc=rc):
+                    rc_file.write_text(rc + "\n")
+                    self.assertIs(probe(runner), False)
+
+            rc_file.write_text("not-a-number")
+            self.assertIsNone(probe(runner))
 
     def test_per_instance_agent_timeout_overrides_the_config_default(self):
         """TB rows declare their own agent budget; it must beat the config-wide value."""
