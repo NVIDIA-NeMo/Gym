@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import shutil
+import shlex
 import sys
 import tomllib
 from importlib import import_module
 from pathlib import Path
 from subprocess import TimeoutExpired
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,12 +34,12 @@ from nemo_gym.cli.env import (
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
-    TestConfig,
     _delete_server_venv,
     _resolve_server_dir,
     _select_shard,
     _test_single,
     dump_config,
+    init_environment,
     init_resources_server,
     list_environments,
     pip_list,
@@ -46,9 +47,16 @@ from nemo_gym.cli.env import (
     status,
     validate,
 )
+from nemo_gym.cli.env import (
+    TestConfig as EnvironmentTestConfig,
+)
+from nemo_gym.cli.env import (
+    test_environment_manifest as run_manifest_test,
+)
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
-from nemo_gym.registry import EnvironmentEntry
+from nemo_gym.environment.scaffold import ScaffoldError
+from nemo_gym.registry import EnvironmentCatalogEntry
 
 
 class TestSelectShard:
@@ -142,85 +150,77 @@ class TestCLI:
             target = getattr(import_module(module), fn)
             assert callable(target), f"{script_name} -> {import_path} is not callable"
 
-    def test_init_resources_server_includes_domain(self) -> None:
-        """Test that init_resources_server creates a config with the required domain field."""
-
+    def test_init_resources_server_includes_domain(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         server_name = "test_cli_server"
-        entrypoint = f"resources_servers/{server_name}"
-        server_path = Path(entrypoint).resolve()
+        server_path = tmp_path / "resources_servers" / server_name
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_GLOBAL_CONFIG_DICT",
+            OmegaConf.create({"entrypoint": str(server_path)}),
+        )
 
-        # Clean up any existing test server directory
-        if server_path.exists():
-            shutil.rmtree(server_path)
+        init_resources_server()
 
-        try:
-            with MonkeyPatch.context() as mp:
-                # Set up the global config to point to our test entrypoint
-                mp.setattr(
-                    nemo_gym.global_config,
-                    "_GLOBAL_CONFIG_DICT",
-                    OmegaConf.create({"entrypoint": entrypoint}),
-                )
+        config_file = server_path / "configs" / f"{server_name}.yaml"
+        config_dict = OmegaConf.load(config_file)
+        resources_server_key = f"{server_name}_resources_server"
+        server_config = config_dict[resources_server_key]["resources_servers"][server_name]
+        assert server_config["domain"] == "other"
+        assert server_config["verified"] is False
 
-                # Run init_resources_server
-                init_resources_server()
+        config_text = config_file.read_text()
+        assert "# Resources server:" in config_text
+        assert config_text.count("#") >= 10
+        from scripts.add_verified_flag import ensure_verified_flag
 
-                # Verify the generated config file exists
-                config_file = server_path / "configs" / f"{server_name}.yaml"
-                assert config_file.exists(), f"Config file not created at {config_file}"
+        assert ensure_verified_flag(config_file) is False
+        assert config_file.read_text() == config_text
 
-                # Load and verify the config
-                config_dict = OmegaConf.load(config_file)
+        full_config_dict = OmegaConf.create(
+            {
+                "name": resources_server_key,
+                "server_type_config_dict": config_dict[resources_server_key],
+                **OmegaConf.to_container(config_dict[resources_server_key]),
+            }
+        )
+        assert ResourcesServerInstanceConfig.model_validate(full_config_dict) is not None
+        assert "source:" in config_text
+        assert "gitlab_identifier" not in config_text
+        assert "huggingface_identifier" not in config_text
 
-                # Check that the domain field is present in the resources server config
-                resources_server_key = f"{server_name}_resources_server"
-                assert resources_server_key in config_dict, f"Resources server key '{resources_server_key}' not found"
+    def test_init_resources_server_preserves_existing_directory(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys
+    ) -> None:
+        server_path = tmp_path / "resources_servers" / "existing"
+        server_path.mkdir(parents=True)
+        sentinel = server_path / "sentinel.txt"
+        sentinel.write_text("keep\n", encoding="utf-8")
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_GLOBAL_CONFIG_DICT",
+            OmegaConf.create({"entrypoint": str(server_path)}),
+        )
 
-                resources_config = config_dict[resources_server_key]
-                assert "resources_servers" in resources_config
-                assert server_name in resources_config["resources_servers"]
+        with pytest.raises(SystemExit):
+            init_resources_server()
 
-                server_config = resources_config["resources_servers"][server_name]
-                assert "domain" in server_config, "Domain field missing from resources server config"
-                assert server_config["domain"] == "other", f"Expected domain 'other', got '{server_config['domain']}'"
+        assert capsys.readouterr().out == f"Folder already exists: {server_path}. Exiting init.\n"
+        assert list(server_path.iterdir()) == [sentinel]
 
-                # Generated config ships `verified: false` so the add-verified-flag pre-commit hook
-                # is a no-op and does not rewrite (and strip the comments from) the file on commit.
-                assert server_config["verified"] is False
+    def test_init_resources_server_rejects_an_invalid_python_name(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        server_path = tmp_path / "resources_servers" / "invalid-name"
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_GLOBAL_CONFIG_DICT",
+            OmegaConf.create({"entrypoint": str(server_path)}),
+        )
 
-                # The generated config is documented with inline comments (friction #7).
-                config_text = config_file.read_text()
-                assert "# Resources server:" in config_text
-                assert config_text.count("#") >= 10, "expected inline field documentation comments"
+        with pytest.raises(ScaffoldError, match="Python identifier"):
+            init_resources_server()
 
-                # The add-verified-flag hook must NOT modify the generated config (would strip comments).
-                from scripts.add_verified_flag import ensure_verified_flag
-
-                assert ensure_verified_flag(config_file) is False
-                assert config_file.read_text() == config_text, "verified-flag hook altered the generated config"
-
-                # Verify that the config can be validated (this would have failed before the fix)
-                full_config_dict = OmegaConf.create(
-                    {
-                        "name": resources_server_key,
-                        "server_type_config_dict": config_dict[resources_server_key],
-                        **OmegaConf.to_container(config_dict[resources_server_key]),
-                    }
-                )
-
-                # This should not raise an assertion error about missing domain
-                instance_config = ResourcesServerInstanceConfig.model_validate(full_config_dict)
-                assert instance_config is not None
-
-                # The generated config points users at the unified `source:` identifier, not the
-                # deprecated gitlab_identifier/huggingface_identifier.
-                assert "source:" in config_text
-                assert "gitlab_identifier" not in config_text
-                assert "huggingface_identifier" not in config_text
-        finally:
-            # Clean up the test server directory
-            if server_path.exists():
-                shutil.rmtree(server_path)
+        assert not server_path.exists()
 
     def test_run_helper_prefers_cwd_server_over_install(self, tmp_path: Path) -> None:
         """ng_run should use a local CWD server dir instead of the installed one."""
@@ -262,7 +262,7 @@ class TestResolveServerDir:
 
     def test_test_config_resolved_dir_path_uses_install_root(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
-        cfg = TestConfig(entrypoint="resources_servers/arc_agi")
+        cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
         assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
 
 
@@ -382,7 +382,15 @@ class TestExitCleanlyOnConfigError:
     # Every CLI entrypoint that must carry the clean-error contract (each calls get_global_config_dict
     # and wears @exit_cleanly_on_config_error). Keep this list in sync when decorating new commands —
     # it's the single place that asserts each one actually exits cleanly on a config error.
-    DECORATED_COMMANDS = [run, validate, dump_config, status, pip_list]
+    DECORATED_COMMANDS = [
+        run,
+        validate,
+        init_environment,
+        run_manifest_test,
+        dump_config,
+        status,
+        pip_list,
+    ]
 
     def test_config_error_becomes_clean_exit(self) -> None:
         @exit_cleanly_on_config_error
@@ -424,6 +432,7 @@ class TestExitCleanlyOnConfigError:
             raise NoServerInstancesError("nothing configured to run")
 
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
+        monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", _raise)
 
         with raises(SystemExit) as exc_info:
             command()
@@ -436,6 +445,7 @@ class TestExitCleanlyOnConfigError:
             raise RuntimeError("unexpected")
 
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
+        monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", _raise)
 
         with raises(RuntimeError, match="unexpected"):
             command()
@@ -477,108 +487,392 @@ class TestValidate:
         assert exc_info.value.code == 1
 
 
+class TestOnboardingCommandAdapters:
+    _ENTRY = EnvironmentCatalogEntry(
+        name="alpha",
+        kind="environment",
+        status="experimental",
+        path=Path("environments/alpha"),
+        config_path=Path("environments/alpha/config.yaml"),
+        manifest_path=Path("environments/alpha/manifest.yaml"),
+    )
+
+    def test_init_environment_forwards_typed_scaffold_options(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_command_overrides",
+            lambda: OmegaConf.create(
+                {
+                    "scaffold_kind": "benchmark",
+                    "scaffold_name": "sample",
+                    "profile": "custom-gym-verifier",
+                    "reuse_verifier": "shared",
+                    "reward_range": [-1, 1],
+                    "higher_is_better": False,
+                }
+            ),
+        )
+        scaffold = MagicMock(
+            return_value=MagicMock(
+                asset_dir=Path("benchmarks/sample"),
+                created=(Path("benchmarks/sample/manifest.yaml"),),
+            )
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "scaffold_environment", scaffold)
+
+        init_environment()
+
+        options = scaffold.call_args.kwargs
+        assert options == {
+            "kind": "benchmark",
+            "name": "sample",
+            "profile": "custom-gym-verifier",
+            "reuse_verifier": "shared",
+            "reward_range": (-1.0, 1.0),
+            "higher_is_better": False,
+        }
+        assert "Created benchmarks/sample" in capsys.readouterr().out
+
+    def test_validate_manifest_by_catalog_name(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_command_overrides",
+            lambda: OmegaConf.create(
+                {"onboarding_name": "alpha", "catalog_kind": "environment", "sync": True, "json": True}
+            ),
+        )
+        resolver = MagicMock(return_value=self._ENTRY)
+        report = MagicMock()
+        report.to_dict.return_value = {"name": "alpha", "kind": "environment"}
+        validator = MagicMock(return_value=report)
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_catalog_entry", resolver)
+        monkeypatch.setattr(nemo_gym.cli.env, "validate_environment", validator)
+
+        validate()
+
+        assert resolver.call_args.args[0] == "alpha"
+        assert resolver.call_args.args[1].value == "environment"
+        validator.assert_called_once_with(self._ENTRY.manifest_path, self._ENTRY.config_path, sync=True)
+        assert json.loads(capsys.readouterr().out) == {"name": "alpha", "kind": "environment"}
+
+    def test_validation_human_report(self, capsys) -> None:
+        report = SimpleNamespace(
+            name="alpha",
+            version="1.0.0",
+            kind="environment",
+            declared_profile="custom-gym-verifier",
+            inferred_profile="custom-gym-verifier",
+            profile_evidence="simple_agent",
+            components=(
+                SimpleNamespace(
+                    role="agent_server",
+                    name="alpha_agent",
+                    implementation="simple_agent",
+                    boundary="responses_api_agents",
+                ),
+            ),
+            datasets=(SimpleNamespace(name="example", rows=1, type="example"),),
+            synchronized_fields=("datasets",),
+            warnings=("check this",),
+        )
+
+        nemo_gym.cli.env._print_validation_report(report, json_output=False)
+
+        captured = capsys.readouterr()
+        assert "Manifest: alpha 1.0.0" in captured.out
+        assert "alpha_agent -> simple_agent" in captured.out
+        assert "example: 1 rows" in captured.out
+        assert "Synchronized: datasets" in captured.out
+        assert "check this" in captured.err
+
+    @pytest.mark.parametrize(
+        ("values", "message"),
+        [
+            ({"onboarding_name": "alpha", "manifest_path": "manifest.yaml"}, "catalog name or --manifest"),
+            ({"manifest_path": "manifest.yaml", "catalog_kind": "environment"}, "--kind"),
+        ],
+    )
+    def test_manifest_selector_rejects_conflicting_options(self, values: dict, message: str) -> None:
+        config = nemo_gym.cli.env.ManifestCommandConfig.model_validate(values)
+
+        with raises(ConfigError, match=message):
+            nemo_gym.cli.env._manifest_entry(config)
+
+    def test_manifest_commands_reject_runtime_overrides(self) -> None:
+        with raises(ConfigError, match="runtime config overrides"):
+            nemo_gym.cli.env._reject_manifest_command_extras(
+                OmegaConf.create({"onboarding_name": "alpha", "temperature": 0.5}),
+                nemo_gym.cli.env._MANIFEST_VALIDATE_KEYS,
+            )
+
+    def test_manifest_test_forwards_update_expected(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_command_overrides",
+            lambda: OmegaConf.create({"onboarding_name": "alpha", "update_expected": True, "json": True}),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_catalog_entry", MagicMock(return_value=self._ENTRY))
+        report = MagicMock()
+        report.to_dict.return_value = {"name": "alpha", "cases": []}
+        verify = MagicMock(return_value=report)
+        monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", verify)
+
+        run_manifest_test()
+
+        verify.assert_called_once_with(self._ENTRY, update_expected=True)
+        assert json.loads(capsys.readouterr().out) == {"name": "alpha", "cases": []}
+
+    def test_manifest_test_human_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_command_overrides",
+            lambda: OmegaConf.create({"onboarding_name": "alpha"}),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_catalog_entry", MagicMock(return_value=self._ENTRY))
+        report = SimpleNamespace(name="alpha", resources_server="alpha", cases=(object(), object(), object()))
+        monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", MagicMock(return_value=report))
+
+        run_manifest_test()
+
+        assert "Verifier: alpha (alpha) 3 cases passed" in capsys.readouterr().out
+
+    def test_publish_runs_validation_fixture_and_catalog_finalization(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_command_overrides",
+            lambda: OmegaConf.create({"onboarding_name": "alpha", "json": True}),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_catalog_entry", MagicMock(return_value=self._ENTRY))
+        validation = MagicMock()
+        verifier = MagicMock()
+        validator = MagicMock(return_value=validation)
+        runner = MagicMock(return_value=verifier)
+        publication = MagicMock()
+        publication.to_dict.return_value = {
+            "name": "alpha",
+            "version": "1.0.0",
+            "kind": "environment",
+            "status": "experimental",
+            "manifest_path": "environments/alpha/manifest.yaml",
+            "verifier_cases": 3,
+        }
+        finalizer = MagicMock(return_value=publication)
+        monkeypatch.setattr(nemo_gym.cli.env, "validate_environment", validator)
+        monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", runner)
+        monkeypatch.setattr(nemo_gym.cli.env, "finalize_publication", finalizer)
+
+        nemo_gym.cli.env.publish_environment_manifest()
+
+        validator.assert_called_once_with(self._ENTRY.manifest_path, self._ENTRY.config_path)
+        runner.assert_called_once_with(self._ENTRY, update_expected=False, validation=validation)
+        finalizer.assert_called_once_with(self._ENTRY, validation, verifier)
+        assert json.loads(capsys.readouterr().out)["status"] == "experimental"
+
+    def test_publish_human_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_command_overrides",
+            lambda: OmegaConf.create({"onboarding_name": "alpha"}),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_catalog_entry", MagicMock(return_value=self._ENTRY))
+        monkeypatch.setattr(nemo_gym.cli.env, "validate_environment", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "_run_manifest_verifier", MagicMock())
+        report = SimpleNamespace(
+            kind="environment",
+            name="alpha",
+            version="1.0.0",
+            status="experimental",
+            verifier_cases=3,
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "finalize_publication", MagicMock(return_value=report))
+
+        nemo_gym.cli.env.publish_environment_manifest()
+
+        assert "Publication checks passed for environment alpha 1.0.0" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("editable_install", [True, False])
+    def test_manifest_fixture_runs_in_the_server_environment(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, editable_install: bool
+    ) -> None:
+        install_root = nemo_gym.cli.env.PARENT_DIR if editable_install else tmp_path / "site-packages"
+        monkeypatch.setattr(nemo_gym.cli.env, "PARENT_DIR", install_root)
+        spec = MagicMock(
+            resources_server="alpha",
+            server_dir=str(tmp_path / "resources_servers/alpha"),
+        )
+        spec.to_dict.return_value = {"name": "alpha"}
+        monkeypatch.setattr(nemo_gym.cli.env, "prepare_verifier_run", MagicMock(return_value=spec))
+        parser = MagicMock()
+        setup_config = OmegaConf.create({})
+        parser.parse.return_value = setup_config
+        monkeypatch.setattr(nemo_gym.cli.env, "GlobalConfigDictParser", MagicMock(return_value=parser))
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "setup")
+        monkeypatch.setattr(nemo_gym.cli.env, "get_venv_path", lambda *args: tmp_path / ".venv")
+
+        def run_command(command: str, *args, **kwargs):
+            result_path = Path(shlex.split(command)[-1])
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "report": {
+                            "name": "alpha",
+                            "kind": "environment",
+                            "resources_server": "alpha",
+                            "manifest_path": "manifest.yaml",
+                            "fixture_path": "cases.jsonl",
+                            "cases": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return MagicMock(wait=MagicMock(return_value=0))
+
+        runner = MagicMock(side_effect=run_command)
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", runner)
+
+        report = nemo_gym.cli.env._run_manifest_verifier(self._ENTRY, update_expected=True)
+
+        assert report.name == "alpha"
+        assert parser.parse.call_args.args[0].offline is True
+        assert "nemo_gym.environment._verifier_runner" in runner.call_args.args[0]
+        assert runner.call_args.kwargs["global_config_dict"] is setup_config
+        assert runner.call_args.kwargs["stdout_target"] is sys.stderr
+        assert runner.call_args.kwargs["project_root"] == (install_root if editable_install else None)
+
+
 class TestListEnvironments:
-    _ALPHA = EnvironmentEntry(
+    _ALPHA = EnvironmentCatalogEntry(
         name="alpha",
         config_path=Path("environments/alpha/config.yaml"),
         path=Path("environments/alpha"),
         description="Alpha env",
         domain="agent",
+        kind="environment",
+        status="experimental",
+        manifest_path=Path("environments/alpha/manifest.yaml"),
+        version="1.2.3",
+        integration_profile="custom-gym-verifier",
+        modality="text",
+        licensing="Apache-2.0",
+        lifecycle="active",
+    )
+    _BETA = EnvironmentCatalogEntry(
+        name="beta",
+        config_path=Path("benchmarks/beta/config.yaml"),
+        path=Path("benchmarks/beta"),
+        description="Beta benchmark",
+        domain="math",
+        kind="benchmark",
     )
 
+    def _mock_catalog(
+        self,
+        monkeypatch: MonkeyPatch,
+        *,
+        overrides: dict | None = None,
+        entries: tuple[EnvironmentCatalogEntry, ...] | None = None,
+    ) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_command_overrides",
+            lambda: OmegaConf.create(overrides or {}),
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "discover_environment_catalog",
+            lambda: (self._ALPHA, self._BETA) if entries is None else entries,
+        )
+
     def test_lists_discovered_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        self._mock_catalog(monkeypatch)
 
         list_environments()
 
         out = capsys.readouterr().out
-        assert "alpha" in out
-        assert "agent" in out
+        assert "alpha" in out and "environment" in out and "experimental" in out
+        assert "beta" in out and "benchmark" in out and "no-manifest" in out
+        assert "manifests 1/2" in out
 
     def test_no_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({}))
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {})
+        self._mock_catalog(monkeypatch, entries=())
 
         list_environments()
 
         assert "No environments found" in capsys.readouterr().out
 
     def test_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"json": True}))
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        self._mock_catalog(monkeypatch, overrides={"json": True}, entries=(self._ALPHA,))
 
         list_environments()
 
         assert json.loads(capsys.readouterr().out) == [
-            {"name": "alpha", "domain": "agent", "description": "Alpha env"}
+            {
+                "name": "alpha",
+                "kind": "environment",
+                "status": "experimental",
+                "domain": "agent",
+                "description": "Alpha env",
+                "version": "1.2.3",
+                "integration_profile": "custom-gym-verifier",
+                "modality": "text",
+                "licensing": "Apache-2.0",
+                "lifecycle": "active",
+            }
         ]
 
     def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        # `gym search environments <query>` reuses this command via the `query` config key
-        # (matches name + domain + description).
-        beta = EnvironmentEntry(
-            name="beta",
-            config_path=Path("environments/beta/config.yaml"),
-            path=Path("environments/beta"),
-            description="Beta env",
-            domain="math",
-        )
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "alpha"})
-        )
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "beta": beta}
-        )
+        self._mock_catalog(monkeypatch, overrides={"query": "alpha"})
 
         list_environments()
 
         out = capsys.readouterr().out
-        assert "Environments matching 'alpha'" in out
-        assert "agent" in out  # alpha's domain -> its row was rendered
-        assert "beta" not in out and "math" not in out  # beta and its domain filtered out
+        assert "Catalog entries matching 'alpha'" in out
+        assert "agent" in out
+        assert "beta" not in out and "math" not in out
 
     def test_query_matches_description(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        # "Robotics" only appears in gamma's description, not its name or domain.
-        gamma = EnvironmentEntry(
+        gamma = EnvironmentCatalogEntry(
             name="gamma",
             config_path=Path("environments/gamma/config.yaml"),
             path=Path("environments/gamma"),
             description="Robotics manipulation tasks",
             domain="control",
         )
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"query": "Robotics"})
-        )
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA, "gamma": gamma}
-        )
-
-        monkeypatch.setattr(
-            nemo_gym.cli.env,
-            "read_environment_details",
-            lambda cfg: {
-                "domain": "agent",
-                "description": "Alpha env",
-                "value": "Some value",
-                "resources_servers": ["alpha_rs"],
-                "agent": "simple_agent",
-                "datasets": ["train", "example"],
-            },
-        )
+        self._mock_catalog(monkeypatch, overrides={"query": "Robotics"}, entries=(self._ALPHA, gamma))
 
         list_environments()
 
         out = capsys.readouterr().out
-
         assert "gamma" in out
         assert "alpha" not in out
 
-    def test_inspect_environment_by_name(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"component_name": "alpha"})
+    def test_catalog_filters(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"catalog_kind": "benchmark", "domain": "math", "status": "no-manifest"},
         )
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "beta" in out
+        assert "alpha" not in out
+
+    def test_filter_reports_entries_missing_metadata(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        self._mock_catalog(monkeypatch, overrides={"modality": "text"})
+
+        list_environments()
+
+        assert "1 catalog entry has no modality metadata" in capsys.readouterr().err
+
+    def _mock_inspect_alpha(self, monkeypatch: MonkeyPatch, *, json_output: bool = False) -> None:
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"component_name": "alpha", "json": json_output},
+            entries=(self._ALPHA,),
+        )
         monkeypatch.setattr(
             nemo_gym.cli.env,
             "read_environment_details",
@@ -592,39 +886,22 @@ class TestListEnvironments:
             },
         )
 
+    def test_inspect_environment_by_name(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        self._mock_inspect_alpha(monkeypatch)
+
         list_environments()
 
         out = capsys.readouterr().out
-
         assert "The alpha environment (domain: agent)" in out
         assert "Value: Some value" in out
+        assert "status: experimental" in out
+        assert "manifest:" in out and "profile: custom-gym-verifier" in out
         assert "resources servers: alpha_rs" in out and "agent: simple_agent" in out
         assert "datasets: train, example" in out
         assert "gym env start --environment alpha --model-type vllm_model" in out
 
-    def _mock_inspect_alpha(self, monkeypatch: MonkeyPatch, config: dict) -> None:
-        monkeypatch.setattr(
-            nemo_gym.cli.env,
-            "get_global_config_dict",
-            lambda **k: OmegaConf.create({"component_name": "alpha", **config}),
-        )
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
-        monkeypatch.setattr(
-            nemo_gym.cli.env,
-            "read_environment_details",
-            lambda cfg: {
-                "domain": "agent",
-                "description": "Alpha env",
-                "value": "Some value",
-                "resources_servers": [],
-                "agent": None,
-                "datasets": [],
-            },
-        )
-
     def test_inspect_folds_value_into_description(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        # `value` is not a separate field: it is appended to the description, not surfaced on its own.
-        self._mock_inspect_alpha(monkeypatch, {"json": True})
+        self._mock_inspect_alpha(monkeypatch, json_output=True)
 
         list_environments()
 
@@ -633,7 +910,7 @@ class TestListEnvironments:
         assert "value" not in payload and "value" not in payload["details"]
 
     def test_inspect_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        self._mock_inspect_alpha(monkeypatch, {"json": True})
+        self._mock_inspect_alpha(monkeypatch, json_output=True)
 
         list_environments()
 
@@ -642,15 +919,24 @@ class TestListEnvironments:
             "type": "environment",
             "domain": "agent",
             "description": "Alpha env\nValue: Some value",
-            "details": {"config": str(self._ALPHA.config_path.resolve())},
+            "details": {
+                "config": str(self._ALPHA.config_path.resolve()),
+                "status": "experimental",
+                "manifest": str(self._ALPHA.manifest_path.resolve()),
+                "version": "1.2.3",
+                "profile": "custom-gym-verifier",
+                "modality": "text",
+                "licensing": "Apache-2.0",
+                "lifecycle": "active",
+                "resources servers": "alpha_rs",
+                "agent": "simple_agent",
+                "datasets": "train, example",
+            },
             "usage_example": "gym env start --environment alpha --model-type vllm_model",
         }
 
     def test_inspect_unknown_environment_exits(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        monkeypatch.setattr(
-            nemo_gym.cli.env, "get_global_config_dict", lambda **k: OmegaConf.create({"component_name": "alfa"})
-        )
-        monkeypatch.setattr(nemo_gym.cli.env, "discover_environments", lambda *a, **k: {"alpha": self._ALPHA})
+        self._mock_catalog(monkeypatch, overrides={"component_name": "alfa"}, entries=(self._ALPHA,))
 
         with raises(SystemExit):
             list_environments()
@@ -666,8 +952,8 @@ class TestListEnvironments:
         monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
         monkeypatch.setattr(
             nemo_gym.cli.env,
-            "get_global_config_dict",
-            lambda **k: OmegaConf.create({"component_name": "my_env"}),
+            "_command_overrides",
+            lambda: OmegaConf.create({"component_name": "my_env"}),
         )
 
         list_environments()
