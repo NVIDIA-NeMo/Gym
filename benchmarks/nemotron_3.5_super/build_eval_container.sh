@@ -49,8 +49,12 @@ git checkout $NEMO_GYM_GIT_REF
 # See the script for more information.
 python benchmarks/nemotron_3.5_super/downgrade_python.py
 
+
 uv sync --active
-uv pip install "\$ray_dependency"
+# gym eval prepare imports nemo_gym.profiling at startup. In this Python 3.12 build,
+# uv sync --active can leave gprof2dot absent, so install the uv.lock version and verify the import.
+uv pip install "\$ray_dependency" "gprof2dot==2025.4.14"
+python -c 'import gprof2dot'
 
 ########################################
 # START Benchmark specific preparation
