@@ -16,6 +16,10 @@
 
 import os
 import shutil
+import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from subprocess import run
 from tempfile import TemporaryDirectory
@@ -26,6 +30,9 @@ TAU2_BENCH_REF_ENV = "NEMO_GYM_TAU2_BENCH_REF"
 
 DEFAULT_TAU2_BENCH_REPO_URL = "https://github.com/bxyu-nvidia/tau2-bench"
 DEFAULT_TAU2_BENCH_REF = "bxyu/nemo_gym_stable"
+TAU2_DATA_LOCK_POLL_INTERVAL_SECONDS = 5.0
+TAU2_DATA_LOCK_STALE_SECONDS = 3600.0
+TAU2_DATA_LOCK_TIMEOUT_SECONDS = 3600.0
 
 
 def get_tau2_bench_repo_url() -> str:
@@ -57,6 +64,49 @@ def _ignore_generated_tau2_data(directory: str, names: list[str]) -> set[str]:
     return set()
 
 
+@contextmanager
+def _tau2_data_lock(data_dir: Path) -> Iterator[None]:
+    """Serialize Tau2 data setup across processes and nodes sharing a filesystem."""
+
+    lock_path = data_dir.parent / f".{data_dir.name}.lockdir"
+    owner_path = lock_path / "owner"
+    owner = uuid.uuid4().hex
+    started_at = time.monotonic()
+
+    while True:
+        try:
+            lock_path.mkdir(exist_ok=False)
+            try:
+                owner_path.write_text(owner)
+            except OSError:
+                shutil.rmtree(lock_path, ignore_errors=True)
+                raise
+            break
+        except FileExistsError:
+            try:
+                lock_age = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+
+            if lock_age > TAU2_DATA_LOCK_STALE_SECONDS:
+                shutil.rmtree(lock_path, ignore_errors=True)
+                continue
+
+            if time.monotonic() - started_at >= TAU2_DATA_LOCK_TIMEOUT_SECONDS:
+                raise TimeoutError(f"Timed out waiting for Tau2 data setup lock at {lock_path}")
+            time.sleep(TAU2_DATA_LOCK_POLL_INTERVAL_SECONDS)
+
+    try:
+        yield
+    finally:
+        try:
+            is_owner = owner_path.read_text() == owner
+        except FileNotFoundError:
+            is_owner = False
+        if is_owner:
+            shutil.rmtree(lock_path, ignore_errors=True)
+
+
 def ensure_tau2_data_dir(data_dir: Path) -> Path:
     """Ensure ``data_dir`` contains Tau data, including Tau3 banking_knowledge.
 
@@ -66,27 +116,28 @@ def ensure_tau2_data_dir(data_dir: Path) -> Path:
     ``NEMO_GYM_TAU2_BENCH_REF``.
     """
 
-    if _has_banking_knowledge_data(data_dir):
-        return data_dir
-
     data_dir.parent.mkdir(parents=True, exist_ok=True)
-    repo_url = get_tau2_bench_repo_url()
-    ref = get_tau2_bench_ref()
+    with _tau2_data_lock(data_dir):
+        if _has_banking_knowledge_data(data_dir):
+            return data_dir
 
-    with TemporaryDirectory(prefix="tau2-bench-", dir=data_dir.parent) as tmp_dir:
-        checkout_dir = Path(tmp_dir) / "tau2-bench"
-        run(["git", "clone", repo_url, str(checkout_dir)], check=True)
-        run(["git", "-C", str(checkout_dir), "checkout", ref], check=True)
+        repo_url = get_tau2_bench_repo_url()
+        ref = get_tau2_bench_ref()
 
-        source_data_dir = checkout_dir / "data"
-        if not source_data_dir.exists():
-            raise RuntimeError(f"Tau2 data directory not found at {source_data_dir}")
+        with TemporaryDirectory(prefix="tau2-bench-", dir=data_dir.parent) as tmp_dir:
+            checkout_dir = Path(tmp_dir) / "tau2-bench"
+            run(["git", "clone", repo_url, str(checkout_dir)], check=True)
+            run(["git", "-C", str(checkout_dir), "checkout", ref], check=True)
 
-        if data_dir.exists():
-            shutil.rmtree(data_dir)
-        shutil.copytree(source_data_dir, data_dir, ignore=_ignore_generated_tau2_data)
+            source_data_dir = checkout_dir / "data"
+            if not source_data_dir.exists():
+                raise RuntimeError(f"Tau2 data directory not found at {source_data_dir}")
 
-    if not _has_banking_knowledge_data(data_dir):
-        raise RuntimeError(f"Tau2 data copied from {repo_url}@{ref} is missing banking_knowledge assets")
+            if data_dir.exists():
+                shutil.rmtree(data_dir)
+            shutil.copytree(source_data_dir, data_dir, ignore=_ignore_generated_tau2_data)
+
+        if not _has_banking_knowledge_data(data_dir):
+            raise RuntimeError(f"Tau2 data copied from {repo_url}@{ref} is missing banking_knowledge assets")
 
     return data_dir
