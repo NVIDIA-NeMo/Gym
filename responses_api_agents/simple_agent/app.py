@@ -287,7 +287,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             )
         return model_response
 
-    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+    async def run(
+        self, request: Request, response: Response, body: SimpleAgentRunRequest
+    ) -> SimpleAgentVerifyResponse:
         self._num_requests_total += 1
         self._num_requests_running += 1
         if self._num_requests_total % 100 == 0:
@@ -306,14 +308,22 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
-            cookies=cookies,
+        request.cookies = cookies
+        inner_response = await self.responses(
+            request=request,
+            response=response,
+            body=body.responses_create_params,
         )
-        await raise_for_status(response)
-        model_response_json = await get_response_json(response)
+
+        # self.server_client.post(
+        #     server_name=self.config.name,
+        #     url_path=self.url_path_for_run("/v1/responses", body),
+        #     json=body.responses_create_params,
+        #     cookies=cookies,
+        # )
+        # await raise_for_status(response)
+        # model_response_json = await get_response_json(response)
+        model_response_json = inner_response.model_dump()
         cookies = response.cookies
 
         trajectory = None
