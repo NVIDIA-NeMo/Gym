@@ -743,6 +743,27 @@ class TestNVInternalDatasetProcessor:
             result = processor.get_run_command()
             assert "test_x.py,test_y.py" in result.command
 
+    @pytest.mark.parametrize(
+        ("line", "rewritten"),
+        [
+            # A Jest invocation runs in band and exits once its tests are done.
+            ("npx jest tests/", "npx jest --runInBand --forceExit tests/"),
+            (". nvm.sh && jest -c x.json", ". nvm.sh && jest --runInBand --forceExit -c x.json"),
+            # A worker count that the row sets is respected.
+            ("yarn jest --maxWorkers=2 suite/", "yarn jest --forceExit --maxWorkers=2 suite/"),
+            # A mention of Jest that does not invoke it stays as it is.
+            ("elif grep -q '\"jest\"' package.json; then", None),
+            ('"preset": "ts-jest",', None),
+            ("config_jest", None),
+        ],
+    )
+    def test_get_run_command_rewrites_node_lines(self, line: str, rewritten: Optional[str]) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processor = self._make_processor(tmpdir, {"run_script.sh": f"{line}\n"})
+            processor.get_run_command()
+            script = (processor.config.persistent_dir / "run_script.sh").read_text()
+            assert script == f"{rewritten or line}\n"
+
     def test_get_run_command_no_repo_cmd(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             processor = self._make_processor(
