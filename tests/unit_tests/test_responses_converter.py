@@ -349,6 +349,62 @@ def test_responses_to_chat_completion_rejects_unrepresentable_function_output(
         converter.responses_to_chat_completion_create_params(responses_params)
 
 
+def test_responses_to_chat_completion_plain_assistant_turn_omits_tool_calls(converter: ResponsesConverter):
+    """A plain assistant turn must not carry `tool_calls: []`.
+
+    OpenAI rejects an empty array outright ("empty array. Expected an array with minimum
+    length 1"), which breaks any dataset row that carries conversation history.
+    """
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"},
+            ]
+        )
+    )
+    assistant_msg = params.messages[1]
+    assert assistant_msg["content"] == "hello"
+    assert "tool_calls" not in assistant_msg
+
+
+def test_responses_to_chat_completion_chat_shaped_tool_turn(converter: ResponsesConverter):
+    """Chat-Completions-shaped tool turns embedded in `input` convert without loss.
+
+    Datasets that carry pre-canned tool turns (e.g. IHEval) express them as an assistant
+    message with `tool_calls` and no `content` key at all, followed by a `role: "tool"`
+    result, rather than as `function_call`/`function_call_output` items.
+    """
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "call a tool"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "nyc"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "sunny"},
+            ]
+        )
+    )
+    assert [m["role"] for m in params.messages] == ["user", "assistant", "tool"]
+    assistant_msg = params.messages[1]
+    assert assistant_msg["content"] is None
+    assert assistant_msg["tool_calls"] == [
+        {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "nyc"}'}}
+    ]
+    tool_msg = params.messages[2]
+    assert tool_msg["tool_call_id"] == "call_1"
+    assert tool_msg["content"] == "sunny"
+
+
 def test_responses_to_chat_completion_reasoning_prepended(converter: ResponsesConverter):
     reasoning = NeMoGymResponseReasoningItem(
         id="rs_1",
