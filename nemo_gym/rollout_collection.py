@@ -734,10 +734,6 @@ class RolloutCollectionHelper(BaseModel):
         return input_rows, rows, results, result_strs
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
-        from os import environ
-
-        environ["IS_ROLLOUT_COLLECTION"] = "1"
-
         output_fpath = Path(config.output_jsonl_fpath)
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,

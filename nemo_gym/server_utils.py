@@ -147,26 +147,6 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
 
     num_workers = get_nemo_gym_fastapi_num_workers()
 
-    # TODO @bxyu-nvidia: remove
-    from aiohttp import ClientRequest
-
-    num_requests = [0]
-
-    from os import environ
-
-    is_rollout_collection = environ.get("IS_ROLLOUT_COLLECTION") == "1"
-    if is_rollout_collection:
-        print("Hit is_rollout_collection=True")
-
-    class ClientRequestWithPrinting(ClientRequest):
-        async def send(self, conn) -> "ClientResponse":
-            if is_rollout_collection:
-                num_requests[0] += 1
-                if num_requests[0] % 100 == 0:
-                    print(f"Rollout collection has sent {num_requests[0]} requests!")
-
-            return await super().send(conn)
-
     print(
         f"Limit: {cfg.global_aiohttp_connector_limit}\nLimit per host: {cfg.global_aiohttp_connector_limit_per_host}\nNum workers: {num_workers}"
     )
@@ -183,7 +163,6 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
-        request_class=ClientRequestWithPrinting,
     )
 
     global _GLOBAL_AIOHTTP_CLIENT
