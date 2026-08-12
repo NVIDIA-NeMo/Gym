@@ -35,13 +35,19 @@ mean, not the task-macro average of upstream ``average_final_score.py`` — that
 exact number still comes from the gym-native ``compute_metrics`` path over the
 full ``test.jsonl``.)
 
-Why Chat-Completions shape
---------------------------
+Message shape vs tool shape
+---------------------------
 IHEval uses ``simple_agent``, which passes ``responses_create_params.input``
-and ``responses_create_params.tools`` directly to the model's
-``/chat/completions`` endpoint without Responses→Chat conversion. The dataset
-must already be Chat-Completions-shaped, or the tool-use rows fail validation
-("tools.0.function: Field required").
+directly to the model's ``/chat/completions`` endpoint, so the *messages* stay
+Chat-Completions-shaped (``assistant`` with ``tool_calls`` + ``role: "tool"``
+result). ``ResponsesConverter`` accepts that shape too, so the ``gym eval run``
+path via ``vllm_model`` works as well.
+
+The *tools*, however, must use the Responses API flat shape:
+``NeMoGymResponseCreateParamsNonStreaming.tools`` is typed ``List[ToolParam]``
+and rejects the nested ``{"type": "function", "function": {...}}`` form with a
+422 ("tools.0.FunctionToolParam.name: Field required") before the request ever
+reaches the model server. ``ResponsesConverter`` re-nests them for chat.
 
 This reproduces the upstream benchmark's own request builder exactly, so the
 prompt the model sees is byte-for-byte what upstream IHEval sends:
@@ -181,18 +187,22 @@ def _tool_call_openai(tool: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[
     raw_tool_call = tool["call"]
     raw_tool_return = tool["return"]
 
+    # Responses API flat shape (``ToolParam``/``FunctionToolParam``): ``name``, ``description``
+    # and ``parameters`` sit at the top level and ``strict`` must be present, because
+    # ``NeMoGymResponseCreateParamsNonStreaming.tools`` is typed ``List[ToolParam]``. The nested
+    # Chat Completions shape (``{"type": "function", "function": {...}}``) is rejected with a 422
+    # before the request reaches the model server.
     definition = [
         {
             "type": "function",
-            "function": {
-                "name": raw_definition["name"],
-                "description": raw_definition["description"],
-                "parameters": {
-                    "type": "object",
-                    "properties": raw_definition["parameters"],
-                    "required": list(raw_definition["parameters"].keys()),
-                },
+            "name": raw_definition["name"],
+            "description": raw_definition["description"],
+            "parameters": {
+                "type": "object",
+                "properties": raw_definition["parameters"],
+                "required": list(raw_definition["parameters"].keys()),
             },
+            "strict": None,
         }
     ]
 

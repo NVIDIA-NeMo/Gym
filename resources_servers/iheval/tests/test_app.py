@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -24,6 +25,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import ServerClient
 from resources_servers.iheval.app import (
     IHEvalResourcesServer,
@@ -812,3 +814,45 @@ class TestCategoryAggregation:
         m = server.compute_metrics([[r] for r in rows])
         assert m["diff_conflict"] == approx(0.4 - 0.8)
         assert m["diff_aligned"] == approx(0.9 - 0.8)
+
+
+class TestExampleDataShape:
+    """The shipped dataset must satisfy the request schema the model server validates against."""
+
+    @staticmethod
+    def _rows() -> list:
+        data = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
+        return [json.loads(line) for line in data.read_text().splitlines() if line.strip()]
+
+    def test_rows_validate_as_response_create_params(self) -> None:
+        for row in self._rows():
+            NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")
+
+    def test_tools_use_responses_flat_shape(self) -> None:
+        tool_rows = [r for r in self._rows() if "tools" in r["responses_create_params"]]
+        assert tool_rows, "example.jsonl must keep at least one tool-use row"
+        for row in tool_rows:
+            for tool in row["responses_create_params"]["tools"]:
+                # Responses API `FunctionToolParam`, not the nested Chat Completions shape.
+                assert tool["type"] == "function"
+                assert "function" not in tool
+                assert {"name", "description", "parameters", "strict"} <= set(tool)
+
+    def test_tool_turns_convert_to_chat_completions(self) -> None:
+        converter = ResponsesConverter(return_token_id_information=False)
+        for row in self._rows():
+            params = converter.responses_to_chat_completion_create_params(
+                NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")
+            )
+            for message in params.messages:
+                if message["role"] == "tool":
+                    assert message["tool_call_id"]
+
+    def test_no_assistant_turn_carries_an_empty_tool_calls_array(self) -> None:
+        converter = ResponsesConverter(return_token_id_information=False)
+        for row in self._rows():
+            params = converter.responses_to_chat_completion_create_params(
+                NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")
+            )
+            for message in params.messages:
+                assert message.get("tool_calls") != [], f"empty tool_calls in row {row['id']}"
