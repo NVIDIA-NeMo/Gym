@@ -14,6 +14,7 @@ resolution-markers = [
 constraints = [{ name = "grpcio", specifier = ">=1.81.0rc1" }]
 overrides = [
     { name = "opencv-python-headless", marker = "sys_platform == 'never'" },
+    { name = "pycountry", marker = "sys_platform == 'never'" },
     { name = "spacy", specifier = ">=3.8.13" },
     { name = "torchaudio", marker = "sys_platform == 'never'" },
     { name = "torchvision", marker = "sys_platform == 'never'" },
@@ -2557,7 +2558,6 @@ dependencies = [
     { name = "fastapi" },
     { name = "fonttools" },
     { name = "gitpython" },
-    { name = "gprof2dot" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
     { name = "mcp" },
@@ -2590,6 +2590,7 @@ all = [
     { name = "coverage" },
     { name = "daytona" },
     { name = "defusedxml" },
+    { name = "gprof2dot" },
     { name = "httpx-aiohttp" },
     { name = "mypy" },
     { name = "opensandbox" },
@@ -2606,6 +2607,7 @@ all = [
 dev = [
     { name = "coverage" },
     { name = "defusedxml" },
+    { name = "gprof2dot" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -2649,7 +2651,7 @@ requires-dist = [
     { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.12" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", specifier = ">=3.1.57" },
-    { name = "gprof2dot" },
+    { name = "gprof2dot", marker = "extra == 'dev'" },
     { name = "httpx-aiohttp", marker = "extra == 'sandbox'", specifier = ">=0.2.0" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
@@ -4132,7 +4134,7 @@ wheels = [
 
 [package.optional-dependencies]
 pycountry = [
-    { name = "pycountry" },
+    { name = "pycountry", marker = "sys_platform == 'never'" },
 ]
 
 [[package]]
