@@ -180,7 +180,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+        # A venv that lacks the marker was not fully built; remove it.
         env_setup_cmd = (
+            f"{{ [ -e {venv_marker_fpath} ] || rm -rf {venv_path}; }} && "
             f"rm -f {venv_marker_fpath} && "
             f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd} && "
             f"touch {venv_marker_fpath}"
