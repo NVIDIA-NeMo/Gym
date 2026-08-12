@@ -8,14 +8,11 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from benchmarks.biomysterybench.compare_official import (
-    OFFICIAL_REPEATS,
-    ComparisonError,
-    validate_official_expected_dataset,
-)
+from benchmarks.biomysterybench.prepare import BENCHMARK_DIR, RELEASES
 
 
 REVERIFIED_RESULT_FIELDS = (
@@ -29,14 +26,29 @@ REVERIFIED_RESULT_FIELDS = (
     "cheat_evidence",
 )
 LEGACY_AGENT_FAILURE_NORMALIZATION = "legacy_anyterminal_missing_agent_failed"
-from benchmarks.biomysterybench.prepare import BENCHMARK_DIR, RELEASES
-
-
+OFFICIAL_REPEATS = 5
 DEFAULT_EXPECTED = BENCHMARK_DIR / "data" / RELEASES["official-99"].output_filename
 BIOMYSTERY_AGENT_REF = {
     "type": "responses_api_agents",
     "name": "biomysterybench_anyterminal_claude_code",
 }
+
+
+class ComparisonError(ValueError):
+    """Raised when shard input is invalid."""
+
+
+def validate_official_expected_dataset(rows: list[dict[str, Any]]) -> None:
+    release = RELEASES["official-99"]
+    ids = [row.get("id") for row in rows]
+    split_counts = Counter(row.get("human_solvable") for row in rows)
+    revisions = {row.get("dataset_revision") for row in rows}
+    if len(rows) != release.expected_task_count or len(set(ids)) != len(ids):
+        raise ComparisonError("expected dataset does not contain 99 unique tasks")
+    if dict(split_counts) != release.expected_split_counts:
+        raise ComparisonError(f"unexpected task split: {dict(split_counts)}")
+    if revisions != {release.revision}:
+        raise ComparisonError(f"unexpected dataset revision: {revisions}")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

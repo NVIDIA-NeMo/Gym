@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from benchmarks.biomysterybench import prepare_official, prepare_smoke
+from benchmarks.biomysterybench import prepare_official, prepare_test
 from nemo_gym.benchmarks import BenchmarkConfig
 
 
@@ -14,7 +14,7 @@ from nemo_gym.benchmarks import BenchmarkConfig
     ("directory", "dataset_name", "repeats", "prepare_script"),
     [
         ("biomysterybench", "biomysterybench", 5, "prepare_official.py"),
-        ("biomysterybench_smoke", "biomysterybench_smoke", 1, "prepare_smoke.py"),
+        ("biomysterybench_test", "biomysterybench_test", 1, "prepare_test.py"),
         ("biomysterybench_v11", "biomysterybench_v11", 5, "prepare.py"),
     ],
 )
@@ -40,10 +40,10 @@ def test_official_entrypoint_pins_published_release() -> None:
     inner.assert_called_once_with(release_name="official-99")
 
 
-def test_smoke_entrypoint_pins_one_official_task() -> None:
-    prepared = prepare_smoke.DATA_DIR / "biomysterybench_official_smoke.jsonl"
-    with patch.object(prepare_smoke, "_prepare", return_value=prepared) as inner:
-        assert prepare_smoke.prepare() == prepared
+def test_test_entrypoint_pins_one_official_task() -> None:
+    prepared = prepare_test.DATA_DIR / "biomysterybench_official_test.jsonl"
+    with patch.object(prepare_test, "_prepare", return_value=prepared) as inner:
+        assert prepare_test.prepare() == prepared
     inner.assert_called_once_with(
         release_name="official-99",
         task_ids=["hb013"],

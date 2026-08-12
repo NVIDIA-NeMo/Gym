@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.biomysterybench.compare_official import ComparisonError
 from benchmarks.biomysterybench.shard_official import (
     DEFAULT_EXPECTED,
     LEGACY_AGENT_FAILURE_NORMALIZATION,
+    ComparisonError,
     _normalize_legacy_policy_evidence,
     merge_shards,
     prepare_shards,

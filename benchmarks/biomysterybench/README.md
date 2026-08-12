@@ -2,8 +2,7 @@
 
 Native NeMo Gym integration for Anthropic's gated
 [BioMysteryBench-full](https://huggingface.co/datasets/Anthropic/BioMysteryBench-full).
-It uses `anyterminal_agent` directly with a native Gym sandbox and resources-server verifier;
-there is no Harbor runtime or task dependency.
+It uses `anyterminal_agent` with a native Gym sandbox and resources-server verifier.
 
 Each policy-agent sandbox receives one extracted task directory read-only at `/data` and a
 writable `/workspace`. The answer rubric remains on the Gym host. After the sandbox exits, the
@@ -61,20 +60,20 @@ The judge reuses the policy model on the same gateway. Its chat-completions requ
 
 ## Prepare
 
-Prepare one small task for an initial smoke run of the official release:
+Prepare one task for an initial test run of the official release:
 
 ```bash
-.venv/bin/gym eval prepare --benchmark biomysterybench_smoke
+uv run gym eval prepare --benchmark biomysterybench_test
 ```
 
 Prepare all 99 tasks used in the official result:
 
 ```bash
-.venv/bin/gym eval prepare --benchmark biomysterybench
+uv run gym eval prepare --benchmark biomysterybench
 ```
 
 Prepare corrected v11 instead with
-`.venv/bin/gym eval prepare --benchmark biomysterybench_v11`.
+`uv run gym eval prepare --benchmark biomysterybench_v11`.
 
 Preparation downloads only selected archives, safely extracts them under the gitignored
 `benchmarks/biomysterybench/data/cache/`, and writes an absolute-path benchmark JSONL. Re-running
@@ -82,24 +81,24 @@ preparation reuses archives from the Hugging Face cache and hash-validated extra
 
 ## Run
 
-Run the one-task, one-repeat smoke benchmark first:
+Run the one-task, one-repeat test benchmark first:
 
 ```bash
-.venv/bin/gym eval run \
-  --benchmark biomysterybench_smoke \
+uv run gym eval run \
+  --benchmark biomysterybench_test \
   --model-type vllm_model \
   --model azure/anthropic/claude-opus-4-6 \
   --model-url https://inference-api.nvidia.com/v1 \
   --model-api-key "$NVIDIA_API_KEY" \
   --split benchmark \
-  --output results/biomysterybench/opus_4_6_smoke.jsonl \
+  --output results/biomysterybench/opus_4_6_test.jsonl \
   --concurrency 1
 ```
 
 Run the complete published-release benchmark:
 
 ```bash
-.venv/bin/gym eval run \
+uv run gym eval run \
   --benchmark biomysterybench \
   --model-type vllm_model \
   --model azure/anthropic/claude-opus-4-6 \
@@ -112,20 +111,6 @@ Run the complete published-release benchmark:
 
 The rollout collector supports resumable execution. Add `--resume` when restarting the same output
 path after an interruption.
-
-After all 495 rollouts finish, validate exact coverage and generate the official subset comparison:
-
-```bash
-.venv/bin/python -m benchmarks.biomysterybench.compare_official \
-  results/biomysterybench/opus_4_6_official_99.jsonl \
-  --json-output results/biomysterybench/opus_4_6_official_99_comparison.json \
-  --markdown-output results/biomysterybench/opus_4_6_official_99_comparison.md
-```
-
-The comparison refuses empty, partial, duplicate, masked, timed-out, wrong-revision, non-binary,
-or invalid-judge runs. It reports the exact article-compatible accuracy for the 76 human-solvable
-and 23 human-difficult problems, deltas from Anthropic's 77.4% and 23.5% Opus 4.6 results, and the
-0-through-5 per-problem solve-consistency histograms.
 
 The benchmark config requests five repeats per problem, matching Anthropic's reported evaluation
 protocol. Headline metrics are average accuracy over repeats, plus human-solvable/human-hard subset
