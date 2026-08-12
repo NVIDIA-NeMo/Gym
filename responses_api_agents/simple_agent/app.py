@@ -96,7 +96,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         self._num_response_requests_running += 1
         if self._num_response_requests_total % 100 == 0:
             print(
-                f"Hit in {self.config.name}: Total requests: {self._num_response_requests_total} Running requests: {self._num_response_requests_running}"
+                f"Hit in {self.config.name} /responses: Total requests: {self._num_response_requests_total} Running requests: {self._num_response_requests_running}"
             )
 
         invocation_id = "root"
@@ -292,7 +292,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         self._num_requests_running += 1
         if self._num_requests_total % 100 == 0:
             print(
-                f"Hit in {self.config.name}: Total requests: {self._num_requests_total} Running requests: {self._num_requests_running}"
+                f"Hit in {self.config.name} /run: Total requests: {self._num_requests_total} Running requests: {self._num_requests_running}"
             )
 
         cookies = request.cookies
