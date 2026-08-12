@@ -1,0 +1,17 @@
+# Finance Agent v2 (FABv2) Resource Server Dependencies
+#
+# tools-only reuse of Vals's official finance-agent-v2 codebase. We import the
+# upstream Tool classes directly (no reimplementation). Both upstream pins are
+# exact so the benchmark is reproducible (bump deliberately).
+-e nemo-gym[dev] @ ../../
+
+# Vals model-library (provides model_library.agent.Tool / ToolOutput / base.LLM).
+# finance-agent pins `model-library==0.1.25`. Its metadata declares
+# openai[aiohttp]>=2.28.0, which cannot resolve against the vLLM-compatible openai
+# nemo-gym pins; `overrides.txt` drops that floor. The code runs on the older
+# client — only the declared floor conflicts.
+model-library==0.1.25
+
+# Vals finance-agent-v2 (provides finance_agent.tools.* and finance_agent.prompt).
+# No upstream tags exist; pinned to the HEAD commit at integration time.
+finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@bb460b524472ae0955abdf243bbbac06958dc8c9
