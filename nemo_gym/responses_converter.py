@@ -227,6 +227,10 @@ class ResponsesConverter(BaseModel):
         if max_output_tokens is not None:
             responses_create_params["max_tokens"] = max_output_tokens
 
+        reasoning = responses_create_params.pop("reasoning", None)
+        if reasoning is not None and reasoning.get("effort") is not None:
+            responses_create_params["reasoning_effort"] = reasoning["effort"]
+
         tools = responses_create_params.pop("tools", None)
         if tools:
             responses_create_params["tools"] = []
@@ -394,7 +398,9 @@ class ResponsesConverter(BaseModel):
             metadata=chat_completion_create_params.metadata,
             model=chat_completion_create_params.model,
             parallel_tool_calls=chat_completion_create_params.parallel_tool_calls,
-            reasoning=Reasoning(reasoning_effort=chat_completion_create_params.reasoning_effort),
+            reasoning=Reasoning(effort=chat_completion_create_params.reasoning_effort)
+            if chat_completion_create_params.reasoning_effort is not None
+            else None,
             service_tier=chat_completion_create_params.service_tier,
             store=chat_completion_create_params.store,
             temperature=chat_completion_create_params.temperature,

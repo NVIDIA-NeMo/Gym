@@ -21,6 +21,7 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChoice,
@@ -410,6 +411,22 @@ def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: Re
 
 def test_chat_completion_to_responses_tools_accepts_none(converter: ResponsesConverter):
     assert converter._chat_completion_to_responses_tools(None) == []
+
+
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high"])
+def test_reasoning_effort_round_trips_between_request_schemas(converter: ResponsesConverter, effort: str):
+    responses_params = converter.chat_completion_to_responses_create_params(
+        NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort=effort,
+            tools=[],
+        )
+    )
+
+    assert responses_params.reasoning == {"effort": effort}
+
+    chat_params = converter.responses_to_chat_completion_create_params(responses_params)
+    assert chat_params.reasoning_effort == effort
 
 
 def test_responses_to_chat_completion_token_id_information_path():

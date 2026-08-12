@@ -44,15 +44,33 @@ gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_jobs_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
+# +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
+# ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
+# ++upload_rollouts_to_wandb=false: Rollouts file is massive. We leave on the cluster.
+# global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
+# port_range_low, port_range_high: Move into ephemeral ports
+# ++uvicorn_timeout_worker_healthcheck=600: Tau2 and Tau3 servers may take a long time to spin up since we import the Tau repo which has hefty dependencies.
 gym eval run \
     $@ \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
     +nemo_gym_log_dir=results/\$experiment_name/logs \
+    +skip_venv_if_present=true \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
+    ++overwrite_metrics_conflicts=true \
+    ++split=benchmark \
+    ++use_absolute_ip=true \
+    ++reuse_existing_data_preparation=true \
     ++policy_base_url=http://\$(getent hosts "\$PREFILL_HEAD" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
-    ++policy_model_name=$MODEL
+    ++policy_api_key=dummy_api_key \
+    ++policy_model_name=$MODEL \
+    ++upload_rollouts_to_wandb=false \
+    ++global_aiohttp_connector_limit_per_host=16384 \
+    ++port_range_low=63000 \
+    ++port_range_high=64000 \
+    ++uvicorn_timeout_worker_healthcheck=600
+
 
 if (( $EXPORT_TO_CSV )); then
     python benchmarks/nemotron_3.5_super/export_to_csv.py \
@@ -126,9 +144,7 @@ if (( SLURM_PROCID == 0 )); then
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
-        --prometheus-host 0.0.0.0 \
-        --prometheus-port 9000 \
-        --log-level info
+        --log-level error
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
