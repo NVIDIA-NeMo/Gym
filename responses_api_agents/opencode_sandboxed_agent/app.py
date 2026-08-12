@@ -55,6 +55,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
     opencode_version: str
+    remote_opencode_install_script_path: Optional[str] = None
+    remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
 
     # Sandbox config
@@ -76,9 +78,13 @@ class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
 
 
 class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
+    # Allow for benchmark params to propagate properly
+    model_config = ConfigDict(extra="allow")
+
     opencode_results_fpath: str
     opencode_run_stdout: str
     opencode_run_stderr: str
+    opencode_finished: bool
     opencode_export_found: bool
 
 
@@ -260,13 +266,27 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         opencode_thinking_str = "--thinking"
 
+        if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
+            install_str = f"""bash {self.config.remote_opencode_install_script_path} --binary {self.config.remote_opencode_binary_path}"""
+        else:
+            print(
+                "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
+                file=sys.stderr,
+            )
+            install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
+        && echo "Downloaded OpenCode installer to $installer" \
+        && VERSION={self.config.opencode_version} bash "$installer\""""
+
         # --auto is to approve not explicitly denied requests.
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
-        && curl -fsSL https://opencode.ai/install | VERSION={self.config.opencode_version} bash \
+        && echo "Optionally activated Conda env" \
+        && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)}
+        && echo "Installed OpenCode" \
+        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
+        && echo "OpenCode run finished"
         """
 
         opencode_config_content = json.dumps(self._create_opencode_config())
@@ -305,7 +325,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         try:
             pwd_result = await sandbox.exec(command="pwd")
-            results_remote_fpath = Path(pwd_result.stdout) / export_fname
+            results_remote_fpath = Path(pwd_result.stdout.strip()) / export_fname
         except:
             print("Failed to get current working directory", format_exc(), file=sys.stderr)
             results_remote_fpath = None
@@ -339,6 +359,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stdout": (result.stdout if result else "") or "",
             "opencode_run_stderr": (result.stderr if result else "") or "",
             "opencode_export_found": opencode_export_found,
+            "opencode_finished": ("OpenCode run finished" in result.stdout if result else False),
         }
 
         return NeMoGymResponse(

@@ -42,15 +42,20 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
+experiment_name=$EXPERIMENT_NAME/slurm_jobs_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
+# ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
+# ++upload_rollouts_to_wandb=false: Rollouts file is massive. We leave on the cluster.
+# global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
+# port_range_low, port_range_high: Move into ephemeral ports
+# ++uvicorn_timeout_worker_healthcheck=600: Tau2 and Tau3 servers may take a long time to spin up since we import the Tau repo which has hefty dependencies.
 gym eval run \
     $@ \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
-    +nemo_gym_log_dir=results/\$experiment_name-logs \
+    +nemo_gym_log_dir=results/\$experiment_name/logs \
     +skip_venv_if_present=true \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
     ++overwrite_metrics_conflicts=true \
@@ -63,7 +68,8 @@ gym eval run \
     ++upload_rollouts_to_wandb=false \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
-    ++port_range_high=64000
+    ++port_range_high=64000 \
+    ++uvicorn_timeout_worker_healthcheck=600
 
 
 if (( $EXPORT_TO_CSV )); then
@@ -126,15 +132,9 @@ if (( SLURM_PROCID == 0 )); then
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-    until curl -fs "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" >/dev/null; do
-        sleep 5
-    done
-    until curl -fs "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" >/dev/null; do
-        sleep 5
-    done
-
     # --intra-node-data-parallel-size must match the data-parallel-size-local above.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
+    # Don't manually wait as vllm-router will wait for the URLs to come up
     vllm-router \
         --policy consistent_hash \
         --vllm-pd-disaggregation \
@@ -220,12 +220,7 @@ cleanup_server() {
 trap cleanup_server EXIT INT TERM
 
 if (( $should_run_eval )); then
-    until curl -fs "http://\$PREFILL_HEAD:$ROUTER_SERVER_PORT/health" >/dev/null; do
-        if ! kill -0 "\$server_step" 2>/dev/null; then
-            wait "\$server_step"
-        fi
-        sleep 5
-    done
+    # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
 
     eval_status=0
     PREFILL_HEAD="\$PREFILL_HEAD" \

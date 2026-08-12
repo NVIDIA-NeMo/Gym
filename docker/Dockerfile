@@ -35,7 +35,6 @@ apt-get install -y --no-install-recommends \
     jq \
     curl \
     git \
-    rsync \
     wget \
     less \
     vim

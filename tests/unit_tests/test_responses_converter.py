@@ -21,6 +21,7 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChoice,
@@ -141,6 +142,23 @@ def test_flush_assistant_emits_training_message_when_token_info_present():
     state.flush_assistant()
     assert state.messages[0]["prompt_token_ids"] == [1, 2]
     assert state.messages[0]["generation_token_ids"] == [3]
+    assert state.token_information is None
+
+
+def test_flush_assistant_clears_token_info_when_no_assistant_is_buffered():
+    state = ResponsesConverterState(
+        return_token_id_information=True,
+        token_information={
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+        },
+    )
+
+    state.flush_assistant()
+
+    assert state.messages == []
+    assert state.token_information is None
 
 
 # ===========================================================================
@@ -281,6 +299,55 @@ def test_responses_to_chat_completion_function_call_and_output(converter: Respon
     assert tool_msg["content"] == "sunny"
 
 
+def test_responses_to_chat_completion_preserves_structured_function_output_text(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [
+                        {"type": "input_text", "text": "first"},
+                        {"type": "input_text", "text": "second"},
+                    ],
+                }
+            ]
+        )
+    )
+
+    assert params.messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("output", "unsupported_type"),
+    [
+        ([{"type": "input_image", "file_id": "file_123"}], "input_image"),
+        ([{"type": "input_file", "file_id": "file_123"}], "input_file"),
+    ],
+)
+def test_responses_to_chat_completion_rejects_unrepresentable_function_output(
+    converter: ResponsesConverter, output: list[dict], unsupported_type: str
+):
+    responses_params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"type": "function_call_output", "call_id": "call_1", "output": output}]
+    )
+
+    with pytest.raises(
+        NotImplementedError,
+        match=rf"Chat tool messages cannot represent content part type\(s\) '{unsupported_type}'",
+    ):
+        converter.responses_to_chat_completion_create_params(responses_params)
+
+
 def test_responses_to_chat_completion_reasoning_prepended(converter: ResponsesConverter):
     reasoning = NeMoGymResponseReasoningItem(
         id="rs_1",
@@ -391,6 +458,26 @@ def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: Re
     assert len(params.tools) == 1
 
 
+def test_chat_completion_to_responses_tools_accepts_none(converter: ResponsesConverter):
+    assert converter._chat_completion_to_responses_tools(None) == []
+
+
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high"])
+def test_reasoning_effort_round_trips_between_request_schemas(converter: ResponsesConverter, effort: str):
+    responses_params = converter.chat_completion_to_responses_create_params(
+        NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort=effort,
+            tools=[],
+        )
+    )
+
+    assert responses_params.reasoning == {"effort": effort}
+
+    chat_params = converter.responses_to_chat_completion_create_params(responses_params)
+    assert chat_params.reasoning_effort == effort
+
+
 def test_responses_to_chat_completion_token_id_information_path():
     converter = ResponsesConverter(return_token_id_information=True)
     params = converter.responses_to_chat_completion_create_params(
@@ -410,6 +497,108 @@ def test_responses_to_chat_completion_token_id_information_path():
     msg = params.messages[0]
     assert msg["prompt_token_ids"] == [1, 2, 3]
     assert msg["generation_token_ids"] == [4, 5]
+
+
+def test_responses_to_chat_completion_preserves_empty_prompt_token_ids():
+    converter = ResponsesConverter(return_token_id_information=True)
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "assistant",
+                    "type": "message",
+                    "content": "trained answer",
+                    "prompt_token_ids": [],
+                    "generation_token_ids": [4],
+                    "generation_log_probs": [-0.1],
+                }
+            ]
+        )
+    )
+
+    assert params.messages[0]["prompt_token_ids"] == []
+    assert params.messages[0]["generation_token_ids"] == [4]
+
+
+def test_responses_to_chat_completion_does_not_leak_token_info_between_turns():
+    converter = ResponsesConverter(return_token_id_information=True)
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "assistant",
+                    "type": "message",
+                    "content": "trained answer",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                },
+                {"role": "user", "type": "message", "content": "next"},
+                {"role": "assistant", "type": "message", "content": "plain answer"},
+            ]
+        )
+    )
+
+    first_assistant, _, second_assistant = params.messages
+    assert first_assistant["prompt_token_ids"] == [1]
+    assert "prompt_token_ids" not in second_assistant
+    assert "generation_token_ids" not in second_assistant
+    assert "generation_log_probs" not in second_assistant
+
+
+def test_responses_to_chat_completion_preserves_empty_training_assistant():
+    converter = ResponsesConverter(return_token_id_information=True)
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "assistant",
+                    "type": "message",
+                    "content": "",
+                    "prompt_token_ids": [],
+                    "generation_token_ids": [],
+                    "generation_log_probs": [],
+                }
+            ]
+        )
+    )
+
+    assert params.messages == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [],
+            "prompt_token_ids": [],
+            "generation_token_ids": [],
+            "generation_log_probs": [],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "token_metadata",
+    [
+        {"prompt_token_ids": [1]},
+        {
+            "prompt_token_ids": [1],
+            "generation_token_ids": "not-a-list",
+            "generation_log_probs": [-0.1],
+        },
+    ],
+    ids=["partial", "malformed"],
+)
+def test_response_input_rejects_invalid_token_metadata_atomically(token_metadata: dict):
+    with pytest.raises(ValueError, match="token|Token"):
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "assistant",
+                    "type": "message",
+                    "content": "answer",
+                    **token_metadata,
+                }
+            ]
+        )
 
 
 # ===========================================================================
@@ -484,6 +673,18 @@ def test_postprocess_token_id_information_wraps_last_item():
     assert output[-1].prompt_token_ids == [1, 2]
 
 
+def test_postprocess_rejects_partial_token_metadata():
+    converter = ResponsesConverter(return_token_id_information=True)
+    with pytest.raises(ValueError, match="missing"):
+        converter.postprocess_assistant_message_dict(
+            {
+                "role": "assistant",
+                "content": "answer",
+                "prompt_token_ids": [1, 2],
+            }
+        )
+
+
 # ===========================================================================
 # chat_completions_messages_to_responses_items
 # ===========================================================================
@@ -501,6 +702,26 @@ def test_chat_messages_to_responses_items_all_roles(converter: ResponsesConverte
     # system, user (None -> ""), assistant message, tool output
     assert items[1].content == ""
     assert any(isinstance(item, NeMoGymFunctionCallOutput) for item in items)
+
+
+def test_chat_structured_tool_text_to_responses_preserves_parts(converter: ResponsesConverter):
+    items = converter.chat_completions_messages_to_responses_items(
+        [
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"},
+                ],
+            }
+        ]
+    )
+
+    assert items[0].model_dump()["output"] == [
+        {"type": "input_text", "text": "first"},
+        {"type": "input_text", "text": "second"},
+    ]
 
 
 def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: ResponsesConverter):

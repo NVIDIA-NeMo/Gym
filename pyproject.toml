@@ -226,11 +226,7 @@ dependencies = [
     # License: BSD 2-Clause https://pyasn1.readthedocs.io/en/latest/license.html
     "pyasn1>=0.6.4",
 
-    # gprof2dot and pydot: Used for outputting dot graphs for profiling.
-    # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
-    # gprof2dot License: GNU Lesser General Public License v3.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     # pydot License: MIT https://github.com/pydot/pydot/blob/a2bee1e770698867332516fb2878fac262b4ffc5/LICENSES/MIT.txt
-    "gprof2dot",
     "pydot",
 ]
 
@@ -261,6 +257,14 @@ sandbox = [
     # License: Apache 2.0
     "opensandbox>=0.1.15",
 
+    # httpx-aiohttp: aiohttp-backed httpx transport used by the OpenSandbox
+    # provider's `connection.transport_backend: aiohttp`; without it the
+    # provider silently falls back to the httpx transport with only a warning.
+    # Pulls in aiohttp (aiohttp<4,>=3.10).
+    # Updated: Tue Aug 11, 2026 with httpx-aiohttp>=0.2.0
+    # License: BSD 3-Clause https://github.com/karpetrosyan/httpx-aiohttp/blob/master/LICENSE
+    "httpx-aiohttp>=0.2.0",
+
     # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
     # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
     # lifecycle calls. Upper bound <0.1: the SDK is alpha 0.0.x and the provider also relies on
@@ -283,6 +287,11 @@ sandbox = [
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
+    # gprof2dot: Used for outputting dot graphs for profiling.
+    # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14
+    # License: LGPLv3+ https://github.com/jrfonseca/gprof2dot/blob/master/COPYING.LESSER
+    "gprof2dot",
+
     # Pre-commit: Used for pre-commit hooks.
     # Updated: Thu Sep 04, 2025 with pre-commit==4.3.0
     # License: MIT https://github.com/pre-commit/pre-commit/blob/e70b313c8017b2b6d7844e91795c9d41b9ceb9fb/LICENSE
@@ -364,6 +373,7 @@ override-dependencies = [
     "opencv-python-headless; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Servers that need a

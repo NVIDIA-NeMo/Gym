@@ -31,6 +31,11 @@ from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionMessageCustomToolCall,
+    NeMoGymChoice,
+    NeMoGymFunctionCallOutput,
     NeMoGymImageGenerationCall,
     NeMoGymLocalShellCall,
     NeMoGymResponse,
@@ -83,6 +88,159 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_unknown_field_still_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponseCreateParamsNonStreaming(input="hello", not_a_real_field=1)
+
+
+class TestTokenMetadataValidation:
+    @pytest.mark.parametrize(
+        "token_metadata",
+        [
+            {"generation_token_ids": [2], "generation_log_probs": [-0.1]},
+            {
+                "prompt_token_ids": [1],
+                "generation_token_ids": {"invalid": "shape"},
+                "generation_log_probs": [-0.1],
+            },
+        ],
+        ids=["partial", "malformed"],
+    )
+    def test_chat_request_rejects_invalid_metadata_instead_of_falling_back(self, token_metadata: dict) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[
+                    {
+                        "role": "assistant",
+                        "content": "answer",
+                        **token_metadata,
+                    }
+                ]
+            )
+
+    def test_chat_response_rejects_partial_metadata_instead_of_falling_back(self) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymChoice(
+                index=0,
+                finish_reason="stop",
+                message={
+                    "role": "assistant",
+                    "content": "answer",
+                    "prompt_token_ids": [1],
+                },
+            )
+
+
+class TestNeMoGymChatCompletionSchemas:
+    def test_user_audio_and_file_content_parts_round_trip(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": "UklGRg==", "format": "wav"},
+                        },
+                        {
+                            "type": "file",
+                            "file": {"file_id": "file-123"},
+                        },
+                    ],
+                }
+            ],
+            "model": "gpt-test",
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        round_tripped = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate_json(params.model_dump_json())
+
+        assert round_tripped == params
+        assert [part["type"] for part in params.messages[0]["content"]] == ["input_audio", "file"]
+
+    def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "custom",
+                            "custom": {"name": "shell", "input": "echo hello"},
+                        }
+                    ],
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                }
+            ],
+            "model": "gpt-test",
+            "tools": [
+                {
+                    "type": "custom",
+                    "custom": {
+                        "name": "shell",
+                        "description": "Run a shell command",
+                        "format": {"type": "text"},
+                    },
+                }
+            ],
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        round_tripped = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate_json(params.model_dump_json())
+
+        assert round_tripped == params
+        assert params.tools[0]["type"] == "custom"
+        assert params.messages[0]["tool_calls"][0]["type"] == "custom"
+        assert params.messages[0]["generation_token_ids"] == [2]
+
+    def test_custom_response_tool_call_round_trip(self) -> None:
+        payload = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-test",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "custom",
+                                "custom": {"name": "shell", "input": "echo hello"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+        round_tripped = NeMoGymChatCompletion.model_validate_json(completion.model_dump_json())
+
+        assert round_tripped == completion
+        assert isinstance(completion.choices[0].message.tool_calls[0], NeMoGymChatCompletionMessageCustomToolCall)
+
+
+class TestNeMoGymFunctionCallOutput:
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "plain text",
+            [{"type": "input_text", "text": "structured text"}],
+            [{"type": "input_image", "image_url": "https://example.com/image.png", "detail": "high"}],
+            [{"type": "input_file", "file_id": "file_123", "filename": "result.txt"}],
+        ],
+        ids=["string", "text", "image", "file"],
+    )
+    def test_accepts_and_preserves_openai_2_7_2_payloads(self, output) -> None:
+        item = NeMoGymFunctionCallOutput(call_id="call_1", output=output)
+
+        assert item.model_dump()["output"] == output
 
 
 class TestNeMoGymResponseHostedMcpItems:
