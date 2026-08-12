@@ -285,6 +285,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Downloaded OpenCode installer to $installer" \
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
+        opencode_config_content = json.dumps(self._create_opencode_config())
+
         # --auto is to approve not explicitly denied requests.
         command = f"""
         echo "Shell: $SHELL" \
@@ -292,11 +294,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
+        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} \
+            opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
         && echo "OpenCode run finished"
         """
-
-        opencode_config_content = json.dumps(self._create_opencode_config())
 
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
@@ -307,7 +308,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 command=command,
                 session=pty_session,
                 timeout_s=self.config.sandbox_timeout,
-                env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
             )
         except:
             result = None
