@@ -27,7 +27,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, List, Literal, Mapping, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -236,7 +236,15 @@ async def request(
 ) -> ClientResponse:  # pragma: no cover
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
-        kwargs["data"] = orjson.dumps(kwargs.pop("json"))
+        json_obj = kwargs.pop("json")
+        if isinstance(json_obj, BaseModel):
+            data = json_obj.model_dump_json(exclude_unset=True)
+        elif isinstance(json_obj, Mapping):
+            data = orjson.dumps(json_obj)
+        else:
+            raise NotImplementedError
+
+        kwargs["data"] = data
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
@@ -359,10 +367,6 @@ class ServerClient(BaseModel):
         base_url = self._build_server_base_url(server_config_dict)
 
         json_obj = kwargs.get("json")
-        if "json" in kwargs:
-            if isinstance(json_obj, BaseModel):
-                json_obj = json_obj.model_dump(exclude_unset=True)
-                kwargs["json"] = json_obj
 
         observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
         server_entry = self.global_config_dict.get(server_name)
