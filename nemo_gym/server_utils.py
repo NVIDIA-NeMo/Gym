@@ -159,7 +159,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         print("Hit is_rollout_collection=True")
 
     class ClientRequestWithPrinting(ClientRequest):
-        def send(self, conn) -> "ClientResponse":
+        async def send(self, conn) -> "ClientResponse":
             if is_rollout_collection:
                 num_requests[0] += 1
                 if num_requests[0] % 100 == 0:
