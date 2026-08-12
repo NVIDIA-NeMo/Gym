@@ -328,14 +328,22 @@ class TestFinanceAgentV2Config:
 
 
 class TestAbortingErrorType:
-    def test_matches_abort_error(self) -> None:
+    def test_matches_abort_error_in_the_servers_envelope(self) -> None:
+        """The resource server double-encodes: the error object is a JSON string
+        inside ``results``, which is the only shape a tool failure arrives in."""
+        agent, _ = _make_agent_and_client()
+        payload = json.dumps({"results": json.dumps({"error": "RetryExhaustedError: gave up after 5 attempts"})})
+        assert agent._aborting_error_type(payload) == "RetryExhaustedError"
+
+    def test_matches_abort_error_without_an_envelope(self) -> None:
+        """A tool call that never reached the server is rendered locally flat."""
         agent, _ = _make_agent_and_client()
         payload = json.dumps({"error": "RetryExhaustedError: gave up after 5 attempts"})
         assert agent._aborting_error_type(payload) == "RetryExhaustedError"
 
     def test_ignores_other_errors(self) -> None:
         agent, _ = _make_agent_and_client()
-        payload = json.dumps({"error": "ConnectionError: server unavailable"})
+        payload = json.dumps({"results": json.dumps({"error": "ConnectionError: server unavailable"})})
         assert agent._aborting_error_type(payload) is None
 
     def test_ignores_successful_payload_mentioning_the_type(self) -> None:
@@ -349,9 +357,16 @@ class TestAbortingErrorType:
         agent, _ = _make_agent_and_client()
         assert agent._aborting_error_type("RetryExhaustedError: plain text") is None
 
+    def test_ignores_a_successful_reply_that_happens_to_be_json(self) -> None:
+        """A tool whose own output is a JSON object with no error field is a
+        success, however it is worded."""
+        agent, _ = _make_agent_and_client()
+        payload = json.dumps({"results": json.dumps({"summary": "RetryExhaustedError: appears in this filing"})})
+        assert agent._aborting_error_type(payload) is None
+
     def test_disabled_when_config_is_empty(self) -> None:
         agent, _ = _make_agent_and_client(_make_config(abort_on_tool_error_types=[]))
-        payload = json.dumps({"error": "RetryExhaustedError: gave up"})
+        payload = json.dumps({"results": json.dumps({"error": "RetryExhaustedError: gave up"})})
         assert agent._aborting_error_type(payload) is None
 
 
@@ -503,7 +518,7 @@ class TestResponses:
 
         tool_call = _tool_call_response("price_history", json.dumps({"ticker": "AAPL"}))
         model_mock = _dotjson_mock(tool_call, tool_call)
-        rs_mock = _dotjson_mock({"error": "RetryExhaustedError: gave up after 5 attempts"})
+        rs_mock = _dotjson_mock({"results": json.dumps({"error": "RetryExhaustedError: gave up after 5 attempts"})})
         agent.server_client.post = AsyncMock(side_effect=_route(model_mock, rs_mock))
 
         res = client.post("/v1/responses", json=_INPUT)
@@ -516,7 +531,7 @@ class TestResponses:
 
         tool_call = _tool_call_response("price_history", json.dumps({"ticker": "AAPL"}))
         model_mock = _dotjson_mock(tool_call, tool_call)
-        rs_mock = _dotjson_mock({"error": "ConnectionError: server unavailable"})
+        rs_mock = _dotjson_mock({"results": json.dumps({"error": "ConnectionError: server unavailable"})})
         agent.server_client.post = AsyncMock(side_effect=_route(model_mock, rs_mock))
 
         res = client.post("/v1/responses", json=_INPUT)

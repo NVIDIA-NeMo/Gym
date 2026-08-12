@@ -82,9 +82,14 @@ class CachedPriceHistory(PriceHistory):
         return t.upper() if endpoint == "equity" else t.lower()
 
     def _master_paths(self, endpoint: str, ticker: str) -> tuple[Path, Path]:
-        t = self._norm_ticker(endpoint, ticker)
-        base = self._cache.path(self._NAMESPACE, endpoint)
-        return base / f"{t}.jsonl", base / f"{t}.meta.json"
+        # Both parts name a path component and both come from the tool call, so
+        # both go through safe_name; a real ticker passes through unchanged.
+        t = ToolCache.safe_name(self._norm_ticker(endpoint, ticker))
+        endpoint_dir = ToolCache.safe_name(endpoint)
+        return (
+            self._cache.path(self._NAMESPACE, endpoint_dir, f"{t}.jsonl"),
+            self._cache.path(self._NAMESPACE, endpoint_dir, f"{t}.meta.json"),
+        )
 
     @staticmethod
     def _rec_date(rec: dict[str, Any]) -> str:

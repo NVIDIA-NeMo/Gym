@@ -93,6 +93,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    accumulate_response_usage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -157,6 +158,15 @@ _CONTEXT_OVERFLOW_RE = re.compile(
     r"input exceeded the context window",
     re.IGNORECASE,
 )
+
+
+def _decoded_object(raw: str) -> Optional[dict]:
+    """JSON-decode *raw*, returning None unless it decodes to an object."""
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 class StopReason(str, Enum):
@@ -279,25 +289,42 @@ class FinanceAgentV2(SimpleResponsesAPIAgent):
 
         return outputs[i:]
 
+    @staticmethod
+    def _tool_error_message(tool_output: str) -> Optional[str]:
+        """Return the ``error`` string a tool reply carries, if any.
+
+        Two shapes arrive here. A reply from the resource server is wrapped as
+        ``{"results": "<payload>"}`` where the payload is itself a JSON string,
+        so an error is double-encoded and the inner object must be decoded
+        separately. A tool call that never reached the server (timeout,
+        transport failure) is rendered locally as a flat ``{"error": ...}``.
+
+        Only an ``error`` field counts, so a successful reply whose text merely
+        mentions an exception name is not mistaken for a failure.
+        """
+        payload = _decoded_object(tool_output)
+        if payload is None:
+            return None
+
+        results = payload.get("results")
+        if isinstance(results, str):
+            inner = _decoded_object(results)
+            if inner is not None and isinstance(inner.get("error"), str):
+                return inner["error"]
+
+        error = payload.get("error")
+        return error if isinstance(error, str) else None
+
     def _aborting_error_type(self, tool_output: str) -> Optional[str]:
         """Return the abort-worthy exception type named in *tool_output*, if any.
 
-        The resource server renders an uncaught tool exception as
-        ``{"error": "<TypeName>: <message>"}``, which is how upstream's typed
-        ``on_tool_result`` hook surfaces here. Only the ``error`` field is
-        inspected so a tool that merely echoes the name in its payload cannot
-        abort the run.
+        Mirrors upstream's ``on_tool_result`` hook, which re-raises a few typed
+        errors rather than feeding them back to the model.
         """
         if not self.config.abort_on_tool_error_types:
             return None
-        try:
-            payload = json.loads(tool_output)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        error = payload.get("error")
-        if not isinstance(error, str):
+        error = self._tool_error_message(tool_output)
+        if error is None:
             return None
         return next(
             (name for name in self.config.abort_on_tool_error_types if error.startswith(f"{name}:")),
@@ -390,18 +417,7 @@ class FinanceAgentV2(SimpleResponsesAPIAgent):
             last_model_response = model_response
             new_outputs.extend(output)
 
-            if not usage:
-                usage = model_response.usage
-                model_response.usage = None
-
-            if usage and model_response.usage:
-                usage.input_tokens += model_response.usage.input_tokens
-                usage.output_tokens += model_response.usage.output_tokens
-                usage.total_tokens += model_response.usage.total_tokens
-
-                # TODO support more advanced token details
-                usage.input_tokens_details.cached_tokens = 0
-                usage.output_tokens_details.reasoning_tokens = 0
+            usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
                 stop_reason = StopReason.MAX_OUTPUT_TOKENS

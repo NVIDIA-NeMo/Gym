@@ -93,6 +93,24 @@ class TestToolCachePolicy:
         c.write_jsonl(p, _RECORDS)
         assert c.read_jsonl(p) == _RECORDS
 
+    @pytest.mark.parametrize("part", ["../../outside", "a/../../../outside", "/etc/passwd"])
+    def test_path_refuses_to_leave_the_root(self, tmp_path, part):
+        c = ToolCache(tmp_path / "cache")
+        with pytest.raises(ValueError, match="escapes the cache root"):
+            c.path("pricing", part)
+
+    @pytest.mark.parametrize("value", ["AAPL", "btcusd", "BRK-B", "VFIAX", "equity"])
+    def test_safe_name_leaves_a_real_ticker_alone(self, value):
+        """Existing cache entries keep their filenames, so a warm cache shared
+        across jobs is not orphaned."""
+        assert ToolCache.safe_name(value) == value
+
+    @pytest.mark.parametrize("value", ["../../etc/passwd", "a/b", "..", ".hidden", "-flag", "x" * 65])
+    def test_safe_name_digests_anything_that_could_steer_the_path(self, value):
+        name = ToolCache.safe_name(value)
+        assert name != value
+        assert ToolCache._SAFE_NAME_RE.match(name)
+
 
 # ============================================================================
 # price_history caching
@@ -149,6 +167,20 @@ class TestCachedPriceHistory:
 
         assert cache.path("pricing", "equity", "AAPL.jsonl").exists()  # equity uppercases
         assert cache.path("pricing", "crypto", "btcusd.jsonl").exists()  # crypto lowercases
+
+    @pytest.mark.asyncio
+    async def test_a_ticker_cannot_write_outside_the_cache_dir(self, tmp_path, monkeypatch):
+        """The ticker is model-supplied and names a file, so a traversal attempt
+        has to stay contained instead of reaching a sibling directory."""
+        monkeypatch.setattr(PriceHistory, "_fetch", _fake_fetch_factory([0]))
+        root = tmp_path / "cache"
+        cached = CachedPriceHistory("x", ToolCache(root))
+
+        out = (await cached.execute(_args(ticker="../../escaped"), {}, _LOG)).output
+
+        assert out  # the call still serves data
+        assert list(tmp_path.glob("*.jsonl")) == []  # nothing landed beside the root
+        assert list((root / "pricing" / "equity").glob("*.jsonl"))  # it landed inside
 
 
 # ============================================================================

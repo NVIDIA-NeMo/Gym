@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -49,6 +50,10 @@ class ToolCache:
     ``cache_dir`` roots the cache (relative paths resolve from the CWD); when unset
     and enabled, it defaults under ``~/.cache/nemo_gym/finance_agent_v2``.
     """
+
+    #: A single path component: no separator, and a leading alphanumeric so the
+    #: name can never be ``..`` or a dotfile.
+    _SAFE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
     def __init__(
         self,
@@ -73,6 +78,7 @@ class ToolCache:
             )
         root.mkdir(parents=True, exist_ok=True)
         self.root = root
+        self._root_resolved = root.resolve()
 
     @property
     def enabled(self) -> bool:
@@ -80,16 +86,36 @@ class ToolCache:
 
     # -- paths ----------------------------------------------------------------
     def path(self, *parts: str) -> Path:
-        """Resolve a path under the cache root. Raises if the cache is disabled."""
+        """Resolve a path under the cache root. Raises if the cache is disabled.
+
+        Rejects any result that lands outside the root. Parts are derived from
+        tool arguments, so this is the one place that guarantee can be enforced
+        for every namespace.
+        """
         if self.root is None:
             raise RuntimeError("ToolCache is disabled; no paths are available.")
-        return self.root.joinpath(*parts)
+        candidate = self.root.joinpath(*parts)
+        resolved = candidate.resolve()
+        if resolved != self._root_resolved and self._root_resolved not in resolved.parents:
+            raise ValueError(f"cache path escapes the cache root: {os.path.join(*parts)}")
+        return candidate
 
     @staticmethod
     def hash_key(payload: Any) -> str:
         """Stable sha256 of a JSON-serializable payload (sorted keys)."""
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def safe_name(cls, value: str) -> str:
+        """Return *value* if it is usable as one path component, else its digest.
+
+        A value that names a cache file can come straight from a model tool call,
+        so it must not be able to steer the path. Unusable values are replaced by
+        a digest rather than stripped of offending characters, so two different
+        inputs cannot be folded onto the same file.
+        """
+        return value if cls._SAFE_NAME_RE.match(value) else cls.hash_key(value)
 
     # -- atomic IO ------------------------------------------------------------
     @staticmethod

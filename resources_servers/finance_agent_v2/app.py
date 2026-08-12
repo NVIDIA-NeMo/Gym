@@ -949,11 +949,15 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         for output_item in reversed(body.response.output):
             if getattr(output_item, "type", None) == "function_call":
                 if getattr(output_item, "name", None) == "submit_final_result":
+                    # Arguments are model-authored, so nothing about their shape is
+                    # guaranteed. Anything that is not a string answer is treated as
+                    # no submission, which scores zero, rather than raising here.
                     try:
                         args = json.loads(getattr(output_item, "arguments", "{}"))
-                        generated_answer = args.get("final_result", "")
                     except (json.JSONDecodeError, TypeError):
-                        pass
+                        args = {}
+                    if isinstance(args, dict) and isinstance(args.get("final_result"), str):
+                        generated_answer = args["final_result"]
                     break
 
         criteria = self._parse_rubric(body.rubric)

@@ -889,6 +889,33 @@ class TestVerifyRubricJudge:
         # the same rollouts as the score means.
         assert res.rubric_total == 1
 
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            '["final_result", "x"]',  # decodes to a list, not an object
+            '"just a string"',
+            "17",
+            '{"final_result": {"answer": "$391B"}}',  # not a string
+            '{"final_result": 391}',
+            '{"final_result": null}',
+            "{not json at all",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_malformed_submission_scores_zero_instead_of_raising(self, arguments: str) -> None:
+        """Tool arguments are model-authored, so verify has to survive any shape
+        the model emits rather than failing the whole rollout."""
+        server, stub = _rubric_server({_C1: [1, 1, 1]})
+        request = _make_verify_request(
+            _make_response(_tool_call("submit_final_result", arguments)), rubric=_rubric(_C1)
+        )
+        res = await server.verify(_mock_request(), request)
+
+        assert res.reward == 0.0
+        assert res.rubric_partial_credit == 0.0
+        assert res.judge_error is None
+        assert sum(stub.calls.values()) == 0  # no judge spend on an unusable answer
+
     @pytest.mark.asyncio
     async def test_no_submission_and_no_rubric_is_still_a_give_up(self) -> None:
         """An unscorable rubric must not reclassify a give-up as a judge problem:
