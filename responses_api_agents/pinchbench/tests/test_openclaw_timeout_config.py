@@ -32,6 +32,8 @@ from responses_api_agents.pinchbench.tests.test_app import make_agent
 
 
 _SEEDED_AGENT_ID = "bench-seeded"
+_BAKED_PATCH = Path(__file__).resolve().parents[1] / "setup_scripts" / "nvidia-pinchbench.patch"
+_CEILING_WRITE = 'agents_cfg.setdefault("defaults", {})["timeoutSeconds"]'
 
 
 def _generate_openclaw_config(tmp_path: Path, **agent_kwargs) -> dict:
@@ -84,3 +86,16 @@ def test_no_timeout_is_written_when_it_is_unset(tmp_path):
     assert "timeoutSeconds" not in _seeded_agent(config)
     assert "timeoutSeconds" not in config["agents"]["defaults"]
     assert "timeoutSeconds" not in config["models"]["providers"]["custom"]
+
+
+def test_the_baked_patch_only_sets_the_ceiling_when_overridden():
+    """The patch runs at image build, so it has no in-repo runtime to exercise.
+
+    Writing the ceiling unconditionally clamps OpenClaw's gateway run timeout
+    from its 600s default down to the 120s provider default, cutting long tasks
+    short and grading the partial work as a failure.
+    """
+    added = [line[1:] for line in _BAKED_PATCH.read_text().splitlines() if line.startswith("+")]
+    ceiling_write = next(index for index, line in enumerate(added) if _CEILING_WRITE in line)
+
+    assert added[ceiling_write - 1].strip() == "if provider_timeout_override:"
