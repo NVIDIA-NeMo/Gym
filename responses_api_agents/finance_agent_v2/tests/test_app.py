@@ -265,6 +265,7 @@ class TestUpstreamParity:
         assert len(agent_pins) == 2, f"expected finance-agent and model-library pins, got {agent_pins}"
         assert agent_pins == server_pins
 
+
 # ---------------------------------------------------------------------------
 # Tests: Config and Construction
 # ---------------------------------------------------------------------------
