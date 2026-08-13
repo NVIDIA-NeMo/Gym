@@ -18,8 +18,7 @@ components:
       required_variables: null
       state_schema: {}
       streaming_callback: null
-      system_prompt: You are a helpful assistant. Use the available tools when needed. When you
-        have enough information, reply with a concise final answer and no further tool calls.
+      system_prompt: null
       tool_concurrency_limit: 4
       tool_streaming_callback_passthrough: false
       tools:

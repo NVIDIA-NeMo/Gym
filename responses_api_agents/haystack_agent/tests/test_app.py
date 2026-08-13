@@ -446,6 +446,23 @@ class TestApp:
         )
         HaystackAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
+    async def test_rejects_request_system_message_when_pipeline_has_system_prompt(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        server, client = _build_agent(tmp_path, monkeypatch, model_responses=[])
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {
+                "input": [
+                    {"type": "message", "role": "system", "content": "Environment instructions."},
+                    {"type": "message", "role": "user", "content": "Hello."},
+                ]
+            }
+        )
+
+        with pytest.raises(ValueError, match="only one system instruction source"):
+            await server.responses(request=MagicMock(headers={}, cookies={}), response=MagicMock(), body=body)
+        client.post.assert_not_awaited()
+
     async def test_responses_runs_haystack_agent_loop(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         # Model call 1: request the tool. Model call 2: final text answer.
         server, client = _build_agent(

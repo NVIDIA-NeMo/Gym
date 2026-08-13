@@ -213,6 +213,14 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        if getattr(self._agent, "system_prompt", None) and any(
+            getattr(item, "role", None) == "system" for item in body.input
+        ):
+            raise ValueError(
+                "The Responses request includes a system message, but the Haystack Agent also has a configured "
+                "system_prompt. Configure only one system instruction source."
+            )
+
         messages = responses_input_to_messages(body.input)
 
         # Forward the row's sampling params to every model call. Haystack threads generation_kwargs
