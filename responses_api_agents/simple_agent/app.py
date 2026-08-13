@@ -318,7 +318,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         #     body=body.responses_create_params,
         # )
 
-        response = self.server_client.post(
+        response = await self.server_client.post(
             server_name=self.config.name,
             url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
