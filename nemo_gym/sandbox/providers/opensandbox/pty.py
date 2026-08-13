@@ -52,7 +52,43 @@ WS_CLOSE_TAKEN_OVER = 4001
 WS_CLOSE_POLICY_VIOLATION = 1008
 # Backoff for connect-class transients (proxy route not ready, backend
 # unreachable, socket re-dial): the execd bind window is short.
-_PTY_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
+_PTY_RETRY_DELAYS = (
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+    2.0,
+)
 
 # Mirrors execd's shell pick (bash when available, else sh) for env-only specs.
 _DEFAULT_SHELL_SNIPPET = 'exec "$(command -v bash || echo sh)"'
