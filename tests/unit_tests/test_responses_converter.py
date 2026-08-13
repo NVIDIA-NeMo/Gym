@@ -14,6 +14,7 @@
 # limitations under the License.
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -254,6 +255,21 @@ def test_responses_to_chat_completion_input_image_part(converter: ResponsesConve
     assert {"type": "image_url", "image_url": {"url": "http://img", "detail": "high"}} in parts
 
 
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"type": "input_image", "file_id": "file_123", "detail": "high"},
+        {"type": "input_image", "image_url": "http://img", "detail": "original"},
+    ],
+    ids=["file_id", "original_detail"],
+)
+def test_responses_to_chat_completion_rejects_unrepresentable_input_images(converter: ResponsesConverter, part: dict):
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "type": "message", "content": [part]}])
+
+    with pytest.raises(NotImplementedError):
+        converter.responses_to_chat_completion_create_params(params)
+
+
 def test_responses_to_chat_completion_unsupported_part_raises(converter: ResponsesConverter):
     # Exercise the converter directly with an unsupported content part type. A raw
     # ResponseCreateParams would reject this at schema-validation time, so we call the
@@ -401,6 +417,202 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
     assert params.max_tokens == 128
     assert params.tools[0]["type"] == "function"
     assert params.tools[0]["function"]["name"] == "get_weather"
+    assert params.tools[0]["function"]["strict"] is True
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "parameters": {},
+            "strict": True,
+            "defer_loading": True,
+        },
+        {
+            "type": "custom",
+            "name": "shell",
+            "defer_loading": True,
+        },
+    ],
+    ids=["function", "custom"],
+)
+def test_responses_to_chat_completion_rejects_deferred_tool(converter: ResponsesConverter, tool: dict):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", tools=[tool])
+
+    with pytest.raises(NotImplementedError, match="defer_loading"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+@pytest.mark.parametrize(
+    ("chat_tool", "responses_tool"),
+    [
+        (
+            {"type": "function", "function": {"name": "get_weather"}},
+            {"type": "function", "name": "get_weather", "parameters": None, "strict": None},
+        ),
+        (
+            {"type": "custom", "custom": {"name": "shell", "description": "Run a command"}},
+            {"type": "custom", "name": "shell", "description": "Run a command"},
+        ),
+        (
+            {
+                "type": "custom",
+                "custom": {
+                    "name": "parser",
+                    "format": {
+                        "type": "grammar",
+                        "grammar": {
+                            "definition": "start: WORD",
+                            "syntax": "lark",
+                        },
+                    },
+                },
+            },
+            {
+                "type": "custom",
+                "name": "parser",
+                "format": {
+                    "type": "grammar",
+                    "definition": "start: WORD",
+                    "syntax": "lark",
+                },
+            },
+        ),
+    ],
+    ids=["minimal_function", "custom", "custom_grammar"],
+)
+def test_tool_definitions_round_trip(
+    converter: ResponsesConverter,
+    chat_tool: dict,
+    responses_tool: dict,
+):
+    responses_params = converter.chat_completion_to_responses_create_params(
+        NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[chat_tool],
+        )
+    )
+    assert responses_params.tools == [responses_tool]
+
+    chat_params = converter.responses_to_chat_completion_create_params(responses_params)
+    assert chat_params.tools[0]["type"] == chat_tool["type"]
+    tool_type = chat_tool["type"]
+    assert chat_params.tools[0][tool_type]["name"] == chat_tool[tool_type]["name"]
+    if tool_type == "function":
+        assert chat_params.tools[0]["function"].get("parameters") is None
+        assert chat_params.tools[0]["function"].get("strict") is None
+    else:
+        assert chat_params.tools == [chat_tool]
+
+
+@pytest.mark.parametrize(
+    ("chat_choice", "responses_choice"),
+    [
+        (
+            {"type": "function", "function": {"name": "get_weather"}},
+            {"type": "function", "name": "get_weather"},
+        ),
+        (
+            {"type": "custom", "custom": {"name": "shell"}},
+            {"type": "custom", "name": "shell"},
+        ),
+        (
+            {
+                "type": "allowed_tools",
+                "allowed_tools": {
+                    "mode": "required",
+                    "tools": [
+                        {"type": "function", "function": {"name": "get_weather"}},
+                        {"type": "custom", "custom": {"name": "shell"}},
+                    ],
+                },
+            },
+            {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [
+                    {"type": "function", "name": "get_weather"},
+                    {"type": "custom", "name": "shell"},
+                ],
+            },
+        ),
+    ],
+    ids=["named_function", "named_custom", "allowed_tools"],
+)
+def test_tool_choices_round_trip(
+    converter: ResponsesConverter,
+    chat_choice: dict,
+    responses_choice: dict,
+):
+    assert converter._chat_to_responses_tool_choice(chat_choice) == responses_choice
+    assert converter._responses_to_chat_tool_choice(responses_choice) == chat_choice
+
+    chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[{"role": "user", "content": "hi"}],
+        tool_choice=chat_choice,
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+
+    responses_params = converter.chat_completion_to_responses_create_params(chat_params)
+    round_tripped = converter.responses_to_chat_completion_create_params(responses_params)
+    assert json.loads(round_tripped.model_dump_json())["tool_choice"] == chat_choice
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        {"type": "apply_patch"},
+        {"type": "shell"},
+        {"type": "mcp", "server_label": "server"},
+        {"type": "file_search"},
+    ],
+    ids=["apply_patch", "shell", "mcp", "hosted"],
+)
+def test_responses_to_chat_completion_rejects_responses_only_tool_choices(
+    converter: ResponsesConverter,
+    tool_choice: dict,
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        tool_choice=tool_choice,
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": None,
+                "strict": None,
+            }
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="tool choice"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+def test_responses_to_chat_completion_rejects_responses_only_allowed_tool_reference(
+    converter: ResponsesConverter,
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        tool_choice={
+            "type": "allowed_tools",
+            "mode": "auto",
+            "tools": [{"type": "mcp", "server_label": "server"}],
+        },
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": None,
+                "strict": None,
+            }
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="tool reference"):
+        converter.responses_to_chat_completion_create_params(params)
 
 
 @pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
@@ -437,6 +649,31 @@ def test_responses_to_chat_completion_no_tools_rejects_required_tool_choice(
         )
 
 
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        {"type": "function", "name": "get_weather"},
+        {
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{"type": "function", "name": "get_weather"}],
+        },
+    ],
+    ids=["named", "allowed"],
+)
+def test_responses_to_chat_completion_no_tools_rejects_structured_tool_choice(
+    converter: ResponsesConverter,
+    tool_choice: dict,
+):
+    with pytest.raises(ValueError, match="requires at least one tool"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="hi",
+                tool_choice=tool_choice,
+            )
+        )
+
+
 def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: ResponsesConverter):
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
@@ -463,7 +700,7 @@ def test_chat_completion_to_responses_tools_accepts_none(converter: ResponsesCon
     assert converter._chat_completion_to_responses_tools(None) == []
 
 
-@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high"])
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh"])
 def test_reasoning_effort_round_trips_between_request_schemas(converter: ResponsesConverter, effort: str):
     responses_params = converter.chat_completion_to_responses_create_params(
         NeMoGymChatCompletionCreateParamsNonStreaming(
@@ -477,6 +714,67 @@ def test_reasoning_effort_round_trips_between_request_schemas(converter: Respons
 
     chat_params = converter.responses_to_chat_completion_create_params(responses_params)
     assert chat_params.reasoning_effort == effort
+
+
+def test_shared_openai_request_fields_round_trip(converter: ResponsesConverter):
+    chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[{"role": "user", "content": "hi"}],
+        moderation={"model": "omni-moderation-latest"},
+        prompt_cache_key="cache-key",
+        prompt_cache_retention="24h",
+        safety_identifier="safe-user",
+        verbosity="high",
+        tools=[],
+    )
+
+    responses_params = converter.chat_completion_to_responses_create_params(chat_params)
+    assert responses_params.moderation == {"model": "omni-moderation-latest"}
+    assert responses_params.prompt_cache_key == "cache-key"
+    assert responses_params.prompt_cache_retention == "24h"
+    assert responses_params.safety_identifier == "safe-user"
+    assert responses_params.text == {"verbosity": "high"}
+
+    round_tripped = converter.responses_to_chat_completion_create_params(responses_params)
+    assert round_tripped.moderation == chat_params.moderation
+    assert round_tripped.prompt_cache_key == chat_params.prompt_cache_key
+    assert round_tripped.prompt_cache_retention == chat_params.prompt_cache_retention
+    assert round_tripped.safety_identifier == chat_params.safety_identifier
+    assert round_tripped.verbosity == chat_params.verbosity
+
+
+def test_responses_to_chat_completion_rejects_message_phase(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "working", "annotations": []}],
+            }
+        ]
+    )
+
+    with pytest.raises(NotImplementedError, match="phase"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+def test_responses_to_chat_completion_rejects_function_namespace(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run",
+                "namespace": "tools",
+                "arguments": "{}",
+            }
+        ]
+    )
+
+    with pytest.raises(NotImplementedError, match="namespace"):
+        converter.responses_to_chat_completion_create_params(params)
 
 
 def test_responses_to_chat_completion_token_id_information_path():
@@ -987,6 +1285,43 @@ def test_downconverting_an_unsupported_type_names_it_and_the_way_out():
     assert "a-query-that-should-not-reach-the-error" not in message, (
         "the item payload must not be interpolated into the error"
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("background", True),
+        ("context_management", []),
+        ("conversation", "conv_1"),
+        ("include", ["reasoning.encrypted_content"]),
+        ("max_tool_calls", 2),
+        ("previous_response_id", "resp_1"),
+        ("prompt", {"id": "pmpt_1"}),
+        ("truncation", "auto"),
+    ],
+)
+def test_downconverting_present_responses_only_fields_fails_explicitly(
+    converter: ResponsesConverter, field: str, value
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", **{field: value})
+
+    with pytest.raises(NotImplementedError, match=field):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+def test_downconverting_text_format_fails_explicitly(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", text={"format": {"type": "json_object"}})
+
+    with pytest.raises(NotImplementedError, match="text format"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+@pytest.mark.parametrize("field", ["context", "generate_summary", "summary"])
+def test_downconverting_responses_only_reasoning_fields_fails_explicitly(converter: ResponsesConverter, field: str):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={field: "auto"})
+
+    with pytest.raises(NotImplementedError, match=field):
+        converter.responses_to_chat_completion_create_params(params)
 
 
 def test_training_variant_of_raises_a_named_error_for_an_unregistered_class():

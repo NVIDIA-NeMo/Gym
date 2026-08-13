@@ -23,6 +23,7 @@ import re
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from openai.types.responses.response_create_params import ToolParam
 from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import (
@@ -37,12 +38,12 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionToolMessageParam,
     NeMoGymChatCompletionToolParam,
+    NeMoGymChatCompletionToolUnionParam,
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChoice,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymFunctionDefinition,
-    NeMoGymFunctionToolParam,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
@@ -162,9 +163,29 @@ class ResponsesConverter(BaseModel):
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
         responses_create_params = responses_create_params.model_dump(exclude_unset=True)
 
+        unsupported_fields = sorted(
+            {
+                "background",
+                "context_management",
+                "conversation",
+                "include",
+                "max_tool_calls",
+                "previous_response_id",
+                "prompt",
+                "truncation",
+            }
+            & responses_create_params.keys()
+        )
+        if unsupported_fields:
+            raise NotImplementedError(
+                f"Responses request field(s) {unsupported_fields} have no Chat Completions "
+                "representation, so this request cannot be downconverted. Route it to a model "
+                "server that passes Responses through."
+            )
+
         state = ResponsesConverterState(return_token_id_information=self.return_token_id_information)
 
-        response_input = responses_create_params["input"]
+        response_input = responses_create_params.pop("input")
         if isinstance(response_input, str):
             wrapped_input = {
                 "content": [
@@ -178,7 +199,7 @@ class ResponsesConverter(BaseModel):
             }
             input_messages = [wrapped_input]
         else:
-            input_messages = responses_create_params.pop("input", [])
+            input_messages = response_input
 
         for m in input_messages:
             if not m.get("type") and m.get("role"):
@@ -238,24 +259,61 @@ class ResponsesConverter(BaseModel):
             responses_create_params["max_tokens"] = max_output_tokens
 
         reasoning = responses_create_params.pop("reasoning", None)
-        if reasoning is not None and reasoning.get("effort") is not None:
-            responses_create_params["reasoning_effort"] = reasoning["effort"]
+        if reasoning is not None:
+            unsupported_reasoning_fields = sorted(
+                field for field, value in reasoning.items() if field != "effort" and value is not None
+            )
+            if unsupported_reasoning_fields:
+                raise NotImplementedError(
+                    "Responses reasoning field(s) "
+                    f"{unsupported_reasoning_fields} have no Chat Completions representation."
+                )
+            if reasoning.get("effort") is not None:
+                responses_create_params["reasoning_effort"] = reasoning["effort"]
 
+        text = responses_create_params.pop("text", None)
+        if text is not None:
+            if text.get("format") is not None:
+                raise NotImplementedError("Responses text format has no implemented Chat Completions conversion.")
+            if text.get("verbosity") is not None:
+                responses_create_params["verbosity"] = text["verbosity"]
+
+        tool_choice = self._responses_to_chat_tool_choice(responses_create_params.pop("tool_choice", None))
         tools = responses_create_params.pop("tools", None)
         if tools:
             responses_create_params["tools"] = []
             for tool_dict in tools:
+                tool_type = tool_dict.get("type")
+                if tool_type not in {"function", "custom"}:
+                    raise NotImplementedError(
+                        f"Responses tool type {tool_type!r} has no implemented Chat Completions conversion."
+                    )
+                if tool_dict.get("defer_loading"):
+                    raise NotImplementedError(
+                        f"Responses {tool_type} tools with defer_loading enabled "
+                        "have no Chat Completions representation."
+                    )
                 tool_dict = tool_dict.copy()
                 tool_dict.pop("type", None)
-                tool_dict.pop("strict", None)
-                responses_create_params["tools"].append(
-                    NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
-                )
+                tool_dict.pop("defer_loading", None)
+                if tool_type == "function":
+                    tool_dict = {key: value for key, value in tool_dict.items() if value is not None}
+                    converted_tool = NeMoGymChatCompletionToolParam(
+                        type="function",
+                        function=NeMoGymFunctionDefinition(**tool_dict),
+                    )
+                else:
+                    converted_tool = {
+                        "type": "custom",
+                        "custom": self._responses_custom_tool_to_chat(tool_dict),
+                    }
+                responses_create_params["tools"].append(converted_tool)
+            if tool_choice is not None:
+                responses_create_params["tool_choice"] = tool_choice
         else:
-            if responses_create_params.get("tool_choice") == "required":
-                raise ValueError("tool_choice='required' requires at least one tool")
+            if tool_choice not in (None, "auto", "none"):
+                raise ValueError(f"tool_choice={tool_choice!r} requires at least one tool")
 
-            responses_create_params.pop("tool_choice", None)
             responses_create_params.pop("parallel_tool_calls", None)
 
         chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
@@ -307,6 +365,8 @@ class ResponsesConverter(BaseModel):
         state: ResponsesConverterState,
     ) -> None:
         content = m["content"]
+        if m.get("phase") is not None:
+            raise NotImplementedError("Responses message phase has no Chat Completions representation.")
 
         if isinstance(content, list) and m["role"] != "assistant":
             converted_parts = []
@@ -315,8 +375,16 @@ class ResponsesConverter(BaseModel):
                     case "input_text":
                         converted_parts.append({"type": "text", "text": part_param["text"]})
                     case "input_image":
-                        image_url = part_param.get("image_url", "")
+                        image_url = part_param.get("image_url")
+                        if image_url is None:
+                            raise NotImplementedError(
+                                "Responses input images referenced by file_id have no Chat Completions representation."
+                            )
                         detail = part_param.get("detail", "auto")
+                        if detail == "original":
+                            raise NotImplementedError(
+                                "Responses input image detail 'original' has no Chat Completions representation."
+                            )
                         converted_parts.append(
                             {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
                         )
@@ -398,6 +466,8 @@ class ResponsesConverter(BaseModel):
     ) -> None:
         state.assistant_item_buffered = True
         assert "call_id" in m
+        if m.get("namespace") is not None:
+            raise NotImplementedError("Responses function call namespace has no Chat Completions representation.")
         tool_call = NeMoGymChatCompletionMessageToolCallParam(
             id=m["call_id"],
             function=NeMoGymChatCompletionMessageToolCallFunctionParam(
@@ -412,12 +482,89 @@ class ResponsesConverter(BaseModel):
     # Chat Completion create params to Response create params
     # =======================================================
 
+    @staticmethod
+    def _tool_reference_to_responses(tool: dict) -> dict:
+        tool_type = tool.get("type")
+        if tool_type not in {"function", "custom"}:
+            raise NotImplementedError(f"Chat tool reference type {tool_type!r} has no Responses representation.")
+        return {"type": tool_type, **tool[tool_type]}
+
+    @staticmethod
+    def _tool_reference_to_chat(tool: dict) -> dict:
+        tool_type = tool.get("type")
+        if tool_type not in {"function", "custom"}:
+            raise NotImplementedError(f"Responses tool reference type {tool_type!r} has no Chat representation.")
+        return {"type": tool_type, tool_type: {key: value for key, value in tool.items() if key != "type"}}
+
+    @staticmethod
+    def _chat_custom_tool_to_responses(tool: dict) -> dict:
+        converted = dict(tool)
+        tool_format = converted.get("format")
+        if tool_format is not None and tool_format["type"] == "grammar":
+            converted["format"] = {"type": "grammar", **tool_format["grammar"]}
+        return converted
+
+    @staticmethod
+    def _responses_custom_tool_to_chat(tool: dict) -> dict:
+        converted = dict(tool)
+        tool_format = converted.get("format")
+        if tool_format is not None and tool_format["type"] == "grammar":
+            converted["format"] = {
+                "type": "grammar",
+                "grammar": {key: value for key, value in tool_format.items() if key != "type"},
+            }
+        return converted
+
+    def _chat_to_responses_tool_choice(self, tool_choice: Any) -> Any:
+        if tool_choice is None or isinstance(tool_choice, str):
+            return tool_choice
+
+        tool_type = tool_choice.get("type")
+        if tool_type in {"function", "custom"}:
+            return self._tool_reference_to_responses(tool_choice)
+        if tool_type == "allowed_tools":
+            allowed_tools = tool_choice["allowed_tools"]
+            return {
+                "type": "allowed_tools",
+                "mode": allowed_tools["mode"],
+                "tools": [self._tool_reference_to_responses(tool) for tool in allowed_tools["tools"]],
+            }
+        raise NotImplementedError(f"Chat tool choice type {tool_type!r} has no Responses representation.")
+
+    def _responses_to_chat_tool_choice(self, tool_choice: Any) -> Any:
+        if tool_choice is None or isinstance(tool_choice, str):
+            return tool_choice
+
+        tool_type = tool_choice.get("type")
+        if tool_type in {"function", "custom"}:
+            return self._tool_reference_to_chat(tool_choice)
+        if tool_type == "allowed_tools":
+            return {
+                "type": "allowed_tools",
+                "allowed_tools": {
+                    "mode": tool_choice["mode"],
+                    "tools": [self._tool_reference_to_chat(tool) for tool in tool_choice["tools"]],
+                },
+            }
+        raise NotImplementedError(f"Responses tool choice type {tool_type!r} has no Chat representation.")
+
     def _chat_completion_to_responses_tools(
-        self, chat_completions_tools: Optional[List[NeMoGymChatCompletionToolParam]]
-    ) -> List[NeMoGymFunctionToolParam]:
+        self, chat_completions_tools: Optional[List[NeMoGymChatCompletionToolUnionParam]]
+    ) -> List[ToolParam]:
         if chat_completions_tools is None:
             return []
-        return [tool["function"] | {"type": "function"} for tool in chat_completions_tools]
+
+        converted_tools = []
+        for tool in chat_completions_tools:
+            tool_type = tool["type"]
+            tool_definition = dict(tool[tool_type])
+            if tool_type == "function":
+                tool_definition.setdefault("parameters", None)
+                tool_definition.setdefault("strict", None)
+            else:
+                tool_definition = self._chat_custom_tool_to_responses(tool_definition)
+            converted_tools.append({"type": tool_type, **tool_definition})
+        return converted_tools
 
     def chat_completion_to_responses_create_params(
         self,
@@ -428,14 +575,21 @@ class ResponsesConverter(BaseModel):
             max_output_tokens=chat_completion_create_params.max_completion_tokens,
             metadata=chat_completion_create_params.metadata,
             model=chat_completion_create_params.model,
+            moderation=chat_completion_create_params.moderation,
             parallel_tool_calls=chat_completion_create_params.parallel_tool_calls,
+            prompt_cache_key=chat_completion_create_params.prompt_cache_key,
+            prompt_cache_retention=chat_completion_create_params.prompt_cache_retention,
             reasoning=Reasoning(effort=chat_completion_create_params.reasoning_effort)
             if chat_completion_create_params.reasoning_effort is not None
             else None,
+            safety_identifier=chat_completion_create_params.safety_identifier,
             service_tier=chat_completion_create_params.service_tier,
             store=chat_completion_create_params.store,
             temperature=chat_completion_create_params.temperature,
-            tool_choice=chat_completion_create_params.tool_choice
+            text={"verbosity": chat_completion_create_params.verbosity}
+            if chat_completion_create_params.verbosity is not None
+            else None,
+            tool_choice=self._chat_to_responses_tool_choice(chat_completion_create_params.tool_choice)
             if chat_completion_create_params.tool_choice is not None
             else "auto",
             tools=self._chat_completion_to_responses_tools(chat_completion_create_params.tools),
@@ -645,6 +799,9 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
         "mcp_list_tools",
         "reasoning",
         "web_search_call",
+        "apply_patch_call",
+        "shell_call",
+        "tool_search_call",
     }
 )
 
@@ -655,11 +812,17 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
 # The SDK unions do not distinguish generated items from client-supplied items.
 _RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
     {
+        "additional_tools",
+        "apply_patch_call_output",
+        "compaction",
+        "compaction_trigger",
         "computer_call_output",
         "custom_tool_call_output",
         "function_call_output",
         "local_shell_call_output",
         "mcp_approval_response",
+        "shell_call_output",
+        "tool_search_output",
     }
 )
 

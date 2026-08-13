@@ -59,23 +59,40 @@ from openai.types.chat.completion_create_params import (
     ResponseFormat,
     WebSearchOptions,
 )
+from openai.types.chat.completion_create_params import (
+    Moderation as ChatCompletionModeration,
+)
 from openai.types.responses import (
     FunctionToolParam,
     Response,
+    ResponseApplyPatchToolCall,
+    ResponseApplyPatchToolCallOutput,
     ResponseCodeInterpreterToolCall,
+    ResponseCompactionItem,
     ResponseComputerToolCall,
+    ResponseComputerToolCallOutputItem,
     ResponseCustomToolCall,
+    ResponseCustomToolCallOutputItem,
     ResponseFileSearchToolCall,
+    ResponseFunctionShellToolCall,
+    ResponseFunctionShellToolCallOutput,
+    ResponseFunctionToolCallOutputItem,
     ResponseFunctionWebSearch,
     ResponseInputTextParam,
+    ResponseToolSearchCall,
+    ResponseToolSearchOutputItem,
 )
+from openai.types.responses.response_conversation_param_param import ResponseConversationParamParam
 from openai.types.responses.response_create_params import (
+    ContextManagement,
     Metadata,
+    Moderation,
     Reasoning,
     ResponseIncludable,
     ResponsePromptParam,
     ResponsesModel,
     ResponseTextConfigParam,
+    StreamOptions,
     ToolChoice,
     ToolParam,
 )
@@ -83,6 +100,10 @@ from openai.types.responses.response_function_call_output_item_list_param import
     ResponseFunctionCallOutputItemListParam,
 )
 from openai.types.responses.response_input_item import (
+    AdditionalTools as InputAdditionalTools,
+)
+from openai.types.responses.response_input_item import (
+    CompactionTrigger,
     ComputerCallOutput,
     LocalShellCallOutput,
     McpApprovalResponse,
@@ -92,11 +113,20 @@ from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
 from openai.types.responses.response_output_item import (
+    AdditionalTools as OutputAdditionalTools,
+)
+from openai.types.responses.response_output_item import (
     ImageGenerationCall,
     LocalShellCall,
     McpApprovalRequest,
     McpCall,
     McpListTools,
+)
+from openai.types.responses.response_output_item import (
+    LocalShellCallOutput as OutputLocalShellCallOutput,
+)
+from openai.types.responses.response_output_item import (
+    McpApprovalResponse as OutputMcpApprovalResponse,
 )
 from openai.types.responses.response_output_text_param import Annotation, Logprob
 from openai.types.responses.response_reasoning_item import (
@@ -110,7 +140,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -222,12 +252,16 @@ class NeMoGymResponseOutputMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
+    # Preserve the response phase when replaying the item.
+    phase: Optional[Literal["commentary", "final_answer"]] = None
 
 
 class NeMoGymEasyInputMessage(BaseModel):
     content: Union[str, ResponseInputMessageContentListParam]
     role: Literal["user", "assistant", "system", "developer"]
     type: Literal["message"] = "message"
+    # Preserve the response phase when replaying the item.
+    phase: Optional[Literal["commentary", "final_answer"]] = None
 
 
 class NeMoGymMessage(BaseModel):
@@ -257,6 +291,8 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
     type: Literal["function_call"] = "function_call"
     id: Optional[str] = None
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
+    # The namespace identifies the tool when names overlap.
+    namespace: Optional[str] = None
 
 
 class NeMoGymResponseMcpCall(McpCall):
@@ -341,19 +377,84 @@ class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
 # These models represent client-supplied results for the calls above.
 # The installed SDK defines them in ``response_input_item``.
 class NeMoGymComputerCallOutput(ComputerCallOutput):
-    """The client's result of a computer-use action (``computer_call_output`` item)."""
+    """A computer-use result accepted in request input (``computer_call_output`` item)."""
+
+
+class NeMoGymResponseComputerCallOutput(ResponseComputerToolCallOutputItem):
+    """Provider output for a computer-use action, including ``status="failed"``."""
 
 
 class NeMoGymResponseCustomToolCallOutput(ResponseCustomToolCallOutput):
     """The client's result of a custom tool call (``custom_tool_call_output`` item)."""
 
 
+class NeMoGymResponseCustomToolCallOutputItem(ResponseCustomToolCallOutputItem):
+    """Provider output for a custom tool call."""
+
+
 class NeMoGymLocalShellCallOutput(LocalShellCallOutput):
     """The client's result of a local shell command (``local_shell_call_output`` item)."""
 
 
+class NeMoGymResponseLocalShellCallOutput(OutputLocalShellCallOutput):
+    """Provider output for a local shell command."""
+
+
 class NeMoGymMcpApprovalResponse(McpApprovalResponse):
     """The client's answer to a hosted-MCP approval request (``mcp_approval_response`` item)."""
+
+
+class NeMoGymResponseMcpApprovalResponse(OutputMcpApprovalResponse):
+    """Provider output carrying an answer to a hosted-MCP approval request."""
+
+
+# These output items must remain representable in Gym transcripts.
+# Unsupported items cause non-streaming validation errors.
+# The streaming path would otherwise omit them from replayed transcripts.
+
+
+class NeMoGymResponseApplyPatchToolCall(ResponseApplyPatchToolCall):
+    """A patch the model wants applied (``apply_patch_call`` output item)."""
+
+
+class NeMoGymResponseApplyPatchToolCallOutput(ResponseApplyPatchToolCallOutput):
+    """The client's result of applying a patch (``apply_patch_call_output`` item)."""
+
+
+class NeMoGymResponseCompactionItem(ResponseCompactionItem):
+    """An opaque context-compaction record the provider emits (``compaction`` item)."""
+
+
+class NeMoGymResponseFunctionShellToolCall(ResponseFunctionShellToolCall):
+    """A shell command the model wants run (``shell_call`` output item)."""
+
+
+class NeMoGymResponseFunctionShellToolCallOutput(ResponseFunctionShellToolCallOutput):
+    """The client's result of running a shell command (``shell_call_output`` item)."""
+
+
+class NeMoGymResponseToolSearchCall(ResponseToolSearchCall):
+    """A tool-search call (``tool_search_call`` output item)."""
+
+
+class NeMoGymResponseToolSearchOutputItem(ResponseToolSearchOutputItem):
+    """The result of a tool search (``tool_search_output`` item)."""
+
+
+class NeMoGymCompactionTrigger(CompactionTrigger):
+    """A request for the provider to compact the context (``compaction_trigger`` item).
+
+    Gym preserves this input item when replaying the transcript.
+    """
+
+
+# Additional tool definitions sent with an input transcript.
+class NeMoGymAdditionalTools(InputAdditionalTools):
+    """Additional tool definitions accepted in request input."""
+
+
+class NeMoGymResponseAdditionalTools(OutputAdditionalTools):
+    """Additional tool definitions returned by the provider."""
 
 
 class NeMoGymResponseInputText(ResponseInputTextParam):
@@ -447,6 +548,16 @@ NeMoGymResponseInputItem = Annotated[
         NeMoGymResponseCustomToolCallOutput,
         NeMoGymLocalShellCallOutput,
         NeMoGymMcpApprovalResponse,
+        # Codex tool family and context management.
+        NeMoGymResponseApplyPatchToolCall,
+        NeMoGymResponseApplyPatchToolCallOutput,
+        NeMoGymResponseCompactionItem,
+        NeMoGymResponseFunctionShellToolCall,
+        NeMoGymResponseFunctionShellToolCallOutput,
+        NeMoGymResponseToolSearchCall,
+        NeMoGymResponseToolSearchOutputItem,
+        NeMoGymCompactionTrigger,
+        NeMoGymAdditionalTools,
         # Training variants.
         NeMoGymEasyInputMessageForTraining,
         NeMoGymMessageForTraining,
@@ -459,6 +570,23 @@ NeMoGymResponseInputItem = Annotated[
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
 
+def _normalize_response_item_for_input(item: Any) -> Any:
+    """Convert a provider output item to the request input schema."""
+    if isinstance(item, BaseModel):
+        item = item.model_dump(exclude_unset=True)
+    if not isinstance(item, dict):
+        return item
+
+    item_type = item.get("type")
+    if item_type == "additional_tools" and item.get("role") != "developer":
+        item = item.copy()
+        item["role"] = "developer"
+    elif item_type == "computer_call_output" and item.get("status") == "failed":
+        item = item.copy()
+        item.pop("status")
+    return item
+
+
 class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     """
     This class is a copy of openai.types.responses.response_create_params.ResponseCreateParamsNonStreaming
@@ -467,6 +595,16 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_output_items_for_replay(cls, value: Any) -> Any:
+        """Normalize fields whose OpenAI output and input schemas differ."""
+        if not isinstance(value, dict) or not isinstance(value.get("input"), list):
+            return value
+        value = value.copy()
+        value["input"] = [_normalize_response_item_for_input(item) for item in value["input"]]
+        return value
 
     background: Optional[bool] = None
     include: Optional[List[ResponseIncludable]] = None
@@ -482,6 +620,16 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     reasoning: Optional[Reasoning] = None
     service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
     store: Optional[bool] = None
+    # These fields mirror the SDK request schema.
+    # Missing fields cause non-streaming validation errors.
+    # The streaming sanitizer would otherwise remove them.
+    context_management: Optional[List[ContextManagement]] = None
+    conversation: Union[str, ResponseConversationParamParam, None] = None
+    moderation: Optional[Moderation] = None
+    prompt_cache_key: Optional[str] = None
+    prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
+    safety_identifier: Optional[str] = None
+    stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
     text: Optional[ResponseTextConfigParam] = None
     tool_choice: ToolChoice = "auto"  # OpenAI default
@@ -506,8 +654,49 @@ def _require_response_output_item_type(value: Any) -> Any:
     return value
 
 
+class NeMoGymResponseFunctionCallOutput(ResponseFunctionToolCallOutputItem):
+    """Provider output for a function call result."""
+
+
 NeMoGymResponseOutputItem = Annotated[
-    NeMoGymResponseInputItem,
+    Union[
+        NeMoGymResponseOutputMessage,
+        NeMoGymResponseFunctionToolCall,
+        NeMoGymResponseFunctionCallOutput,
+        NeMoGymResponseReasoningItem,
+        NeMoGymResponseMcpCall,
+        NeMoGymResponseMcpListTools,
+        NeMoGymResponseMcpApprovalRequest,
+        NeMoGymResponseFileSearchToolCall,
+        NeMoGymResponseFunctionWebSearch,
+        NeMoGymResponseComputerToolCall,
+        NeMoGymImageGenerationCall,
+        NeMoGymResponseCodeInterpreterToolCall,
+        NeMoGymLocalShellCall,
+        NeMoGymResponseCustomToolCall,
+        NeMoGymResponseComputerCallOutput,
+        NeMoGymResponseCustomToolCallOutputItem,
+        NeMoGymResponseLocalShellCallOutput,
+        NeMoGymResponseMcpApprovalResponse,
+        NeMoGymResponseApplyPatchToolCall,
+        NeMoGymResponseApplyPatchToolCallOutput,
+        NeMoGymResponseCompactionItem,
+        NeMoGymResponseFunctionShellToolCall,
+        NeMoGymResponseFunctionShellToolCallOutput,
+        NeMoGymResponseToolSearchCall,
+        NeMoGymResponseToolSearchOutputItem,
+        NeMoGymResponseAdditionalTools,
+        # Local agents include prompt messages and function results in returned trajectories.
+        # Accept their request models alongside the SDK output models.
+        NeMoGymEasyInputMessage,
+        NeMoGymMessage,
+        NeMoGymFunctionCallOutput,
+        NeMoGymEasyInputMessageForTraining,
+        NeMoGymMessageForTraining,
+        NeMoGymResponseOutputMessageForTraining,
+        NeMoGymResponseFunctionToolCallForTraining,
+        NeMoGymResponseReasoningItemForTraining,
+    ],
     BeforeValidator(_require_response_output_item_type),
 ]
 
@@ -742,6 +931,8 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
     audio: Optional[ChatCompletionAudioParam] = None
@@ -751,14 +942,18 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     max_completion_tokens: Optional[int] = None
     max_tokens: Optional[int] = None
     metadata: Optional[Metadata] = None
+    moderation: Optional[ChatCompletionModeration] = None
     modalities: Optional[List[Literal["text", "audio"]]] = None
     n: Optional[int] = None
     parallel_tool_calls: bool = True  # OpenAI default
     prediction: Optional[ChatCompletionPredictionContentParam] = None
     presence_penalty: Optional[float] = None
+    prompt_cache_key: Optional[str] = None
+    prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     response_format: Optional[ResponseFormat] = None
     seed: Optional[int] = None
+    safety_identifier: Optional[str] = None
     service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
     stop: Union[Optional[str], List[str], None] = None
     store: Optional[bool] = None
@@ -769,6 +964,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
     user: Optional[str] = None
+    verbosity: Optional[Literal["low", "medium", "high"]] = None
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
 

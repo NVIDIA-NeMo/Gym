@@ -129,6 +129,13 @@ COMMON_RESPONSE_PARAMS = dict(
     status="completed",
     tool_choice="auto",
 )
+OPENAI_2_44_OPTIONAL_CHAT_FIELDS = {
+    "moderation",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "verbosity",
+}
 
 PARAMETERIZE_DATA = [
     # ----- EasyInputMessageParam: content as a list, id: "ez_list" -----
@@ -945,6 +952,7 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the current status for a given order",
+                "strict": True,
             },
             {
                 "name": "get_delivery_date",
@@ -959,6 +967,7 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the estimated delivery date for a given order",
+                "strict": True,
             },
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -1417,6 +1426,7 @@ class TestApp:
                     },
                     "required": ["order_id", "date"],
                 },
+                "strict": True,
             }
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -2698,7 +2708,8 @@ class TestVLLMConverter:
         )
 
         expected_chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
+            parallel_tool_calls=COMMON_RESPONSE_PARAMS["parallel_tool_calls"],
+            tool_choice=COMMON_RESPONSE_PARAMS["tool_choice"],
             messages=[
                 {
                     "role": "user",
@@ -2978,7 +2989,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output"]
-        assert expected_output == chat_completion_create_params.model_dump()
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
         converter = VLLMConverter(return_token_id_information=True)
@@ -3084,7 +3095,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output_return_token_id_information"]
-        assert expected_output == chat_completion_create_params.model_dump()
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())

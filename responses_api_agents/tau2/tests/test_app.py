@@ -35,6 +35,17 @@ from responses_api_agents.tau2.app import (
 )
 from tau2.data_model.message import AssistantMessage, UserMessage
 from tau2.data_model.simulation import RewardInfo, SimulationRun, TerminationReason
+
+
+def _drop_nulls(value):
+    """Recursively remove keys whose value is None."""
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
 # isort: on
 
 
@@ -176,7 +187,10 @@ class TestApp:
 
             d["duration"] = 0.0
 
-            return d
+            # SDK releases can add optional response fields.
+            # Ignore these fields when their values are `None`.
+            # Expected non-null values remain part of the comparison.
+            return _drop_nulls(d)
 
         assert _clean(expected_response_dict) == _clean(actual_response_dict)
 

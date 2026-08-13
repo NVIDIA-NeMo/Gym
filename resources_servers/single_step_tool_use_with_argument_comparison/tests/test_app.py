@@ -15,7 +15,7 @@
 import json
 from unittest.mock import MagicMock
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import FunctionToolParam
 from pytest import approx, fixture
 
 from nemo_gym.openai_utils import (
@@ -70,7 +70,7 @@ class TestApp:
         self,
         resources_server: SingleStepToolUseArgumentComparisonResourcesServer,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
-        tool: FunctionTool,
+        tool: FunctionToolParam,
         expected_action: ExpectedAction,
         response_id: str,
         output_item: NeMoGymResponseOutputItem,
@@ -100,10 +100,15 @@ class TestApp:
         assert verify_response.category == expected_reward_category
 
     async def test_verify(self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer) -> None:
-        tool = FunctionTool(
-            type="function",
-            name="set_metric_count",
-            parameters={
+        # Build the request type directly because the SDK types differ in optionality.
+        # `FunctionTool.defer_loading` defaults to `None`.
+        # `FunctionToolParam` requires a boolean when the field is present.
+        # Dumping the model includes `None`, which the request model rejects.
+        tool: FunctionToolParam = {
+            "type": "function",
+            "name": "set_metric_count",
+            "strict": None,
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "metric_name": {
@@ -118,8 +123,7 @@ class TestApp:
                     "metric_count",
                 ],
             },
-        )
-        tool_param = tool.model_dump()
+        }
         tool_call_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 NeMoGymEasyInputMessage(
@@ -127,7 +131,7 @@ class TestApp:
                     content="Set the views metric count to 75.",
                 )
             ],
-            tools=[tool_param],
+            tools=[tool],
         )
 
         expected_arguments = {
@@ -224,7 +228,7 @@ class TestApp:
                     content="This is a greeting.",
                 )
             ],
-            tools=[tool_param],
+            tools=[tool],
         )
         expected_message = MessageAction(
             type="message",
@@ -252,11 +256,12 @@ class TestApp:
             StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE,
         )
 
-    def _search_tool(self) -> FunctionTool:
-        return FunctionTool(
-            type="function",
-            name="search",
-            parameters={
+    def _search_tool(self) -> FunctionToolParam:
+        return {
+            "type": "function",
+            "name": "search",
+            "strict": None,
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
@@ -267,10 +272,10 @@ class TestApp:
                     "query",
                 ],
             },
-        )
+        }
 
     def _parallel_verify_request(
-        self, tool: FunctionTool, actual_queries: list[str], expected_queries: list[str]
+        self, tool: FunctionToolParam, actual_queries: list[str], expected_queries: list[str]
     ) -> SingleStepToolUseArgumentComparisonVerifyRequest:
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[
@@ -280,7 +285,7 @@ class TestApp:
                 )
             ],
             parallel_tool_calls=True,
-            tools=[tool.model_dump()],
+            tools=[tool],
         )
         response = NeMoGymResponse(
             id="parallel_tool_calls",
