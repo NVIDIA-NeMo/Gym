@@ -464,11 +464,11 @@ For agents with non-monotonic trajectoires, the asserts may need to be disabled.
 
 # How do I choose an onboarding path?
 
-Use the [onboarding decision tree](/contribute/environments/onboarding-decision-tree). A benchmark is usually a YAML overlay under `benchmarks/` that reuses a resources server. Create a new resources server only when no existing scorer fits.
+Use the [onboarding decision tree](/contribute/environments/onboarding-decision-tree). A benchmark is usually a YAML overlay under `benchmarks/` that reuses a resources server (copy `gsm8k`, `gpqa`, or `livecodebench`). Create a new resources server only when no existing scorer fits. Add a new agent or wrap a library when the episode is not driven by `simple_agent`.
 
 # What out-of-the-box resource servers can I reuse?
 
-`gym search` and `gym list environments` (unified catalog; in-tree rows say `no-manifest`). `gym list resources-servers` lists config selectors under `resources_servers/*/configs/`, not the same catalog.
+`gym search` and `gym list environments` (unified catalog; in-tree rows say `no-manifest`). To find a **scorer**, use `gym search resources-servers "…"` or `gym list resources-servers` (config selectors under `resources_servers/*/configs/`, not the same catalog).
 
 Highest overlay reuse: `math_with_judge`, `mcqa`, `code_gen`, `asr_with_pc`, `instruction_following`, `swebench`. Search and GUI stacks: `tavily_search`, `benchmarks/browsecomp`, `gui_coordinate`, `benchmarks/osworld`. Terminal Bench is Harbor via `responses_api_agents/harbor_agent`, not under `benchmarks/`.
 
@@ -486,7 +486,7 @@ Do not pass `--resources-server` unless you added a new server. See [Add a bench
 
 # Where do example_rollouts go and what format do they need?
 
-For a **new resources server**: `resources_servers/<name>/data/example_rollouts.jsonl`, exactly five lines, each a full `gym eval run` record including reward. Required by CI (`+should_validate_data=true`), not by a default local `gym env test --resources-server`. Overlay-only PRs under `benchmarks/` do not add this file. See [example data and example_rollouts](/contribute/environments/adding-a-benchmark#example-data-and-example_rollouts).
+For a **new resources server**: `resources_servers/<name>/data/example_rollouts.jsonl`, exactly five lines, each a full `gym eval run` record including reward. Required by CI (`+should_validate_data=true`), not by a default local `gym env test --resources-server`. Overlay-only PRs under `benchmarks/` do not add this file. See [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
 
 # How do I know if my contribution is environment-complete vs benchmark-complete?
 

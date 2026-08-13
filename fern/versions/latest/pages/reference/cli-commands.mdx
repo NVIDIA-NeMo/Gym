@@ -513,7 +513,7 @@ gym env test
 ```
 
 <Note>
-`gym env test --resources-server NAME` runs pytest in the server venv. The five-row `example.jsonl`, `example_metrics.json`, and `example_rollouts.jsonl` checks run only when `+should_validate_data=true`. Pull-request CI always passes that flag. Overlay-only changes under `benchmarks/**` skip the server unit-test suite. See [Add a benchmark](/contribute/environments/adding-a-benchmark#example-data-and-example_rollouts).
+`gym env test --resources-server NAME` runs pytest in the server venv. The five-row `example.jsonl`, `example_metrics.json`, and `example_rollouts.jsonl` checks run only when `+should_validate_data=true`. Pull-request CI always sets that flag. Overlay-only changes under `benchmarks/**` skip the server unit-test suite. See [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
 </Note>
 
 ### `gym env publish`
