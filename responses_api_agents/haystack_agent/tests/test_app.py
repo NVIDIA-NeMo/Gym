@@ -37,6 +37,7 @@ from responses_api_agents.haystack_agent.chat_generator import (
     NeMoGymResponsesChatGenerator,
     chat_messages_to_responses,
     response_to_chat_messages,
+    responses_input_to_messages,
 )
 from responses_api_agents.haystack_agent.example_tools import get_weather
 from responses_api_agents.haystack_agent.http_tool import HTTPTool
@@ -229,11 +230,52 @@ class TestChatGenerator:
 
         output = chat_messages_to_responses(messages, output=True)
         assert [item.type for item in output] == ["reasoning", "function_call"]
+        assert output[0].id == "rs_1"
         assert output[0].encrypted_content == "opaque-reasoning-state"
         assert not hasattr(output[0], "generation_token_ids")
+        assert output[1].id == "fc_1"
         assert output[1].generation_token_ids == [20, 21]
         assert output[1].generation_log_probs == [-0.1, -0.2]
         assert output[1].routed_experts == [[[0]]]
+
+    def test_preserves_all_model_output_item_ids(self) -> None:
+        second_reasoning = {**_reasoning_item("I should explain the result."), "id": "rs_2"}
+        second_message = {**_text_item("Done."), "id": "msg_2"}
+        second_tool_call = {
+            **_function_call_item(name="get_forecast", arguments='{"city": "New York"}'),
+            "id": "fc_2",
+            "call_id": "call_2",
+        }
+        response = chat_generator_module.NeMoGymResponse.model_validate(
+            _envelope(
+                [
+                    _reasoning_item(),
+                    _text_item(),
+                    _function_call_item(),
+                    second_reasoning,
+                    second_message,
+                    second_tool_call,
+                ]
+            )
+        )
+
+        messages = response_to_chat_messages(response)
+
+        for output in (False, True):
+            reconstructed = chat_messages_to_responses(messages, output=output)
+            assert [item.id for item in reconstructed] == ["rs_1", "msg_1", "fc_1", "rs_2", "msg_2", "fc_2"]
+            assert [item.type for item in reconstructed] == [
+                "reasoning",
+                "message",
+                "function_call",
+                "reasoning",
+                "message",
+                "function_call",
+            ]
+
+        seeded_messages = responses_input_to_messages(response.output)
+        seeded_items = chat_messages_to_responses(seeded_messages)
+        assert [item.id for item in seeded_items] == ["rs_1", "msg_1", "fc_1", "rs_2", "msg_2", "fc_2"]
 
     async def test_run_async_does_not_replace_resource_cookies(self, monkeypatch: MonkeyPatch) -> None:
         client = MagicMock()

@@ -102,6 +102,7 @@ _current_run_state: contextvars.ContextVar[Optional[_GenRunState]] = contextvars
 # when converting the completed trajectory back into Responses output items.
 _TRAINING_META_KEY = "__ng_training__"
 _USAGE_META_KEY = "__ng_usage__"
+_OUTPUT_ITEMS_META_KEY = "__ng_output_items__"
 _TRAINING_META_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
 _TEXT_CONTENT_TYPES = {"text", "input_text", "output_text"}
 
@@ -169,7 +170,12 @@ def responses_input_to_messages(input_items: list[Any]) -> list[ChatMessage]:
                 id=item.call_id,
             )
             calls_by_id[item.call_id] = tool_call
-            messages.append(ChatMessage.from_assistant(tool_calls=[tool_call]))
+            meta = (
+                {_OUTPUT_ITEMS_META_KEY: [{"type": "function_call", "id": item.id, "call_id": item.call_id}]}
+                if item.id is not None
+                else None
+            )
+            messages.append(ChatMessage.from_assistant(tool_calls=[tool_call], meta=meta))
         elif item_type == "function_call_output":
             origin = calls_by_id.get(item.call_id) or ToolCall(tool_name="", arguments={}, id=item.call_id)
             messages.append(ChatMessage.from_tool(tool_result=item.output, origin=origin))
@@ -178,11 +184,28 @@ def responses_input_to_messages(input_items: list[Any]) -> list[ChatMessage]:
             messages.append(
                 ChatMessage.from_assistant(
                     reasoning=summary,
-                    meta={"__ng_reasoning_id__": item.id, "__ng_reasoning_encrypted__": item.encrypted_content},
+                    meta={
+                        "__ng_reasoning_id__": item.id,
+                        "__ng_reasoning_encrypted__": item.encrypted_content,
+                        _OUTPUT_ITEMS_META_KEY: [
+                            {
+                                "type": "reasoning",
+                                "id": item.id,
+                                "summary": summary,
+                                "encrypted_content": item.encrypted_content,
+                            }
+                        ],
+                    },
                 )
             )
         elif role == "assistant":
-            messages.append(ChatMessage.from_assistant(text=_content_to_text(item.content) or None))
+            text = _content_to_text(item.content)
+            meta = (
+                {_OUTPUT_ITEMS_META_KEY: [{"type": "message", "id": item.id, "text": text}]}
+                if getattr(item, "id", None) is not None
+                else None
+            )
+            messages.append(ChatMessage.from_assistant(text=text or None, meta=meta))
         elif role == "system" or role == "developer":
             messages.append(ChatMessage.from_system(_content_to_text(item.content), meta={"__ng_role__": role}))
         else:  # user (default)
@@ -199,6 +222,57 @@ def _tool_to_responses_param(tool: Any, tools_strict: bool) -> dict[str, Any]:
         "parameters": tool.parameters,
         "strict": tools_strict,
     }
+
+
+def _items_from_output_metadata(message: ChatMessage, index: int) -> Optional[list[Any]]:
+    """Recreate the model output items folded into one Haystack assistant message.
+
+    Haystack's ``ChatMessage`` has one text and one reasoning field, while a Responses
+    completion may contain several reasoning and assistant-message items. The private
+    metadata retains their minimal grouping solely so their model-provided IDs survive
+    both the next model request and the final reconstructed trajectory.
+    """
+    records = message.meta.get(_OUTPUT_ITEMS_META_KEY)
+    if records is None:
+        return None
+
+    tool_calls_by_id = {tool_call.id: tool_call for tool_call in message.tool_calls if tool_call.id is not None}
+    items: list[Any] = []
+    for record in records:
+        record_type = record["type"]
+        if record_type == "reasoning":
+            items.append(
+                NeMoGymResponseReasoningItem(
+                    type="reasoning",
+                    id=record["id"],
+                    summary=[NeMoGymSummary(text=record["summary"], type="summary_text")],
+                    encrypted_content=record.get("encrypted_content"),
+                )
+            )
+        elif record_type == "message":
+            items.append(
+                NeMoGymResponseOutputMessage(
+                    type="message",
+                    id=record["id"],
+                    content=[NeMoGymResponseOutputText(type="output_text", annotations=[], text=record["text"])],
+                )
+            )
+        elif record_type == "function_call":
+            tool_call = tool_calls_by_id.get(record["call_id"])
+            if tool_call is None:
+                raise ValueError(f"Missing tool call {record['call_id']!r} retained in Responses metadata.")
+            items.append(
+                NeMoGymResponseFunctionToolCall(
+                    type="function_call",
+                    id=record["id"],
+                    call_id=tool_call.id,
+                    name=tool_call.tool_name,
+                    arguments=json.dumps(tool_call.arguments or {}),
+                )
+            )
+        else:
+            raise ValueError(f"Unsupported retained Responses output item type {record_type!r}.")
+    return items
 
 
 def chat_messages_to_responses(messages: list[ChatMessage], *, output: bool = False) -> list[Any]:
@@ -228,37 +302,41 @@ def chat_messages_to_responses(messages: list[ChatMessage], *, output: bool = Fa
 
         role = message.role
         if role == ChatRole.ASSISTANT:
-            reasoning = message.reasoning
-            if reasoning is not None:
-                items.append(
-                    NeMoGymResponseReasoningItem(
-                        type="reasoning",
-                        id=message.meta.get("__ng_reasoning_id__", f"rs_{index}"),
-                        summary=[NeMoGymSummary(text=reasoning.reasoning_text, type="summary_text")],
-                        encrypted_content=message.meta.get("__ng_reasoning_encrypted__"),
-                    )
-                )
-            text = "".join(message.texts)
-            if text:
-                if output:
+            retained_items = _items_from_output_metadata(message, index)
+            if retained_items is not None:
+                items.extend(retained_items)
+            else:
+                reasoning = message.reasoning
+                if reasoning is not None:
                     items.append(
-                        NeMoGymResponseOutputMessage(
-                            type="message",
-                            id=message.meta.get("__ng_message_id__", f"msg_{index}"),
-                            content=[NeMoGymResponseOutputText(type="output_text", annotations=[], text=text)],
+                        NeMoGymResponseReasoningItem(
+                            type="reasoning",
+                            id=message.meta.get("__ng_reasoning_id__", f"rs_{index}"),
+                            summary=[NeMoGymSummary(text=reasoning.reasoning_text, type="summary_text")],
+                            encrypted_content=message.meta.get("__ng_reasoning_encrypted__"),
                         )
                     )
-                else:
-                    items.append(NeMoGymEasyInputMessage(type="message", role="assistant", content=text))
-            for call_index, tool_call in enumerate(message.tool_calls):
-                items.append(
-                    NeMoGymResponseFunctionToolCall(
-                        type="function_call",
-                        call_id=tool_call.id or f"call_{index}_{call_index}",
-                        name=tool_call.tool_name,
-                        arguments=json.dumps(tool_call.arguments or {}),
+                text = "".join(message.texts)
+                if text:
+                    if output:
+                        items.append(
+                            NeMoGymResponseOutputMessage(
+                                type="message",
+                                id=message.meta.get("__ng_message_id__", f"msg_{index}"),
+                                content=[NeMoGymResponseOutputText(type="output_text", annotations=[], text=text)],
+                            )
+                        )
+                    else:
+                        items.append(NeMoGymEasyInputMessage(type="message", role="assistant", content=text))
+                for call_index, tool_call in enumerate(message.tool_calls):
+                    items.append(
+                        NeMoGymResponseFunctionToolCall(
+                            type="function_call",
+                            call_id=tool_call.id or f"call_{index}_{call_index}",
+                            name=tool_call.tool_name,
+                            arguments=json.dumps(tool_call.arguments or {}),
+                        )
                     )
-                )
 
             # One Haystack assistant message represents one model completion. Its token stream
             # covers every item reconstructed above (including parsed reasoning), so attach it to
@@ -291,13 +369,15 @@ def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]
     reasoning_parts: list[str] = []
     reasoning_id: Optional[str] = None
     reasoning_encrypted_content: Optional[str] = None
+    output_items: list[dict[str, Any]] = []
     tool_calls: list[ToolCall] = []
 
     for item in ng_response.output:
         item_type = getattr(item, "type", None)
         if item_type == "message" and getattr(item, "role", None) == "assistant":
-            for content in item.content:
-                text_parts.append(_content_part_text(content, context="model response"))
+            text = "".join(_content_part_text(content, context="model response") for content in item.content)
+            text_parts.append(text)
+            output_items.append({"type": "message", "id": item.id, "text": text})
         elif item_type == "function_call":
             try:
                 arguments = json.loads(item.arguments) if item.arguments else {}
@@ -306,13 +386,26 @@ def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]
                 # invocation surfaces the error instead of us crashing here.
                 arguments = {"__raw_arguments__": item.arguments}
             tool_calls.append(ToolCall(tool_name=item.name, arguments=arguments, id=item.call_id))
+            output_items.append({"type": "function_call", "id": item.id, "call_id": item.call_id})
         elif item_type == "reasoning":
+            summary = "".join(summary.text for summary in item.summary)
+            reasoning_parts.append(summary)
             reasoning_id = item.id
             reasoning_encrypted_content = item.encrypted_content
-            reasoning_parts.extend(summary.text for summary in item.summary)
+            output_items.append(
+                {
+                    "type": "reasoning",
+                    "id": item.id,
+                    "summary": summary,
+                    "encrypted_content": item.encrypted_content,
+                }
+            )
 
-    meta: dict[str, Any] = {}
+    meta: dict[str, Any] = {_OUTPUT_ITEMS_META_KEY: output_items} if output_items else {}
     if reasoning_id is not None:
+        # Retain the legacy single-item fields for manually constructed ChatMessages.
+        # The ordered output metadata above is authoritative when a model emitted more
+        # than one reasoning item.
         meta["__ng_reasoning_id__"] = reasoning_id
         meta["__ng_reasoning_encrypted__"] = reasoning_encrypted_content
     training_item = next(
