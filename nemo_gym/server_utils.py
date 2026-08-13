@@ -46,6 +46,7 @@ from aiohttp import (
 )
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -211,14 +212,7 @@ async def request(
 ) -> ClientResponse:  # pragma: no cover
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
-        json_obj = kwargs.pop("json")
-        if isinstance(json_obj, BaseModel):
-            data = json_obj.model_dump_json(exclude_unset=True)
-        elif isinstance(json_obj, Mapping):
-            data = orjson.dumps(json_obj)
-        else:
-            raise NotImplementedError
-
+        data = await get_request_json(kwargs.pop("json"))
         kwargs["data"] = data
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
@@ -288,8 +282,22 @@ Response content: {content}""")
             raise e
 
 
+def _sync_get_request_json(json_obj: Union[BaseModel, Mapping]) -> str:
+    if isinstance(json_obj, BaseModel):
+        data = json_obj.model_dump_json(exclude_unset=True)
+    elif isinstance(json_obj, Mapping):
+        data = orjson.dumps(json_obj)
+    else:
+        raise NotImplementedError
+    return data
+
+
+async def get_request_json(json_obj: Union[BaseModel, Mapping]) -> str:
+    return await run_in_threadpool(_sync_get_request_json, json_obj=json_obj)
+
+
 async def get_response_json(response: ClientResponse) -> Any:
-    return orjson.loads(await response.read())
+    return await run_in_threadpool(orjson.loads, await response.read())
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
