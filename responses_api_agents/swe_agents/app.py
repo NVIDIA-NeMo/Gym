@@ -61,6 +61,7 @@ from nemo_gym.global_config import (
     RESULTS_DIR_KEY_NAME,
     OmegaConf,
     get_global_config_dict,
+    maybe_get_global_config_dict,
 )
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -312,6 +313,11 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
 
 
 @contextmanager
+def _is_pinned_commit(ref: str) -> bool:
+    """True for a hex object id (immutable); False for HEAD, branch, and tag refs."""
+    return re.fullmatch(r"[0-9a-fA-F]{7,40}", ref) is not None
+
+
 def file_lock(file_path: Path, label: str, max_wait: float = 3600.0, poll_interval: float = 5.0):
     """Cross-node lock using mkdir (atomic on Lustre/NFS, unlike fcntl.flock)."""
     lock_dir = file_path.parent
@@ -364,9 +370,27 @@ class BaseDatasetHarnessProcessor(BaseModel):
 
         Anchored at the global `cache_dir` so deployments can relocate the
         caches (e.g. to node-local or baked container storage) independently of
-        the package and of where run artifacts go.
+        the package and of where run artifacts go. Consults the config without
+        parsing it, so bare processors (no gym CLI, no injected config) fall
+        back to the install-anchored default rather than triggering a parse.
         """
-        return Path(get_global_config_dict().get(CACHE_DIR_KEY_NAME) or CACHE_DIR) / "swe_agents"
+        global_config_dict = maybe_get_global_config_dict()
+        configured = global_config_dict.get(CACHE_DIR_KEY_NAME) if global_config_dict is not None else None
+        return (Path(configured) if configured else CACHE_DIR) / "swe_agents"
+
+    def resolve_setup_dir(self, name: str) -> Path:
+        """Setup tree under the cache root, unless only a pre-staged install-relative tree exists.
+
+        Deployments that bake the setup trees at build time stage them next to
+        the package (the pre-`cache_dir` layout); abandoning those would mean a
+        multi-GB re-clone per node, or a hard failure on egress-restricted
+        clusters.
+        """
+        setup_dir = self.setup_root / name
+        legacy_dir = self.parent_dir / name
+        if not setup_dir.exists() and legacy_dir.exists():
+            return legacy_dir
+        return setup_dir
 
     def _run_setup_command(self, command: str) -> None:
         process = Popen(command, shell=True)
@@ -392,7 +416,7 @@ class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
         swebench_repo = "https://github.com/HeyyyyyyG/SWE-bench.git"
         swebench_commit = "HEAD"
 
-        setup_dir = self.setup_root / "swe_swebench_setup"
+        setup_dir = self.resolve_setup_dir("swe_swebench_setup")
         setup_dir.mkdir(parents=True, exist_ok=True)
 
         with file_lock(setup_dir, "SWE-bench setup"):
@@ -462,7 +486,7 @@ class SweBenchMultilingualDatasetProcessor(BaseDatasetHarnessProcessor):
         swebench_repo = "https://github.com/Kipok/SWE-bench.git"
         swebench_commit = "HEAD"
 
-        setup_dir = self.setup_root / "swe_swebench_multilingual_setup"
+        setup_dir = self.resolve_setup_dir("swe_swebench_multilingual_setup")
         setup_dir.mkdir(parents=True, exist_ok=True)
 
         with file_lock(setup_dir, "SWE-bench_Multilingual setup"):
@@ -532,7 +556,7 @@ class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
         eval_harness_repo = "https://github.com/sdevare-nv/nv-R2E-Gym.git"
         eval_harness_commit = "local-eval"
 
-        setup_dir = self.setup_root / "swe_r2e_gym_setup"
+        setup_dir = self.resolve_setup_dir("swe_r2e_gym_setup")
 
         with file_lock(setup_dir, "R2E-Gym setup"):
             r2e_gym_dir = setup_dir / "R2E-Gym"
@@ -776,7 +800,7 @@ def _load_rebench_log_parsers(rebench_repo_dir: Path):
 
 class SWERebenchDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
-        setup_dir = self.setup_root / "swe_rebench_setup"
+        setup_dir = self.resolve_setup_dir("swe_rebench_setup")
 
         with file_lock(setup_dir, "SWE-rebench setup"):
             rebench_dir = setup_dir / "SWE-rebench-V2"
@@ -917,7 +941,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
             report_path.write_text(json.dumps(report, indent=2))
             return
 
-        setup_dir = self.setup_root / "swe_rebench_setup"
+        setup_dir = self.resolve_setup_dir("swe_rebench_setup")
         log_parsers = _load_rebench_log_parsers(setup_dir / "SWE-rebench-V2")
 
         parser = log_parsers.NAME_TO_PARSER.get(log_parser_name) or getattr(log_parsers, log_parser_name, None)
@@ -1559,11 +1583,26 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         new_commit = _git("rev-parse", "HEAD")
         print(f"OpenHands now at commit {new_commit[:12]} (target={target})", flush=True)
 
+    def _resolve_openhands_setup_dir(self) -> Path:
+        # OpenHands is the only processor whose checkout commit comes from
+        # config (the others hardcode their pins per code version), so only its
+        # shared tree can be retargeted by a concurrently starting run:
+        # file_lock is held during setup() only, and a later run's
+        # `reset --hard` would move the tree under this one. Key the tree by
+        # commit when the value is an immutable object id; mutable refs (HEAD,
+        # branches) can't key a cache and keep the shared tree + ensure-commit
+        # flow instead.
+        commit = self.config.agent_framework_commit
+        if not _is_pinned_commit(commit):
+            return self.resolve_setup_dir("swe_openhands_setup")
+        setup_dir = self.setup_root / "swe_openhands_setup" / commit
+        legacy_dir = self.parent_dir / "swe_openhands_setup"
+        if not setup_dir.exists() and legacy_dir.exists():
+            return legacy_dir
+        return setup_dir
+
     def setup(self) -> Path:
-        # Keyed by commit: file_lock is only held during setup(), so an unkeyed
-        # shared checkout could be reset --hard to a different commit by a
-        # later run while this one is still executing from it.
-        setup_dir = self.setup_root / "swe_openhands_setup" / self.config.agent_framework_commit
+        setup_dir = self._resolve_openhands_setup_dir()
 
         with file_lock(setup_dir, "OpenHands setup"):
             openhands_dir = setup_dir / "OpenHands"
@@ -1931,7 +1970,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
 
     def setup(self) -> Path:
-        setup_dir = self.setup_root / "swe_opencode_setup"
+        setup_dir = self.resolve_setup_dir("swe_opencode_setup")
 
         with file_lock(setup_dir, "opencode"):
             opencode_dir = setup_dir / "opencode"
@@ -2787,8 +2826,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         # Run artifacts are written here by this server and read across the run
         # (on multinode deployments, from other nodes); resolved from the global
-        # `results_dir` so runs can point it at a shared filesystem.
-        results_root = Path(get_global_config_dict().get(RESULTS_DIR_KEY_NAME) or RESULTS_DIR)
+        # `results_dir` so runs can point it at a shared filesystem. The key is
+        # absent only for hand-built config dicts that bypassed the parser.
+        configured_results_root = get_global_config_dict().get(RESULTS_DIR_KEY_NAME)
+        results_root = Path(configured_results_root) if configured_results_root else RESULTS_DIR
         base_results_dir = results_root / f"swebench_results_{run_session_id}"
         base_results_dir.mkdir(parents=True, exist_ok=True)
         # Only set up the agent harness that's actually selected. Both share the

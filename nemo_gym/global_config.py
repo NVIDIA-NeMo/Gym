@@ -847,9 +847,16 @@ Found global config dict yaml:
             # `cache_dir` is where they keep reusable setup trees (clones, venvs,
             # toolchains). Overridable independently, so a run can point results at
             # a shared filesystem while caches stay on fast local (or baked
-            # container) storage.
-            global_config_dict.setdefault(RESULTS_DIR_KEY_NAME, str(RESULTS_DIR))
-            global_config_dict.setdefault(CACHE_DIR_KEY_NAME, str(CACHE_DIR))
+            # container) storage. Normalized to absolute here: children resolve
+            # relative paths against their own cwd, which differs per process.
+            for dir_key_name, dir_default in (
+                (RESULTS_DIR_KEY_NAME, RESULTS_DIR),
+                (CACHE_DIR_KEY_NAME, CACHE_DIR),
+            ):
+                dir_value = global_config_dict.setdefault(dir_key_name, str(dir_default))
+                if not isinstance(dir_value, str) or not dir_value:
+                    raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
+                global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
 
             # UV related configuration
             # UV caching directory overrides to local folders, under the cache root.
@@ -861,6 +868,9 @@ Found global config dict yaml:
                 environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
+            # Deliberately anchored at WORKING_DIR rather than the cache root: venv
+            # trees don't relocate safely once built, and the key is independently
+            # overridable for deployments that want them elsewhere.
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
@@ -922,6 +932,30 @@ Found global config dict yaml:
         return almost_servers
 
 
+def maybe_get_global_config_dict() -> Optional[DictConfig]:
+    """The global config dict when this process already has one; never triggers a CLI parse.
+
+    Returns the cached dict, or the one the parent injected via
+    NEMO_GYM_CONFIG_DICT (caching it), or None in a bare process. Library code
+    that only wants to *consult* the config should use this instead of
+    `get_global_config_dict`, which falls through to a full CLI/hydra parse.
+    """
+    global _GLOBAL_CONFIG_DICT
+    if _GLOBAL_CONFIG_DICT is not None:
+        return _GLOBAL_CONFIG_DICT
+
+    nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    if nemo_gym_config_dict_str_from_env:
+        global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
+
+        _GLOBAL_CONFIG_DICT = global_config_dict
+
+        _apply_verbosity(global_config_dict)
+        return global_config_dict
+
+    return None
+
+
 def get_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
@@ -943,18 +977,9 @@ def get_global_config_dict(
 
     If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME. The config dict will be read directly off this variable, cached, and returned with no additional validation.
     """
-    global _GLOBAL_CONFIG_DICT
-    if _GLOBAL_CONFIG_DICT is not None:
-        return _GLOBAL_CONFIG_DICT
-
-    nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
-    if nemo_gym_config_dict_str_from_env:
-        global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
-
-        _GLOBAL_CONFIG_DICT = global_config_dict
-
-        _apply_verbosity(global_config_dict)
-        return global_config_dict
+    existing_global_config_dict = maybe_get_global_config_dict()
+    if existing_global_config_dict is not None:
+        return existing_global_config_dict
 
     set_global_config_dict(
         global_config_dict_parser_config=global_config_dict_parser_config,

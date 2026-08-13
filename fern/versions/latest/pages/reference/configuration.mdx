@@ -13,6 +13,17 @@ Complete syntax and field specifications for NeMo Gym configuration files.
 | Server configs | `<server_type>/<implementation>/configs/*.yaml` | ✅ Committed |
 | env.yaml | Repository root (`./env.yaml`) | ❌ Gitignored (user creates) |
 
+### Artifact Roots (`results_dir`, `cache_dir`)
+
+Two top-level config keys control where servers keep state that outlives a request:
+
+| Key | Default | Holds |
+|-----|---------|-------|
+| `results_dir` | `<working dir>/results` | Per-run artifacts a run writes and reads back (on multi-node deployments, from other nodes) — point it at a shared filesystem there |
+| `cache_dir` | `<working dir>/cache` | Reusable setup trees (clones, venvs, toolchains) and the `uv` cache — fast local or baked container storage is fine |
+
+Both are independently overridable (`results_dir=/shared/results cache_dir=/local/cache`), and relative values are normalized to absolute paths at parse time so all server processes agree. `uv_cache_dir` defaults under `cache_dir`; `uv_venv_dir` keeps its own key and default. Servers that pre-staged setup trees next to the package (the layout before `cache_dir` existed) keep using those trees until one exists under `cache_dir`. Contents accumulate across runs — both directories are safe to delete when no run is active.
+
 ---
 
 ## Path Resolution and External Roots
