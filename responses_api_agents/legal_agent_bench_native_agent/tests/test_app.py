@@ -258,6 +258,24 @@ async def test_preflight_rejects_container_tool_error(monkeypatch) -> None:
         await _REAL_PREFLIGHT(executor)
 
 
+async def test_preflight_uses_its_dedicated_timeout(monkeypatch) -> None:
+    executor = app.LabToolExecutor(
+        timeout_seconds=60,
+        preflight_timeout_seconds=120,
+        max_output_chars=100,
+    )
+    run = AsyncMock(return_value="OK")
+    monkeypatch.setattr(executor, "_run", run)
+
+    await _REAL_PREFLIGHT(executor)
+
+    run.assert_awaited_once_with(
+        ["/usr/local/bin/python", str(app.CONTAINER_TOOL_RUNNER), "preflight"],
+        stdin=b"{}",
+        timeout_seconds=120,
+    )
+
+
 async def test_explicit_full_read_is_not_truncated(monkeypatch) -> None:
     executor = app.LabToolExecutor(timeout_seconds=1, max_output_chars=5)
     monkeypatch.setattr(executor, "_run", AsyncMock(return_value="complete document"))

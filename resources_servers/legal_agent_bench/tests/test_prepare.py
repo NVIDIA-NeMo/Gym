@@ -94,6 +94,11 @@ def test_generated_task_cache_is_deterministic_and_credential_free(monkeypatch, 
         "legal_agent_bench::area__task-one",
     ]
     assert all("agent_ref" not in row for row in rows)
+    dockerfile = (first / "area__task-one" / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    assert "iproute2" in dockerfile
+    assert "groupadd --gid 1000660000 sandbox" in dockerfile
+    assert "useradd -K UID_MAX=1000660000" in dockerfile
+    assert "install -d -o sandbox -g sandbox /workspace/output" in dockerfile
     for toml in first.glob("*/task.toml"):
         text = toml.read_text(encoding="utf-8")
         assert "[verifier.env]" not in text

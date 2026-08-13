@@ -46,7 +46,7 @@ DEFAULT_SKILLS_DIR = PACKAGE_DIR / "data" / "cache" / "harness" / "skills"
 INDEX_FILENAME = "all.jsonl"
 DEFAULT_INDEX_FPATH = PACKAGE_DIR / "data" / "generated" / INDEX_FILENAME
 CACHE_MARKER = ".nemo_gym_asset.json"
-CACHE_FORMAT_VERSION = 4
+CACHE_FORMAT_VERSION = 5
 REWARD_MODES = ("full_task", "criteria_pass_rate")
 REWARD_MODE_ENV_KEY = "LEGAL_AGENT_BENCH_REWARD_MODE"
 LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "vendor" / "harvey_labs" / "lab_harbor"
@@ -80,8 +80,16 @@ RUN apt-get update \\
     && apt-get install -y --no-install-recommends \\
         bash ca-certificates coreutils curl file findutils fonts-liberation g++ \\
         gawk gcc git grep jq libreoffice nodejs npm pandoc poppler-utils procps \\
-        qpdf ripgrep sed tesseract-ocr \\
+        iproute2 qpdf ripgrep sed tesseract-ocr \\
     && rm -rf /var/lib/apt/lists/*
+
+# OpenShell executes commands as a restricted sandbox identity and requires
+# iproute2 for its network namespace. The high UID/GID avoids colliding with
+# ordinary host users when user-namespace remapping is unavailable.
+RUN groupadd --gid 1000660000 sandbox \\
+    && useradd -K UID_MAX=1000660000 --no-log-init --uid 1000660000 \\
+        --gid sandbox --create-home --shell /bin/bash sandbox \\
+    && install -d -o sandbox -g sandbox /workspace/output
 
 RUN python -m pip install --upgrade pip \\
     && python -m pip install \\
@@ -102,12 +110,14 @@ WORKDIR /workspace/output
 _TEST_SCRIPT = """#!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p /logs/verifier
-python /tests/legal_agent_bench_verify.py \\
-  --task-json /tests/task.json \\
-  --run-dir /logs/agent/artifacts/lab-run \\
-  --verifier-dir /logs/verifier \\
-  --reward-json /logs/verifier/reward.json
+tests_dir="${LAB_TESTS_DIR:-/tests}"
+logs_dir="${LAB_LOGS_DIR:-/logs}"
+mkdir -p "$logs_dir/verifier"
+python "$tests_dir/legal_agent_bench_verify.py" \\
+  --task-json "$tests_dir/task.json" \\
+  --run-dir "$logs_dir/agent/artifacts/lab-run" \\
+  --verifier-dir "$logs_dir/verifier" \\
+  --reward-json "$logs_dir/verifier/reward.json"
 """
 
 

@@ -62,6 +62,7 @@ class LegalAgentBenchNativeAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     max_turns: int = Field(default=60, ge=1)
     shell_timeout: int = Field(default=60, ge=1)
+    preflight_timeout_seconds: int = Field(default=120, ge=1)
     model_timeout_seconds: int = Field(default=1800, ge=1)
     max_output_chars: int = Field(default=16_384, ge=1)
 
@@ -73,8 +74,15 @@ class LegalAgentBenchNativeRunRequest(BaseRunRequest):
 class LabToolExecutor:
     """Execute the upstream LAB tools in the current task sandbox."""
 
-    def __init__(self, *, timeout_seconds: int, max_output_chars: int) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: int,
+        max_output_chars: int,
+        preflight_timeout_seconds: int | None = None,
+    ) -> None:
         self.timeout_seconds = timeout_seconds
+        self.preflight_timeout_seconds = preflight_timeout_seconds or timeout_seconds
         self.max_output_chars = max_output_chars
 
     async def preflight(self) -> None:
@@ -104,17 +112,30 @@ class LabToolExecutor:
             # but stream the command over stdin so argv remains fixed-size.
             result = await self._run(["/bin/bash", "-l", "-s"], stdin=command.encode())
         else:
-            result = await self._run(
-                ["/usr/local/bin/python", str(CONTAINER_TOOL_RUNNER), name],
-                stdin=json.dumps(parsed).encode(),
-            )
+            command = ["/usr/local/bin/python", str(CONTAINER_TOOL_RUNNER), name]
+            stdin = json.dumps(parsed).encode()
+            if name == "preflight":
+                result = await self._run(
+                    command,
+                    stdin=stdin,
+                    timeout_seconds=self.preflight_timeout_seconds,
+                )
+            else:
+                result = await self._run(command, stdin=stdin)
         full_read = name == "read" and "limit" in parsed and parsed.get("limit") in {0, None}
         return result if full_read else self._truncate(result)
 
-    async def _run(self, command: list[str], *, stdin: bytes | None = None) -> str:
+    async def _run(
+        self,
+        command: list[str],
+        *,
+        stdin: bytes | None = None,
+        timeout_seconds: int | None = None,
+    ) -> str:
+        effective_timeout = timeout_seconds or self.timeout_seconds
         process = await asyncio.create_subprocess_exec(
             *command,
-            cwd="/workspace/output",
+            cwd=os.environ.get("OUTPUT_DIR", "/workspace/output"),
             env=os.environ.copy(),
             stdin=asyncio.subprocess.PIPE if stdin is not None else None,
             stdout=asyncio.subprocess.PIPE,
@@ -122,14 +143,14 @@ class LabToolExecutor:
             start_new_session=True,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(input=stdin), timeout=self.timeout_seconds)
+            stdout, stderr = await asyncio.wait_for(process.communicate(input=stdin), timeout=effective_timeout)
         except asyncio.TimeoutError:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             await process.communicate()
-            return f"Error: tool timed out after {self.timeout_seconds}s"
+            return f"Error: tool timed out after {effective_timeout}s"
 
         output = stdout.decode(errors="replace")
         error = stderr.decode(errors="replace")
@@ -261,6 +282,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
 
         executor = LabToolExecutor(
             timeout_seconds=self.config.shell_timeout,
+            preflight_timeout_seconds=self.config.preflight_timeout_seconds,
             max_output_chars=self.config.max_output_chars,
         )
         try:
