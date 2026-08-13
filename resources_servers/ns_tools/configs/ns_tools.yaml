@@ -53,9 +53,8 @@ ns_tools:
               domain: ${oc.env:OPENSANDBOX_BASE_URL,}
               api_key: ${oc.env:OPENSANDBOX_API_KEY,}
               use_server_proxy: true
-              # First-ever create on a new image tag blocks on nydus conversion (40-55s);
-              # the SDK default request_timeout (30s) fails the whole cold warmup wave.
-              request_timeout: 180
+              # Cold image conversion can exceed the default request timeout.
+              request_timeout_s: 180
         image: ${oc.env:NS_SANDBOX_IMAGE,}
         # Server-side Pool CRD name (pools.sandbox.opensandbox.io). When set,
         # creates claim prewarmed pods via extensions.poolRef — image/resources come
@@ -65,6 +64,9 @@ ns_tools:
         # unavailable (true, default) or fail the slot instead (false). Fallback pods
         # go through the prepare step, so keep setup/service settings configured.
         pool_fallback: ${oc.decode:${oc.env:NS_SANDBOX_POOL_FALLBACK,true}}
+        # OpenSandbox otherwise replaces the image command with an idle execd
+        # bootstrap, so direct creates must start the NS service explicitly.
+        entrypoint: ["/start-with-nginx.sh"]
         port: 6000
         size: ${oc.env:NS_SANDBOX_POOL_SIZE,8}
         ttl_s: ${oc.env:NS_SANDBOX_TTL_S,14400}
