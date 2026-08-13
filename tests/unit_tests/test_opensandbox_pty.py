@@ -22,8 +22,8 @@ from typing import Any
 import aiohttp
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtyError, SandboxPtySpec
 import nemo_gym.sandbox.providers.opensandbox.pty as pty_module
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtyError, SandboxPtySpec
 from nemo_gym.sandbox.providers.opensandbox.pty import (
     OpenSandboxPtySession,
     _effective_command,
