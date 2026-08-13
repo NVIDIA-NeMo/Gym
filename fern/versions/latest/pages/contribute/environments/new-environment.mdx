@@ -1,36 +1,42 @@
 ---
 title: "New Environment"
-description: "Scaffold a resources server, implement verify(), and satisfy tests and example artifacts."
+description: "Add a new scorer: scaffold a resources server, implement verify(), and satisfy tests and example artifacts."
 position: 3
 ---
 import { NavButton } from "../../../../../components/NavButton";
 
 <Info>
-**Goal:** Add a new resources server when no existing scorer can grade the task.
+**Goal:** Add a new **scorer** (resources server) when no existing one can grade the task.
 
-**Time:** Longer than an overlay. Budget a working session for `verify()`, tests, and the five-row artifacts.
+A resources server is the program under `resources_servers/` that implements `verify()` — the function that returns a numeric score. An **overlay** (a named benchmark) comes later, in step 6.
+
+**Time:** Budget a working session for scoring code, tests, and five example tasks.
 
 **In this guide you will:**
 
-1. Scaffold `resources_servers/<name>/`
-2. Implement `verify()` (and tools or state)
+1. Create `resources_servers/<name>/`
+2. Implement `verify()` (and any tools or session state)
 3. Add unit tests
-4. Produce five example rows, metrics, and rollouts
-5. Open a PR that matches CI
-6. Add a named benchmark overlay that chains to the new server
+4. Produce five example tasks, metrics, and rollouts
+5. Open a pull request that matches CI
+6. Add a named benchmark overlay that points at this scorer
 
-Reusing `math_with_judge`, `mcqa`, or similar? Stop and follow [Add a benchmark](/contribute/environments/adding-a-benchmark).
+If `math_with_judge`, `mcqa`, or a similar scorer already fits, stop and follow [Add a benchmark](/contribute/environments/adding-a-benchmark).
 </Info>
 
 <NavButton href="/contribute/environments/onboarding-decision-tree" label="Onboarding decision tree" direction="back" />
 
-An environment is the measurement surface (tasks, verifier, tools, state). Gym config composes it with an agent and a model.
+**Before you start**
 
-**Prerequisites:** [Development setup](/contribute/development-setup) and a working `env.yaml` from the [Quickstart](/get-started/quickstart). For a full hands-on `verify()` and tool example, work through [Single-Step Environment](/environment-tutorials/single-step-environment) first. Run every command from the repository root.
+1. [Development setup](/contribute/development-setup) and a gitignored `env.yaml` from the [Quickstart](/get-started/quickstart).
+2. For a full hands-on `verify()` and tool example, work through [Single-Step Environment](/environment-tutorials/single-step-environment) first.
+3. Run every command from the repository root.
 
 ---
 
 ## 1. Scaffold
+
+Search first, then generate the folder:
 
 ```bash
 gym search resources-servers "task description"
@@ -40,8 +46,8 @@ gym env init --resources-server my_server
 ```text
 resources_servers/my_server/
 +-- __init__.py
-+-- app.py                 # VerifierFixture scaffold (see below)
-+-- configs/my_server.yaml # instance keys: my_server_resources_server, my_server_simple_agent
++-- app.py                 # scoring code (starter tests use VerifierFixture — see step 2)
++-- configs/my_server.yaml # block names: my_server_resources_server, my_server_simple_agent
 +-- data/
 |   +-- .gitignore
 +-- tests/
@@ -52,28 +58,30 @@ resources_servers/my_server/
 +-- README.md
 ```
 
-YAML instance names are `{name}_resources_server` and `{name}_simple_agent` (pass the latter as `--agent`).
+In YAML, the scorer block is `{name}_resources_server` and the agent block is `{name}_simple_agent`. Pass the agent block as `--agent`.
 
 <Warning>
-For in-tree PRs, use `gym env init --resources-server` only. `--environment` / `--reuse-verifier` / `--benchmark` write the experimental manifest contract — details are in the accordion at the bottom of this page.
+For pull requests to this repository, run `gym env init --resources-server` only. `--environment`, `--reuse-verifier`, and `--benchmark` create an experimental layout — see the accordion at the bottom of this page.
 </Warning>
+
+**Next:** implement `verify()` in `app.py`.
 
 ---
 
 ## 2. Implement `verify()`
 
-`gym env init --resources-server` generates a **VerifierFixture** scaffold: `verify()` lives on a `{Name}Verifier` mixin, `VERIFIER_FIXTURE` is exported, and `tests/test_app.py` runs `exercise_verifier_fixture` against `tests/verifier_cases.jsonl`.
+`gym env init --resources-server` generates starter tests around a **VerifierFixture**: `verify()` lives on a `{Name}Verifier` class, `VERIFIER_FIXTURE` is exported, and `tests/test_app.py` runs those cases from `tests/verifier_cases.jsonl`.
 
 <Warning>
-The [Single-Step Environment](/environment-tutorials/single-step-environment) tutorial implements `verify()` on `SimpleResourcesServer` with hand-written pytest. That is the pattern used by most production servers (see [`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call)). Pick one:
+The [Single-Step Environment](/environment-tutorials/single-step-environment) tutorial puts `verify()` on `SimpleResourcesServer` and uses hand-written pytest. Most shipped scorers use that pattern (see [`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call)). Pick one:
 
-1. **Evolve the scaffold** — keep `VERIFIER_FIXTURE` and update `verifier_cases.jsonl`.
-2. **Rewrite to SimpleResourcesServer** — replace `tests/test_app.py` so it no longer imports `VERIFIER_FIXTURE`.
+1. **Keep the generated tests** — update `verifier_cases.jsonl` and leave `VERIFIER_FIXTURE` in place.
+2. **Switch to the tutorial pattern** — rewrite `tests/test_app.py` so it no longer imports `VERIFIER_FIXTURE`.
 
 Do not mix the two without updating tests.
 </Warning>
 
-Scoring (and any tools or session state) lives in `app.py`. Stub:
+Edit `resources_servers/my_server/app.py`. Scoring (and any tools or session state) lives there:
 
 ```python
 async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
@@ -81,37 +89,41 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 ```
 
-Handle missing or malformed model output with `reward=0.0` — do not crash the server. Add tools as extra FastAPI handlers on the same class. For session state (`seed_session`, cookies), see [Stateful Environment](/environment-tutorials/stateful-environment). If `simple_agent` is the wrong loop, see [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks).
+If the model output is missing or malformed, return `reward=0.0`. Do not crash the server. Add tools as extra FastAPI handlers on the same class. For per-task memory (`seed_session`, cookies), see [Stateful Environment](/environment-tutorials/stateful-environment). If `simple_agent` is the wrong loop, see [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks).
 
-Worked SimpleResourcesServer example: [Single-Step Environment](/environment-tutorials/single-step-environment). Verification pattern catalog: [Build Verifiers](/build-verifiers).
+Worked SimpleResourcesServer example: [Single-Step Environment](/environment-tutorials/single-step-environment). Scoring pattern catalog: [Build Verifiers](/build-verifiers).
 
-Set `domain` in the resources-server YAML (`math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, or `other`). See [Resources Server Fields](/reference/configuration#resources-server-fields).
+In `resources_servers/my_server/configs/my_server.yaml`, set `domain` to one of: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, or `other`. See [Resources Server Fields](/reference/configuration#resources-server-fields).
 
-Complete `README.md` with licensing. The `add-verified-flag` hook sets `verified: false` — leave it.
+Fill in `README.md` with licensing. The `add-verified-flag` git hook sets `verified: false` — leave it.
+
+**Next:** add tests, then five example tasks.
 
 ---
 
 ## 3. Tests
 
-At least one test in `tests/test_app.py` is required. The scaffold ships `test_verifier_fixture` plus `verifier_cases.jsonl` — replace or extend those when you change the verify pattern. Cover a passing reward, a failing reward, and empty model output.
+You need at least one test in `tests/test_app.py`. The scaffold already adds `test_verifier_fixture` plus `verifier_cases.jsonl` — replace or extend those when you change how scoring works. Cover a passing score, a failing score, and empty model output.
 
 ```bash
 gym env test --resources-server my_server
 ```
 
-That command runs pytest only. Add `+should_validate_data=true` to also check the five-row artifacts in the next step. CI always sets that flag.
+That command runs pytest only. Add `+should_validate_data=true` after you create the five example files in the next step. Pull-request CI always sets that flag.
+
+**Next:** write `data/example.jsonl` (five lines).
 
 ---
 
 ## 4. Example data and rollouts
 
-Create `resources_servers/my_server/data/example.jsonl` with **exactly 5** lines **before** collating metrics. New-server example rows typically **do** include `responses_create_params.input` (unlike overlay JSONL that uses `prompt_config`):
+Create `resources_servers/my_server/data/example.jsonl` with **exactly 5** lines **before** you generate metrics. These rows include chat messages (`responses_create_params.input`). Overlay JSONL that uses a prompt file does not — see [Add a benchmark](/contribute/environments/adding-a-benchmark#3-wire-config-prepare-and-data).
 
 ```json
 {"responses_create_params": {"input": [{"role": "user", "content": "what's it like in sf?"}]}}
 ```
 
-Add whatever fields `verify()` reads (`expected_answer`, `verifier_metadata`, tools). Reference: [`example_single_tool_call/data/example.jsonl`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_single_tool_call/data/example.jsonl) and [Single-Step §2](/environment-tutorials/single-step-environment#2-task-preparation).
+Add whatever fields `verify()` reads (`expected_answer`, `verifier_metadata`, tools). Examples: [`example_single_tool_call/data/example.jsonl`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_single_tool_call/data/example.jsonl) and [Single-Step §2](/environment-tutorials/single-step-environment#2-task-preparation).
 
 CI then requires all three files under `resources_servers/my_server/data/`:
 
@@ -119,7 +131,7 @@ CI then requires all three files under `resources_servers/my_server/data/`:
 | --- | --- |
 | `example.jsonl` | Exactly **5** rows (often the first five of your train split) |
 | `example_metrics.json` | `"Number of examples": 5` |
-| `example_rollouts.jsonl` | Exactly **5** rollouts |
+| `example_rollouts.jsonl` | Exactly **5** rollouts (full run records, including `reward`) |
 
 Generate metrics:
 
@@ -129,8 +141,6 @@ gym dataset collate \
   +output_dirpath=data/my_server \
   +mode=example_validation
 ```
-
-Generate rollouts (servers running):
 
 <Note>
 **Before rollouts:** [Development Setup](/contribute/development-setup) (`uv sync --extra dev`) and root `env.yaml` (`policy_base_url`, `policy_api_key`, `policy_model_name`) from the [Quickstart](/get-started/quickstart). Never commit `env.yaml`. Start servers in one terminal, collect in another. `--agent` is `my_server_simple_agent`.
@@ -153,7 +163,11 @@ gym env test --resources-server my_server +should_validate_data=true
 
 Worked example: [`resources_servers/example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step). `gym env test` (all servers) only discovers directories that contain `README.md`. Do not leave `*conflict*` files under `data/`.
 
-Train and validation dataset entries need a YAML `license` field. The scaffold already sets `license: Apache 2.0` on those slots — update it when you publish real splits. Hugging Face `source:` is the public default; GitLab is NVIDIA-internal. See [Prepare Data](/data).
+<Note>
+Train and validation dataset entries need a YAML `license` field. The scaffold already sets `license: Apache 2.0` — change it when you publish real splits. Hugging Face `source:` is the public default. GitLab is NVIDIA-internal only. See [Prepare Data](/data).
+</Note>
+
+**Next:** open a pull request, then name the eval in step 6.
 
 ---
 
@@ -164,20 +178,22 @@ Train and validation dataset entries need a YAML `license` field. The scaffold a
 - [ ] `domain` on the server YAML; `license` on train/validation datasets
 - [ ] `verified: false` (leave the hook default)
 - [ ] SPDX header on every new file
-- [ ] `git commit -s` (DCO)
+- [ ] `git commit -s` (Developer Certificate of Origin; cryptographic `-S` signing is optional)
 - [ ] `pre-commit run --files resources_servers/my_server/**/*` (stage auto-fixes from ruff / `add-verified-flag` / `update-readme-table`)
 - [ ] README with licensing
 - [ ] PR description: what the environment measures, how `verify()` works, data source and domain
 
-Reward profiling and a training run are optional for merge. They are stronger evidence before `verified: true`. See [Add a benchmark](/contribute/environments/adding-a-benchmark#6-reward-profiling).
+Score checks and a training run are optional for merge. They help before `verified: true`. See [Add a benchmark](/contribute/environments/adding-a-benchmark#6-reward-profiling).
+
+**Next:** add a named benchmark overlay so people can run `gym eval run --benchmark …`.
 
 ---
 
 ## 6. Name the eval
 
-A resources server is the scorer, not the named benchmark. After the server exists, add an overlay under `benchmarks/<name>/` that chains to `resources_servers/my_server/configs/my_server.yaml`. A training mix can live under `environments/<name>/` the same way.
+A resources server is the scorer, not the named benchmark. After the server exists, add `benchmarks/<name>/` that points `config_paths` at `resources_servers/my_server/configs/my_server.yaml`. A training mix can live under `environments/<name>/` the same way.
 
-Follow [Add a benchmark](/contribute/environments/adding-a-benchmark) from step 2, pointing `config_paths` at **your** server instead of `math_with_judge`.
+Follow [Add a benchmark](/contribute/environments/adding-a-benchmark) from step 2, and set `config_paths` to **your** server instead of `math_with_judge`.
 
 ---
 
@@ -189,7 +205,7 @@ A useful training check isolates this environment (for example GRPO with NeMo RL
 </Accordion>
 
 <Accordion title="Experimental manifest contract">
-In-tree environments and benchmarks do not ship `manifest.yaml`. The commands below are implemented but experimental.
+Environments and benchmarks in this repository do not ship `manifest.yaml`. The commands below are implemented but experimental.
 
 ```bash
 gym env init --environment my_eval --profile custom-gym-verifier

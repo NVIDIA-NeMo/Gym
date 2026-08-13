@@ -5,49 +5,49 @@ position: 3
 ---
 
 <Info>
-**Environment** = tasks, verifier, tools, and state. **Benchmark** = a versioned eval overlay on that surface (dataset, prompt, `prepare.py`). Most contributions reuse a scorer and never touch `app.py`.
+A **scorer** (resources server) grades the model's answer. A **benchmark** is usually a new dataset and prompt on top of an existing scorer, not new scoring code. Most contributions copy a folder under `benchmarks/` and never write `app.py`.
 </Info>
 
 <Tip>
-Complete [Development Setup](/contribute/development-setup) first. Using Cursor, Claude Code, or Codex? Follow the [`add-benchmark`](/contribute/agent-skills) skill.
+[Development Setup](/contribute/development-setup) first (`uv sync`, `pre-commit install`, `git commit -s`). Using an AI assistant? See [Agent Skills](/contribute/agent-skills).
 </Tip>
 
-Read the decision tree first, then the matching how-to. Keep the [Single-step tutorial](/environment-tutorials/single-step-environment) for a hands-on `verify()` walkthrough.
+Open the decision tree, then only the matching how-to.
 
 <Cards>
 
 <Card title="Onboarding decision tree" href="/contribute/environments/onboarding-decision-tree">
-Reuse a scorer, create a new one, or add a new harness.
+Can Gym already score this task? Pick overlay, new scorer, or a different agent.
 
 <Badge intent="success" minimal outlined>start here</Badge>
 </Card>
 
 <Card title="Add a benchmark" href="/contribute/environments/adding-a-benchmark">
-Copy an overlay, implement `prepare.py`, run `gym eval`.
+Copy an example folder, write `prepare.py`, run `gym eval`.
 
 <Badge intent="tip" minimal outlined>reuse a scorer</Badge>
 </Card>
 
 <Card title="New Environment" href="/contribute/environments/new-environment">
-Scaffold a resources server, implement `verify()`, satisfy the five-row CI gate.
+Add scoring code, tests, and five example tasks.
 
 <Badge minimal outlined>new scorer</Badge>
 </Card>
 
 <Card title="Single-step tutorial" href="/environment-tutorials/single-step-environment">
-Build a weather-tool server hands-on: tools, `verify()`, tests, and rollouts.
+Build a weather-tool server: tools, scoring, tests, and rollouts.
 
 <Badge minimal outlined>hands-on depth</Badge>
 </Card>
 
 <Card title="Wrap an external library" href="/environment-tutorials/integrate-external-environments">
-When the episode is driven by a third-party runner rather than `simple_agent`.
+The model must use a GUI, sandbox, or third-party runner instead of Gym's default agent.
 
 <Badge minimal outlined>advanced</Badge>
 </Card>
 
 <Card title="Onboarding FAQ" href="/reference/faq#how-do-i-choose-an-onboarding-path">
-Overlay vs new server vs harness, plus CLI and CI artifact rules.
+Which path to take, which commands to run, and what CI requires.
 </Card>
 
 </Cards>

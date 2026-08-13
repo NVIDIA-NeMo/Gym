@@ -464,39 +464,46 @@ For agents with non-monotonic trajectoires, the asserts may need to be disabled.
 
 # How do I choose an onboarding path?
 
-Use the [onboarding decision tree](/contribute/environments/onboarding-decision-tree). A benchmark is usually a YAML overlay under `benchmarks/` that reuses a resources server (copy `gsm8k`, `gpqa`, or `livecodebench`). Create a new resources server only when no existing scorer fits. Add a new agent or wrap a library when the episode is not driven by `simple_agent`.
+Copy an existing folder under `benchmarks/` unless you need new scoring code. Start at the [onboarding decision tree](/contribute/environments/onboarding-decision-tree).
 
-# What out-of-the-box resource servers can I reuse?
+- Same scorer, new data or prompt → [Add a benchmark](/contribute/environments/adding-a-benchmark) (copy `gsm8k`, `gpqa`, or `livecodebench/v5_2408_2502`).
+- New `verify()` → [New Environment](/contribute/environments/new-environment).
+- GUI, sandbox, or a third-party runner → [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks).
 
-`gym search` and `gym list environments` (unified catalog; in-tree rows say `no-manifest`). To find a **scorer**, use `gym search resources-servers "…"` or `gym list resources-servers` (config selectors under `resources_servers/*/configs/`, not the same catalog).
+# Which scorers can I reuse?
 
-Highest overlay reuse: `math_with_judge`, `mcqa`, `code_gen`, `asr_with_pc`, `instruction_following`, `swebench`. Search and GUI stacks: `tavily_search`, `benchmarks/browsecomp`, `gui_coordinate`, `benchmarks/osworld`. Terminal Bench is Harbor via `responses_api_agents/harbor_agent`, not under `benchmarks/`.
+Run `gym search resources-servers "math"` or `gym list resources-servers`. That lists scorer configs under `resources_servers/*/configs/`. `gym search` with no type searches environments instead.
 
-# How do I make my benchmark work with the CLI?
+Most overlays reuse `math_with_judge`, `mcqa`, `code_gen`, `asr_with_pc`, `instruction_following`, or `swebench`. For search or GUI, look at `tavily_search`, `benchmarks/browsecomp`, `gui_coordinate`, and `benchmarks/osworld`. Terminal Bench uses `responses_api_agents/harbor_agent`, not a folder under `benchmarks/`.
 
-Add `benchmarks/<name>/config.yaml` with a `type: benchmark` dataset and `prepare_script` so `gym list benchmarks` shows it. Then:
+# How do I make my benchmark show up in the CLI?
+
+Add `benchmarks/<name>/config.yaml` with a dataset of `type: benchmark` and a `prepare_script`. Then `gym list benchmarks` will list it. Run:
 
 ```bash
 gym eval prepare --benchmark <name>
-gym env start --benchmark <name> --model-type openai_model
-gym eval run --no-serve --benchmark <name>
+gym eval run --benchmark <name> \
+  --model-type openai_model \
+  --split benchmark \
+  --output results/<name>_rollouts.jsonl \
+  --limit 2
 ```
 
-Do not pass `--resources-server` unless you added a new server. See [Add a benchmark](/contribute/environments/adding-a-benchmark).
+Do not pass `--resources-server` unless you added a new scorer. Full flags: [Add a benchmark](/contribute/environments/adding-a-benchmark#4-prepare-and-run).
 
-# Where do example_rollouts go and what format do they need?
+# Where do example_rollouts go?
 
-For a **new resources server**: `resources_servers/<name>/data/example_rollouts.jsonl`, exactly five lines, each a full `gym eval run` record including reward. Required by CI (`+should_validate_data=true`), not by a default local `gym env test --resources-server`. Overlay-only PRs under `benchmarks/` do not add this file. See [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
+Only new scorers need this file: `resources_servers/<name>/data/example_rollouts.jsonl`, exactly five lines, each a full `gym eval run` record including `reward`. CI checks it when `+should_validate_data=true`. Overlay-only PRs under `benchmarks/` do not add it. See [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
 
-# How do I know if my contribution is environment-complete vs benchmark-complete?
+# When is my PR done?
 
-- **Resources-server complete:** `verify()` (and tools or state), tests, 5/5/5 example artifacts, `domain`, README, license.
-- **Environment-complete:** that scorer composed with an agent, a model, and datasets.
-- **Benchmark-complete:** versioned eval overlay (canonical split, prompt, prepare, repeats) on a scorer; reward-profiled before `verified: true`.
+- **New scorer:** `verify()`, tests, five example tasks + metrics + rollouts, `domain`, README, license.
+- **Named benchmark:** overlay with canonical split, prompt, `prepare.py`, and `num_repeats`. Score checks come before `verified: true`.
+- An **environment** is that scorer plus an agent, a model, and datasets.
 
 # Should I use --reuse-verifier?
 
-Not for in-tree work today. It requires `VERIFIER_FIXTURE`, which production servers do not export. Use `config_paths` and `_inherit_from` as in `benchmarks/gsm8k`.
+No, not for pull requests to this repository. It needs `VERIFIER_FIXTURE`, which shipped scorers do not export. Copy `benchmarks/gsm8k` and use `config_paths` plus `_inherit_from`.
 
 # I am not an NVIDIA employee. Do I need GitLab?
 
