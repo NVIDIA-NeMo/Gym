@@ -16,7 +16,9 @@
 import json
 from collections import Counter
 
+import orjson
 from pydantic import BaseModel
+from tqdm.auto import tqdm
 
 from nemo_gym.global_config import get_global_config_dict
 
@@ -32,8 +34,8 @@ if __name__ == "__main__":
     metrics = Counter()
     num_rows = 0
     with open(config.jsonl_fpath) as f:
-        for row in f:
-            result = json.loads(row)
+        for row in tqdm(f, "Reading rows"):
+            result = orjson.loads(row)
             metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
             num_rows += 1
 
