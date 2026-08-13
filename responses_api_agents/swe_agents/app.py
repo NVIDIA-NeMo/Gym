@@ -379,18 +379,20 @@ class BaseDatasetHarnessProcessor(BaseModel):
         return (Path(configured) if configured else CACHE_DIR) / "swe_agents"
 
     def resolve_setup_dir(self, name: str) -> Path:
-        """Setup tree under the cache root, unless only a pre-staged install-relative tree exists.
+        """A pre-staged install-relative tree when present, else the tree under the cache root.
 
         Deployments that bake the setup trees at build time stage them next to
         the package (the pre-`cache_dir` layout); abandoning those would mean a
         multi-GB re-clone per node, or a hard failure on egress-restricted
-        clusters.
+        clusters. Presence of the pre-staged tree is fixed at image-build time,
+        so this resolution is stable for the lifetime of a deployment — remove
+        the pre-staged tree to migrate to the cache root.
         """
-        setup_dir = self.setup_root / name
         legacy_dir = self.parent_dir / name
-        if not setup_dir.exists() and legacy_dir.exists():
+        if legacy_dir.exists():
+            print(f"Using pre-staged setup tree at {legacy_dir}", flush=True)
             return legacy_dir
-        return setup_dir
+        return self.setup_root / name
 
     def _run_setup_command(self, command: str) -> None:
         process = Popen(command, shell=True)
@@ -941,7 +943,9 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
             report_path.write_text(json.dumps(report, indent=2))
             return
 
-        setup_dir = self.resolve_setup_dir("swe_rebench_setup")
+        # Use the tree resolved at server startup (carried in the instance
+        # config); re-resolving here could pick a different tree mid-run.
+        setup_dir = Path(self.config.swe_rebench_setup_dir)
         log_parsers = _load_rebench_log_parsers(setup_dir / "SWE-rebench-V2")
 
         parser = log_parsers.NAME_TO_PARSER.get(log_parser_name) or getattr(log_parsers, log_parser_name, None)
@@ -1583,32 +1587,37 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         new_commit = _git("rev-parse", "HEAD")
         print(f"OpenHands now at commit {new_commit[:12]} (target={target})", flush=True)
 
-    def _resolve_openhands_setup_dir(self) -> Path:
-        # OpenHands is the only processor whose checkout commit comes from
-        # config (the others hardcode their pins per code version), so only its
-        # shared tree can be retargeted by a concurrently starting run:
-        # file_lock is held during setup() only, and a later run's
-        # `reset --hard` would move the tree under this one. Key the tree by
-        # commit when the value is an immutable object id; mutable refs (HEAD,
-        # branches) can't key a cache and keep the shared tree + ensure-commit
-        # flow instead.
-        commit = self.config.agent_framework_commit
-        if not _is_pinned_commit(commit):
-            return self.resolve_setup_dir("swe_openhands_setup")
-        setup_dir = self.setup_root / "swe_openhands_setup" / commit
+    @staticmethod
+    def _openhands_tree_valid(setup_dir: Path) -> bool:
+        return (setup_dir / "OpenHands" / ".venv" / "bin" / "python").exists()
+
+    def _openhands_setup_target(self) -> Path:
+        # A valid pre-staged tree wins (see resolve_setup_dir); anything else
+        # builds under the cache root, so the rmtree below can never rewrite a
+        # pre-staged tree other nodes may be executing from. OpenHands is the
+        # only processor whose checkout commit comes from config (the others
+        # hardcode their pins per code version), so only its shared tree can be
+        # retargeted by a concurrently starting run: file_lock is held during
+        # setup() only, and a later run's `reset --hard` would move the tree
+        # under this one. Key the cache tree by commit when the value is an
+        # immutable object id; mutable refs (HEAD, branches) can't key a cache
+        # and keep the shared tree + ensure-commit flow instead.
         legacy_dir = self.parent_dir / "swe_openhands_setup"
-        if not setup_dir.exists() and legacy_dir.exists():
+        if legacy_dir.exists() and self._openhands_tree_valid(legacy_dir):
+            print(f"Using pre-staged setup tree at {legacy_dir}", flush=True)
             return legacy_dir
-        return setup_dir
+        commit = self.config.agent_framework_commit
+        base = self.setup_root / "swe_openhands_setup"
+        return base / commit if _is_pinned_commit(commit) else base
 
     def setup(self) -> Path:
-        setup_dir = self._resolve_openhands_setup_dir()
+        setup_dir = self._openhands_setup_target()
 
         with file_lock(setup_dir, "OpenHands setup"):
             openhands_dir = setup_dir / "OpenHands"
             miniforge_dir = setup_dir / "miniforge3"
 
-            if openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists():
+            if self._openhands_tree_valid(setup_dir):
                 print(f"OpenHands already set up at {setup_dir}", flush=True)
                 self._sync_openhands_to_config_commit(openhands_dir)
                 return setup_dir
@@ -2832,6 +2841,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         results_root = Path(configured_results_root) if configured_results_root else RESULTS_DIR
         base_results_dir = results_root / f"swebench_results_{run_session_id}"
         base_results_dir.mkdir(parents=True, exist_ok=True)
+        # Rollout workers and eval containers consume this path (and the setup
+        # trees) by host path from other nodes; say where they resolved to.
+        print(f"SWE agents results root for this run: {base_results_dir}", flush=True)
         # Only set up the agent harness that's actually selected. Both share the
         # same dataset/eval setup paths.
         openhands_setup_dir, opencode_setup_dir = None, None

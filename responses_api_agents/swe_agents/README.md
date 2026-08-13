@@ -83,9 +83,9 @@ This server keeps three kinds of state, anchored differently (see the global `re
 | Setup trees (harness clones, venvs, toolchains; multi-GB) | `<cache_dir>/swe_agents/swe_*_setup` | reused across runs; safe to delete when no run is active |
 | Per-run results | `<results_dir>/swebench_results_<run_session_id>` | one per server process per run; never deleted automatically |
 
-On multi-node deployments point `results_dir` at a shared filesystem (per-instance dirs are bind-mounted into containers by host path and read across nodes), and keep `cache_dir` on fast local or baked container storage.
+Per-instance work is scheduled across the cluster (Ray `SPREAD`), and the generated agent/eval commands embed the setup-tree and results paths as host paths executed from **other nodes**. Both roots must therefore resolve to the same content at the same path on every node that runs rollout workers: a shared filesystem, or trees pre-staged identically per node (e.g. baked into the container image). A `cache_dir` populated only on the head node breaks remote rollouts.
 
-Two compatibility notes: setup trees pre-staged next to the package (the layout before `cache_dir` existed, e.g. baked into container images at build time) keep being used until a tree exists under `cache_dir`. And when `agent_framework_commit` is a pinned commit SHA, the OpenHands tree is additionally keyed by that SHA (`swe_openhands_setup/<sha>`), so concurrent runs pinned to different commits don't reset each other's checkout; old per-SHA trees are not garbage-collected — prune them when disk fills.
+Two compatibility notes: setup trees pre-staged next to the package (the layout before `cache_dir` existed, e.g. baked into container images at build time) always win while they exist — remove them to migrate to `cache_dir`. And when `agent_framework_commit` is a pinned commit SHA and no valid pre-staged tree exists, the OpenHands tree is keyed by that SHA (`swe_openhands_setup/<sha>`), so concurrent runs pinned to different commits don't reset each other's checkout; old per-SHA trees are not garbage-collected — prune them when disk fills.
 
 ---
 

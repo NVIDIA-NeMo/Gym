@@ -18,6 +18,7 @@ import os
 import shutil
 import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -426,14 +427,14 @@ class TestBaseDatasetHarnessProcessor:
                 BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
             ),
         ):
-            # Nothing staged anywhere: the cache root wins.
+            # Nothing staged: build under the cache root.
             assert processor.resolve_setup_dir("swe_x_setup") == cache_root / "swe_x_setup"
-            # Only a pre-staged install-relative tree exists: keep using it.
+            # A pre-staged install-relative tree always wins while it exists,
+            # even if something created the cache-root directory meanwhile
+            # (e.g. a crashed attempt) — resolution stays stable over time.
             (legacy_root / "swe_x_setup").mkdir(parents=True)
-            assert processor.resolve_setup_dir("swe_x_setup") == legacy_root / "swe_x_setup"
-            # Once the cache-root tree exists, it wins over the legacy tree.
             (cache_root / "swe_x_setup").mkdir(parents=True)
-            assert processor.resolve_setup_dir("swe_x_setup") == cache_root / "swe_x_setup"
+            assert processor.resolve_setup_dir("swe_x_setup") == legacy_root / "swe_x_setup"
 
     def test_setup_returns_none(self) -> None:
         config = _minimal_server_config()
@@ -501,42 +502,54 @@ class TestBaseDatasetHarnessProcessor:
 
 
 class TestOpenHandsSetupDirResolution:
+    SHA = "deadbeef" * 5
+
     def _processor(self, commit: str) -> OpenHandsHarnessProcessor:
         config = _minimal_server_config().model_copy(update={"agent_framework_commit": commit})
         return OpenHandsHarnessProcessor(config=config)
 
-    def _patched_roots(self, cache_root: Path, legacy_root: Path):
-        return (
+    def _patched_roots(self, cache_root: Path, legacy_root: Path) -> ExitStack:
+        stack = ExitStack()
+        stack.enter_context(
             patch.object(
                 BaseDatasetHarnessProcessor, "setup_root", new_callable=lambda: property(lambda self: cache_root)
-            ),
+            )
+        )
+        stack.enter_context(
             patch.object(
                 BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
-            ),
+            )
         )
+        return stack
 
-    def test_pinned_commit_keys_the_setup_tree(self, tmp_path: Path) -> None:
-        sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-        processor = self._processor(sha)
-        root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
-        with root_patches[0], root_patches[1]:
-            expected = tmp_path / "cache" / "swe_openhands_setup" / sha
-            assert processor._resolve_openhands_setup_dir() == expected
+    def test_pinned_commit_keys_the_cache_tree(self, tmp_path: Path) -> None:
+        processor = self._processor(self.SHA)
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
+            expected = tmp_path / "cache" / "swe_openhands_setup" / self.SHA
+            assert processor._openhands_setup_target() == expected
 
-    def test_pinned_commit_falls_back_to_prestaged_tree(self, tmp_path: Path) -> None:
-        processor = self._processor("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+    def test_valid_prestaged_tree_wins(self, tmp_path: Path) -> None:
+        processor = self._processor(self.SHA)
         legacy_setup = tmp_path / "legacy" / "swe_openhands_setup"
-        legacy_setup.mkdir(parents=True)
-        root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
-        with root_patches[0], root_patches[1]:
-            assert processor._resolve_openhands_setup_dir() == legacy_setup
+        (legacy_setup / "OpenHands" / ".venv" / "bin").mkdir(parents=True)
+        (legacy_setup / "OpenHands" / ".venv" / "bin" / "python").touch()
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
+            assert processor._openhands_setup_target() == legacy_setup
 
-    def test_mutable_refs_use_the_shared_tree(self, tmp_path: Path) -> None:
+    def test_invalid_prestaged_tree_builds_under_cache_root(self, tmp_path: Path) -> None:
+        # A half-baked pre-staged tree must not be rmtree'd and rebuilt in
+        # place (other nodes may be executing from it): build in the cache.
+        processor = self._processor(self.SHA)
+        (tmp_path / "legacy" / "swe_openhands_setup").mkdir(parents=True)
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
+            expected = tmp_path / "cache" / "swe_openhands_setup" / self.SHA
+            assert processor._openhands_setup_target() == expected
+
+    def test_mutable_refs_use_the_shared_cache_tree(self, tmp_path: Path) -> None:
         for ref in ("HEAD", "main", "feature/x"):
             processor = self._processor(ref)
-            root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
-            with root_patches[0], root_patches[1]:
-                assert processor._resolve_openhands_setup_dir() == tmp_path / "cache" / "swe_openhands_setup"
+            with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
+                assert processor._openhands_setup_target() == tmp_path / "cache" / "swe_openhands_setup"
 
 
 class TestNVInternalDatasetProcessor:
