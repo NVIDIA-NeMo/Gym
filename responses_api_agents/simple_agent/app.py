@@ -77,9 +77,6 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
-    _num_total_calls: int = 0
-    _cpu_time_taken_seed_session: float = 0
-
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -280,11 +277,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies
 
-        from time import process_time
-
-        self._num_total_calls += 1
-        start_cpu = process_time()
-
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
@@ -294,12 +286,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
-
-        self._cpu_time_taken_seed_session += process_time() - start_cpu
-        if self._num_total_calls % 100 == 0:
-            print(
-                f"seed_session time total {self._cpu_time_taken_seed_session:.2f}s, avg {self._cpu_time_taken_seed_session / self._num_total_calls}s, n={self._num_total_calls}"
-            )
 
         response = await self.server_client.post(
             server_name=self.config.name,
