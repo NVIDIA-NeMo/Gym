@@ -293,6 +293,8 @@ def _sync_get_request_json(json_obj: Union[BaseModel, Mapping]) -> str:
 
 
 async def get_request_json(json_obj: Union[BaseModel, Mapping]) -> str:
+    # TODO @bxyu-nvidia: Remove
+    print("Hit in get_request_json")
     return await run_in_threadpool(_sync_get_request_json, json_obj=json_obj)
 
 
