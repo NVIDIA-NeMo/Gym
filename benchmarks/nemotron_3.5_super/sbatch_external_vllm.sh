@@ -71,9 +71,7 @@ gym eval run \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000 \
-    ++uvicorn_timeout_worker_healthcheck=600 \
-    +profiling_enabled=true \
-    +profiling_results_dirpath=results/\$experiment_name/profiling
+    ++uvicorn_timeout_worker_healthcheck=600
 
 
 if (( $EXPORT_TO_CSV )); then
