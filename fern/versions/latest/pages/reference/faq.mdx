@@ -462,6 +462,46 @@ For models with a chat template that drops previous reasoning traces: modify the
 
 For agents with non-monotonic trajectoires, the asserts may need to be disabled. This is not currently supported, but can be experimented with.  
 
+# How do I choose an onboarding path?
+
+Use the [onboarding decision tree](/contribute/environments/onboarding-decision-tree). A benchmark is usually a YAML overlay under `benchmarks/` that reuses a resources server. Create a new resources server only when no existing scorer fits.
+
+# What out-of-the-box resource servers can I reuse?
+
+`gym search` and `gym list environments` (unified catalog; in-tree rows say `no-manifest`). `gym list resources-servers` lists config selectors under `resources_servers/*/configs/`, not the same catalog.
+
+Highest overlay reuse: `math_with_judge`, `mcqa`, `code_gen`, `asr_with_pc`, `instruction_following`, `swebench`. Search and GUI stacks: `tavily_search`, `benchmarks/browsecomp`, `gui_coordinate`, `benchmarks/osworld`. Terminal Bench is Harbor via `responses_api_agents/harbor_agent`, not under `benchmarks/`.
+
+# How do I make my benchmark work with the CLI?
+
+Add `benchmarks/<name>/config.yaml` with a `type: benchmark` dataset and `prepare_script` so `gym list benchmarks` shows it. Then:
+
+```bash
+gym eval prepare --benchmark <name>
+gym env start --benchmark <name> --model-type openai_model
+gym eval run --no-serve --benchmark <name>
+```
+
+Do not pass `--resources-server` unless you added a new server. See [Add a benchmark](/contribute/environments/adding-a-benchmark).
+
+# Where do example_rollouts go and what format do they need?
+
+For a **new resources server**: `resources_servers/<name>/data/example_rollouts.jsonl`, exactly five lines, each a full `gym eval run` record including reward. Required by CI (`+should_validate_data=true`), not by a default local `gym env test --resources-server`. Overlay-only PRs under `benchmarks/` do not add this file. See [example data and example_rollouts](/contribute/environments/adding-a-benchmark#example-data-and-example_rollouts).
+
+# How do I know if my contribution is environment-complete vs benchmark-complete?
+
+- **Resources-server complete:** `verify()` (and tools or state), tests, 5/5/5 example artifacts, `domain`, README, license.
+- **Environment-complete:** that scorer composed with an agent, a model, and datasets.
+- **Benchmark-complete:** versioned eval overlay (canonical split, prompt, prepare, repeats) on a scorer; reward-profiled before `verified: true`.
+
+# Should I use --reuse-verifier?
+
+Not for in-tree work today. It requires `VERIFIER_FIXTURE`, which production servers do not export. Use `config_paths` and `_inherit_from` as in `benchmarks/gsm8k`.
+
+# I am not an NVIDIA employee. Do I need GitLab?
+
+No. Prefer Hugging Face `source:` or commit small `example.jsonl`. The GitLab dataset registry in some READMEs and the add-benchmark skill is an internal option. For search smoke tests, use your own Tavily key and an empty exclude-domains JSON.
+
 # FAQ: Model responses from inference.nvidia.com have no diversity
 `inference.nvidia.com` uses LiteLLM caching by default which leads to no diversity in model responses (pass@1 similar to pass@5). Please set something like the following flags in order to enable diverse responses:
 ```yaml
