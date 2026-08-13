@@ -140,7 +140,7 @@ if (( SLURM_PROCID == 0 )); then
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-    # --intra-node-data-parallel-size must match the data-parallel-size-local above.
+    # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
     vllm-router \
