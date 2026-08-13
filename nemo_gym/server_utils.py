@@ -150,12 +150,12 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         connector=TCPConnector(
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
-            keepalive_timeout=15.0,
-            socket_factory=_make_keepalive_socket_factory(
-                idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
-                interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
-                probes=cfg.global_aiohttp_tcp_keepalive_probes,
-            ),
+            # keepalive_timeout=15.0,
+            # socket_factory=_make_keepalive_socket_factory(
+            #     idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+            #     interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+            #     probes=cfg.global_aiohttp_tcp_keepalive_probes,
+            # ),
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),

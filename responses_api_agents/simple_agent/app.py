@@ -312,21 +312,21 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         # cookies = seed_session_response.cookies
 
         # request._cookies = cookies
-        inner_response = await self.responses(
-            request=request,
-            response=response,
-            body=body.responses_create_params,
-        )
-
-        # self.server_client.post(
-        #     server_name=self.config.name,
-        #     url_path=self.url_path_for_run("/v1/responses", body),
-        #     json=body.responses_create_params,
-        #     cookies=cookies,
+        # inner_response = await self.responses(
+        #     request=request,
+        #     response=response,
+        #     body=body.responses_create_params,
         # )
-        # await raise_for_status(response)
-        # model_response_json = await get_response_json(response)
-        model_response_json = inner_response.model_dump()
+
+        self.server_client.post(
+            server_name=self.config.name,
+            url_path=self.url_path_for_run("/v1/responses", body),
+            json=body.responses_create_params,
+            cookies=cookies,
+        )
+        await raise_for_status(response)
+        model_response_json = await get_response_json(response)
+        # model_response_json = inner_response.model_dump()
         # TODO @bxyu-nvidia: Use starlette.requests.cookie_parser
         # cookies = response.cookies
 
