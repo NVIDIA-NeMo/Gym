@@ -282,125 +282,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.use_completions_api and self.config.render_chat_template:
             self._chat_template_tokenizer = self._load_chat_template_tokenizer()
 
-    @staticmethod
-    def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
-        """Check the container without scanning or copying token IDs."""
-        if not isinstance(value, list):
-            raise RuntimeError(f"`{field_name}` must be a list of integer token IDs.")
-        return value
-
-    @staticmethod
-    def _require_log_prob_list(value: Any, field_name: str) -> List[Any]:
-        """Check the container without scanning or copying log probabilities."""
-        if not isinstance(value, list):
-            raise RuntimeError(f"`{field_name}` must be a list of numeric log probabilities.")
-        return value
-
-    @classmethod
-    def _validate_token_bundle(cls, bundle: Dict[str, Any], source: str) -> Dict[str, Any]:
-        present_fields = TOKEN_METADATA_FIELDS.intersection(bundle)
-        missing_fields = REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
-        if missing_fields:
-            missing = ", ".join(sorted(missing_fields))
-            raise RuntimeError(f"{source} returned partial token metadata; missing: {missing}.")
-
-        normalized = {
-            "prompt_token_ids": cls._require_token_id_list(bundle["prompt_token_ids"], f"{source}.prompt_token_ids"),
-            "generation_token_ids": cls._require_token_id_list(
-                bundle["generation_token_ids"], f"{source}.generation_token_ids"
-            ),
-            "generation_log_probs": cls._require_log_prob_list(
-                bundle["generation_log_probs"], f"{source}.generation_log_probs"
-            ),
-        }
-        if "routed_experts" in bundle:
-            normalized["routed_experts"] = bundle["routed_experts"]
-
-        if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
-            raise RuntimeError(
-                f"{source} returned mismatched generation token IDs and log probabilities: "
-                f"{len(normalized['generation_token_ids'])} token IDs and "
-                f"{len(normalized['generation_log_probs'])} log probabilities."
-            )
-
-        return normalized
-
-    @classmethod
-    def _extract_message_token_bundle(cls, message_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        required_fields = REQUIRED_TOKEN_METADATA_FIELDS.intersection(message_dict)
-        if not required_fields:
-            return None
-        present_fields = TOKEN_METADATA_FIELDS.intersection(message_dict)
-        return cls._validate_token_bundle(
-            {field: message_dict[field] for field in present_fields},
-            "choice.message",
-        )
-
-    @classmethod
-    def _extract_vllm_response_token_ids(
-        cls,
-        chat_completion_dict: Dict[str, Any],
-        choice_dict: Dict[str, Any],
-    ) -> Optional[tuple[List[Any], List[Any]]]:
-        prompt_value = chat_completion_dict.get("prompt_token_ids")
-        generation_value = choice_dict.get("token_ids")
-        prompt_present = prompt_value is not None
-        generation_present = generation_value is not None
-
-        if prompt_present != generation_present:
-            missing = "choice.token_ids" if prompt_present else "prompt_token_ids"
-            raise RuntimeError(f"vLLM response returned partial token metadata; missing: {missing}.")
-        if not prompt_present:
-            return None
-
-        return (
-            cls._require_token_id_list(prompt_value, "prompt_token_ids"),
-            cls._require_token_id_list(generation_value, "choice.token_ids"),
-        )
-
-    def _extract_choice_logprobs(self, choice_dict: Dict[str, Any]) -> tuple[List[int], List[float]]:
-        logprobs_block = choice_dict.get("logprobs")
-        if not isinstance(logprobs_block, dict) or not isinstance(logprobs_block.get("content"), list):
-            raise RuntimeError(
-                f"`{self.config.name}` requested per-token logprobs from vLLM "
-                "(return_token_id_information=True, logprobs=True, top_logprobs=0), "
-                f"but the response had none (choice.logprobs={logprobs_block!r}). "
-                "Cannot extract token ids or logprobs."
-            )
-
-        generation_token_ids: List[int] = []
-        generation_log_probs: List[float] = []
-        for index, entry in enumerate(logprobs_block["content"]):
-            if not isinstance(entry, dict):
-                raise RuntimeError(f"choice.logprobs.content[{index}] must be an object.")
-            token = entry.get("token")
-            if not isinstance(token, str) or not token.startswith("token_id:"):
-                raise RuntimeError(f"choice.logprobs.content[{index}].token must use the `token_id:<int>` format.")
-            try:
-                token_id = int(token.removeprefix("token_id:"))
-            except ValueError as e:
-                raise RuntimeError(
-                    f"choice.logprobs.content[{index}].token must use the `token_id:<int>` format."
-                ) from e
-            log_prob = entry.get("logprob")
-            if not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool):
-                raise RuntimeError(f"choice.logprobs.content[{index}].logprob must be numeric.")
-            generation_token_ids.append(token_id)
-            generation_log_probs.append(float(log_prob))
-
-        return generation_token_ids, generation_log_probs
-
-    @classmethod
-    def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Keep every known prompt-affecting field aligned with generation."""
-        return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
-
-    def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
-        if self.config.return_token_id_information and body_dict.get("n") not in (None, 1):
-            raise ValueError(
-                f"NeMo Gym server `{self.config.name}` requires n=1 when return_token_id_information=true."
-            )
-
     def _load_chat_template_tokenizer(self):
         """Load an HF AutoTokenizer for client-side chat-template rendering.
 
@@ -926,6 +807,125 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    @staticmethod
+    def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
+        """Check the container without scanning or copying token IDs."""
+        if not isinstance(value, list):
+            raise RuntimeError(f"`{field_name}` must be a list of integer token IDs.")
+        return value
+
+    @staticmethod
+    def _require_log_prob_list(value: Any, field_name: str) -> List[Any]:
+        """Check the container without scanning or copying log probabilities."""
+        if not isinstance(value, list):
+            raise RuntimeError(f"`{field_name}` must be a list of numeric log probabilities.")
+        return value
+
+    @classmethod
+    def _validate_token_bundle(cls, bundle: Dict[str, Any], source: str) -> Dict[str, Any]:
+        present_fields = TOKEN_METADATA_FIELDS.intersection(bundle)
+        missing_fields = REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
+        if missing_fields:
+            missing = ", ".join(sorted(missing_fields))
+            raise RuntimeError(f"{source} returned partial token metadata; missing: {missing}.")
+
+        normalized = {
+            "prompt_token_ids": cls._require_token_id_list(bundle["prompt_token_ids"], f"{source}.prompt_token_ids"),
+            "generation_token_ids": cls._require_token_id_list(
+                bundle["generation_token_ids"], f"{source}.generation_token_ids"
+            ),
+            "generation_log_probs": cls._require_log_prob_list(
+                bundle["generation_log_probs"], f"{source}.generation_log_probs"
+            ),
+        }
+        if "routed_experts" in bundle:
+            normalized["routed_experts"] = bundle["routed_experts"]
+
+        if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
+            raise RuntimeError(
+                f"{source} returned mismatched generation token IDs and log probabilities: "
+                f"{len(normalized['generation_token_ids'])} token IDs and "
+                f"{len(normalized['generation_log_probs'])} log probabilities."
+            )
+
+        return normalized
+
+    @classmethod
+    def _extract_message_token_bundle(cls, message_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        required_fields = REQUIRED_TOKEN_METADATA_FIELDS.intersection(message_dict)
+        if not required_fields:
+            return None
+        present_fields = TOKEN_METADATA_FIELDS.intersection(message_dict)
+        return cls._validate_token_bundle(
+            {field: message_dict[field] for field in present_fields},
+            "choice.message",
+        )
+
+    @classmethod
+    def _extract_vllm_response_token_ids(
+        cls,
+        chat_completion_dict: Dict[str, Any],
+        choice_dict: Dict[str, Any],
+    ) -> Optional[tuple[List[Any], List[Any]]]:
+        prompt_value = chat_completion_dict.get("prompt_token_ids")
+        generation_value = choice_dict.get("token_ids")
+        prompt_present = prompt_value is not None
+        generation_present = generation_value is not None
+
+        if prompt_present != generation_present:
+            missing = "choice.token_ids" if prompt_present else "prompt_token_ids"
+            raise RuntimeError(f"vLLM response returned partial token metadata; missing: {missing}.")
+        if not prompt_present:
+            return None
+
+        return (
+            cls._require_token_id_list(prompt_value, "prompt_token_ids"),
+            cls._require_token_id_list(generation_value, "choice.token_ids"),
+        )
+
+    def _extract_choice_logprobs(self, choice_dict: Dict[str, Any]) -> tuple[List[int], List[float]]:
+        logprobs_block = choice_dict.get("logprobs")
+        if not isinstance(logprobs_block, dict) or not isinstance(logprobs_block.get("content"), list):
+            raise RuntimeError(
+                f"`{self.config.name}` requested per-token logprobs from vLLM "
+                "(return_token_id_information=True, logprobs=True, top_logprobs=0), "
+                f"but the response had none (choice.logprobs={logprobs_block!r}). "
+                "Cannot extract token ids or logprobs."
+            )
+
+        generation_token_ids: List[int] = []
+        generation_log_probs: List[float] = []
+        for index, entry in enumerate(logprobs_block["content"]):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"choice.logprobs.content[{index}] must be an object.")
+            token = entry.get("token")
+            if not isinstance(token, str) or not token.startswith("token_id:"):
+                raise RuntimeError(f"choice.logprobs.content[{index}].token must use the `token_id:<int>` format.")
+            try:
+                token_id = int(token.removeprefix("token_id:"))
+            except ValueError as e:
+                raise RuntimeError(
+                    f"choice.logprobs.content[{index}].token must use the `token_id:<int>` format."
+                ) from e
+            log_prob = entry.get("logprob")
+            if not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool):
+                raise RuntimeError(f"choice.logprobs.content[{index}].logprob must be numeric.")
+            generation_token_ids.append(token_id)
+            generation_log_probs.append(float(log_prob))
+
+        return generation_token_ids, generation_log_probs
+
+    @classmethod
+    def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep every known prompt-affecting field aligned with generation."""
+        return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
+
+    def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
+        if self.config.return_token_id_information and body_dict.get("n") not in (None, 1):
+            raise ValueError(
+                f"NeMo Gym server `{self.config.name}` requires n=1 when return_token_id_information=true."
+            )
 
     async def _chat_completions_via_completions_api(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
