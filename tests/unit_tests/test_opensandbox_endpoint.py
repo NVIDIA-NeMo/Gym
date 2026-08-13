@@ -116,7 +116,7 @@ def test_schemeless_endpoint_uses_the_sdk_resolved_url_and_key() -> None:
 def test_direct_mode_endpoint_does_not_inject_the_key() -> None:
     raw = _RawWithEndpoint(
         endpoint="http://pod.example:6000",
-        headers={},
+        headers={"OPEN-SANDBOX-API-KEY": "secret"},  # pragma: allowlist secret
         connection=_Connection(api_key="secret"),  # pragma: allowlist secret
     )
     resolved = asyncio.run(_provider().endpoint(_handle(raw), 6000))
