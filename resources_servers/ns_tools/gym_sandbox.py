@@ -74,10 +74,6 @@ class GymSandbox(ns_sandbox.LocalSandbox):
 
         try:
             status, text = await self._post_execute(base_url, headers, payload, timeout)
-            if status == 502:
-                # A proxy-minted 502 means the pod never received the request, so ONE retry
-                # is idempotency-safe even for stateful ipython.
-                status, text = await self._post_execute(base_url, headers, payload, timeout)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise httpx.TimeoutException(f"sandbox pool transport error: {exc!r}") from exc
         if status != 200:
