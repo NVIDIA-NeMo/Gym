@@ -14,6 +14,23 @@
 
 """Sandbox utility helpers."""
 
+import asyncio
+
+
+async def await_cleanup(task: asyncio.Task[None]) -> None:
+    """Finish owned cleanup before propagating caller cancellation."""
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                raise
+            cancellation = exc
+    if cancellation is not None:
+        raise cancellation
+
 
 def rewrite_image(image: str | None, rewrites: list[dict[str, str]]) -> str | None:
     """Apply ordered image-prefix rewrites used by sandbox configs."""

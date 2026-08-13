@@ -352,6 +352,75 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
+@pytest.mark.asyncio
+async def test_async_sandbox_cancellation_during_initial_upload_closes_handle() -> None:
+    class BlockingUploadProvider(FakeSandboxProvider):
+        upload_started = asyncio.Event()
+
+        async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+            self.upload_started.set()
+            await asyncio.Future()
+
+        async def close(self, handle: SandboxHandle) -> None:
+            await asyncio.sleep(0.01)
+            await super().close(handle)
+
+    provider = BlockingUploadProvider()
+    sandbox = AsyncSandbox(provider)
+    start = asyncio.create_task(sandbox.start(SandboxSpec(image="image:tag", files={"/tmp/bootstrap.txt": "hello"})))
+    await provider.upload_started.wait()
+    start.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    assert provider.closed == provider.created_handles
+    assert provider.aclosed is True
+
+
+@pytest.mark.asyncio
+async def test_async_sandbox_create_error_closes_provider_resources() -> None:
+    provider = FakeSandboxProvider()
+
+    async def fail_create(_spec: SandboxSpec) -> SandboxHandle:
+        raise RuntimeError("create failed")
+
+    provider.create = fail_create
+    sandbox = AsyncSandbox(provider)
+    with pytest.raises(RuntimeError, match="create failed"):
+        await sandbox.start(SandboxSpec(image="image:tag"))
+    assert provider.aclosed is True
+
+
+@pytest.mark.asyncio
+async def test_async_sandbox_cancelled_stop_finishes_cleanup() -> None:
+    provider = FakeSandboxProvider()
+    sandbox = await AsyncSandbox(provider).start(SandboxSpec(image="image:tag"))
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+    original_close = provider.close
+
+    async def blocked_close(handle: SandboxHandle) -> None:
+        close_started.set()
+        await finish_close.wait()
+        await original_close(handle)
+
+    provider.close = blocked_close
+    stopping = asyncio.create_task(sandbox.stop())
+    await close_started.wait()
+    stopping.cancel()
+    await asyncio.sleep(0)
+    stopping.cancel()
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    finish_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    await sandbox.stop()
+    assert provider.closed == provider.created_handles
+    assert provider.aclosed is True
+
+
 def test_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
     asyncio.run(_assert_async_sandbox_requires_spec_and_reports_unknown_status())
 

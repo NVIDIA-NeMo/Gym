@@ -20,12 +20,17 @@ Reference sandbox implementation:
 - Dockerfile: https://github.com/NVIDIA-NeMo/NeMo-Skills/blob/main/dockerfiles/Dockerfile.sandbox
 """
 
+import asyncio
 import json
 import logging
 import os
+import tempfile
+import uuid
 from typing import Any, Dict
 
 import httpx
+
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, await_cleanup
 
 
 LOG = logging.getLogger(__name__)
@@ -39,8 +44,6 @@ class Lean4SandboxClient:
         host: str = "127.0.0.1",
         port: int = 6000,
         max_output_characters: int = 1000,
-        base_url: str | None = None,
-        extra_headers: Dict[str, str] | None = None,
     ):
         """Initialize sandbox client.
 
@@ -48,15 +51,10 @@ class Lean4SandboxClient:
             host: Sandbox server hostname
             port: Sandbox server port
             max_output_characters: Maximum characters in output
-            base_url: Full base URL override (e.g. an OpenSandbox proxied endpoint);
-                when set, host/port are ignored.
-            extra_headers: Headers added to every request (e.g. proxy auth).
         """
         self.host = host
         self.port = port
         self.max_output_characters = max_output_characters
-        self.base_url = base_url.rstrip("/") if base_url else None
-        self.extra_headers = dict(extra_headers or {})
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -75,8 +73,6 @@ class Lean4SandboxClient:
 
     def _get_execute_url(self) -> str:
         """Get the sandbox execute endpoint URL."""
-        if self.base_url:
-            return f"{self.base_url}/execute"
         return f"http://{self.host}:{self.port}/execute"
 
     async def execute_lean4(
@@ -107,7 +103,7 @@ class Lean4SandboxClient:
                 url=self._get_execute_url(),
                 content=json.dumps(request_data),
                 timeout=timeout + 5.0,  # Add buffer for network overhead
-                headers={"Content-Type": "application/json", **self.extra_headers},
+                headers={"Content-Type": "application/json"},
             )
 
             if response.status_code == 502:
@@ -137,12 +133,11 @@ class Lean4SandboxClient:
         Returns:
             True if sandbox is healthy, False otherwise
         """
-        base = self.base_url if self.base_url else f"http://{self.host}:{self.port}"
-        url = f"{base}/health"
+        url = f"http://{self.host}:{self.port}/health"
         client = await self._get_client()
 
         try:
-            response = await client.get(url=url, timeout=timeout, headers=self.extra_headers)
+            response = await client.get(url=url, timeout=timeout)
             return response.status_code == 200
         except httpx.HTTPError:
             return False
@@ -151,23 +146,9 @@ class Lean4SandboxClient:
 class GymSandboxLean4Client:
     """Lean4 compilation on per-verify OpenSandbox pods via provider exec.
 
-    Reimplements the NS server's lean4 invocation exactly (reference frozen at
-    nemo_skills local_sandbox_server.py:631-685 @ da85a881): the proof lands in
-    /lean4/my_project, `lake env --dir /lean4/my_project lean <file>` runs with an
-    in-sandbox `timeout -s KILL`, and the exit code maps to the same
-    process_status/stdout/stderr contract as `Lean4SandboxClient.execute_lean4`.
-    Long compiles never hold an HTTP connection open (background/short exec
-    requests), so proxy read-timeout ceilings do not apply.
-
-    With ``pool_size=0`` every verify gets a fresh pod (created under a bounded
-    semaphore, destroyed in finally). With ``pool_size=N`` a warm pool of N pods is
-    built lazily and reused across verifies: a fresh pod's first `import Mathlib`
-    lazy-pulls ~5GB of olean files through nydus one FUSE fault at a time (measured
-    at ~900s), while a warmed pod compiles in ~4s — so pool pods bulk-prefetch
-    the olean tree once at prepare and then serve verifies back-to-back. A pod that
-    hits an infra error (incl. TTL expiry) is killed and replaced in place; the
-    verify retries once on a second pod before degrading. Infra failures degrade to
-    the client's existing error/timeout shapes, never raise into verify().
+    Runs the same Lean command and preserves the NS server's result contract. A
+    configured warm pool reuses prepared sandboxes and replaces failed leases;
+    otherwise each verification gets a fresh sandbox.
     """
 
     def __init__(
@@ -186,7 +167,7 @@ class GymSandboxLean4Client:
     ):
         if not image:
             raise ValueError("sandbox_backend=gym_sandbox requires a non-empty image")
-        connection = (next(iter(provider.values()), {}) or {}).get("connection", {}) if provider else {}
+        connection = (provider.get("opensandbox") or {}).get("connection", {}) if provider else {}
         if not connection.get("domain") or not connection.get("api_key"):
             raise ValueError(
                 "sandbox_backend=gym_sandbox requires provider connection domain/api_key — "
@@ -200,24 +181,17 @@ class GymSandboxLean4Client:
         self.max_output_characters = max_output_characters
         self._acquire_timeout_s = acquire_timeout_s
         self._semaphore_size = int(max_concurrent)
-        self._semaphore: Any = None  # bound lazily to the serving event loop
+        self._semaphore = asyncio.Semaphore(self._semaphore_size)
         self._pool_size = int(pool_size)
         self._prefetch_paths = prefetch_paths
         self._pool_ref = pool_ref or ""
-        self._pool: Any = None  # asyncio.Queue of warm AsyncSandbox pods, filled lazily
-        self._pool_started = False
+        self._pool: asyncio.Queue[AsyncSandbox] | None = None
+        self._pool_sandboxes: set[AsyncSandbox] = set()
+        self._fill_tasks: set[asyncio.Task[None]] = set()
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
-    def _get_semaphore(self):
-        import asyncio
-
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self._semaphore_size)
-        return self._semaphore
-
-    def _new_sandbox(self, files: Dict[str, str] | None = None, use_pool: bool = True):
-        from nemo_gym.sandbox.api import AsyncSandbox
-        from nemo_gym.sandbox.providers.base import SandboxSpec
-
+    def _new_sandbox(self, files: Dict[str, str] | None = None, use_pool: bool = True) -> AsyncSandbox:
         # pool_ref claims a prewarmed pod from a server-side Pool whose template
         # has already warmed the lean toolchain, so the prepare-time prefetch
         # degrades to a fast cache hit.
@@ -235,7 +209,7 @@ class GymSandboxLean4Client:
             ),
         )
 
-    async def _start_sandbox(self, files: Dict[str, str] | None = None):
+    async def _start_sandbox(self, files: Dict[str, str] | None = None) -> AsyncSandbox:
         """Start a sandbox, degrading a failed pool claim to a direct create."""
         sandbox = self._new_sandbox(files)
         try:
@@ -249,7 +223,14 @@ class GymSandboxLean4Client:
             await sandbox.start()
             return sandbox
 
-    async def _create_pool_pod(self):
+    async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
+        self._pool_sandboxes.discard(sandbox)
+        try:
+            await sandbox.stop()
+        except Exception as exc:
+            LOG.warning("lean sandbox teardown failed (TTL will reap): %s", exc)
+
+    async def _create_pool_pod(self) -> AsyncSandbox:
         """Create + warm one pool pod: a single bulk tar read pulls the olean tree at
         line rate (concurrent chunk fetches) instead of the compile's serial faults."""
         sandbox = await self._start_sandbox()
@@ -259,6 +240,9 @@ class GymSandboxLean4Client:
             await sandbox.exec(
                 f"find {self._prefetch_paths} -type f -exec cat {{}} + > /dev/null 2>&1; true", timeout_s=1800
             )
+        except asyncio.CancelledError:
+            await self._stop_sandbox(sandbox)
+            raise
         except Exception:
             pass  # prefetch is an optimization; the first compile warms the rest
         return sandbox
@@ -266,33 +250,42 @@ class GymSandboxLean4Client:
     def start_pool(self) -> None:
         """Kick the pool fill early (call from server lifespan startup) so the first
         verify does not pay pool warmup inside its admission window."""
-        if self._pool_size > 0:
-            self._pool_queue()
+        if self._pool_size <= 0 or self._pool is not None or self._closed:
+            return
+        self._pool = asyncio.Queue(maxsize=self._pool_size)
+        for _ in range(self._pool_size):
+            self._schedule_fill()
 
-    @property
-    def pool_ready_count(self) -> int:
-        return self._pool.qsize() if self._pool is not None else 0
+    def _schedule_fill(self) -> None:
+        if self._closed:
+            return
+        task = asyncio.create_task(self._fill_one())
+        self._fill_tasks.add(task)
+        task.add_done_callback(self._fill_tasks.discard)
 
-    def _pool_queue(self):
-        import asyncio
+    async def _fill_one(self) -> None:
+        retry_s = 1.0
+        while not self._closed:
+            try:
+                sandbox = await self._create_pool_pod()
+            except Exception as exc:
+                LOG.error("lean pool pod create failed; retrying in %.0fs: %s", retry_s, exc)
+                await asyncio.sleep(retry_s)
+                retry_s = min(retry_s * 2, 30.0)
+                continue
 
-        if self._pool is None:
-            self._pool = asyncio.Queue()
-            for _ in range(self._pool_size):
-                asyncio.get_running_loop().create_task(self._fill_one())
-        return self._pool
-
-    async def _fill_one(self):
-        try:
-            self._pool.put_nowait(await self._create_pool_pod())
-        except Exception as e:
-            LOG.error("lean pool pod create failed (capacity reduced until next heal): %s", e)
+            if self._closed:
+                await self._stop_sandbox(sandbox)
+            else:
+                self._pool_sandboxes.add(sandbox)
+                self._pool.put_nowait(sandbox)
+            return
 
     async def _execute_pooled(self, code: str, timeout: float) -> Dict[str, Any]:
-        import asyncio
-        import uuid
-
-        pool = self._pool_queue()
+        self.start_pool()
+        if self._pool is None:
+            raise RuntimeError("Lean sandbox pool is closed")
+        pool = self._pool
         for attempt in (1, 2):
             try:
                 sandbox = await asyncio.wait_for(pool.get(), timeout=self._acquire_timeout_s)
@@ -301,8 +294,6 @@ class GymSandboxLean4Client:
                 return {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
             proof_name = f"proof_{uuid.uuid4().hex}.lean"
             try:
-                import tempfile
-
                 with tempfile.NamedTemporaryFile("w", suffix=".lean", delete=False) as fh:
                     fh.write(code)
                 try:
@@ -316,44 +307,48 @@ class GymSandboxLean4Client:
                     f"rc=$?; rm -f {proof_name}; exit $rc"
                 )
                 result = await sandbox.exec(command, timeout_s=timeout + 60)
-            except Exception as e:
+            except asyncio.CancelledError:
+                await self._stop_sandbox(sandbox)
+                self._schedule_fill()
+                raise
+            except Exception as exc:
                 # Pod is suspect (TTL expiry, node loss): replace it, retry once elsewhere.
-                LOG.warning("lean pool pod failed (attempt %d), replacing: %s", attempt, e)
-                try:
-                    await sandbox.stop()
-                except Exception:
-                    pass
-                asyncio.get_running_loop().create_task(self._fill_one())
+                LOG.warning("lean pool pod failed (attempt %d), replacing: %s", attempt, exc)
+                await self._stop_sandbox(sandbox)
+                self._schedule_fill()
                 if attempt == 1:
                     continue
-                return {"process_status": "error", "stdout": "", "stderr": str(e)}
-            pool.put_nowait(sandbox)
+                return {"process_status": "error", "stdout": "", "stderr": str(exc)}
+            if self._closed:
+                await self._stop_sandbox(sandbox)
+            else:
+                pool.put_nowait(sandbox)
             return self._map_result(result, timeout)
         return {"process_status": "error", "stdout": "", "stderr": "lean pool exhausted"}
 
     def _map_result(self, result, timeout: float) -> Dict[str, Any]:
-        stdout = (result.stdout or "")[: self.max_output_characters]
-        stderr = (result.stderr or "")[: self.max_output_characters]
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
         if result.return_code == 0:
-            return {"process_status": "completed", "stdout": stdout, "stderr": stderr}
-        if result.return_code in (124, 137, -9):
-            return {
-                "process_status": "timeout",
-                "stdout": stdout,
-                "stderr": stderr + f"Execution timed out after {timeout} seconds\n",
-            }
-        return {"process_status": "failed", "stdout": stdout, "stderr": stderr}
+            process_status = "completed"
+        elif result.return_code in (124, 137, -9):
+            process_status = "timeout"
+            stderr += f"Execution timed out after {timeout} seconds\n"
+        else:
+            process_status = "failed"
+        if len(stdout) > self.max_output_characters:
+            stdout = stdout[: self.max_output_characters] + "<output cut>"
+        if len(stderr) > self.max_output_characters:
+            stderr = stderr[: self.max_output_characters] + "<output cut>"
+        return {"process_status": process_status, "stdout": stdout, "stderr": stderr}
 
     async def execute_lean4(self, code: str, timeout: float = 30.0) -> Dict[str, Any]:
         """Same signature and return contract as Lean4SandboxClient.execute_lean4."""
-        import asyncio
-        import uuid
-
         if self._pool_size > 0:
             return await self._execute_pooled(code, timeout)
 
         try:
-            await asyncio.wait_for(self._get_semaphore().acquire(), timeout=self._acquire_timeout_s)
+            await asyncio.wait_for(self._semaphore.acquire(), timeout=self._acquire_timeout_s)
         except asyncio.TimeoutError:
             LOG.warning("Lean sandbox admission timed out after %.0fs", self._acquire_timeout_s)
             return {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
@@ -374,9 +369,25 @@ class GymSandboxLean4Client:
             LOG.error("OpenSandbox lean4 execution failed: %s", e)
             return {"process_status": "error", "stdout": "", "stderr": str(e)}
         finally:
-            self._get_semaphore().release()
+            self._semaphore.release()
             if sandbox is not None:
-                try:
-                    await sandbox.stop()
-                except Exception as exc:
-                    LOG.warning("lean sandbox teardown failed (TTL will reap): %s", exc)
+                await self._stop_sandbox(sandbox)
+
+    async def close(self) -> None:
+        """Stop pool maintenance and every warm sandbox owned by this client."""
+        if self._close_task is None:
+            self._closed = True
+
+            async def cleanup() -> None:
+                tasks = tuple(self._fill_tasks)
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                sandboxes = tuple(self._pool_sandboxes)
+                if sandboxes:
+                    await asyncio.gather(*(self._stop_sandbox(sandbox) for sandbox in sandboxes))
+                self._pool = None
+
+            self._close_task = asyncio.create_task(cleanup())
+        await await_cleanup(self._close_task)

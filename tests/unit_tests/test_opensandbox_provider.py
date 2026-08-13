@@ -16,6 +16,7 @@
 import asyncio
 import builtins
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import timedelta
@@ -49,6 +50,11 @@ class FakePlatformSpec:
 class FakeConnectionConfig:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
+        self.headers = dict(kwargs.get("headers", {}))
+        self.use_server_proxy = bool(kwargs.get("use_server_proxy", False))
+
+    def get_api_key(self) -> str:
+        return self.kwargs.get("api_key") or os.getenv("OPEN_SANDBOX_API_KEY", "")
 
 
 @dataclass(frozen=True)
@@ -181,7 +187,7 @@ async def test_provider_conversion_helpers(
     assert opensandbox_provider._to_volumes([{"name": "workspace"}]) == [FakeVolume(name="workspace")]
 
 
-async def test_direct_create_passes_platform_to_sdk_create(
+async def test_create_passes_provider_options_to_sdk(
     fake_opensandbox_sdk: None,
 ) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -192,7 +198,10 @@ async def test_direct_create_passes_platform_to_sdk_create(
     handle = await provider.create(
         SandboxSpec(
             image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
-            provider_options={"platform": {"os": "linux", "arch": "amd64"}},
+            provider_options={
+                "platform": {"os": "linux", "arch": "amd64"},
+                "extensions": {"poolRef": "warm"},
+            },
         ),
     )
 
@@ -201,6 +210,7 @@ async def test_direct_create_passes_platform_to_sdk_create(
         os="linux",
         arch="amd64",
     )
+    assert FakeSandbox.created_kwargs["extensions"]["poolRef"] == "warm"
 
 
 async def test_direct_create_passes_resource_requests_to_sdk_create(
@@ -482,7 +492,10 @@ def test_provider_options_from_mapping() -> None:
         options_cls.from_mapping({"volumes": ["workspace"]})
 
 
-def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
+def test_connection_config_and_image_policy(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
             "domain": "sandbox.example/",
@@ -502,11 +515,8 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
         "protocol": "https",
         "request_timeout": timedelta(seconds=10),
         "use_server_proxy": True,
-        # The API key must also travel as a header: the SDK's execd clients
-        # (health ping, commands, files) send only ConnectionConfig.headers,
-        # and proxied /proxy/* routes may enforce auth.
-        "headers": {"OPEN-SANDBOX-API-KEY": "key"},  # pragma: allowlist secret
     }
+    assert config.headers == {"OPEN-SANDBOX-API-KEY": "key"}  # pragma: allowlist secret
     short_timeout_config = provider._connection_config(request_timeout_s=3)
     assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
 
@@ -515,7 +525,11 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     direct = opensandbox_provider.OpenSandboxProvider(
         connection={"domain": "sandbox.example", "api_key": "key"}  # pragma: allowlist secret
     )
-    assert "headers" not in direct._connection_config().kwargs
+    assert direct._connection_config().headers == {}
+
+    monkeypatch.setenv("OPEN_SANDBOX_API_KEY", "key-from-env")  # pragma: allowlist secret
+    env_config = opensandbox_provider.OpenSandboxProvider(connection={"use_server_proxy": True})._connection_config()
+    assert env_config.headers == {"OPEN-SANDBOX-API-KEY": "key-from-env"}  # pragma: allowlist secret
 
 
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1193,6 +1207,74 @@ async def test_create_once_and_connect_after_create_error_paths(
     with pytest.raises(RuntimeError, match="probe failed"):
         await provider._create_once(SandboxSpec(image="image:tag"))
     assert cleanup_calls == ["sandbox-1"]
+
+
+async def test_create_once_cleans_up_after_cancellation(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": "probe"})
+    cleanup_calls: list[str] = []
+    verify_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def wait_in_verify(_handle: opensandbox_provider.SandboxHandle) -> None:
+        verify_started.set()
+        await asyncio.get_running_loop().create_future()
+
+    async def cleanup(handle: opensandbox_provider.SandboxHandle) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        cleanup_calls.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "_verify_created_handle", wait_in_verify)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+
+    create_task = asyncio.create_task(provider._create_once(SandboxSpec(image="image:tag")))
+    await verify_started.wait()
+    create_task.cancel()
+    await cleanup_started.wait()
+    allow_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await create_task
+
+    assert cleanup_calls == ["sandbox-1"]
+
+
+async def test_close_releases_local_resources_after_cancellation() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    kill_started = asyncio.Event()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    close_finished = asyncio.Event()
+
+    class Raw:
+        async def kill(self) -> None:
+            kill_started.set()
+            await asyncio.get_running_loop().create_future()
+
+        async def close(self) -> None:
+            close_started.set()
+            await allow_close.wait()
+            close_finished.set()
+
+    close_task = asyncio.create_task(
+        provider.close(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-cancelled",
+                provider_name="opensandbox",
+                raw=Raw(),
+            ),
+        )
+    )
+    await kill_started.wait()
+    close_task.cancel()
+    await close_started.wait()
+    allow_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+    assert close_finished.is_set()
 
 
 async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.MonkeyPatch) -> None:

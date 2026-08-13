@@ -39,7 +39,7 @@ from nemo_gym.sandbox.providers import (
     list_providers,
     register_provider,
 )
-from nemo_gym.sandbox.utils import rewrite_image
+from nemo_gym.sandbox.utils import await_cleanup, rewrite_image
 
 
 __all__ = [
@@ -64,6 +64,7 @@ __all__ = [
     "SupportsSandboxPty",
     "SupportsSandboxPtyAttach",
     "create_provider",
+    "await_cleanup",
     "get_provider_class",
     "list_providers",
     "register_provider",
