@@ -241,6 +241,144 @@ async def test_direct_create_passes_image_auth_to_sdk_create(
     assert image.auth.password == TEST_REGISTRY_PASSWORD
 
 
+async def test_pool_create_uses_sdk_compatibility_image_and_proxy_auth(
+    fake_opensandbox_sdk: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "http://sandbox.example/",
+            "api_key": "pool-api-key",  # pragma: allowlist secret
+            "request_timeout_s": 30,
+            "use_server_proxy": True,
+        },
+        create={
+            "request_timeout_s": 120,
+            "timeout_s": 30,
+        },
+        probe={"command": None},
+    )
+    handle = await provider.create(
+        SandboxSpec(
+            image="busybox:1.36",
+            ttl_s=1800,
+            metadata={"purpose": "osworld"},
+            provider_options={
+                "skip_health_check": True,
+                "extensions": {"poolRef": "osworld-kvm"},
+            },
+        )
+    )
+
+    assert handle.sandbox_id == "sandbox-1"
+    assert FakeSandbox.created_kwargs["image"] == "busybox:1.36"
+    assert FakeSandbox.created_kwargs["timeout"] == timedelta(seconds=1800)
+    assert FakeSandbox.created_kwargs["extensions"]["poolRef"] == "osworld-kvm"
+    assert FakeSandbox.created_kwargs["metadata"]["purpose"] == "osworld"
+    assert FakeSandbox.created_kwargs["skip_health_check"] is True
+    create_connection = FakeSandbox.created_kwargs["connection_config"]
+    assert create_connection.kwargs["domain"] == "http://sandbox.example"
+    assert create_connection.kwargs["headers"] == {
+        "OPEN-SANDBOX-API-KEY": "pool-api-key"  # pragma: allowlist secret
+    }
+    assert FakeSandbox.connected_args == ()
+
+
+async def test_endpoint_normalizes_missing_scheme_and_merges_sdk_headers() -> None:
+    class FakeRaw:
+        connection_config = SimpleNamespace(
+            get_base_url=lambda: "https://sandbox.example/v1",
+            headers={
+                "OPEN-SANDBOX-API-KEY": "pool-api-key",  # pragma: allowlist secret
+                "X-Shared": "connection",
+            },
+        )
+
+        async def get_endpoint(self, port: int) -> Any:
+            assert port == 5000
+            return SimpleNamespace(
+                endpoint="10.0.0.22:5000",
+                headers={"X-Route": "sandbox", "X-Shared": "endpoint"},
+            )
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "https://sandbox.example/",
+            "api_key": "pool-api-key",  # pragma: allowlist secret
+            "use_server_proxy": True,
+        },
+        operations={"retries": 0},
+        probe={"command": None},
+    )
+    resolved = await provider.endpoint(
+        opensandbox_provider.SandboxHandle(
+            sandbox_id="sandbox-1",
+            provider_name="opensandbox",
+            raw=FakeRaw(),
+        ),
+        5000,
+    )
+
+    assert resolved.endpoint == "https://10.0.0.22:5000"
+    assert resolved.headers == {
+        "OPEN-SANDBOX-API-KEY": "pool-api-key",  # pragma: allowlist secret
+        "X-Shared": "endpoint",
+        "X-Route": "sandbox",
+    }
+
+
+async def test_endpoint_uses_effective_sdk_scheme_when_provider_input_is_unset() -> None:
+    class FakeRaw:
+        connection_config = SimpleNamespace(
+            get_base_url=lambda: "https://gateway.example/v1",
+            headers={},
+        )
+
+        async def get_endpoint(self, _port: int) -> Any:
+            return SimpleNamespace(endpoint="sandbox.example:5000", headers={})
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 0},
+        probe={"command": None},
+    )
+    resolved = await provider.endpoint(
+        opensandbox_provider.SandboxHandle(
+            sandbox_id="sandbox-1",
+            provider_name="opensandbox",
+            raw=FakeRaw(),
+        ),
+        5000,
+    )
+
+    assert resolved.endpoint == "https://sandbox.example:5000"
+
+
+async def test_direct_endpoint_never_receives_management_api_key() -> None:
+    class FakeRaw:
+        connection_config = SimpleNamespace(headers={})
+
+        async def get_endpoint(self, _port: int) -> Any:
+            return SimpleNamespace(endpoint="http://10.0.0.22:5000", headers={})
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "api_key": "pool-api-key",  # pragma: allowlist secret
+            "use_server_proxy": False,
+        },
+        operations={"retries": 0},
+        probe={"command": None},
+    )
+    resolved = await provider.endpoint(
+        opensandbox_provider.SandboxHandle(
+            sandbox_id="sandbox-1",
+            provider_name="opensandbox",
+            raw=FakeRaw(),
+        ),
+        5000,
+    )
+
+    assert resolved.headers == {}
+
+
 def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")
@@ -335,7 +473,7 @@ def test_provider_options_from_mapping() -> None:
 def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
-            "domain": "sandbox.example",
+            "domain": "sandbox.example/",
             "api_key": "key",  # pragma: allowlist secret
             "protocol": "https",
             "request_timeout_s": 10,

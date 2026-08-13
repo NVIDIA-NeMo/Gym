@@ -24,11 +24,13 @@ from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxPtySession,
@@ -634,7 +636,9 @@ class OpenSandboxProvider:
         _, ConnectionConfig, _, _, _ = _require_opensandbox_sdk()
         kwargs: dict[str, Any] = {}
         if self._connection.domain is not None:
-            kwargs["domain"] = self._connection.domain
+            # OpenSandbox SDK 0.1.15 appends ``/v1`` directly. Normalizing here
+            # prevents a configured trailing slash from producing ``//v1``.
+            kwargs["domain"] = self._connection.domain.rstrip("/")
         if self._connection.api_key is not None:
             kwargs["api_key"] = self._connection.api_key
         if self._connection.protocol is not None:
@@ -962,6 +966,38 @@ class OpenSandboxProvider:
                 sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
+
+    async def endpoint(
+        self,
+        handle: SandboxHandle,
+        port: int,
+    ) -> SandboxEndpoint:
+        """Resolve one client-reachable direct or server-proxied service URL."""
+
+        resolved = await self._await_sdk_operation(
+            lambda: handle.raw.get_endpoint(port),
+            operation="get_endpoint",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=(
+                float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
+            ),
+        )
+        endpoint_url = str(resolved.endpoint or "")
+        if not endpoint_url:
+            raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
+        if "://" not in endpoint_url:
+            # Use the SDK handle's effective configuration so environment-
+            # resolved domains and protocols match the lifecycle request.
+            scheme = urlsplit(handle.raw.connection_config.get_base_url()).scheme or "http"
+            endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
+        headers = dict(handle.raw.connection_config.headers)
+        # Match the SDK's service adapters: connection-wide headers apply to
+        # every request, while endpoint-specific routing or auth headers win.
+        # The upstream proxy-auth fix adds the management API key to
+        # ConnectionConfig.headers only in server-proxy mode, so direct
+        # sandbox endpoints never receive it.
+        headers.update(resolved.headers)
+        return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
