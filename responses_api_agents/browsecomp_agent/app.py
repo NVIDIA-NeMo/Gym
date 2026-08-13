@@ -46,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    accumulate_response_usage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -480,18 +481,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             new_outputs.extend(output)
             full_trajectory.extend(output)
 
-            if not usage:
-                usage = model_response.usage
-                model_response.usage = None
-
-            if usage and model_response.usage:
-                usage.input_tokens += model_response.usage.input_tokens
-                usage.output_tokens += model_response.usage.output_tokens
-                usage.total_tokens += model_response.usage.total_tokens
-
-                # TODO support more advanced token details
-                usage.input_tokens_details.cached_tokens = 0
-                usage.output_tokens_details.reasoning_tokens = 0
+            usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
                 break

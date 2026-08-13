@@ -23,11 +23,13 @@ from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -50,6 +52,15 @@ class OpenSandboxCreateTimeoutError(OpenSandboxCreateError):
 
 class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
+
+
+class SandboxBackendUnreachableError(RuntimeError):
+    """Raised when the server proxy cannot open a TCP connection to a sandbox's exec daemon.
+
+    The proxy's 502 is a connect failure, so the submitted command never
+    started. Persistent 502s mean the backend is gone (e.g. the container was
+    OOM-killed and sandbox pods never restart); retrying cannot revive it.
+    """
 
 
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -261,13 +272,17 @@ def _log_create_retry(retry_state: Any) -> None:
     )
 
 
-def _log_operation_retry(retry_state: Any) -> None:
+def _log_operation_retry(retry_state: Any, *, operation: str = "?", sandbox_id: str = "?") -> None:
+    # operation + sandbox_id make an absorbed create-probe retry distinguishable
+    # from a failing agent exec; without them every 502 retry looks identical.
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
     LOGGER.warning(
-        "Retrying OpenSandbox SDK operation after attempt %s; next_sleep_s=%s; error=%r",
+        "Retrying OpenSandbox SDK operation after attempt %s; next_sleep_s=%s; operation=%s; sandbox_id=%s; error=%r",
         retry_state.attempt_number,
         sleep_s,
+        operation,
+        sandbox_id,
         exception,
     )
 
@@ -364,6 +379,10 @@ class OpenSandboxConnectionConfig:
     protocol: str | None = None
     request_timeout_s: int | None = None
     use_server_proxy: bool = False
+    # Open a fresh connection per request. Set this behind a load balancer that
+    # silently reaps idle pooled connections, where reusing one hangs the SDK.
+    # Costs a handshake per request; otherwise harmless.
+    disable_connection_pooling: bool = False
     keepalive_expiry_s: float | None = 3.0
     max_keepalive_connections: int = 20
     max_connections: int | None = 100
@@ -474,6 +493,13 @@ class OpenSandboxOperationConfig:
     retry_max_delay_s: float = 15.0
     command_retries: int = 0
     close_timeout_s: float | None = 30.0
+    # Poll short status/log requests instead of holding one SSE stream open for
+    # the whole command. Set this behind a load balancer that caps stream
+    # duration, which would otherwise drop the stream and hang the client.
+    background_exec: bool = False
+    # Backs off from initial to interval.
+    background_poll_initial_s: float = 0.25
+    background_poll_interval_s: float = 2.0
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -486,6 +512,10 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.command_retries must be >= 0")
         if self.close_timeout_s is not None and self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
+        if self.background_poll_interval_s <= 0:
+            raise ValueError("operations.background_poll_interval_s must be > 0")
+        if self.background_poll_initial_s <= 0:
+            raise ValueError("operations.background_poll_initial_s must be > 0")
 
 
 @dataclass(frozen=True)
@@ -601,7 +631,9 @@ class OpenSandboxProvider:
         _, ConnectionConfig, _, _, _ = _require_opensandbox_sdk()
         kwargs: dict[str, Any] = {}
         if self._connection.domain is not None:
-            kwargs["domain"] = self._connection.domain
+            # OpenSandbox SDK 0.1.15 appends ``/v1`` directly. Normalizing here
+            # prevents a configured trailing slash from producing ``//v1``.
+            kwargs["domain"] = self._connection.domain.rstrip("/")
         if self._connection.api_key is not None:
             kwargs["api_key"] = self._connection.api_key
         if self._connection.protocol is not None:
@@ -612,7 +644,15 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
-        if self._connection.keepalive_expiry_s is not None:
+            # The SDK's execd-facing clients (health ping, commands, files)
+            # send only ConnectionConfig.headers — api_key alone never reaches
+            # proxied /proxy/* routes, so servers that enforce auth there 401
+            # every health ping and create times out at ready_timeout. Inject
+            # the key only in proxy mode: a direct sandbox endpoint runs
+            # untrusted code and must never see it.
+            if self._connection.api_key is not None:
+                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
+        if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
 
@@ -626,9 +666,12 @@ class OpenSandboxProvider:
         """Build the SDK transport with the configured pool limits."""
         import httpx
 
+        max_keepalive = (
+            0 if self._connection.disable_connection_pooling else self._connection.max_keepalive_connections
+        )
         limits = httpx.Limits(
             max_connections=self._connection.max_connections,
-            max_keepalive_connections=self._connection.max_keepalive_connections,
+            max_keepalive_connections=max_keepalive,
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
         if self._connection.transport_backend == "aiohttp":
@@ -660,7 +703,12 @@ class OpenSandboxProvider:
         return {"sandbox_id": handle.sandbox_id}
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
-        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK."""
+        """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
+
+        Health-checks unless the caller opts out: a sandbox id only proves the
+        workload exists, not that its exec daemon is listening yet, so an
+        unchecked handle turns that gap into a 502 on the first call.
+        """
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         sandbox_id = str(descriptor["sandbox_id"])
         timeout_s = self._create.connect_attempt_timeout_s
@@ -669,7 +717,7 @@ class OpenSandboxProvider:
                 sandbox_id,
                 connection_config=self._connection_config(request_timeout_s=timeout_s),
                 connect_timeout=timedelta(seconds=timeout_s),
-                skip_health_check=True,
+                skip_health_check=self._create.skip_health_check,
             ),
             timeout=timeout_s,
         )
@@ -707,7 +755,7 @@ class OpenSandboxProvider:
         max_attempts = retry_count + 1
 
         def _before_sleep(retry_state: Any) -> None:
-            _log_operation_retry(retry_state)
+            _log_operation_retry(retry_state, operation=operation, sandbox_id=sandbox_id)
 
         retry_policy = AsyncRetrying(
             retry=retry_if_exception(_is_retryable_sdk_operation_error),
@@ -729,6 +777,57 @@ class OpenSandboxProvider:
                 )
 
         raise RuntimeError("OpenSandbox SDK operation retry loop did not run")
+
+    async def _submit_command(
+        self,
+        operation_factory: Callable[[], Awaitable[Any]],
+        *,
+        operation: str,
+        sandbox_id: str,
+        timeout_s: float | None,
+        retries: int,
+    ) -> Any:
+        """Retry backend-connect 502s that ``command_retries`` deliberately skips.
+
+        A proxy 502 is a TCP-connect failure: the command never reached execd, so
+        retrying under ``operations.retries`` cannot double-run it (unlike a real
+        command failure). When that budget is exhausted the backend is dead, so
+        raise a typed error and fail fast instead of retrying for hours.
+        """
+        attempts = self._operations.retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._await_sdk_operation(
+                    operation_factory,
+                    operation=operation,
+                    sandbox_id=sandbox_id,
+                    timeout_s=timeout_s,
+                    retries=retries,
+                )
+            except Exception as e:
+                if _exception_status_code(e) != 502:
+                    raise
+                if attempt == attempts:
+                    raise SandboxBackendUnreachableError(
+                        f"Sandbox backend unreachable through {attempts} submissions of "
+                        f"{operation!r} (proxy 502: no TCP connection to execd); the sandbox "
+                        f"is likely dead; sandbox_id={sandbox_id!r}"
+                    ) from e
+                # The execd bind window is short, so poll quickly with a small
+                # capped backoff rather than the per-operation delays (which are
+                # tuned for slow creates).
+                sleep_s = min(0.25 * 2 ** (attempt - 1), 2.0)
+                LOGGER.warning(
+                    "Backend-connect 502 on %s; retrying submission %s/%s in %.1fs; sandbox_id=%s",
+                    operation,
+                    attempt,
+                    attempts,
+                    sleep_s,
+                    sandbox_id,
+                )
+                await asyncio.sleep(sleep_s)
+
+        raise RuntimeError("OpenSandbox command submission retry loop did not run")
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
         if self._probe.command is None:
@@ -838,7 +937,7 @@ class OpenSandboxProvider:
                         handle.sandbox_id,
                         connection_config=self._connection_config(),
                         connect_timeout=timedelta(seconds=attempt_timeout_s),
-                        skip_health_check=True,
+                        skip_health_check=self._create.skip_health_check,
                     ),
                     timeout=attempt_timeout_s,
                 )
@@ -852,6 +951,38 @@ class OpenSandboxProvider:
                 sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
+
+    async def endpoint(
+        self,
+        handle: SandboxHandle,
+        port: int,
+    ) -> SandboxEndpoint:
+        """Resolve one client-reachable direct or server-proxied service URL."""
+
+        resolved = await self._await_sdk_operation(
+            lambda: handle.raw.get_endpoint(port),
+            operation="get_endpoint",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=(
+                float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
+            ),
+        )
+        endpoint_url = str(resolved.endpoint or "")
+        if not endpoint_url:
+            raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
+        if "://" not in endpoint_url:
+            # Use the SDK handle's effective configuration so environment-
+            # resolved domains and protocols match the lifecycle request.
+            scheme = urlsplit(handle.raw.connection_config.get_base_url()).scheme or "http"
+            endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
+        headers = dict(handle.raw.connection_config.headers)
+        # Match the SDK's service adapters: connection-wide headers apply to
+        # every request, while endpoint-specific routing or auth headers win.
+        # The upstream proxy-auth fix adds the management API key to
+        # ConnectionConfig.headers only in server-proxy mode, so direct
+        # sandbox endpoints never receive it.
+        headers.update(resolved.headers)
+        return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
@@ -1026,22 +1157,137 @@ class OpenSandboxProvider:
             )
         )
         effective_retries = self._command_retry_count() if retries is None else retries
-        execution = await self._await_sdk_operation(
-            lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
-            operation="command run",
+
+        async def _dispatch() -> SandboxExecResult:
+            if self._operations.background_exec:
+                return await self._exec_background(
+                    handle,
+                    effective_command,
+                    opts_kwargs,
+                    sdk_timeout_s=sdk_timeout_s,
+                    total_timeout_s=timeout_s,
+                    retries=effective_retries,
+                )
+
+            execution = await self._submit_command(
+                lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
+                operation="command run",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=sdk_timeout_s,
+                retries=effective_retries,
+            )
+            stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
+            stderr_parts = [msg.text for msg in execution.logs.stderr]
+            if execution.error is not None:
+                stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
+            stderr = "\n".join(stderr_parts) or None
+            error_type = None
+            if execution.exit_code is not None:
+                return_code = execution.exit_code
+            elif execution.error is not None:
+                return_code = 125
+                error_type = "sandbox"
+            else:
+                return_code = 0
+
+            return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+
+        # Backstop for wedges the inner deadlines miss. Background exec polls, so
+        # sdk_timeout_s bounds a single request rather than the command: without
+        # timeout_s there is nothing to cap against.
+        if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
+            return await _dispatch()
+        hard_cap_s = 2.0 * float(sdk_timeout_s) + 30.0
+        try:
+            return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
+                f"(sandbox_id={handle.sandbox_id!r})"
+            ) from e
+
+    async def _exec_background(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        opts_kwargs: dict[str, Any],
+        *,
+        sdk_timeout_s: float | None,
+        total_timeout_s: int | float | None,
+        retries: int,
+    ) -> SandboxExecResult:
+        """Run a command as a background execution polled via short requests.
+
+        The logs endpoint returns one combined stream, so unlike the foreground
+        path ``stdout`` carries both streams and ``stderr`` is set only when the
+        sandbox itself reports an error.
+        """
+        _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
+        background_opts = dict(opts_kwargs)
+        background_opts["background"] = True
+
+        execution = await self._submit_command(
+            lambda: handle.raw.commands.run(command, opts=RunCommandOpts(**background_opts)),
+            operation="command run (background submit)",
             sandbox_id=handle.sandbox_id,
             timeout_s=sdk_timeout_s,
-            retries=effective_retries,
+            retries=retries,
         )
-        stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
-        stderr_parts = [msg.text for msg in execution.logs.stderr]
-        if execution.error is not None:
-            stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
-        stderr = "\n".join(stderr_parts) or None
+        execution_id = getattr(execution, "id", None)
+        if not execution_id:
+            raise RuntimeError("OpenSandbox background command did not return an execution id")
+
+        loop = asyncio.get_running_loop()
+        # The server enforces the command timeout; leave the client headroom.
+        deadline = (loop.time() + float(total_timeout_s) + 60.0) if total_timeout_s is not None else None
+        poll_timeout_s = (
+            float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
+        )
+
+        # Poll fast at first so the many short commands an agent issues are
+        # detected promptly, then back off so long ones do not spam requests.
+        poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
+        while True:
+            status = await self._await_sdk_operation(
+                lambda: handle.raw.commands.get_command_status(execution_id),
+                operation="command status",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=poll_timeout_s,
+                retries=self._operations.retries,
+            )
+            # A renamed SDK field must not degrade silently: a missing `running`
+            # would end the poll at once, a missing `exit_code` would score a
+            # failed command as a success.
+            for field in ("running", "exit_code"):
+                if not hasattr(status, field):
+                    raise RuntimeError(f"OpenSandbox status has no {field!r} field; execution_id={execution_id!r}")
+            if not status.running:
+                break
+            if deadline is not None and loop.time() >= deadline:
+                raise TimeoutError(
+                    f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "
+                    f"execution_id={execution_id!r}"
+                )
+            await asyncio.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
+
+        # The execution has finished, so one call returns its whole buffer; the
+        # cursor this endpoint reports back is the end offset rather than a
+        # more-data flag, so there is no tail to follow.
+        logs = await self._await_sdk_operation(
+            lambda: handle.raw.commands.get_background_command_logs(execution_id),
+            operation="command logs",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=poll_timeout_s,
+            retries=self._operations.retries,
+        )
+        stdout = getattr(logs, "content", None) or None
+        status_error = getattr(status, "error", None)
+        stderr = status_error or None
         error_type = None
-        if execution.exit_code is not None:
-            return_code = execution.exit_code
-        elif execution.error is not None:
+        if status.exit_code is not None:
+            return_code = status.exit_code
+        elif status_error is not None:
             return_code = 125
             error_type = "sandbox"
         else:

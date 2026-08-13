@@ -52,17 +52,70 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
     VLLMModelConfig,
+    _append_transport_io,
+    _transport_images,
+    _transport_log_context,
 )
 
 
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000
 FIXED_UUID = "123"
+
+
+def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    log_path = tmp_path / "model-io-transport.jsonl"
+    monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+                {"type": "text", "text": "inspect"},
+            ],
+        }
+    ]
+
+    _append_transport_io(
+        {
+            "schema_version": 1,
+            "event": "transport_request",
+            "request_payload": {"messages": messages},
+            "embedded_images": _transport_images(messages),
+        }
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["request_payload"]["messages"] == messages
+    assert row["embedded_images"][0]["decoded_bytes"] == 3
+
+
+def test_transport_log_context_reads_generic_headers_without_body_fields() -> None:
+    request = MagicMock()
+    request.headers = {
+        "x-nemo-gym-log-run-id": "run-001",
+        "x-nemo-gym-log-adapter": "gym",
+        "x-nemo-gym-log-task-id": "task-001",
+        "x-nemo-gym-log-domain": "chrome",
+        "x-nemo-gym-log-task-attempt": "2",
+        "x-nemo-gym-log-step": "3",
+        "x-nemo-gym-log-parse-attempt": "1",
+    }
+
+    assert _transport_log_context(request) == {
+        "run_id": "run-001",
+        "adapter": "gym",
+        "task_id": "task-001",
+        "domain": "chrome",
+        "task_attempt": 2,
+        "step": 3,
+        "parse_attempt": 1,
+    }
 
 
 class FakeUUID:
@@ -73,6 +126,7 @@ class FakeUUID:
 
 COMMON_RESPONSE_PARAMS = dict(
     parallel_tool_calls=True,
+    status="completed",
     tool_choice="auto",
 )
 
@@ -469,7 +523,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="<think>I have identified the city as San Francisco based on user input.</think>",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -532,7 +585,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="<think>I'll first think about the user's question.</think><think>Then I will answer.</think>",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -613,7 +665,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="Hello! How can I assist you today?",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -682,6 +733,27 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
+        workers = [self._setup_server(monkeypatch) for _ in range(2)]
+        for worker in workers:
+            worker._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        workers[0]._session_id_to_client = {"prior-a": workers[0]._clients[0]}
+        workers[1]._session_id_to_client = {
+            "prior-b": workers[1]._clients[0],
+            "prior-c": workers[1]._clients[1],
+            "prior-d": workers[1]._clients[2],
+        }
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "target-session"}
+
+        client_indices = []
+        for worker in workers:
+            selected_client = worker._resolve_client(request)
+            client_indices.append(next(i for i, client in enumerate(worker._clients) if client is selected_client))
+
+        assert client_indices[0] == client_indices[1]
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -1005,7 +1077,6 @@ class TestApp:
             {
                 "content": "<think>Considering ways to greet the user...</think>Hi, how can I help?",
                 "role": "assistant",
-                "tool_calls": [],
             },
             {
                 "content": [{"text": "What's the weather?", "type": "text"}],
@@ -1304,7 +1375,6 @@ class TestApp:
             {
                 "content": "Order #1234 is shipped and arrives tomorrow.",
                 "role": "assistant",
-                "tool_calls": [],
             },
             {
                 "content": [
@@ -1460,7 +1530,7 @@ class TestApp:
 
         assert captured_params["value"] == expected_chat_completion_create_params
 
-    def test_client_session_routing(self, monkeypatch: MonkeyPatch):
+    def test_client_session_routing(self):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -1521,7 +1591,7 @@ class TestApp:
 
         server._clients = [client_1, client_2]
 
-        # Test first query by client 1 goes to underlying client 1
+        # Record the backend selected for each new session.
         client_1 = TestClient(app)
         response_1_1 = client_1.post(
             "/v1/responses",
@@ -1529,9 +1599,8 @@ class TestApp:
         )
         assert response_1_1.status_code == 200
         data = response_1_1.json()
-        assert data["output"][0]["content"][0]["text"] == "1"
+        routed_output_1 = data["output"][0]["content"][0]["text"]
 
-        # Test first query by client 2 goes to underlying client 2 (round robin)
         client_2 = TestClient(app)
         response_2_1 = client_2.post(
             "/v1/responses",
@@ -1539,9 +1608,8 @@ class TestApp:
         )
         assert response_2_1.status_code == 200
         data = response_2_1.json()
-        assert data["output"][0]["content"][0]["text"] == "2"
+        routed_output_2 = data["output"][0]["content"][0]["text"]
 
-        # Test first query by client 3 goes to underlying client 1 = 3 % 2 (round robin)
         client_3 = TestClient(app)
         response_3_1 = client_3.post(
             "/v1/responses",
@@ -1549,19 +1617,18 @@ class TestApp:
         )
         assert response_3_1.status_code == 200
         data = response_3_1.json()
-        assert data["output"][0]["content"][0]["text"] == "1"
+        routed_output_3 = data["output"][0]["content"][0]["text"]
 
-        # Test second query by client 1 goes to the same underlying client 1 (not round robin since we've called it before)
-        # Here, we assume that TestClient will extract and propogate the response cookies
+        # TestClient preserves the session cookie, so every second request must
+        # return through the same backend selected for that session's first request.
         response_1_2 = client_1.post(
             "/v1/responses",
             json=request_body.model_dump(exclude_unset=True, mode="json"),
         )
         assert response_1_2.status_code == 200
         data = response_1_2.json()
-        assert data["output"][0]["content"][0]["text"] == "1"
+        assert data["output"][0]["content"][0]["text"] == routed_output_1
 
-        # Test second query by client 3 goes to the same underlying client 1 (not round robin since we've called it before)
         # We do this out of order as 1 -> 3 -> 2 instead of 1 -> 2 -> 3 to test any ordering effects.
         response_3_2 = client_3.post(
             "/v1/responses",
@@ -1569,16 +1636,15 @@ class TestApp:
         )
         assert response_3_2.status_code == 200
         data = response_3_2.json()
-        assert data["output"][0]["content"][0]["text"] == "1"
+        assert data["output"][0]["content"][0]["text"] == routed_output_3
 
-        # Test second query by client 2 goes to the same underlying client 2
         response_2_2 = client_2.post(
             "/v1/responses",
             json=request_body.model_dump(exclude_unset=True, mode="json"),
         )
         assert response_2_2.status_code == 200
         data = response_2_2.json()
-        assert data["output"][0]["content"][0]["text"] == "2"
+        assert data["output"][0]["content"][0]["text"] == routed_output_2
 
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -1786,7 +1852,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -1794,7 +1859,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
         ]
@@ -1880,7 +1944,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -1888,7 +1951,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -1995,7 +2057,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2003,7 +2064,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2028,7 +2088,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [],
                 "reasoning_content": "None content test",
                 "reasoning": "None content test",
             },
@@ -2244,7 +2303,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2252,7 +2310,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
         ]
@@ -2338,7 +2395,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2346,7 +2402,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2453,7 +2508,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2461,7 +2515,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2486,7 +2539,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [],
                 "reasoning_content": "None content test",
                 "reasoning": "None content test",
             },
@@ -2524,7 +2576,7 @@ class TestApp:
         ]
 
         expected_response = NeMoGymResponse(
-            **COMMON_RESPONSE_PARAMS,
+            **(COMMON_RESPONSE_PARAMS | {"status": "incomplete"}),
             id="resp_123",
             object="response",
             tools=[],
@@ -2643,7 +2695,6 @@ class TestVLLMConverter:
                 {
                     "role": "assistant",
                     "content": "assistant content",
-                    "tool_calls": [],
                 },
                 {
                     "role": "system",
@@ -3327,6 +3378,68 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Assistant reasoning history preprocessing
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_reasoning_history_model(*, preserve_content: bool) -> VLLMModel:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=True,
+        uses_interleaved_reasoning=True,
+        preserve_reasoning_in_assistant_content=preserve_content,
+    )
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestAssistantReasoningHistoryPreprocess:
+    @staticmethod
+    def _body(content: Any) -> dict[str, Any]:
+        return {
+            "model": "caller-model",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": "next"},
+            ],
+        }
+
+    def test_default_still_splits_think_history(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=False)
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(), self._body("<think>reason</think>\n## Action:\nact")
+        )
+
+        assistant = result["messages"][1]
+        assert assistant["content"] == "\n## Action:\nact"
+        assert assistant["reasoning_content"] == "reason"
+        assert assistant["reasoning"] == "reason"
+
+    def test_preserve_mode_keeps_string_history_byte_for_byte(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=True)
+        original = "<think>reason</think>\n## Action:\nact"
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body(original))
+
+        assistant = result["messages"][1]
+        assert assistant == {"role": "assistant", "content": original}
+
+    def test_preserve_mode_keeps_list_history_byte_for_byte(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=True)
+        original = [{"type": "text", "text": "<think>reason</think>\n## Action:\nact"}]
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body(original))
+
+        assistant = result["messages"][1]
+        assert assistant == {"role": "assistant", "content": original}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

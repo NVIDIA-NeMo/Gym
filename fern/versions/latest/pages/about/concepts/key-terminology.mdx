@@ -1,136 +1,97 @@
 ---
 title: "Key Terminology"
-description: ""
----
-Essential vocabulary for model training, RL workflows, and NeMo Gym. This glossary defines terms you'll encounter throughout the tutorials and documentation.
-
-## Rollout & Data Collection Terms
-**Rollout / Trajectory**
-
-**Rollout** (verb) refers to the process of executing a policy in an environment to generate data: stepping through the environment, taking actions, and recording what happens. **Rollout** (noun) is also used synonymously with **trajectory**: the resulting sequence of states, actions, and rewards: the ordered record of what happened. In practice, many people use "rollout" and "trajectory" interchangeably since a rollout produces exactly one trajectory.
-
-**Rollout Batch**
-
-A collection of multiple rollouts generated together, typically for the same task. Used for efficient parallel processing.
-
-**Environment**
-
-The conditions in which your model operates. Functionally, this typically refers to tools the model has access to.
-
-**Task**
-
-An input prompt paired with environment setup (tools + verification). What you want models to learn to do.
-
-**Task Instance**
-
-A single rollout attempt for a specific task. Multiple instances per task capture different approaches.
-
-**Training environment**
-
-A set of tasks that share the same environment setup compiled into a single prompt dataset.
-
-**Trace**
-
-Detailed log of a rollout including metadata for debugging or interpretability.
-
-**Data Generation Process**
-
-The complete pipeline from input prompt to scored rollout, involving rollout orchestration, model inference, tool usage, and verification.
-
-**Rollout Collection**
-
-The process of applying your data generation pipeline to input prompts at scale.
-
-**Demonstration Data**
-
-Training data format for SFT consisting of input prompts paired with successful rollouts. Shows models examples of correct behavior.
-
-**Preference Pairs**
-
-Training data format for DPO consisting of the same prompt with two different responses, where one is preferred over the other.
-
+description: "Essential vocabulary for agent evaluation, policy-model training, RL workflows, and NeMo Gym."
 ---
 
-## Architecture Terms
+Essential vocabulary for agent evaluation, policy-model training, RL workflows, and NeMo Gym. You'll encounter these terms throughout the tutorials and documentation.
 
-**Policy Model**
+Deeper treatment: [Environments](/about/concepts/environments), [Evaluation](/about/concepts/evaluation), [Training](/about/concepts/training), [Architecture](/about/architecture).
 
-The primary LLM being trained or evaluated - the "decision-making brain" you want to improve.
+## Overview
 
-**Resources Server**
+A **dataset** is a JSONL file of **tasks** (one row = one problem). Running the agent on a task produces a **rollout** (also called a **trajectory**) — one attempt and its record.
 
-The FastAPI service (under `resources_servers/`) that holds per-task state, exposes the environment's tools, and implements `verify()` to score a rollout into a reward — the verifier-and-state component of an environment. (In Gym an *environment* is a resources server together with an agent and dataset(s); see the `environments/` directory.) Every environment has exactly one resources server.
+Each run follows:
 
-**Agent Server (Responses API Agent)**
+1. **seed_session** — set up isolated state for this attempt  
+2. **agent loop** — call the model (policy), use tools, repeat until done  
+3. **verify** — score the attempt → **reward**
 
-The FastAPI service (under `responses_api_agents/`) that drives the model through a task — the harness that runs the multi-step / tool-calling loop against a resources server. Gym ships several built-in harnesses (e.g. `simple_agent`, `aviary_agent`, and others under `responses_api_agents/`); pick whichever fits your control flow, or bring your own.
+Two compositions matter:
 
-**Model Server (Responses API Model)**
+| | Built from | Notes |
+| --- | --- | --- |
+| **Agent** | **Model** + **Agent harness** | The harness owns the loop, context, and stop conditions, and routes calls to environment-owned tools. |
+| **Environment** | **Dataset** + **Verifier** + **State** (+ env tools) | The task world the agent acts on and is scored against. The **model is outside** the environment. |
 
-The FastAPI service (under `responses_api_models/`) that wraps an LLM endpoint (vLLM, OpenAI, etc.) behind NeMo Gym's Responses API and manages the token IDs needed for training. Agents refer to it by name (commonly `policy_model`).
+The **agent harness** belongs to the agent, not the environment. In Gym packaging, an environment *config* still names which agent server to run — that is a wiring reference, not ownership of the harness.
 
-**Orchestration**
+The **model** (also called the **policy**) is what you call for generation — local weights or a remote API endpoint. In Gym it is usually exposed by the **Model server** (or your harness can call an endpoint directly). The same environment shape can be used for **benchmark** eval (fixed taskset / protocol) or for **training** (rewards or synthetic data); the main differences are task split and contamination controls, not a different environment type.
 
-Coordination logic that manages when to call models, which tools to use, and how to sequence multi-step operations.
+| Concept | In NeMo Gym |
+| --- | --- |
+| Dataset | JSONL rows with `responses_create_params` + `verifier_metadata` — [Prepare Data](/data) |
+| Agent harness | Implemented by the **Agent server** (`responses_api_agents/`) — [Agent Server](/agent-server) |
+| Verifier, per-attempt state, env tools | Implemented by the **Resources server** (`resources_servers/`): `seed_session()` initializes state; tools mutate it; `verify()` scores the attempt — [Build Verifiers](/build-verifiers) |
+| Model | Served by the **Model server** (`responses_api_models/`) — wraps local or remote endpoints — [Model Server](/model-server) |
+| Protocol | **Responses API** (Chat Completions converted via middleware when needed) |
 
-**Verifier**
+## Glossary
 
-Scoring logic that evaluates rollouts and produces reward signals. Also referred to as a scorer or grader. Colloquially, "verifier" may also refer to a training environment with verifiable rewards.
+### Tasks & rollouts
 
-**Service Discovery**
+| Term | Definition |
+| --- | --- |
+| **Task** | One problem for the agent to solve — one dataset row (`responses_create_params` + `verifier_metadata`). |
+| **Dataset** | Collection of tasks plus metadata needed for scoring (usually JSONL). See [Prepare Data](/data). |
+| **Rollout / trajectory** | **Rollout** (verb): execute an agent in an environment — take actions and record what happens. **Rollout** (noun) / **trajectory**: the ordered record of one attempt (states, actions, rewards). In Gym these names are aliases; architecture calls the resulting trajectory a *rollout*. Multiple rollouts per task support metrics like pass@k. See [trajectory capabilities](/reference/trajectory-capabilities). |
+| **Task attempt** | One rollout for a specific task. Multiple attempts per task capture different approaches and support pass@k. |
+| **Trace** | Debug-oriented log of a rollout (timing, tool I/O, metadata) beyond the scored trajectory. |
+| **Rollout batch** | Multiple rollouts generated together (across tasks for throughput, or grouped on one task for methods like GRPO). |
+| **Rollout collection** | Running inference, tools, and verification at scale to produce scored rollouts. Start with the [Quickstart](/get-started/quickstart) or [Evaluate](/evaluation). |
 
-Mechanism by which distributed NeMo Gym components find and communicate with each other across machines.
+### Environment
 
-**Reward / Reward Signal**
+| Term | Definition |
+| --- | --- |
+| **Environment** | The task world an agent runs against, excluding the model: `Dataset + Verifier + State` (plus environment tools). Gym configs also reference an **agent harness** for packaging. See [Environments](/about/concepts/environments) and [Build Environments](/environment-tutorials). |
+| **State** | Per-attempt mutable world (files, DB, tool results, and so on). `seed_session()` starts a clean session; tools update that session; it is not a snapshot of the whole environment config. |
+| **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server. Also called scorer or grader. See [Build Verifiers](/build-verifiers). |
+| **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
+| **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
+| **Environment surface** | The tools and per-task state the agent acts on. |
+| **Environment runtime** | Where and how the environment surface executes, such as a local process, Kubernetes service, or sandbox pool. |
 
-Numerical score (typically 0.0-1.0) indicating how well a task was accomplished.
+### Agent & model
 
-## Training Approaches
+| Term | Definition |
+| --- | --- |
+| **Model / policy model** | The model being trained or evaluated — local weights or a remote endpoint, usually via the Model server. See [Model Server](/model-server). |
+| **Agent harness** | How the model interacts with the environment: loops model calls, routes tools, manages context, and decides when the task is done. See [Agent Server](/agent-server). |
+| **Agent** | Model + agent harness. |
+| **Rollout driver** | Coordinates an episode and records its trajectory. |
+| **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
+| **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
+| **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
 
-**SFT (Supervised Fine-Tuning)**
+### Evaluation
 
-Training approach using examples of good model behavior. Shows successful rollouts as training data.
+| Term | Definition |
+| --- | --- |
+| **Evaluation** | Run an agent on tasks, score results, and measure performance. See [Evaluation](/about/concepts/evaluation) and the [Evaluate](/evaluation) workflow. |
+| **Benchmark** | Repeatable, versioned evaluation built on an environment: canonical dataset split, prompt configuration, metrics, and comparison protocol. Not every environment is used as a benchmark. See [Benchmarks](/evaluation/benchmarks). |
+| **pass@k** | Fraction of tasks with at least one success among *k* rollouts. See [Aggregate Metrics](/evaluation/aggregate-metrics). |
 
-**RL (Reinforcement Learning)**
+### Training
 
-Training approach where models learn through trial-and-error interaction with environments using reward signals.
+| Term | Definition |
+| --- | --- |
+| **SFT (Supervised Fine-Tuning)** | Train from examples of good behavior (**demonstration data**: successful / high-reward rollouts). |
+| **RL (Reinforcement Learning)** | Improve the policy through environment interaction and reward signals. |
+| **Online / offline** | **Online**: update the policy from rewards while interacting (e.g. GRPO). **Offline**: train from pre-collected rollouts (e.g. SFT, DPO). See [Offline training with rollouts](/tutorials/training-tutorials/offline-training-w-rollouts). |
+| **DPO (Direct Preference Optimization)** | Offline preference training from pairs of rollouts (preferred vs dispreferred). |
+| **GRPO (Group Relative Policy Optimization)** | Online RL that compares groups of rollouts on the same task relative to each other. See [Training Tutorials](/tutorials/training-tutorials) (e.g. [NeMo RL GRPO](/tutorials/training-tutorials/nemo-rl-grpo)). |
+| **Demonstration data** | SFT examples from successful (high-reward) rollouts. |
+| **Preference pairs** | DPO data: same task, high-reward vs low-reward rollouts (preferred vs dispreferred). |
 
-**Online vs Offline Training**
-
-- **Online**: Model learns while interacting with environment in real-time - **Offline**: Model learns from pre-collected rollout data
-
-**DPO (Direct Preference Optimization)**
-
-An offline RL training approach using pairs of rollouts where one is preferred over another. Teaches better vs worse responses.
-
-**GRPO (Group Relative Policy Optimization)**
-
-Reinforcement learning algorithm that optimizes policies by comparing groups of rollouts relative to each other. Used for online RL training with language models.
-
-## Interaction Patterns
-
-**Multi-turn**
-
-Conversations spanning multiple exchanges where context and state persist across turns.
-
-**Multi-step**
-
-Complex tasks requiring agents to break problems into sequential steps, often using tools and intermediate reasoning.
-
-**Tool Use / Function Calling**
-
-Models invoking external capabilities (APIs, calculators, databases) to accomplish tasks beyond text generation.
-
-## Technical Infrastructure
-
-**Responses API**
-
-OpenAI's standard interface for rollouts, including function calls and multi-turn conversations. NeMo Gym's native format.
-
-**Chat Completions API**
-
-OpenAI's simpler interface for basic LLM interactions. NeMo Gym includes middleware to convert formats.
-
-**vLLM**
-
-High-performance inference server for running open-source language models locally. Alternative to commercial APIs.
+Responses API and Chat Completions are listed in the mapping table above; see [Architecture](/about/architecture) and [Model Server](/model-server).
