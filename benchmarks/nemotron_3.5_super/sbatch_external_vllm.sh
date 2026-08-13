@@ -132,8 +132,8 @@ if (( SLURM_PROCID == 0 )); then
         --api-server-count 1 \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
-        --max-num-batched-tokens 1085440 \
-        --max-num-seqs 1024 \
+        --max-num-batched-tokens 271360 \
+        --max-num-seqs 2048 \
         &
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
@@ -163,8 +163,8 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
-        --max-num-batched-tokens 1085440 \
-        --max-num-seqs 1024
+        --max-num-batched-tokens 271360 \
+        --max-num-seqs 2048
 elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
     # Decode head
 
