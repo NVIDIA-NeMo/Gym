@@ -34,7 +34,7 @@ upstream.
 | Area | Checked behavior | Evidence |
 |---|---|---|
 | Action semantics | Default replay tiers expose eight validated tools; T2 reset narrows model-facing tools to `noop` and UE-targeted `set_prb_cap` with bounds matching its runtime guardrail. Modeled parameters change deterministic transitions; identical setpoints are idempotent. | `tests/test_guardrail.py`, `tests/test_replay_action_semantics.py`, `tests/test_app.py`, `responses_api_agents/gymnasium_agent/tests/test_app.py` |
-| Reward contract | Live, synthetic replay, and dataset replay use one version selector; T2 uses `openair_t2_v3` with service accounting; non-T2 paths preserve frozen V1. | `openair_congestion/reward_profiles.py`, `tests/test_reward_profiles.py`, `tests/test_dataset_ingestion.py` |
+| Reward contract | Synthetic `replay` and diagnostic `dataset_replay` use one version selector; T2 uses `openair_t2_v3` with service accounting; non-T2 paths preserve frozen V1. Legacy connected-runner reference code uses the same selector but is not a selectable backend. | `openair_congestion/reward_profiles.py`, `tests/test_reward_profiles.py`, `tests/test_dataset_ingestion.py` |
 | Admission accounting | Requested, admitted, delivered, denied, and forcibly terminated service agree with emitted UE topology. | `tests/test_replay_action_semantics.py`, `tests/test_reward_profiles.py` |
 | Transactionality | Failed reward computation does not partially commit a step; close and render synchronize with an in-flight step; concurrent resets cannot reap an allocation before its session is registered. | `tests/test_replay_lifecycle.py`, `tests/test_app.py` |
 | Cleanup | Failed backend close stays tracked; a completed agent rollout survives `/close` failure with a structured warning. | `tests/test_app.py`, `responses_api_agents/gymnasium_agent/tests/test_app.py` |
@@ -127,6 +127,28 @@ runtime rejection rate and worse total return than the starting SFT policy.
 The official qualification remains false. Its qualification-receipt SHA-256
 is `3f475d9227bfa9eb60b1af729dad4583ca2190eb4d9d49196b081422909335f7`.
 
+### External empirical update — August 11–13, 2026
+
+These results were produced in separate experimental lanes derived from this
+resource-server runtime. They were not run against this exact rebased commit,
+their full receipts are not checked into this contribution, and they do not
+qualify the PR as demonstrating model superiority.
+
+- An adapter-assisted five-model pilot completed on deterministic synthetic
+  replay with 50 episodes per model. It evaluated each integrated
+  model-plus-adapter policy rather than the protected native-tool protocol;
+  the model-ordering result was **NOT_EVALUABLE**.
+- Fresh Qwen3-1.7B SFT and formal GRPO execution completed on a separate
+  descendant branch. The selected GRPO candidate completed 640 environment and
+  model steps over 40 full-horizon trajectories with one accepted update.
+- The selected GRPO checkpoint tied SFT on the development partition (paired
+  mean delta `0.0`). Held-out evaluation then failed closed on anchor parity
+  before producing a policy comparison and was marked **failed_unclaimable**.
+
+Accordingly, this contribution does not claim frontier-model advantage,
+current-contract GRPO improvement, passed held-out qualification,
+live-network fidelity, or upstream acceptance.
+
 ## External empirical gates
 
 The following are intentionally **not** claimed by this branch:
@@ -180,3 +202,22 @@ pre-commit checks were run on the staged documentation tree.
 This receipt establishes local code-review handoff readiness. It does not
 convert the failed historical model/GRPO qualifications into success, prove
 live-network fidelity, or represent upstream maintainer acceptance.
+
+## Current upstream-rebase verification — August 13, 2026
+
+The contribution was rebased onto upstream `main` at
+`4ba2d4f87ab690113a23106885a9a826fbfb4744` and reverified on the resulting
+working tree. The upstream CLI check used CPython 3.13.14, matching the current
+repository requirement.
+
+| Gate | Result |
+|---|---|
+| OpenAir resource-server tests through `gym env test` | `215 passed` |
+| OpenAir, shared Gymnasium, and agent regression tests | `240 passed` |
+| Repository-wide pre-commit hooks | Passed |
+| Fern documentation check | `0 errors`; one unauthenticated redirect-check warning |
+| Diff whitespace check | Passed |
+
+These results verify the rebased implementation and documentation locally.
+They do not replace the external empirical gates above or imply that the code
+has been accepted upstream.

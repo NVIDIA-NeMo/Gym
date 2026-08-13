@@ -13,11 +13,11 @@ openair_congestion:
       domain: agent
       verified: false
       description: >-
-        5G congestion control (OpenAirInterface), Gymnasium API style.
-        Multi-turn: the agent observes rolling 5G KPIs each step and issues
-        exactly one network-control tool call (7 actuators + noop). Dense
-        per-step KPI reward; the agent sums step rewards into the episode
-        return. Runs standalone via the deterministic replay backend.
+        Multi-turn 5G congestion control with deterministic synthetic dynamics,
+        Gymnasium API style. The agent observes rolling 5G KPIs each step and
+        issues exactly one network-control tool call (7 actuators + noop).
+        Dense per-step KPI reward; the agent sums step rewards into the episode
+        return. No live OAI/FlexRIC backend is included.
       value: Stateful multi-turn telco control env (replay backend, no 5G lab/GPU).
       # Custom keys bound by OpenAirCongestionResourcesServerConfig (config
       # node type has extra='allow'). backend: 'replay' (default, causal and

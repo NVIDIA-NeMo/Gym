@@ -10,6 +10,17 @@ For a guided build-and-validation walkthrough, see the
 For the code-level claim and verification map, see
 [REVIEWER-EVIDENCE.md](REVIEWER-EVIDENCE.md).
 
+## Component map
+
+| Component | Responsibility in this environment |
+|---|---|
+| Model or policy | Reads rendered KPI telemetry and the available tool schemas, then emits exactly one tool call. `gym env start` serves it for inference; training happens separately in NeMo RL. |
+| Agent server | Alternates model calls with resource-server `/reset`, `/step`, and `/close` requests and carries the resource-issued session cookie. |
+| Resource server | Owns episode state, enforces the one-call protocol, delegates accepted actions to the backend, and returns the next observation and reward. |
+| Tools | Bounded OpenAI function schemas that describe the available actions. The selected backend determines how an accepted call changes state. |
+| Verifier | The programmatic `compute_breakdown` reward function—not an LLM judge—scores KPI changes and rejection outcomes. |
+| Backend | `replay` applies causal deterministic synthetic effects and is training-usable; `dataset_replay` serves prerecorded next states for diagnostics only. No live OAI/FlexRIC backend is selectable. |
+
 ## Agent-environment contract
 
 Each task supplies the agent with:
@@ -46,11 +57,12 @@ The environment itself is the verifier. There is no LLM judge. For each accepted
 
 The objective can be read as congestion cost: a clean steady transition is `0`, and persistent congestion contributes negative level costs. A transition that materially improves KPIs can receive positive delta credit. Therefore, compare episode returns only when reward profile, backend, horizon, and task manifest are identical.
 
-Reward selection is versioned and shared by live, synthetic replay, and
-diagnostic dataset-replay paths:
+Reward selection is versioned across the two selectable backends. Legacy
+connected-runner reference code uses the same selector but is not exposed as a
+live OAI/FlexRIC backend in this contribution:
 
 - T2 episodes use `openair_t2_v3` with explicit requested/admitted/delivered service, denial, and forced-termination accounting.
-- Connected T1 runner episodes preserve `openair_v1` with the runner's `0.08` PRB-pressure threshold.
+- Legacy connected T1 runner reference code preserves `openair_v1` with the runner's `0.08` PRB-pressure threshold.
 - Standalone T1, T3, and replay-tier episodes preserve frozen `openair_v1` with a `0.85` PRB-pressure threshold.
 
 The unnormalized `delta_sla` term remains part of frozen V1. T2 uses the V3 service objective rather than changing V1 in place.
