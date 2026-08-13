@@ -17,8 +17,9 @@
 
 import logging
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -341,12 +342,8 @@ def build_correction_prompt(
 class MathFormalLeanResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: int = 6000
-    # Sandbox backend: "ns_http" (default — today's NS server over host/port), "gym_sandbox"
-    # (per-verify OpenSandbox pods via provider exec), or "ns_http_proxy" (the NS HTTP protocol
-    # through a full base_url + headers, e.g. an OpenSandbox proxied endpoint; parity oracle).
-    sandbox_backend: str = "ns_http"
-    sandbox_base_url: str = ""
-    sandbox_extra_headers: Dict[str, str] = Field(default_factory=dict)
+    # Sandbox backend: local NS HTTP (default) or provider-backed Gym sandboxes.
+    sandbox_backend: Literal["ns_http", "gym_sandbox"] = "ns_http"
     # GymSandboxLean4Client kwargs (provider/image/max_concurrent/...) — read only when
     # sandbox_backend == "gym_sandbox".
     opensandbox: Dict[str, Any] = Field(default_factory=dict)
@@ -398,12 +395,6 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
                 max_output_characters=self.config.max_output_characters,
                 **self.config.opensandbox,
             )
-        elif self.config.sandbox_backend == "ns_http_proxy":
-            self._sandbox_client = Lean4SandboxClient(
-                base_url=self.config.sandbox_base_url,
-                extra_headers=self.config.sandbox_extra_headers,
-                max_output_characters=self.config.max_output_characters,
-            )
         else:
             self._sandbox_client = Lean4SandboxClient(
                 host=self.config.sandbox_host,
@@ -418,20 +409,18 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self):
         app = super().setup_webserver()
-        start_pool = getattr(self._sandbox_client, "start_pool", None)
-        if start_pool is None:
-            return app
-        from contextlib import asynccontextmanager
-
         main_app_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            # Warm lean pool pods from startup: a cold pod's first compile is ~15 min
-            # of nydus olean pulls, far beyond any verify's admission window.
-            start_pool()
-            async with main_app_lifespan(app) as maybe_state:
-                yield maybe_state
+            if isinstance(self._sandbox_client, GymSandboxLean4Client):
+                # A cold pod's first compile can exceed a verify's admission window.
+                self._sandbox_client.start_pool()
+            try:
+                async with main_app_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self._sandbox_client.close()
 
         app.router.lifespan_context = lifespan_wrapper
         return app
