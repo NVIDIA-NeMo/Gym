@@ -150,6 +150,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     api_key: str
     model: str
     return_token_id_information: bool
+    request_prompt_and_generation_token_ids: bool = False
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -606,6 +607,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
             )
+            if self.config.request_prompt_and_generation_token_ids:
+                body_dict["return_token_ids"] = True
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:

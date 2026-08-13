@@ -4564,6 +4564,7 @@ def _make_top_logprobs_model(
     return_token_id_information: bool,
     *,
     extra_body: dict[str, Any] | None = None,
+    request_prompt_and_generation_token_ids: bool = False,
 ) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
     config = VLLMModelConfig(
@@ -4575,6 +4576,7 @@ def _make_top_logprobs_model(
         api_key="dummy_key",  # pragma: allowlist secret
         model="dummy_model",
         return_token_id_information=return_token_id_information,
+        request_prompt_and_generation_token_ids=request_prompt_and_generation_token_ids,
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
         extra_body=extra_body,
@@ -4610,6 +4612,19 @@ class TestTopLogprobsHandling:
             {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "top_logprobs": 5},
         )
         assert result["top_logprobs"] == 0
+
+    def test_capture_path_can_request_prompt_and_generation_token_ids(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            request_prompt_and_generation_token_ids=True,
+        )
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert result["return_token_ids"] is True
 
     def test_capture_path_rejects_multiple_choices(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
@@ -4731,11 +4746,14 @@ class TestTopLogprobsHandling:
         assert message["prompt_token_ids"] == [10, 20, 30]
 
     def test_capture_path_prefers_standard_inline_token_ids(self) -> None:
-        model = _make_top_logprobs_model(return_token_id_information=True)
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            request_prompt_and_generation_token_ids=True,
+        )
         app = model.setup_webserver()
 
         async def mock_create_chat_completion(**kwargs):
-            assert "return_token_ids" not in kwargs
+            assert kwargs["return_token_ids"] is True
             return self._capture_chat_completion_dict(
                 logprobs={
                     "content": [
