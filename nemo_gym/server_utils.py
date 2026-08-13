@@ -308,9 +308,12 @@ class ServerClient(BaseModel):
 
     global_config_dict: DictConfig
 
-    _server_name_to_base_url: Dict[str, str] = Field(default_factory=dict)
+    _server_name_to_base_url: Dict[str, str]
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, context: Any, /) -> None:
+        self._server_name_to_base_url = dict()
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
