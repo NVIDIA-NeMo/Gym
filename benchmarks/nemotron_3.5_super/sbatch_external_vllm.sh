@@ -35,6 +35,14 @@ DECODE_SERVER_PORT=8002
 PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
 
+# TODO @bxyu-nvidia: This is just for heterogenous TP testing.
+if [[ -v VLLM_PREFILL_TP_SIZE ]]; then
+    export VLLM_PREFILL_TP_SIZE
+fi
+if [[ -v VLLM_PREFILL_DP_SIZE_LOCAL ]]; then
+    export VLLM_PREFILL_DP_SIZE_LOCAL
+fi
+
 EVAL_COMMAND=$(cat <<EOF
 set -euo pipefail
 
