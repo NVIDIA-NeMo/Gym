@@ -159,7 +159,7 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --headless \
-        --data-parallel-size (( $NUM_PREFILL_NODES * $VLLM_PREFILL_DP_SIZE_LOCAL ))\
+        --data-parallel-size (( $NUM_PREFILL_NODES * $VLLM_PREFILL_DP_SIZE_LOCAL )) \
         --data-parallel-start-rank \$SLURM_PROCID \
         --data-parallel-address \$PREFILL_HEAD \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
