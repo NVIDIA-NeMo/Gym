@@ -102,7 +102,12 @@ class FakeResponse:
 
 
 class FakeHttpClient:
-    def __init__(self, ws: FakeWs | None = None, post_status: int = 201, ws_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        ws: "FakeWs | list[FakeWs] | None" = None,
+        post_status: "int | list[int]" = 201,
+        ws_error: "Exception | list[Exception] | None" = None,
+    ) -> None:
         self._ws = ws
         self._post_status = post_status
         self._ws_error = ws_error
@@ -113,7 +118,8 @@ class FakeHttpClient:
 
     def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str], timeout: Any = None) -> FakeResponse:
         self.post_calls.append((url, json, headers))
-        return FakeResponse(self._post_status, {"session_id": "s-1"})
+        status = self._post_status.pop(0) if isinstance(self._post_status, list) else self._post_status
+        return FakeResponse(status, {"session_id": "s-1"})
 
     def delete(self, url: str, *, headers: dict[str, str], timeout: Any = None) -> FakeResponse:
         self.delete_calls.append((url, headers))
@@ -121,7 +127,10 @@ class FakeHttpClient:
 
     async def ws_connect(self, url: str, *, headers: dict[str, str]) -> FakeWs:
         self.ws_calls.append((url, headers))
-        if self._ws_error is not None:
+        if isinstance(self._ws_error, list):
+            if self._ws_error:
+                raise self._ws_error.pop(0)
+        elif self._ws_error is not None:
             raise self._ws_error
         if isinstance(self._ws, list):
             return self._ws.pop(0)
@@ -132,11 +141,20 @@ class FakeHttpClient:
         self.closed = True
 
 
+_REAL_REATTACH = pty_module.OpenSandboxPtySession._reattach_socket
+
+
+async def _never_reattach(self: Any) -> bool:
+    return False
+
+
 @pytest.fixture(autouse=True)
 def _no_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sockets in these tests end deliberately; only the reconnect tests below
-    opt back into the re-dial schedule."""
-    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", ())
+    """Sockets in these tests end deliberately, and the fake client would
+    happily re-serve a dead socket forever; the reattach tests below restore
+    the real method."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _never_reattach)
 
 
 async def _session_over(
@@ -313,6 +331,52 @@ async def test_open_pty_session_create_failure(post_status: int, match: str) -> 
             request_timeout_s=5.0,
         )
     assert client.closed
+
+
+async def test_pty_create_propagates_server_detail() -> None:
+    # The server's own answer must reach the caller, not a guessed diagnosis.
+    client = FakeHttpClient(post_status=404)
+    with pytest.raises(SandboxPtyError, match="session_id"):  # FakeResponse body text
+        await open_pty_session(
+            client=client,  # type: ignore[arg-type]
+            base_url="http://server/base",
+            headers={},
+            spec=SandboxPtySpec(),
+            request_timeout_s=5.0,
+        )
+    assert client.closed
+
+
+async def test_pty_create_retries_proxy_transients(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0, 0))
+    ws = FakeWs([CONNECTED])
+    # 502 (backend unreachable) then 404 (route not registered) then created:
+    # neither transient can have made a session, so both are retried.
+    client = FakeHttpClient(ws=ws, post_status=[502, 404, 201])
+    session = await open_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        spec=SandboxPtySpec(),
+        request_timeout_s=5.0,
+    )
+    assert len(client.post_calls) == 3
+    await session.close()
+
+
+async def test_ws_handshake_transient_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
+    shed = aiohttp.WSServerHandshakeError(None, (), status=503, message="unavailable")  # type: ignore[arg-type]
+    client = FakeHttpClient(ws=FakeWs([CONNECTED]), ws_error=[shed])
+    session = await open_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        spec=SandboxPtySpec(),
+        request_timeout_s=5.0,
+    )
+    assert len(client.ws_calls) == 2
+    await session.close()
 
 
 async def test_open_pty_session_ws_failure_deletes_session() -> None:
@@ -661,7 +725,8 @@ async def test_provider_tracks_sessions_strongly_and_prunes_closed(monkeypatch: 
 
 
 async def test_socket_drop_reattaches_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", (0,))
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
     first = FakeWs([CONNECTED, _binary(b"\x01ab")])
     first.closed = True  # dies after two frames, no exit: a shed socket
     replay = b"\x03" + (2).to_bytes(8, "big") + b"cd"
@@ -685,8 +750,30 @@ async def test_socket_drop_reattaches_and_resumes(monkeypatch: pytest.MonkeyPatc
     await session.close()
 
 
+async def test_barren_reconnects_give_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+    # Every re-dial hands back a socket that dies without delivering a byte;
+    # the session must give up rather than spin forever.
+    dead = FakeWs([CONNECTED])
+    dead.closed = True
+    client = FakeHttpClient(ws=dead)  # ws_connect re-serves the same dead socket
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    with pytest.raises(SandboxPtyError):
+        await asyncio.wait_for(session.wait_exit(), timeout=10)
+    await session.close()
+
+
 async def test_takeover_close_does_not_reattach(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", (0,))
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
     ws = FakeWs([CONNECTED], close_code=pty_module.WS_CLOSE_TAKEN_OVER)
     ws.closed = True
     client = FakeHttpClient(ws=[ws])  # a re-dial would pop an empty list and fail
