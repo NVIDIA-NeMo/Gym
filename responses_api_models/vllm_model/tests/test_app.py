@@ -4745,7 +4745,7 @@ class TestTopLogprobsHandling:
         assert message["generation_log_probs"] == [-0.1, -0.2]
         assert message["prompt_token_ids"] == [10, 20, 30]
 
-    def test_capture_path_prefers_standard_inline_token_ids(self) -> None:
+    def test_capture_path_prefers_vllm_response_token_ids(self) -> None:
         model = _make_top_logprobs_model(
             return_token_id_information=True,
             request_prompt_and_generation_token_ids=True,
@@ -4842,7 +4842,7 @@ class TestTopLogprobsHandling:
         mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
         model._clients = [mock_client]
 
-        with raises(RuntimeError, match="disagrees with standard vLLM token IDs"):
+        with raises(RuntimeError, match="disagrees with vLLM response token IDs"):
             TestClient(app).post(
                 "/v1/chat/completions",
                 json={"messages": [{"role": "user", "content": "hi"}]},

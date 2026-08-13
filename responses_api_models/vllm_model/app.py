@@ -32,14 +32,16 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    REQUIRED_TOKEN_METADATA_FIELDS,
+    TOKEN_METADATA_FIELDS,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
+    NeMoGymChatCompletionMessageForTraining,
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    TokenIDLogProbMixin,
 )
 from nemo_gym.responses_converter import (
     VLLMConverter,
@@ -150,6 +152,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     api_key: str
     model: str
     return_token_id_information: bool
+    # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
 
     uses_reasoning_parser: bool
@@ -230,10 +233,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
-    _REQUIRED_TOKEN_METADATA_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {"prompt_token_ids", "generation_token_ids", "generation_log_probs"}
-    )
-    _TOKEN_METADATA_FIELDS: ClassVar[frozenset[str]] = _REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
         "model",
         "messages",
@@ -284,35 +283,33 @@ class VLLMModel(SimpleResponsesAPIModel):
             self._chat_template_tokenizer = self._load_chat_template_tokenizer()
 
     @staticmethod
-    def _coerce_token_ids(value: Any, field_name: str) -> List[int]:
-        if not isinstance(value, list) or any(
-            not isinstance(token_id, int) or isinstance(token_id, bool) for token_id in value
-        ):
+    def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
+        """Check the container without scanning or copying token IDs."""
+        if not isinstance(value, list):
             raise RuntimeError(f"`{field_name}` must be a list of integer token IDs.")
-        return list(value)
+        return value
 
     @staticmethod
-    def _coerce_log_probs(value: Any, field_name: str) -> List[float]:
-        if not isinstance(value, list) or any(
-            not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool) for log_prob in value
-        ):
+    def _require_log_prob_list(value: Any, field_name: str) -> List[Any]:
+        """Check the container without scanning or copying log probabilities."""
+        if not isinstance(value, list):
             raise RuntimeError(f"`{field_name}` must be a list of numeric log probabilities.")
-        return [float(log_prob) for log_prob in value]
+        return value
 
     @classmethod
     def _validate_token_bundle(cls, bundle: Dict[str, Any], source: str) -> Dict[str, Any]:
-        present_fields = cls._TOKEN_METADATA_FIELDS.intersection(bundle)
-        missing_fields = cls._REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
+        present_fields = TOKEN_METADATA_FIELDS.intersection(bundle)
+        missing_fields = REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
         if missing_fields:
             missing = ", ".join(sorted(missing_fields))
             raise RuntimeError(f"{source} returned partial token metadata; missing: {missing}.")
 
         normalized = {
-            "prompt_token_ids": cls._coerce_token_ids(bundle["prompt_token_ids"], f"{source}.prompt_token_ids"),
-            "generation_token_ids": cls._coerce_token_ids(
+            "prompt_token_ids": cls._require_token_id_list(bundle["prompt_token_ids"], f"{source}.prompt_token_ids"),
+            "generation_token_ids": cls._require_token_id_list(
                 bundle["generation_token_ids"], f"{source}.generation_token_ids"
             ),
-            "generation_log_probs": cls._coerce_log_probs(
+            "generation_log_probs": cls._require_log_prob_list(
                 bundle["generation_log_probs"], f"{source}.generation_log_probs"
             ),
         }
@@ -326,25 +323,25 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"{len(normalized['generation_log_probs'])} log probabilities."
             )
 
-        return TokenIDLogProbMixin.model_validate(normalized).model_dump(exclude_none=True)
+        return normalized
 
     @classmethod
     def _extract_message_token_bundle(cls, message_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        required_fields = cls._REQUIRED_TOKEN_METADATA_FIELDS.intersection(message_dict)
+        required_fields = REQUIRED_TOKEN_METADATA_FIELDS.intersection(message_dict)
         if not required_fields:
             return None
-        present_fields = cls._TOKEN_METADATA_FIELDS.intersection(message_dict)
+        present_fields = TOKEN_METADATA_FIELDS.intersection(message_dict)
         return cls._validate_token_bundle(
             {field: message_dict[field] for field in present_fields},
             "choice.message",
         )
 
     @classmethod
-    def _extract_standard_vllm_ids(
+    def _extract_vllm_response_token_ids(
         cls,
         chat_completion_dict: Dict[str, Any],
         choice_dict: Dict[str, Any],
-    ) -> Optional[tuple[List[int], List[int]]]:
+    ) -> Optional[tuple[List[Any], List[Any]]]:
         prompt_value = chat_completion_dict.get("prompt_token_ids")
         generation_value = choice_dict.get("token_ids")
         prompt_present = prompt_value is not None
@@ -352,13 +349,13 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if prompt_present != generation_present:
             missing = "choice.token_ids" if prompt_present else "prompt_token_ids"
-            raise RuntimeError(f"Standard vLLM returned partial token metadata; missing: {missing}.")
+            raise RuntimeError(f"vLLM response returned partial token metadata; missing: {missing}.")
         if not prompt_present:
             return None
 
         return (
-            cls._coerce_token_ids(prompt_value, "prompt_token_ids"),
-            cls._coerce_token_ids(generation_value, "choice.token_ids"),
+            cls._require_token_id_list(prompt_value, "prompt_token_ids"),
+            cls._require_token_id_list(generation_value, "choice.token_ids"),
         )
 
     def _extract_choice_logprobs(self, choice_dict: Dict[str, Any]) -> tuple[List[int], List[float]]:
@@ -866,29 +863,39 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
+
+            # Token metadata uses this source order:
+            # 1. A complete bundle on the assistant message.
+            # 2. Prompt IDs at the response top level and generation IDs on the choice.
+            # 3. Generation data from choice logprobs and prompt IDs from `/tokenize`.
+            #
+            # An earlier source supplies the normalized bundle.
+            # Later inline sources are still checked when present.
+            # A partially present source is invalid.
+            # Duplicate token IDs must agree.
             message_bundle = self._extract_message_token_bundle(message_dict)
-            standard_ids = self._extract_standard_vllm_ids(chat_completion_dict, choice_dict)
+            response_token_ids = self._extract_vllm_response_token_ids(chat_completion_dict, choice_dict)
 
             if message_bundle is not None:
-                if standard_ids is not None:
-                    standard_prompt_ids, standard_generation_ids = standard_ids
+                if response_token_ids is not None:
+                    response_prompt_token_ids, response_generation_token_ids = response_token_ids
                     if (
-                        message_bundle["prompt_token_ids"] != standard_prompt_ids
-                        or message_bundle["generation_token_ids"] != standard_generation_ids
+                        message_bundle["prompt_token_ids"] != response_prompt_token_ids
+                        or message_bundle["generation_token_ids"] != response_generation_token_ids
                     ):
-                        raise RuntimeError("Message-level token metadata disagrees with standard vLLM token IDs.")
+                        raise RuntimeError("Message-level token metadata disagrees with vLLM response token IDs.")
                 message_dict.update(message_bundle)
             else:
                 logprob_token_ids, generation_log_probs = self._extract_choice_logprobs(choice_dict)
-                if standard_ids is not None:
-                    prompt_token_ids, generation_token_ids = standard_ids
+                if response_token_ids is not None:
+                    prompt_token_ids, generation_token_ids = response_token_ids
                     if generation_token_ids != logprob_token_ids:
                         raise RuntimeError(
-                            "Standard vLLM generation token IDs disagree with choice logprob token IDs."
+                            "vLLM response generation token IDs disagree with choice logprob token IDs."
                         )
                 else:
                     tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
-                    prompt_token_ids = self._coerce_token_ids(
+                    prompt_token_ids = self._require_token_id_list(
                         tokenize_response.get("tokens"),
                         "tokenize.tokens",
                     )
@@ -913,9 +920,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # The adapter consumed this compatibility payload.
                 choice_dict.pop("logprobs", None)
 
-            # Standard token-ID fields are transport details.
+            # Top-level and choice-level token-ID fields are transport details.
             chat_completion_dict.pop("prompt_token_ids", None)
             choice_dict.pop("token_ids", None)
+            choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
