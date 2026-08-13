@@ -274,9 +274,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             )
         return model_response
 
-    async def run(
-        self, request: Request, response: Response, body: SimpleAgentRunRequest
-    ) -> SimpleAgentVerifyResponse:
+    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
@@ -287,14 +285,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
-
-        # request._cookies = cookies
-        # inner_response = await self.responses(
-        #     request=request,
-        #     response=response,
-        #     body=body.responses_create_params,
-        # )
-        # model_response_json = inner_response.model_dump()
 
         response = await self.server_client.post(
             server_name=self.config.name,
