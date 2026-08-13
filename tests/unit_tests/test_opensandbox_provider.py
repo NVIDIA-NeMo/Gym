@@ -15,6 +15,7 @@
 
 import asyncio
 import builtins
+import logging
 import sys
 from dataclasses import dataclass
 from datetime import timedelta
@@ -81,6 +82,17 @@ def fake_opensandbox_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
         return FakeSandbox, FakeConnectionConfig, object, FakePlatformSpec, object
 
     monkeypatch.setattr(opensandbox_provider, "_require_opensandbox_sdk", require_sdk)
+
+
+def test_sdk_info_logs_are_silenced(caplog: pytest.LogCaptureFixture) -> None:
+    sdk_logger = logging.getLogger("opensandbox.sandbox")
+
+    with caplog.at_level(logging.INFO):
+        sdk_logger.info("SDK info")
+        sdk_logger.warning("SDK warning")
+
+    sdk_messages = [record.message for record in caplog.records if record.name == sdk_logger.name]
+    assert sdk_messages == ["SDK warning"]
 
 
 def test_sdk_import_helpers_and_retry_classification() -> None:
