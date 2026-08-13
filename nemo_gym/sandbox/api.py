@@ -104,8 +104,7 @@ class SandboxPty:
     def __init__(self, sandbox: "AsyncSandbox") -> None:
         self._sandbox = sandbox
         # The oldest live default-shell session (create() with no command);
-        # exec() without a session reuses it. Custom-command and attached
-        # sessions run arbitrary programs, so they are never reused implicitly.
+        # exec() reuses it when called without a session.
         self._default_session: SandboxPtySession | None = None
         # Session-mode execs share one output stream per session; serialize
         # them so two concurrent calls cannot consume each other's marker.

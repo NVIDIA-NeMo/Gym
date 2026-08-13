@@ -607,9 +607,8 @@ class OpenSandboxProvider:
         # create, so the provider owns this one: built once, reused by every
         # ConnectionConfig, closed in aclose().
         self._transport: Any | None = None
-        # Strong references: a session dropped without close() would leak its
-        # aiohttp client (GC cannot close it); aclose() closes whatever is
-        # still open, and closed sessions are pruned on the next create/attach.
+        # Sessions own aiohttp clients that only close() releases: aclose()
+        # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
 
     def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
@@ -689,12 +688,9 @@ class OpenSandboxProvider:
         return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
 
     async def _retire_closed_pty_sessions(self) -> None:
-        """Release sessions that ended on their own before dropping their refs.
-
-        A session whose pump ended still holds its aiohttp client; ``close()``
-        is idempotent and frees it. Called from create/attach so the tracking
-        set cannot grow without bound.
-        """
+        """Release sessions that ended on their own; their aiohttp client is
+        only freed by ``close()``. Called from create/attach so the tracking
+        set cannot grow without bound."""
         for stale in [s for s in self._pty_sessions if s.closed]:
             try:
                 # Release only: a pump can end because another client took the

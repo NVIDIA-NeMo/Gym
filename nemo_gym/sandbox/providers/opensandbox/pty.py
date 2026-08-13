@@ -158,8 +158,7 @@ class OpenSandboxPtySession:
                 self._exit.set_exception(self._close_error())
                 self._exit.exception()  # retrieved; silences never-retrieved warnings
             # A pump that ends before `connected` arrived means the session
-            # never became usable; fail the waiter rather than letting it
-            # proceed with mode=None.
+            # never became usable; fail the waiter.
             if not self._connected.done():
                 self._connected.set_exception(self._close_error())
                 self._connected.exception()  # retrieved; silences never-retrieved warnings
