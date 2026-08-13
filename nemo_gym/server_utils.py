@@ -27,7 +27,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, Dict, List, Literal, Mapping, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -46,7 +46,6 @@ from aiohttp import (
 )
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
-from fastapi.concurrency import run_in_threadpool
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -212,8 +211,7 @@ async def request(
 ) -> ClientResponse:  # pragma: no cover
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
-        data = await get_request_json(kwargs.pop("json"))
-        kwargs["data"] = data
+        kwargs["data"] = orjson.dumps(kwargs.pop("json"))
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
@@ -282,22 +280,8 @@ Response content: {content}""")
             raise e
 
 
-def _sync_get_request_json(json_obj: Union[BaseModel, Mapping]) -> str:
-    if isinstance(json_obj, BaseModel):
-        data = json_obj.model_dump_json(exclude_unset=True)
-    elif isinstance(json_obj, Mapping):
-        data = orjson.dumps(json_obj)
-    else:
-        raise NotImplementedError
-    return data
-
-
-async def get_request_json(json_obj: Union[BaseModel, Mapping]) -> str:
-    return await run_in_threadpool(_sync_get_request_json, json_obj=json_obj)
-
-
 async def get_response_json(response: ClientResponse) -> Any:
-    return await run_in_threadpool(orjson.loads, await response.read())
+    return orjson.loads(await response.read())
 
 
 DEFAULT_HEAD_SERVER_PORT = 11000
@@ -310,12 +294,7 @@ class ServerClient(BaseModel):
 
     global_config_dict: DictConfig
 
-    _server_name_to_base_url: Dict[str, str]
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def model_post_init(self, context: Any, /) -> None:
-        self._server_name_to_base_url = dict()
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
@@ -351,13 +330,14 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
-        # @bxyu-nvidia: Cache this to reduce the calls to DictConfig.
-        if server_name not in self._server_name_to_base_url:
-            server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-            self._server_name_to_base_url[server_name] = self._build_server_base_url(server_config_dict)
-        base_url = self._server_name_to_base_url[server_name]
+        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+        base_url = self._build_server_base_url(server_config_dict)
 
         json_obj = kwargs.get("json")
+        if "json" in kwargs:
+            if isinstance(json_obj, BaseModel):
+                json_obj = json_obj.model_dump(exclude_unset=True)
+                kwargs["json"] = json_obj
 
         observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
         server_entry = self.global_config_dict.get(server_name)
