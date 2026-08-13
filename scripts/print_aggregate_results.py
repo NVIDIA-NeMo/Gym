@@ -46,5 +46,5 @@ if __name__ == "__main__":
     for agent_name in agent_name_to_metrics:
         metrics = agent_name_to_metrics[agent_name]
         avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
-        print(f"Found {agent_name_to_counts[agent_name]} rows in results.")
+        print(f"Found {agent_name_to_counts[agent_name]} rollouts for `{agent_name}`.")
         print(json.dumps(avg_metrics, indent=4))
