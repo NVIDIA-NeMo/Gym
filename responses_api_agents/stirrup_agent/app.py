@@ -43,6 +43,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_routing import build_failure_result, minimal_failure_response
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -120,12 +121,6 @@ def _log_timeout_once(timeout_s: float) -> None:
 #                     in the traceback). Sidecar entry per attempt; retry
 #                     up to max_attempts.
 # ---------------------------------------------------------------------------
-
-# Sentinel keys the dispatcher (nemo_gym.rollout_collection) reads to route a
-# returned payload between the main jsonl, the failures sidecar, or /dev/null.
-NG_FAILURE_CLASS_KEY = "_ng_failure_class"  # str: one of the 5 class names
-NG_NO_PERSIST_KEY = "_ng_no_persist"  # bool: don't write anywhere
-NG_TERMINAL_KEY = "_ng_failure_terminal"  # bool: never retry on resume
 
 _USER_CODE_PATH_SUBSTRINGS = (
     "responses_api_agents/",
@@ -1548,49 +1543,33 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         else:
             suffix = "failed"
             status_word = "Failed"
-        placeholder = NeMoGymResponse(
-            id=f"{self.task_strategy.response_id(task_info)}-{suffix}",
-            created_at=int(time.time()),
-            model=fixed_params.model or "unknown",
-            object="response",
-            output=[
-                NeMoGymResponseOutputMessage(
-                    id=self.task_strategy.fallback_message_id(task_info),
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text",
-                            text=f"{status_word}: {reason}",
-                            annotations=[],
-                        )
-                    ],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            ],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
+        placeholder = NeMoGymResponse.model_validate(
+            minimal_failure_response(
+                response_id=f"{self.task_strategy.response_id(task_info)}-{suffix}",
+                created_at=int(time.time()),
+                model=fixed_params.model or "unknown",
+                message_id=self.task_strategy.fallback_message_id(task_info),
+                text=f"{status_word}: {reason}",
+                tool_choice="none",
+            )
+        ).model_dump(mode="json")
+        if error_class is None:
+            return body_dict | {
+                "response": placeholder,
+                "reward": 0.0,
+                "skipped": skipped,
+                "error_message": reason,
+            }
+        return build_failure_result(
+            body_dict,
+            failure_class=error_class,
+            error=reason,
+            response=placeholder,
+            terminal=error_class in ("timeout_exceeded", "skipped"),
+            no_persist=error_class == "kill_shaped",
+            error_key="error_message",
+            extra={"skipped": skipped, "error_class": error_class},
         )
-        payload = dict(body_dict)
-        payload["response"] = placeholder.model_dump(mode="json")
-        payload["reward"] = 0.0
-        payload["skipped"] = skipped
-        payload["error_message"] = reason
-        if error_class is not None:
-            payload["error_class"] = error_class
-            payload[NG_FAILURE_CLASS_KEY] = error_class
-            if error_class == "kill_shaped":
-                # Don't persist: resume's set-difference on the main jsonl
-                # naturally re-dispatches. Bounded across hops by per-task timeout.
-                payload[NG_NO_PERSIST_KEY] = True
-            elif error_class in ("timeout_exceeded", "skipped"):
-                # Sidecar entry written once; chain-hop 2 will not retry.
-                payload[NG_TERMINAL_KEY] = True
-            # 'legitimate' / 'transient' / 'incomplete': sidecar entry per
-            # attempt; retried by chain-hop / resume up to
-            # NEMO_GYM_MAX_ROLLOUT_ATTEMPTS (default 3).
-        return payload
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server.
