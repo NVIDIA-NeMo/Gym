@@ -226,7 +226,7 @@ if (( $should_run_eval )); then
 
     eval_status=0
     PREFILL_HEAD="\$PREFILL_HEAD" \
-    srun --overlap --exact --nodes=1 --ntasks=1 --nodelist="\$PREFILL_HEAD" --gpus=0 \
+    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$PREFILL_HEAD" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
         --container-mounts=$MOUNTS \
