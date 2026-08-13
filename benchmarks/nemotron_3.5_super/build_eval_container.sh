@@ -24,7 +24,7 @@ set -xeuo pipefail
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-uv pip install --system fastokens vllm-router
+uv pip install --system vllm-router
 
 apt-get update
 apt-get install -y --no-install-recommends \
