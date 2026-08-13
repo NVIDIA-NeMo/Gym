@@ -312,12 +312,12 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
 ########################################
 
 
-@contextmanager
 def _is_pinned_commit(ref: str) -> bool:
     """True for a hex object id (immutable); False for HEAD, branch, and tag refs."""
     return re.fullmatch(r"[0-9a-fA-F]{7,40}", ref) is not None
 
 
+@contextmanager
 def file_lock(file_path: Path, label: str, max_wait: float = 3600.0, poll_interval: float = 5.0):
     """Cross-node lock using mkdir (atomic on Lustre/NFS, unlike fcntl.flock)."""
     lock_dir = file_path.parent

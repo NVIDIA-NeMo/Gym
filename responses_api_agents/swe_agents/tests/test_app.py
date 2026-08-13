@@ -440,45 +440,6 @@ class TestBaseDatasetHarnessProcessor:
         processor = BaseDatasetHarnessProcessor(config=config)
         assert processor.setup() is None
 
-
-class TestOpenHandsSetupDirResolution:
-    def _processor(self, commit: str) -> OpenHandsHarnessProcessor:
-        config = _minimal_server_config().model_copy(update={"agent_framework_commit": commit})
-        return OpenHandsHarnessProcessor(config=config)
-
-    def _patched_roots(self, cache_root: Path, legacy_root: Path):
-        return (
-            patch.object(
-                BaseDatasetHarnessProcessor, "setup_root", new_callable=lambda: property(lambda self: cache_root)
-            ),
-            patch.object(
-                BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
-            ),
-        )
-
-    def test_pinned_commit_keys_the_setup_tree(self, tmp_path: Path) -> None:
-        sha = "0d766ad06b2be64a42e6f0175b9ebcc4a06599d9"
-        processor = self._processor(sha)
-        root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
-        with root_patches[0], root_patches[1]:
-            expected = tmp_path / "cache" / "swe_openhands_setup" / sha
-            assert processor._resolve_openhands_setup_dir() == expected
-
-    def test_pinned_commit_falls_back_to_prestaged_tree(self, tmp_path: Path) -> None:
-        processor = self._processor("0d766ad06b2be64a42e6f0175b9ebcc4a06599d9")
-        legacy_setup = tmp_path / "legacy" / "swe_openhands_setup"
-        legacy_setup.mkdir(parents=True)
-        root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
-        with root_patches[0], root_patches[1]:
-            assert processor._resolve_openhands_setup_dir() == legacy_setup
-
-    def test_mutable_refs_use_the_shared_tree(self, tmp_path: Path) -> None:
-        for ref in ("HEAD", "main", "feature/x"):
-            processor = self._processor(ref)
-            root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
-            with root_patches[0], root_patches[1]:
-                assert processor._resolve_openhands_setup_dir() == tmp_path / "cache" / "swe_openhands_setup"
-
     def test_get_run_command_returns_none(self) -> None:
         config = _minimal_server_config()
         processor = BaseDatasetHarnessProcessor(config=config)
@@ -537,6 +498,45 @@ class TestOpenHandsSetupDirResolution:
 ########################################
 # NVInternalDatasetProcessor tests
 ########################################
+
+
+class TestOpenHandsSetupDirResolution:
+    def _processor(self, commit: str) -> OpenHandsHarnessProcessor:
+        config = _minimal_server_config().model_copy(update={"agent_framework_commit": commit})
+        return OpenHandsHarnessProcessor(config=config)
+
+    def _patched_roots(self, cache_root: Path, legacy_root: Path):
+        return (
+            patch.object(
+                BaseDatasetHarnessProcessor, "setup_root", new_callable=lambda: property(lambda self: cache_root)
+            ),
+            patch.object(
+                BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
+            ),
+        )
+
+    def test_pinned_commit_keys_the_setup_tree(self, tmp_path: Path) -> None:
+        sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        processor = self._processor(sha)
+        root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
+        with root_patches[0], root_patches[1]:
+            expected = tmp_path / "cache" / "swe_openhands_setup" / sha
+            assert processor._resolve_openhands_setup_dir() == expected
+
+    def test_pinned_commit_falls_back_to_prestaged_tree(self, tmp_path: Path) -> None:
+        processor = self._processor("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        legacy_setup = tmp_path / "legacy" / "swe_openhands_setup"
+        legacy_setup.mkdir(parents=True)
+        root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
+        with root_patches[0], root_patches[1]:
+            assert processor._resolve_openhands_setup_dir() == legacy_setup
+
+    def test_mutable_refs_use_the_shared_tree(self, tmp_path: Path) -> None:
+        for ref in ("HEAD", "main", "feature/x"):
+            processor = self._processor(ref)
+            root_patches = self._patched_roots(tmp_path / "cache", tmp_path / "legacy")
+            with root_patches[0], root_patches[1]:
+                assert processor._resolve_openhands_setup_dir() == tmp_path / "cache" / "swe_openhands_setup"
 
 
 class TestNVInternalDatasetProcessor:
