@@ -69,7 +69,9 @@ gym eval run \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000 \
-    ++uvicorn_timeout_worker_healthcheck=600
+    ++uvicorn_timeout_worker_healthcheck=600 \
+    +profiling_enabled=true \
+    +profiling_results_dirpath=results/\$experiment_name/profiling
 
 
 if (( $EXPORT_TO_CSV )); then
@@ -89,6 +91,8 @@ command=$(cat <<EOF
 #!/bin/bash
 
 set -euo pipefail
+
+apt update && apt install -y graphviz
 
 # Input arguments and validation
 PREFILL_HEAD=\$PREFILL_HEAD
