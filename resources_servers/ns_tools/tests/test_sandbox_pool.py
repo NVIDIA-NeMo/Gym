@@ -217,14 +217,11 @@ class TestSandboxBackend:
         with pytest.raises(httpx.TimeoutException):
             asyncio.run(backend._send_request({"generated_code": "1+1", "session_id": "s"}, timeout=10.0))
 
-    def test_502_retries_exactly_once_then_succeeds(self, backend):
-        ok = '{"process_status": "completed", "stdout": "", "stderr": ""}'
-        backend._aiohttp = _FakeAiohttpSession(
-            [_FakeAiohttpResponse(502, "bad gateway"), _FakeAiohttpResponse(200, ok)]
-        )
-        result = asyncio.run(backend._send_request({"generated_code": "1+1", "session_id": "s"}, timeout=10.0))
-        assert result["process_status"] == "completed"
-        assert len(backend._aiohttp.calls) == 2
+    def test_502_does_not_replay_stateful_code(self, backend):
+        backend._aiohttp = _FakeAiohttpSession([_FakeAiohttpResponse(502, "bad gateway")])
+        with pytest.raises(httpx.TimeoutException):
+            asyncio.run(backend._send_request({"generated_code": "1+1", "session_id": "s"}, timeout=10.0))
+        assert len(backend._aiohttp.calls) == 1
 
     def test_transport_errors_normalize_to_httpx_timeout(self, backend):
         import aiohttp as _aiohttp
