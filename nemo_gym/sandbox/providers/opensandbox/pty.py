@@ -28,6 +28,7 @@ sentinel and read until it appears.
 
 import asyncio
 import json
+import logging
 import shlex
 from collections.abc import AsyncIterator
 from typing import Any
@@ -38,6 +39,8 @@ import aiohttp
 from nemo_gym.sandbox.providers.base import SandboxPtyError, SandboxPtySpec
 
 
+LOGGER = logging.getLogger(__name__)
+
 CHAN_STDIN = 0
 CHAN_STDOUT = 1
 CHAN_STDERR = 2
@@ -47,6 +50,8 @@ CHAN_REPLAY = 3
 REPLAY_HEADER_BYTES = 9
 WS_CLOSE_TAKEN_OVER = 4001
 WS_CLOSE_POLICY_VIOLATION = 1008
+# Bounded re-dial schedule for a socket that dies under a live process.
+_RECONNECT_DELAYS = (0.5, 1.0, 2.0)
 
 # Mirrors execd's shell pick (bash when available, else sh) for env-only specs.
 _DEFAULT_SHELL_SNIPPET = 'exec "$(command -v bash || echo sh)"'
@@ -103,6 +108,7 @@ class OpenSandboxPtySession:
         self._connected: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._error: SandboxPtyError | None = None
         self._closed = False
+        self._received = 0  # bytes of the session's retained stream seen so far
         self._pump_task = asyncio.create_task(self._pump())
 
     @property
@@ -112,46 +118,84 @@ class OpenSandboxPtySession:
         or connection loss). Resources are released by ``close()``."""
         return self._closed or self._pump_task.done()
 
+    async def _pump_socket(self) -> None:
+        """Drain one WebSocket until it closes, fanning frames out."""
+        async for message in self._ws:
+            if message.type == aiohttp.WSMsgType.BINARY:
+                data = message.data
+                if not data:
+                    continue
+                channel = data[0]
+                # Empty payloads are dropped: b"" is the drained-EOF signal.
+                if channel == CHAN_STDOUT and len(data) > 1:
+                    self._received += len(data) - 1
+                    await self._output.put(data[1:])
+                elif channel == CHAN_STDERR and len(data) > 1:
+                    self._received += len(data) - 1
+                    await self._stderr.put(data[1:])
+                elif channel == CHAN_REPLAY and len(data) > REPLAY_HEADER_BYTES:
+                    # Replay is one merged stream regardless of mode. The
+                    # server clamps a `since` older than its 1 MiB buffer,
+                    # so a higher offset here means output was evicted.
+                    self.replay_offset = int.from_bytes(data[1:REPLAY_HEADER_BYTES], "big")
+                    self._received = self.replay_offset + len(data) - REPLAY_HEADER_BYTES
+                    await self._output.put(data[REPLAY_HEADER_BYTES:])
+            elif message.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    frame = json.loads(message.data)
+                    frame_type = frame.get("type")
+                    if frame_type == "connected":
+                        self.mode = frame.get("mode")
+                        if not self._connected.done():
+                            self._connected.set_result(None)
+                    elif frame_type == "exit":
+                        if not self._exit.done():
+                            self._exit.set_result(int(frame.get("exit_code", -1)))
+                    elif frame_type == "error":
+                        self._error = SandboxPtyError(f"PTY session failed: {frame.get('code')}: {frame.get('error')}")
+                except (ValueError, TypeError, AttributeError) as e:
+                    if self._error is None:
+                        self._error = SandboxPtyError(f"PTY session sent a malformed frame: {e!r}")
+                    break
+            elif message.type == aiohttp.WSMsgType.ERROR:
+                break
+
+    async def _reattach_socket(self) -> bool:
+        """Re-dial the session's WebSocket, resuming from the last received byte."""
+        base_url = self._session_url.rsplit("/pty/", 1)[0]
+        for delay in _RECONNECT_DELAYS:
+            await asyncio.sleep(delay)
+            try:
+                self._ws = await _connect_ws(
+                    client=self._client,
+                    base_url=base_url,
+                    headers=self._headers,
+                    session_id=self.session_id,
+                    query={"takeover": "1", "since": str(self._received)},
+                    request_timeout_s=self._request_timeout_s,
+                )
+            except Exception:
+                continue
+            LOGGER.warning("PTY socket lost; re-attached session %s at offset %s", self.session_id, self._received)
+            return True
+        return False
+
     async def _pump(self) -> None:
-        """Sole reader of the WebSocket; fans frames out to queue/future/event."""
+        """Sole reader of the session's sockets; fans frames out to queue/future.
+
+        A socket that dies while the process still runs (proxy shed, connection
+        loss) is re-dialed with ``since=<bytes received>``, so pending reads and
+        execs continue across the gap. A deliberate takeover, a protocol error,
+        an exit, or ``close()`` ends the session instead.
+        """
         try:
-            async for message in self._ws:
-                if message.type == aiohttp.WSMsgType.BINARY:
-                    data = message.data
-                    if not data:
-                        continue
-                    channel = data[0]
-                    # Empty payloads are dropped: b"" is the drained-EOF signal.
-                    if channel == CHAN_STDOUT and len(data) > 1:
-                        await self._output.put(data[1:])
-                    elif channel == CHAN_STDERR and len(data) > 1:
-                        await self._stderr.put(data[1:])
-                    elif channel == CHAN_REPLAY and len(data) > REPLAY_HEADER_BYTES:
-                        # Replay is one merged stream regardless of mode. The
-                        # server clamps a `since` older than its 1 MiB buffer,
-                        # so a higher offset here means output was evicted.
-                        self.replay_offset = int.from_bytes(data[1:REPLAY_HEADER_BYTES], "big")
-                        await self._output.put(data[REPLAY_HEADER_BYTES:])
-                elif message.type == aiohttp.WSMsgType.TEXT:
-                    try:
-                        frame = json.loads(message.data)
-                        frame_type = frame.get("type")
-                        if frame_type == "connected":
-                            self.mode = frame.get("mode")
-                            if not self._connected.done():
-                                self._connected.set_result(None)
-                        elif frame_type == "exit":
-                            if not self._exit.done():
-                                self._exit.set_result(int(frame.get("exit_code", -1)))
-                        elif frame_type == "error":
-                            self._error = SandboxPtyError(
-                                f"PTY session failed: {frame.get('code')}: {frame.get('error')}"
-                            )
-                    except (ValueError, TypeError, AttributeError) as e:
-                        if self._error is None:
-                            self._error = SandboxPtyError(f"PTY session sent a malformed frame: {e!r}")
-                        break
-                elif message.type == aiohttp.WSMsgType.ERROR:
+            while True:
+                await self._pump_socket()
+                if self._closed or self._exit.done() or self._error is not None:
+                    break
+                if self._ws.close_code in (WS_CLOSE_TAKEN_OVER, WS_CLOSE_POLICY_VIOLATION):
+                    break
+                if not await self._reattach_socket():
                     break
         finally:
             if not self._exit.done():

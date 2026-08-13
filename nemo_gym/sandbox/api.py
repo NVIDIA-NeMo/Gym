@@ -63,8 +63,12 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
     """Run ``command`` in a live session, delimited by a unique marker."""
     token = f"NGPTY{uuid.uuid4().hex[:12]}"
     # The marker is assembled from two literals so the shell's echo of this
-    # line cannot itself match the marker we scan for.
-    await session.write(f"{command}\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode())
+    # line cannot itself match the marker we scan for. The brace group keeps
+    # shell state while putting stdin at EOF: the session's stdin never ends,
+    # so a stdin-reading command would block forever and eat the marker line.
+    await session.write(
+        f"{{ {command}\n}} </dev/null\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
+    )
 
     needle = f"{token}:".encode()
     buffer = bytearray()

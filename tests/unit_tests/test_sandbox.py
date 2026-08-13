@@ -1479,6 +1479,9 @@ async def test_pty_exec_on_existing_session() -> None:
     quoted = typed.split("'")
     token = quoted[3] + quoted[5]
     assert f"{token}:" not in typed
+    # The session's stdin never reaches EOF, so the command group must run
+    # with stdin redirected or a stdin-reading command blocks forever.
+    assert "</dev/null" in typed
     assert not session.closed, "an existing session must stay open"
 
     dying = _LiveShellSession(die=True)

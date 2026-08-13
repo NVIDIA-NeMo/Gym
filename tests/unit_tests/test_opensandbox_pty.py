@@ -23,6 +23,7 @@ import aiohttp
 import pytest
 
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtyError, SandboxPtySpec
+import nemo_gym.sandbox.providers.opensandbox.pty as pty_module
 from nemo_gym.sandbox.providers.opensandbox.pty import (
     OpenSandboxPtySession,
     _effective_command,
@@ -122,11 +123,20 @@ class FakeHttpClient:
         self.ws_calls.append((url, headers))
         if self._ws_error is not None:
             raise self._ws_error
+        if isinstance(self._ws, list):
+            return self._ws.pop(0)
         assert self._ws is not None
         return self._ws
 
     async def close(self) -> None:
         self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def _no_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sockets in these tests end deliberately; only the reconnect tests below
+    opt back into the re-dial schedule."""
+    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", ())
 
 
 async def _session_over(
@@ -648,6 +658,50 @@ async def test_provider_tracks_sessions_strongly_and_prunes_closed(monkeypatch: 
     assert not any(id(s) == first_id for s in provider._pty_sessions)
     assert second in provider._pty_sessions
     await provider.aclose()
+
+
+async def test_socket_drop_reattaches_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", (0,))
+    first = FakeWs([CONNECTED, _binary(b"\x01ab")])
+    first.closed = True  # dies after two frames, no exit: a shed socket
+    replay = b"\x03" + (2).to_bytes(8, "big") + b"cd"
+    second = FakeWs([_binary(replay), _text({"type": "exit", "exit_code": 0})])
+    second.closed = True
+    client = FakeHttpClient(ws=[first, second])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    assert await session.read() == b"ab"
+    assert await session.read() == b"cd", "output must resume across the re-dial"
+    assert await session.wait_exit() == 0
+    # The re-dial must resume from the bytes already received and take the
+    # socket back from whatever holds it.
+    assert "since=2" in client.ws_calls[1][0] and "takeover=1" in client.ws_calls[1][0]
+    await session.close()
+
+
+async def test_takeover_close_does_not_reattach(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", (0,))
+    ws = FakeWs([CONNECTED], close_code=pty_module.WS_CLOSE_TAKEN_OVER)
+    ws.closed = True
+    client = FakeHttpClient(ws=[ws])  # a re-dial would pop an empty list and fail
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    with pytest.raises(SandboxPtyError, match="taken over"):
+        await session.wait_exit(timeout_s=5)
+    assert len(client.ws_calls) == 1, "a deliberate takeover must not be fought"
+    await session.close()
 
 
 async def test_open_pty_session_rejects_exit_before_connected() -> None:
