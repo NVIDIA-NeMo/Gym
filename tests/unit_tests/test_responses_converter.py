@@ -624,7 +624,6 @@ def test_responses_to_chat_completion_preserves_empty_training_assistant():
         {
             "role": "assistant",
             "content": None,
-            "tool_calls": [],
             "prompt_token_ids": [],
             "generation_token_ids": [],
             "generation_log_probs": [],
