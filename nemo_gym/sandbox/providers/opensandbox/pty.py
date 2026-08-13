@@ -50,8 +50,9 @@ CHAN_REPLAY = 3
 REPLAY_HEADER_BYTES = 9
 WS_CLOSE_TAKEN_OVER = 4001
 WS_CLOSE_POLICY_VIOLATION = 1008
-# Bounded re-dial schedule for a socket that dies under a live process.
-_RECONNECT_DELAYS = (0.5, 1.0, 2.0)
+# Backoff for connect-class transients (proxy route not ready, backend
+# unreachable, socket re-dial): the execd bind window is short.
+_PTY_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
 
 # Mirrors execd's shell pick (bash when available, else sh) for env-only specs.
 _DEFAULT_SHELL_SNIPPET = 'exec "$(command -v bash || echo sh)"'
@@ -163,22 +164,19 @@ class OpenSandboxPtySession:
     async def _reattach_socket(self) -> bool:
         """Re-dial the session's WebSocket, resuming from the last received byte."""
         base_url = self._session_url.rsplit("/pty/", 1)[0]
-        for delay in _RECONNECT_DELAYS:
-            await asyncio.sleep(delay)
-            try:
-                self._ws = await _connect_ws(
-                    client=self._client,
-                    base_url=base_url,
-                    headers=self._headers,
-                    session_id=self.session_id,
-                    query={"takeover": "1", "since": str(self._received)},
-                    request_timeout_s=self._request_timeout_s,
-                )
-            except Exception:
-                continue
-            LOGGER.warning("PTY socket lost; re-attached session %s at offset %s", self.session_id, self._received)
-            return True
-        return False
+        try:
+            self._ws = await _connect_ws(
+                client=self._client,
+                base_url=base_url,
+                headers=self._headers,
+                session_id=self.session_id,
+                query={"takeover": "1", "since": str(self._received)},
+                request_timeout_s=self._request_timeout_s,
+            )
+        except Exception:
+            return False
+        LOGGER.warning("PTY socket lost; re-attached session %s at offset %s", self.session_id, self._received)
+        return True
 
     async def _pump(self) -> None:
         """Sole reader of the session's sockets; fans frames out to queue/future.
@@ -189,13 +187,19 @@ class OpenSandboxPtySession:
         an exit, or ``close()`` ends the session instead.
         """
         try:
+            barren = 0
             while True:
+                received_before = self._received
                 await self._pump_socket()
                 if self._closed or self._exit.done() or self._error is not None:
                     break
                 if self._ws.close_code in (WS_CLOSE_TAKEN_OVER, WS_CLOSE_POLICY_VIOLATION):
                     break
-                if not await self._reattach_socket():
+                # A socket that reconnects but keeps dying without delivering a
+                # byte would spin forever; three barren rounds mean the session
+                # is gone in a way the close code does not admit.
+                barren = barren + 1 if self._received == received_before else 0
+                if barren >= 3 or not await self._reattach_socket():
                     break
         finally:
             if not self._exit.done():
@@ -329,15 +333,24 @@ async def open_pty_session(
 
     timeout = aiohttp.ClientTimeout(total=request_timeout_s)
     try:
-        async with client.post(f"{base_url}/pty", json=body, headers=headers, timeout=timeout) as response:
-            if response.status == 404:
-                raise SandboxPtyError(
-                    "PTY create returned 404: execd inside this sandbox image predates "
-                    "PTY support (execd >= 1.0.10 required)"
-                )
-            if response.status not in (200, 201):
-                raise SandboxPtyError(f"PTY create failed with HTTP {response.status}: {await response.text()}")
-            session_id = (await response.json())["session_id"]
+        # Retry only failures that cannot have created a session: connect
+        # errors and proxy 404/502/503 (sandbox route not registered yet or
+        # backend unreachable). Anything else carries the server's own answer.
+        session_id: str | None = None
+        for delay in (*_PTY_RETRY_DELAYS, None):
+            try:
+                async with client.post(f"{base_url}/pty", json=body, headers=headers, timeout=timeout) as response:
+                    if response.status in (200, 201):
+                        session_id = (await response.json())["session_id"]
+                        break
+                    detail = f"HTTP {response.status}: {(await response.text()).strip()}"
+                    if response.status not in (404, 502, 503) or delay is None:
+                        raise SandboxPtyError(f"PTY create failed with {detail}")
+            except aiohttp.ClientConnectorError as e:
+                if delay is None:
+                    raise SandboxPtyError(f"PTY create failed with connect error: {e}") from e
+            await asyncio.sleep(delay)
+        assert session_id is not None
 
         try:
             ws = await _connect_ws(
@@ -446,7 +459,19 @@ async def _connect_ws(
     ws_url = f"ws{base_url.removeprefix('http')}/pty/{session_id}/ws"
     if query:
         ws_url += "?" + urlencode(query)
-    return await asyncio.wait_for(client.ws_connect(ws_url, headers=headers), timeout=request_timeout_s)
+    # Attaching is idempotent, so handshake transients are safe to retry;
+    # definitive answers (404 gone, 409 held) propagate immediately.
+    for delay in (*_PTY_RETRY_DELAYS, None):
+        try:
+            return await asyncio.wait_for(client.ws_connect(ws_url, headers=headers), timeout=request_timeout_s)
+        except aiohttp.WSServerHandshakeError as e:
+            if e.status not in (502, 503) or delay is None:
+                raise
+        except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
+            if delay is None:
+                raise
+        await asyncio.sleep(delay)
+    raise SandboxPtyError("unreachable")  # the loop always returns or raises
 
 
 async def _start_session(
