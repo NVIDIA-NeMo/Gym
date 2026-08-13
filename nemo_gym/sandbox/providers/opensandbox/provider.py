@@ -114,6 +114,36 @@ IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
+SERVER_PROXY_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"
+
+
+def _normalize_domain_protocol(domain: str | None, protocol: str | None) -> tuple[str | None, str | None]:
+    """Validate bare domains and HTTP(S) service URLs without changing SDK semantics."""
+    if domain is None:
+        return None, protocol
+    value = domain.strip().rstrip("/")
+    if not value:
+        raise ValueError("OpenSandbox connection domain must not be empty")
+    if "://" not in value:
+        if "/" in value:
+            raise ValueError("OpenSandbox connection domain must not contain a path")
+        return value, protocol
+
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("OpenSandbox connection domain URL must use http or https")
+    if parsed.username or parsed.password:
+        raise ValueError("OpenSandbox connection domain URL must not contain credentials")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError("OpenSandbox connection domain URL must not contain a path, query, or fragment")
+    if protocol is not None and protocol.lower() != parsed.scheme:
+        raise ValueError(
+            f"OpenSandbox connection protocol {protocol!r} conflicts with domain URL scheme {parsed.scheme!r}"
+        )
+    # ConnectionConfig natively accepts a URL-form domain and lets its scheme
+    # override ``protocol``. Preserve that public SDK behavior for existing Gym
+    # consumers while still validating ambiguous or credential-bearing URLs.
+    return f"{parsed.scheme}://{parsed.netloc}", parsed.scheme
 
 
 def validate_image_pull_policy(image_pull_policy: str) -> str:
@@ -636,14 +666,13 @@ class OpenSandboxProvider:
     ) -> Any:
         _, ConnectionConfig, _, _, _ = _require_opensandbox_sdk()
         kwargs: dict[str, Any] = {}
-        if self._connection.domain is not None:
-            # OpenSandbox SDK 0.1.15 appends ``/v1`` directly. Normalizing here
-            # prevents a configured trailing slash from producing ``//v1``.
-            kwargs["domain"] = self._connection.domain.rstrip("/")
+        domain, protocol = _normalize_domain_protocol(self._connection.domain, self._connection.protocol)
+        if domain is not None:
+            kwargs["domain"] = domain
         if self._connection.api_key is not None:
             kwargs["api_key"] = self._connection.api_key
-        if self._connection.protocol is not None:
-            kwargs["protocol"] = self._connection.protocol
+        if protocol is not None:
+            kwargs["protocol"] = protocol
         if request_timeout_s is None:
             request_timeout_s = self._connection.request_timeout_s
         if request_timeout_s is not None:
@@ -657,7 +686,7 @@ class OpenSandboxProvider:
             # the key only in proxy mode: a direct sandbox endpoint runs
             # untrusted code and must never see it.
             if self._connection.api_key is not None:
-                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
+                kwargs["headers"] = {SERVER_PROXY_API_KEY_HEADER: self._connection.api_key}
         if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)

@@ -518,6 +518,41 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     assert "headers" not in direct._connection_config().kwargs
 
 
+def test_connection_domain_url_normalization_and_proxy_secret_boundary(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "http://sandbox.example:8080/",
+            "api_key": "key",  # pragma: allowlist secret
+            "protocol": "http",
+            "use_server_proxy": True,
+        }
+    )
+    config = provider._connection_config()
+    assert config.kwargs["domain"] == "http://sandbox.example:8080"
+    assert config.kwargs["protocol"] == "http"
+    assert config.kwargs["headers"] == {
+        "OPEN-SANDBOX-API-KEY": "key",  # pragma: allowlist secret
+    }
+
+    direct = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "sandbox.example",
+            "api_key": "key",  # pragma: allowlist secret
+            "use_server_proxy": False,
+        }
+    )._connection_config()
+    assert "headers" not in direct.kwargs
+
+    with pytest.raises(ValueError, match="conflicts"):
+        opensandbox_provider.OpenSandboxProvider(
+            connection={"domain": "https://sandbox.example", "protocol": "http"}
+        )._connection_config()
+    with pytest.raises(ValueError, match="must not contain a path"):
+        opensandbox_provider.OpenSandboxProvider(
+            connection={"domain": "http://sandbox.example/api", "protocol": "http"}
+        )._connection_config()
+
+
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
     # Default backend is httpx, with the configured keepalive expiry on the pool.
     provider = opensandbox_provider.OpenSandboxProvider()

@@ -21,6 +21,8 @@ sandbox:
     sandbox-api: opensandbox-sdk
   opensandbox:
     connection:
+      # A bare host[:port] or full http(s) URL is accepted. When the URL
+      # includes a scheme, it must match `protocol` and must not include a path.
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
       protocol: http
