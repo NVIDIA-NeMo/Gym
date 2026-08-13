@@ -318,7 +318,7 @@ async def test_open_pty_session_https_becomes_wss_and_default_size_skips_resize(
 
 @pytest.mark.parametrize(
     ("post_status", "match"),
-    [(404, "execd >= 1.0.10"), (500, "HTTP 500")],
+    [(404, "HTTP 404"), (500, "HTTP 500")],
 )
 async def test_open_pty_session_create_failure(post_status: int, match: str) -> None:
     client = FakeHttpClient(post_status=post_status)

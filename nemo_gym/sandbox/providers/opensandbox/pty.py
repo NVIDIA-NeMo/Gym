@@ -344,8 +344,6 @@ async def open_pty_session(
                         session_id = (await response.json())["session_id"]
                         break
                     detail = f"HTTP {response.status}: {(await response.text()).strip()}"
-                    if response.status == 404:
-                        detail += " (a 404 can also mean execd predates PTY support; execd >= 1.0.10 required)"
                     if response.status not in (404, 502, 503) or delay is None:
                         raise SandboxPtyError(f"PTY create failed with {detail}")
             except aiohttp.ClientConnectorError as e:
