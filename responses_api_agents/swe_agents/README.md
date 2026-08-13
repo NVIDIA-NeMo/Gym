@@ -69,7 +69,7 @@ Two Apptainer containers are launched concurrently per instance:
 
 The two containers are launched at the same time so the eval container's spin-up cost (often tens of seconds for SWE-bench's harness) is hidden behind the agent's run time. The eval container blocks on `until [ -f <predictions> ]; do sleep 5; done` until the agent finishes.
 
-Concurrency across instances is bounded by `concurrency` (default 256) via an asyncio semaphore on the server, and Ray's `SPREAD` scheduling distributes per-instance workers across the cluster.
+Concurrency across instances is bounded by `concurrency` (default 256) via an asyncio semaphore on the server, and Ray's `SPREAD` scheduling distributes per-instance workers across the cluster. Each instance reserves `ray_num_cpus_per_worker` Ray CPUs (default 0.1), which is what limits how many of them Ray places on one node.
 
 ---
 
@@ -411,6 +411,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `memory_watchdog_poll_interval_s`  | `1.0`                                             | Watchdog poll interval (seconds); bounds worst-case RSS overshoot of a fast allocator. |
 | `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container. Exported as both `COMMAND_EXEC_TIMEOUT` (caps explicit per-action timeouts) and `SANDBOX_TIMEOUT` (default for actions without one; requires an OpenHands checkout whose eval sandbox config reads `SANDBOX_TIMEOUT`). |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
+| `ray_num_cpus_per_worker`          | `0.1`                                             | Ray CPUs reserved by each instance. The default admits about ten instances per advertised CPU; a larger value (for example `1.0`) makes Ray bound how many run on one node. |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
 | `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |
 | `skip_eval`                        | `false`                                           | Run the agent normally but skip the eval container entirely; reward is forced to `0.0` since the patch is never graded. Useful for collecting agent trajectories without paying the eval cost. |

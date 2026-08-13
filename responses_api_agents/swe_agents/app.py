@@ -188,6 +188,13 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     # Concurrency control
     concurrency: int = Field(default=256, description="Maximum number of concurrent SWE-bench runs")
 
+    ray_num_cpus_per_worker: float = Field(
+        default=0.1,
+        gt=0,
+        description="Ray CPU reservation per SWE episode. The default admits ~10 episodes per advertised "
+        "CPU; size to real episode weight (e.g. 1.0) so Ray bounds the per-node episode count",
+    )
+
     dataset_path: Optional[str] = Field(
         default=None,
         description="Path to the dataset for SWE-bench evaluation",
@@ -4020,7 +4027,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def _inner_responses(
         self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor
     ) -> NeMoGymResponse:
-        maybe_report_file = await runner_ray_remote.remote(params.model_dump())
+        maybe_report_file = await runner_ray_remote.options(num_cpus=self.config.ray_num_cpus_per_worker).remote(
+            params.model_dump()
+        )
         metrics_to_update = dict()
 
         if maybe_report_file:
