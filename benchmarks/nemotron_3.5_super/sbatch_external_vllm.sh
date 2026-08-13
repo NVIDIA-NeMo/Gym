@@ -129,7 +129,7 @@ if (( SLURM_PROCID == 0 )); then
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
         --max-num-batched-tokens 1085440 \
-        --max-num-seqs 4096 \
+        --max-num-seqs 2048 \
         &
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
@@ -160,7 +160,7 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
         --max-num-batched-tokens 1085440 \
-        --max-num-seqs 4096
+        --max-num-seqs 2048
 elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
     # Decode head
 
