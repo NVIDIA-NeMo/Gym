@@ -6,65 +6,23 @@ position: 6
 
 # Training with Axolotl
 
-Axolotl's `NemoGymPlugin` connects GRPO training to NeMo Gym resource servers. In single-turn mode, completions are scored through the resource server's `/verify` endpoint. Multi-turn mode delegates rollout execution to a NeMo Gym agent through `/run`.
+Axolotl's `NemoGymPlugin` uses one or more NeMo Gym environments as reward sources for GRPO training. It supports single-turn verification, multi-turn agent rollouts, and multi-environment training. In single-turn mode, it scores generated completions through a NeMo Gym resource server's `/verify` endpoint. In multi-turn mode, it delegates rollout orchestration to a NeMo Gym agent server through `/run`.
 
-The plugin can clone NeMo Gym, prepare its environment, start the configured resource servers, load training data, and stop the servers when training exits.
+With automatic setup enabled, the plugin can clone NeMo Gym, create its Python environment, start the configured NeMo Gym services, load the specified datasets, and stop the services it started when training finishes.
+
+The integration is developed and maintained by Axolotl. Refer to Axolotl's integration guide for currently validated models, versions, and training configurations.
 
 ## Prerequisites
 
-- A GPU environment supported by [Axolotl](https://docs.axolotl.ai/docs/installation.html)
-- Git and [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Axolotl installed in an activated virtual environment
+- An Axolotl installation and hardware supported by the selected training configuration
+- A compatible NeMo Gym checkout and training dataset
 
-## Run the single-turn example
+<Warning>
+The revisions checked for this page were [Axolotl `7419d92bacc8`](https://github.com/axolotl-ai-cloud/axolotl/commit/7419d92bacc815c8e2a53bd39b56e1cb1f82f91b) and [NeMo Gym `4ba2d4f87ab6`](https://github.com/NVIDIA-NeMo/Gym/commit/4ba2d4f87ab690113a23106885a9a826fbfb4744). Axolotl's bundled examples at that revision reference `resources_servers/reasoning_gym/data/train_mini_sudoku.jsonl`, which is not present in the NeMo Gym revision. This pair is not validated end to end; confirm a supported version pair and dataset with Axolotl before training.
+</Warning>
 
-Axolotl provides a Sudoku example that uses `reasoning_gym` as the NeMo Gym resource server. Download the current example from Axolotl and start training:
+## References
 
-```bash
-curl -LO https://raw.githubusercontent.com/axolotl-ai-cloud/axolotl/main/src/axolotl/integrations/nemo_gym/examples/nemo_gym_sudoku.yaml
-axolotl train nemo_gym_sudoku.yaml
-```
-
-The example enables the NeMo Gym plugin, clones NeMo Gym to `~/Gym` if it is not already present, starts the resource server, and trains `Qwen/Qwen2.5-1.5B-Instruct`. Training output is written to `./outputs/nemo_gym_sudoku`.
-
-<Note>
-The first run can take longer because the plugin creates the NeMo Gym environment and installs its dependencies.
-</Note>
-
-The following settings control the integration:
-
-| Setting | Purpose |
-| --- | --- |
-| `plugins` | Registers `axolotl.integrations.nemo_gym.NemoGymPlugin`. |
-| `nemo_gym_enabled` | Enables the integration. |
-| `nemo_gym_dir` and `nemo_gym_auto_clone` | Select the NeMo Gym checkout or allow the plugin to clone one. |
-| `nemo_gym_auto_start` and `nemo_gym_config_paths` | Start the resource servers required for the training run. |
-| `nemo_gym_datasets` | Load one or more JSONL datasets and associate each dataset with a resource server. |
-| `nemo_gym_multi_turn` | Use multi-turn agent rollouts when set to `true`; single-turn verification is the default. |
-
-## Use an existing NeMo Gym checkout
-
-To use a checkout that you manage yourself, update the example with its absolute path and disable automatic cloning:
-
-```yaml
-nemo_gym_dir: /absolute/path/to/Gym
-nemo_gym_auto_clone: false
-```
-
-Keep `nemo_gym_config_paths` and `nemo_gym_datasets` aligned: every dataset's `server_name` must refer to a resource server started by the selected NeMo Gym configuration.
-
-## Train across multiple environments
-
-Axolotl's [multi-environment example](https://github.com/axolotl-ai-cloud/axolotl/blob/main/src/axolotl/integrations/nemo_gym/examples/nemo_gym_multi_env.yaml) starts more than one resource server and routes each dataset to its corresponding server. For the NeMo Gym concepts behind this setup, see [Multi-Environment Training](/tutorials/training-tutorials/multi-environment-training).
-
-## Enable multi-turn rollouts
-
-Set `nemo_gym_multi_turn: true` to use a NeMo Gym agent for rollout execution instead of scoring independent completions. Multi-turn training also requires an agent server and model endpoint. Start with Axolotl's [multi-turn example](https://github.com/axolotl-ai-cloud/axolotl/blob/main/src/axolotl/integrations/nemo_gym/examples/nemo_gym_multi_turn.yaml), then follow the [NeMo Gym integration guide](https://github.com/axolotl-ai-cloud/axolotl/blob/main/src/axolotl/integrations/nemo_gym/README.md) for the server setup.
-
-## Troubleshooting
-
-- If a resource server does not start, inspect `ng_run.log` in the directory selected by `nemo_gym_dir`.
-- If port `11000` is already in use, choose another value for `nemo_gym_head_port`.
-- If configuration validation reports a missing server or dataset, check `nemo_gym_config_paths` and `nemo_gym_datasets` together.
-
-For all supported settings and their current defaults, see the [Axolotl NeMo Gym plugin API reference](https://docs.axolotl.ai/docs/api/integrations.nemo_gym.plugin.html).
+- [Axolotl NeMo Gym integration guide](https://docs.axolotl.ai/docs/custom_integrations.html#nemo-gym-integration-for-axolotl)
+- [NemoGymPlugin API reference](https://docs.axolotl.ai/docs/api/integrations.nemo_gym.plugin.html)
+- [Axolotl NeMo Gym integration source](https://github.com/axolotl-ai-cloud/axolotl/tree/main/src/axolotl/integrations/nemo_gym)
