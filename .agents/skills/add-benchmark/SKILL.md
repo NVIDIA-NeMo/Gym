@@ -33,7 +33,33 @@ Before starting, determine which type of benchmark you're adding:
 
 ## Workflow
 
-If this is an overlay on `math_with_judge`, `mcqa`, `code_gen`, or similar, skip scaffolding a new server. Copy `benchmarks/gsm8k/` and stop after prepare + CLI wiring. Only do Step 1 when no existing scorer fits.
+If this is an overlay on `math_with_judge`, `mcqa`, `code_gen`, or similar, skip scaffolding a new server. Copy the closest overlay and stop after prepare + CLI wiring:
+
+| Task | Copy |
+| --- | --- |
+| Math / short answer | `benchmarks/gsm8k` |
+| Multiple choice | `benchmarks/gpqa` |
+| Unit-test code | `benchmarks/livecodebench/v5_2408_2502` |
+
+Human walkthrough: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`. Only do Step 1 when no existing scorer fits.
+
+When the overlay sets `prompt_config`, JSONL rows are raw fields (`question`, `expected_answer`, …). Do **not** bake `responses_create_params.input` into those rows. `prepare()` must return a `Path` equal to `jsonl_fpath`. Keep generated JSONL gitignored.
+
+Search scorers with `gym search resources-servers "…"` (bare `gym search` defaults to environments). Do not use `gym env init --benchmark` for in-tree overlays.
+
+Smoke test (output is required):
+
+```bash
+gym env validate --benchmark my_bench
+gym eval prepare --benchmark my_bench
+gym eval run --benchmark my_bench \
+  --model-type openai_model \
+  --split benchmark \
+  --output results/my_bench_rollouts.jsonl \
+  --limit 2
+```
+
+`--no-serve` also needs `--agent`, `--input`, `--prompt-config`, and `--output`. Overlay-only PRs skip `gym env test --resources-server`.
 
 ### Step 1: Scaffold the server
 
@@ -58,7 +84,17 @@ For external benchmarks, create the agent server manually under `responses_api_a
 
 ### Step 2: Prepare data
 
-Convert your source dataset to Gym JSONL format. Each line must have `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata`.
+Convert your source dataset to Gym JSONL format.
+
+**Overlay with `prompt_config`:** write raw fields the prompt and verifier need. Do not include `responses_create_params.input`. Example (`math_with_judge`):
+
+```json
+{"question": "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?", "expected_answer": 72}
+```
+
+MCQA: see `benchmarks/gpqa/prepare.py` (`question`, `problem`, `options`, `expected_answer`). `prepare()` must return a `Path` equal to `jsonl_fpath`. Keep generated JSONL gitignored.
+
+**New resources server example rows / no prompt_config:** each line has `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata` or top-level scorer fields:
 
 ```json
 {
@@ -75,7 +111,7 @@ Convert your source dataset to Gym JSONL format. Each line must have `responses_
 }
 ```
 
-**Data conversion**: Write conversion scripts in the **source repo** (e.g. your dataset repository), not in NeMo-Gym. Prompt files also belong in the source repo. Exception: when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
+**Data conversion:** Overlay `prepare.py` lives next to `benchmarks/<name>/config.yaml`. For a new resources server, conversion scripts often live in the source dataset repo; exception when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
 
 **`example.jsonl`**: Generate 5 entries for smoke testing. This file is committed directly to git in `data/example.jsonl`.
 
@@ -239,7 +275,7 @@ pre-commit run --all-files
 
 First run may fail as hooks auto-modify files (`verified: false` flag, README table). Stage changes and run again.
 
-Set `verified: true` in YAML config after successful baselining. Include W&B links and screenshots of results in the PR description.
+Leave `verified: false` on the first PR. Maintainers flip it after reward profiling. Include W&B links and screenshots in the PR if you already ran profiling.
 
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash

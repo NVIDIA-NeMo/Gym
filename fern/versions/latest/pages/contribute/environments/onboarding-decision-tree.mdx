@@ -1,32 +1,54 @@
 ---
 title: "Onboarding decision tree"
-description: "Choose whether to reuse a resources server or create a new one."
+description: "Choose whether to reuse a resources server, create a new one, or add a new harness."
 position: 1
 ---
+import { NavButton } from "../../../../../components/NavButton";
 
-You do not always need a new environment. Most benchmarks reuse a scorer that already exists.
+<NavButton href="/contribute/environments" label="Contribute environments" direction="back" />
 
-Search first:
+<Info>
+**Before you choose a path:** complete [Development Setup](/contribute/development-setup) and the [Quickstart](/get-started/quickstart) (`env.yaml` with model credentials).
+
+**1.** Search existing scorers · **2.** Pick overlay, new server, or harness · **3.** Follow the linked guide
+</Info>
+
+An **environment** is the measurement surface: tasks, verifier, tools, and state. A **benchmark** is a versioned eval on top of that surface — usually a new dataset, prompt, and `prepare.py`, not a new server.
+
+Search the catalog before you create anything. A bare `gym search "…"` queries the **environments** catalog, not scorers:
 
 ```bash
-gym search "grade school math"
+gym search resources-servers "grade school math"
+gym list resources-servers
+gym search benchmarks math
 ```
 
-Then pick a path:
+Then pick the row that matches what you actually need to add:
 
-```mermaid
-flowchart TD
-  A[Can an existing resources server score this task?] -->|Yes| B[Add a benchmark]
-  A -->|No| C[New Environment]
-```
-
-| Path | When | Guide |
+| You need | You create | Start here |
 | --- | --- | --- |
-| Reuse | Same verifier, new data, prompt, or repeats | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
-| New scorer | You need new `verify()`, tools, or state | [New Environment](/contribute/environments/new-environment) |
+| Same scorer, new data / prompt / split | Overlay under `benchmarks/<name>/` | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
+| New `verify()`, tools, or session state | Resources server under `resources_servers/<name>/` | [New Environment](/contribute/environments/new-environment) |
+| New agent loop, GUI, sandbox, or third-party runner | Agent server or a library wrap | [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks) |
 
-Copy [`benchmarks/gsm8k`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/gsm8k) when reusing a scorer such as `math_with_judge`, `mcqa`, or `code_gen`.
+<Cards>
+  <Card title="Reuse a scorer" href="/contribute/environments/adding-a-benchmark">
+    Copy `benchmarks/gsm8k` (math), `benchmarks/gpqa` (multiple choice), or `benchmarks/livecodebench/v5_2408_2502` (code). No `app.py`.
+
+    <Badge intent="success" minimal outlined>most common</Badge>
+  </Card>
+  <Card title="Create a new scorer" href="/contribute/environments/new-environment">
+    Scaffold a resources server, implement `verify()`, and satisfy the five-row CI gate.
+
+    <Badge minimal outlined>new resources server</Badge>
+  </Card>
+  <Card title="New harness or wrap a library" href="/environment-tutorials/integrate-external-environments">
+    The scorer already exists, but the episode is driven by a different agent or an external benchmark runner.
+
+    <Badge minimal outlined>advanced</Badge>
+  </Card>
+</Cards>
 
 <Note>
-Need a GUI VM, browser, repo sandbox, or a third-party runner? See [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks) and [Integrate external libraries](/environment-tutorials/integrate-external-environments). Do not use `gym env init --benchmark --reuse-verifier` against in-tree servers; they do not export `VERIFIER_FIXTURE`.
+Still unsure? If an existing resources server can grade the task, it is an overlay. Only scaffold `resources_servers/` when you must change how the reward is computed.
 </Note>

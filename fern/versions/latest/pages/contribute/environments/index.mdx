@@ -1,30 +1,53 @@
 ---
 title: "Environments"
-description: ""
+description: "Onboard a benchmark overlay or a new resources server."
 position: 3
 ---
-Help advance RL training for the community by contributing environments and benchmarks. Start with the decision tree if you are unsure which path to take.
 
----
+<Info>
+**Environment** = tasks, verifier, tools, and state. **Benchmark** = a versioned eval overlay on that surface (dataset, prompt, `prepare.py`). Most contributions reuse a scorer and never touch `app.py`.
+</Info>
+
+<Tip>
+Complete [Development Setup](/contribute/development-setup) first. Using Cursor, Claude Code, or Codex? Follow the [`add-benchmark`](/contribute/agent-skills) skill.
+</Tip>
+
+Read the decision tree first, then the matching how-to. Keep the [Single-step tutorial](/environment-tutorials/single-step-environment) for a hands-on `verify()` walkthrough.
 
 <Cards>
 
 <Card title="Onboarding decision tree" href="/contribute/environments/onboarding-decision-tree">
-Reuse a scorer, add a benchmark overlay, or create a new resources server.
+Reuse a scorer, create a new one, or add a new harness.
 
-<Badge intent="success" minimal outlined>start here</Badge> <Badge minimal outlined>5 min</Badge>
+<Badge intent="success" minimal outlined>start here</Badge>
 </Card>
 
 <Card title="Add a benchmark" href="/contribute/environments/adding-a-benchmark">
-Overlay an existing resources server, or add a new scorer — files, CLI, harness, and reward profiling.
+Copy an overlay, implement `prepare.py`, run `gym eval`.
 
-<Badge minimal outlined>benchmark</Badge>
+<Badge intent="tip" minimal outlined>reuse a scorer</Badge>
 </Card>
 
 <Card title="New Environment" href="/contribute/environments/new-environment">
-Scaffold a resources server, implement verify(), and satisfy local tests and example artifacts.
+Scaffold a resources server, implement `verify()`, satisfy the five-row CI gate.
 
-<Badge minimal outlined>new-environment</Badge>
+<Badge minimal outlined>new scorer</Badge>
+</Card>
+
+<Card title="Single-step tutorial" href="/environment-tutorials/single-step-environment">
+Build a weather-tool server hands-on: tools, `verify()`, tests, and rollouts.
+
+<Badge minimal outlined>hands-on depth</Badge>
+</Card>
+
+<Card title="Wrap an external library" href="/environment-tutorials/integrate-external-environments">
+When the episode is driven by a third-party runner rather than `simple_agent`.
+
+<Badge minimal outlined>advanced</Badge>
+</Card>
+
+<Card title="Onboarding FAQ" href="/reference/faq#how-do-i-choose-an-onboarding-path">
+Overlay vs new server vs harness, plus CLI and CI artifact rules.
 </Card>
 
 </Cards>

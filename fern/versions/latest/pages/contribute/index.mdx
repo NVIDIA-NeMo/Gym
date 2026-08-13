@@ -7,16 +7,27 @@ Welcome! We are excited to have you contribute to NeMo Gym. Whether you are addi
 
 ---
 
+## Before You Start
+
+All contributions require DCO sign-off (`git commit -s`). Cryptographic commit signing is optional. Refer to [development-setup](/contribute/development-setup) for environment setup, CI/CD requirements, and DCO instructions.
+
+<Tip>
+Contributing an environment or benchmark with an AI assistant? See [Agent Skills](/contribute/agent-skills) — especially `add-benchmark`.
+</Tip>
+
+**Not sure where to start?** Check our [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) or create a new issue to discuss your idea.
+
+---
+
 ## Ways to Contribute
 
-<Accordion title="Add Environments and Benchmarks">
-New environments expand Gym's training capabilities. Benchmarks are versioned eval overlays on a resources server — they often reuse an existing scorer.
+<Cards>
+  <Card title="Add environments and benchmarks" href="/contribute/environments">
+    Start with the decision tree: reuse a scorer, create a new resources server, or wrap a harness.
 
-- Novel training environments (coding, reasoning, tool use, games, and so on)
-- Benchmark integrations (such as SWE-Bench and Tau Bench)
-
-→ Start with the [onboarding decision tree](/contribute/environments/onboarding-decision-tree), then [Add a benchmark](/contribute/environments/adding-a-benchmark) or [New Environment](/contribute/environments/new-environment).
-</Accordion>
+    <Badge intent="success" minimal outlined>start here</Badge>
+  </Card>
+</Cards>
 
 <Accordion title="Integrate RL Frameworks">
 Have a preferred training framework? Help integrate it with NeMo Gym.
@@ -33,7 +44,7 @@ Have a preferred training framework? Help integrate it with NeMo Gym.
 <Accordion title="Use Agent Skills">
 NeMo Gym ships vetted agent skills that accelerate common development workflows with AI coding assistants.
 
-→ Refer to [Agent Skills](/contribute/agent-skills) for the available skills and how to use them.
+→ Refer to [Agent Skills](/contribute/agent-skills) for the available skills and how to use them. The onboarding hub is [Contribute environments](/contribute/environments).
 </Accordion>
 
 <Accordion title="Report Bugs & Fix Issues">
@@ -54,11 +65,3 @@ We encourage contributors to use AI coding assistants (Cursor, Claude, Codex, Op
 **Guiding principle:** Prefer contributions where your review and ownership clearly outweigh the maintainer review burden. You are responsible for every line of code you submit, regardless of whether you or an AI tool wrote it.
 
 Refer to [`AGENTS.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/AGENTS.md) for the quality bar (shared by humans and coding agents), and to [Use of AI and LLM Tools](/contribute/development-setup#use-of-ai-and-llm-tools) for how maintainers handle low-effort submissions.
-
----
-
-## Before You Start
-
-All contributions require DCO sign-off (`git commit -s`). Cryptographic commit signing is optional. Refer to [development-setup](/contribute/development-setup) for environment setup, CI/CD requirements, and DCO instructions.
-
-**Not sure where to start?** Check our [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) or create a new issue to discuss your idea.
