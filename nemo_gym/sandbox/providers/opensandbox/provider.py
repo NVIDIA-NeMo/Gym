@@ -650,6 +650,27 @@ class OpenSandboxProvider:
                 )
         return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
 
+    async def _retire_closed_pty_sessions(self) -> None:
+        """Release sessions that ended on their own before dropping their refs.
+
+        A session whose pump ended still holds its aiohttp client; ``close()``
+        is idempotent and frees it. Called from create/attach so the tracking
+        set cannot grow without bound.
+        """
+        for stale in [s for s in self._pty_sessions if s.closed]:
+            try:
+                # Release only: a pump can end because another client took the
+                # session over, and an owned close() would DELETE the session
+                # that client is still using. Ended-by-exit sessions lose their
+                # server-side record with the sandbox instead.
+                stale._owned = False
+                await stale.close()
+            except Exception:
+                LOGGER.warning(
+                    "Failed to close ended PTY session %r", getattr(stale, "session_id", "?"), exc_info=True
+                )
+            self._pty_sessions.discard(stale)
+
     async def aclose(self) -> None:
         """Close provider-owned resources."""
         # PTY sessions hold their own aiohttp clients, which the shared httpx
@@ -1126,7 +1147,7 @@ class OpenSandboxProvider:
             spec=spec,
             request_timeout_s=request_timeout_s,
         )
-        self._pty_sessions = {live for live in self._pty_sessions if not live.closed}
+        await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
         return session
 
@@ -1151,7 +1172,7 @@ class OpenSandboxProvider:
             since=since,
             request_timeout_s=request_timeout_s,
         )
-        self._pty_sessions = {live for live in self._pty_sessions if not live.closed}
+        await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
         return session
 

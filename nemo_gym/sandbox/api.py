@@ -103,12 +103,13 @@ class SandboxPty:
 
     def __init__(self, sandbox: "AsyncSandbox") -> None:
         self._sandbox = sandbox
-        self._sessions: list[SandboxPtySession] = []
-
-    def _live_session(self) -> SandboxPtySession | None:
-        """First still-open session created or attached through this sandbox."""
-        self._sessions = [s for s in self._sessions if not s.closed]
-        return self._sessions[0] if self._sessions else None
+        # The oldest live default-shell session (create() with no command);
+        # exec() without a session reuses it. Custom-command and attached
+        # sessions run arbitrary programs, so they are never reused implicitly.
+        self._default_session: SandboxPtySession | None = None
+        # Session-mode execs share one output stream per session; serialize
+        # them so two concurrent calls cannot consume each other's marker.
+        self._session_exec_lock = asyncio.Lock()
 
     async def create(
         self,
@@ -152,7 +153,8 @@ class SandboxPty:
                 pty=pty,
             ),
         )
-        self._sessions.append(session)
+        if command is None and (self._default_session is None or self._default_session.closed):
+            self._default_session = session
         return session
 
     async def attach(
@@ -174,11 +176,9 @@ class SandboxPty:
         if not isinstance(sandbox._provider, SupportsSandboxPtyAttach):
             provider_name = getattr(sandbox._provider, "name", type(sandbox._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support re-attaching PTY sessions")
-        session = await sandbox._provider.attach_pty(
+        return await sandbox._provider.attach_pty(
             sandbox._require_handle(), session_id, takeover=takeover, since=since
         )
-        self._sessions.append(session)
-        return session
 
     async def exec(
         self,
@@ -195,12 +195,16 @@ class SandboxPty:
     ) -> SandboxExecResult:
         """Run one command in a terminal session and collect its output.
 
-        Without ``session``, the oldest live session opened through this
-        sandbox's ``create()``/``attach()`` is reused — provided the call sets
-        none of the session-shaping arguments (``cwd``/``env``/``user``,
-        non-default ``rows``/``cols``, or ``pty=False``), since those are fixed
-        at ``create()``. When no live session exists (or shaping arguments are
-        given) a private session is opened for the command, drained and closed.
+        Without ``session``, the sandbox's default-shell session — the oldest
+        live one opened by ``create()`` with no ``command`` — is reused,
+        provided the call sets none of the session-shaping arguments
+        (``cwd``/``env``/``user``, non-default ``rows``/``cols``, or
+        ``pty=False``), since those are fixed at ``create()``. Custom-command
+        and attached sessions run arbitrary programs, so they are only used
+        when passed explicitly. When no default-shell session exists (or
+        shaping arguments are given) a private session is opened for the
+        command, drained and closed. Session-mode execs are serialized per
+        sandbox: concurrent calls into one shared stream would corrupt it.
         With ``session`` the command runs in that live session, which stays open
         and keeps its shell state. In a live session the output also contains
         the shell's echo of the command, ``stderr`` is best-effort (pipe mode
@@ -216,7 +220,9 @@ class SandboxPty:
         """
         implicit = False
         if session is None and cwd is None and env is None and user is None and pty and (rows, cols) == (24, 80):
-            session = self._live_session()
+            if self._default_session is not None and self._default_session.closed:
+                self._default_session = None
+            session = self._default_session
             implicit = session is not None
         if session is not None:
             if cwd is not None or env is not None or user is not None:
@@ -225,21 +231,24 @@ class SandboxPty:
                     "for an existing session they are fixed at pty.create() time"
                 )
             try:
-                return await asyncio.wait_for(_run_in_pty_session(session, command), timeout=timeout_s)
+                # The timeout covers waiting for the lock too: a caller's
+                # budget must not be consumed invisibly by another exec.
+                async with asyncio.timeout(timeout_s):
+                    async with self._session_exec_lock:
+                        return await _run_in_pty_session(session, command)
             except (TimeoutError, asyncio.TimeoutError):
                 if implicit:
-                    # The caller has no handle on this session and its stream
-                    # now carries the stray command's output; retire it so the
-                    # next implicit exec cannot inherit it.
+                    # This call did not select the session explicitly, and its
+                    # stream now carries the stray command's output; retire it
+                    # so a later implicit exec cannot inherit it.
                     try:
                         await session.close()
                     except Exception:
                         pass
+                    if self._default_session is session:
+                        self._default_session = None
                 return _pty_timeout_result(command, timeout_s, reusable=False)
         session = await self.create(command, cwd=cwd, env=env, rows=rows, cols=cols, user=user, pty=pty)
-        # A one-shot session is private to this call; keep it out of the
-        # implicit-reuse pool so a concurrent exec cannot pick it mid-drain.
-        self._sessions.remove(session)
         try:
 
             async def drain(read: Callable[[], Awaitable[bytes]]) -> bytes:

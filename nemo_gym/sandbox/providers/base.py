@@ -312,7 +312,9 @@ class SandboxPtySession(Protocol):
         ...
 
     async def close(self) -> None:
-        """Idempotent: end the session if alive and release local resources."""
+        """Idempotent: release local resources; a session this client created
+        is also ended, while an attached one is merely detached and lives on
+        for its owner."""
         ...
 
     async def __aenter__(self) -> "SandboxPtySession": ...

@@ -650,6 +650,60 @@ async def test_provider_tracks_sessions_strongly_and_prunes_closed(monkeypatch: 
     await provider.aclose()
 
 
+async def test_open_pty_session_rejects_exit_before_connected() -> None:
+    # A process that exits (or a socket that closes) before the `connected`
+    # frame must fail creation rather than yield a session with mode=None.
+    ws = FakeWs([_text({"type": "exit", "exit_code": 0})])
+    ws.closed = True  # the stream ends right after its frames
+    client = FakeHttpClient(ws=ws)
+    with pytest.raises(SandboxPtyError):
+        await open_pty_session(
+            client=client,  # type: ignore[arg-type]
+            base_url="http://server/base",
+            headers={},
+            spec=SandboxPtySpec(),
+            request_timeout_s=5.0,
+        )
+    assert client.closed
+
+
+async def test_ended_session_is_closed_and_prune_releases_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/base", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "protocol": "http"})
+    clients: list[FakeHttpClient] = []
+
+    def make_client() -> FakeHttpClient:
+        ws = FakeWs([CONNECTED])
+        ws.closed = True  # the stream ends on its own after `connected`
+        clients.append(FakeHttpClient(ws=ws))
+        return clients[-1]
+
+    monkeypatch.setattr(provider, "_pty_http_client", make_client)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+
+    first = await provider.create_pty(handle, SandboxPtySpec())
+    # The fake stream ends after `connected`, so the pump finishes on its own:
+    # the session must report closed without an explicit close().
+    await first._pump_task
+    assert first.closed
+
+    # The next create retires it, releasing the aiohttp client it still held —
+    # without DELETEing server-side state: the pump may have ended because
+    # another client took the session over and still runs it.
+    await provider.create_pty(handle, SandboxPtySpec())
+    assert clients[0].closed, "pruning must release the ended session's client"
+    assert clients[0].delete_calls == [], "pruning must never end the session server-side"
+    assert first not in provider._pty_sessions
+    await provider.aclose()
+
+
 async def test_attach_never_deletes_a_session_it_did_not_create() -> None:
     from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
 

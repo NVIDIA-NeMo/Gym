@@ -14,7 +14,7 @@
 
 """execd PTY sessions over the OpenSandbox server proxy.
 
-Speaks execd's PTY wire protocol directly (``components/execd/PTY.md``): the
+Speaks execd's documented PTY wire protocol directly: the
 released OpenSandbox SDKs expose no PTY API. Sessions live at
 ``{base}/pty[/{session_id}[/ws]]`` where ``base`` is the sandbox's execd
 endpoint as resolved by the SDK (through the server proxy when
@@ -100,15 +100,17 @@ class OpenSandboxPtySession:
         self._output: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._stderr: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._exit: asyncio.Future[int] = asyncio.get_running_loop().create_future()
-        self._connected = asyncio.Event()
+        self._connected: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._error: SandboxPtyError | None = None
         self._closed = False
         self._pump_task = asyncio.create_task(self._pump())
 
     @property
     def closed(self) -> bool:
-        """Whether ``close()`` has run; a closed session cannot run commands."""
-        return self._closed
+        """True once the session can no longer run commands: after ``close()``,
+        or once the connection pump has ended (process exit, takeover eviction,
+        or connection loss). Resources are released by ``close()``."""
+        return self._closed or self._pump_task.done()
 
     async def _pump(self) -> None:
         """Sole reader of the WebSocket; fans frames out to queue/future/event."""
@@ -136,7 +138,8 @@ class OpenSandboxPtySession:
                         frame_type = frame.get("type")
                         if frame_type == "connected":
                             self.mode = frame.get("mode")
-                            self._connected.set()
+                            if not self._connected.done():
+                                self._connected.set_result(None)
                         elif frame_type == "exit":
                             if not self._exit.done():
                                 self._exit.set_result(int(frame.get("exit_code", -1)))
@@ -154,8 +157,12 @@ class OpenSandboxPtySession:
             if not self._exit.done():
                 self._exit.set_exception(self._close_error())
                 self._exit.exception()  # retrieved; silences never-retrieved warnings
-            # Unblock any waiting reader; late frames are gone anyway.
-            self._connected.set()
+            # A pump that ends before `connected` arrived means the session
+            # never became usable; fail the waiter rather than letting it
+            # proceed with mode=None.
+            if not self._connected.done():
+                self._connected.set_exception(self._close_error())
+                self._connected.exception()  # retrieved; silences never-retrieved warnings
             await self._output.put(None)
             await self._stderr.put(None)
 
@@ -170,9 +177,8 @@ class OpenSandboxPtySession:
         return SandboxPtyError(f"PTY connection closed unexpectedly (close code {code})")
 
     async def _wait_connected(self, timeout_s: float | None) -> None:
-        await asyncio.wait_for(self._connected.wait(), timeout=timeout_s)
-        if self._exit.done() and self._exit.exception() is not None:
-            raise self._exit.exception()
+        # shield: the future is shared; a timed-out waiter must not cancel it.
+        await asyncio.wait_for(asyncio.shield(self._connected), timeout=timeout_s)
 
     async def _read_stream(self, queue: asyncio.Queue[bytes | None], timeout_s: float | None) -> bytes:
         chunk = await asyncio.wait_for(queue.get(), timeout=timeout_s)
