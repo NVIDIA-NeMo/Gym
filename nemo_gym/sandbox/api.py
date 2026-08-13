@@ -63,8 +63,12 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
     """Run ``command`` in a live session, delimited by a unique marker."""
     token = f"NGPTY{uuid.uuid4().hex[:12]}"
     # The marker is assembled from two literals so the shell's echo of this
-    # line cannot itself match the marker we scan for.
-    await session.write(f"{command}\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode())
+    # line cannot itself match the marker we scan for. The brace group keeps
+    # shell state while putting stdin at EOF: the session's stdin never ends,
+    # so a stdin-reading command would block forever and eat the marker line.
+    await session.write(
+        f"{{ {command}\n}} </dev/null\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
+    )
 
     needle = f"{token}:".encode()
     buffer = bytearray()
@@ -103,6 +107,12 @@ class SandboxPty:
 
     def __init__(self, sandbox: "AsyncSandbox") -> None:
         self._sandbox = sandbox
+        # The oldest live default-shell session (create() with no command);
+        # exec() reuses it when called without a session.
+        self._default_session: SandboxPtySession | None = None
+        # Session-mode execs share one output stream per session; serialize
+        # them so two concurrent calls cannot consume each other's marker.
+        self._session_exec_lock = asyncio.Lock()
 
     async def create(
         self,
@@ -134,7 +144,7 @@ class SandboxPty:
             raise NotImplementedError(
                 f"Sandbox provider {provider_name!r} does not support PTY sessions; use exec() instead"
             )
-        return await sandbox._provider.create_pty(
+        session = await sandbox._provider.create_pty(
             sandbox._require_handle(),
             SandboxPtySpec(
                 command=command,
@@ -146,6 +156,9 @@ class SandboxPty:
                 pty=pty,
             ),
         )
+        if command is None and (self._default_session is None or self._default_session.closed):
+            self._default_session = session
+        return session
 
     async def attach(
         self,
@@ -185,20 +198,35 @@ class SandboxPty:
     ) -> SandboxExecResult:
         """Run one command in a terminal session and collect its output.
 
-        Without ``session`` this opens a session for the command, drains it and
-        closes it. With ``session`` the command runs in that live session, which
-        stays open and keeps its shell state; ``cwd``/``env``/``user``/``rows``/
-        ``cols``/``pty`` are then ignored because they are fixed at
-        ``create()``. In a live session the output also contains the shell's
-        echo of the command, ``stderr`` is best-effort (pipe mode only), and a
-        command that ends the shell (``exit``) raises ``SandboxPtyError``.
+        Without ``session``, the sandbox's default-shell session — the oldest
+        live one opened by ``create()`` with no ``command`` — is reused,
+        provided the call sets none of the session-shaping arguments
+        (``cwd``/``env``/``user``, non-default ``rows``/``cols``, or
+        ``pty=False``), since those are fixed at ``create()``. Custom-command
+        and attached sessions run arbitrary programs, so they are only used
+        when passed explicitly. When no default-shell session exists (or
+        shaping arguments are given) a private session is opened for the
+        command, drained and closed. Session-mode execs are serialized per
+        sandbox: concurrent calls into one shared stream would corrupt it.
+        With ``session`` the command runs in that live session, which stays open
+        and keeps its shell state. In a live session the output also contains
+        the shell's echo of the command, ``stderr`` is best-effort (pipe mode
+        only), and a command that ends the shell (``exit``) raises
+        ``SandboxPtyError``.
 
         PTY mode returns all output on ``stdout`` and ``None`` stderr; pipe mode
         splits the two. A command that outlives ``timeout_s`` returns
         ``error_type="timeout"`` like ``sandbox.exec()`` rather than raising;
-        with ``session`` that command keeps running and leaves unread output
-        behind, so discard the session rather than reusing it.
+        in an explicitly passed session that command keeps running and leaves
+        unread output behind, so discard the session rather than reusing it (an
+        implicitly reused session is retired automatically).
         """
+        implicit = False
+        if session is None and cwd is None and env is None and user is None and pty and (rows, cols) == (24, 80):
+            if self._default_session is not None and self._default_session.closed:
+                self._default_session = None
+            session = self._default_session
+            implicit = session is not None
         if session is not None:
             if cwd is not None or env is not None or user is not None:
                 raise ValueError(
@@ -206,8 +234,22 @@ class SandboxPty:
                     "for an existing session they are fixed at pty.create() time"
                 )
             try:
-                return await asyncio.wait_for(_run_in_pty_session(session, command), timeout=timeout_s)
+                # The timeout covers waiting for the lock too: a caller's
+                # budget must not be consumed invisibly by another exec.
+                async with asyncio.timeout(timeout_s):
+                    async with self._session_exec_lock:
+                        return await _run_in_pty_session(session, command)
             except (TimeoutError, asyncio.TimeoutError):
+                if implicit:
+                    # This call did not select the session explicitly, and its
+                    # stream now carries the stray command's output; retire it
+                    # so a later implicit exec cannot inherit it.
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+                    if self._default_session is session:
+                        self._default_session = None
                 return _pty_timeout_result(command, timeout_s, reusable=False)
         session = await self.create(command, cwd=cwd, env=env, rows=rows, cols=cols, user=user, pty=pty)
         try:

@@ -18,7 +18,6 @@ import asyncio
 import logging
 import re
 import shlex
-import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -114,7 +113,6 @@ IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
-DEFAULT_PTY_REQUEST_TIMEOUT_S = 300.0
 
 
 def validate_image_pull_policy(image_pull_policy: str) -> str:
@@ -611,7 +609,9 @@ class OpenSandboxProvider:
         # create, so the provider owns this one: built once, reused by every
         # ConnectionConfig, closed in aclose().
         self._transport: Any | None = None
-        self._pty_sessions: weakref.WeakSet[Any] = weakref.WeakSet()
+        # Sessions own aiohttp clients that only close() releases: aclose()
+        # sweeps any still open; ended ones are retired on the next create/attach.
+        self._pty_sessions: set[Any] = set()
 
     def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
         """Add the configured default image pull policy to SDK create extensions."""
@@ -690,6 +690,24 @@ class OpenSandboxProvider:
                     "is not installed; falling back to the httpx transport"
                 )
         return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
+
+    async def _retire_closed_pty_sessions(self) -> None:
+        """Release sessions that ended on their own; their aiohttp client is
+        only freed by ``close()``. Called from create/attach so the tracking
+        set cannot grow without bound."""
+        for stale in [s for s in self._pty_sessions if s.closed]:
+            try:
+                # Release only: a pump can end because another client took the
+                # session over, and an owned close() would DELETE the session
+                # that client is still using. Ended-by-exit sessions lose their
+                # server-side record with the sandbox instead.
+                stale._owned = False
+                await stale.close()
+            except Exception:
+                LOGGER.warning(
+                    "Failed to close ended PTY session %r", getattr(stale, "session_id", "?"), exc_info=True
+                )
+            self._pty_sessions.discard(stale)
 
     async def aclose(self) -> None:
         """Close provider-owned resources."""
@@ -1343,9 +1361,7 @@ class OpenSandboxProvider:
         # A None connection timeout would also disable aiohttp's own 300s
         # default, leaving create/attach unbounded against a stalled proxy.
         request_timeout_s = (
-            float(self._connection.request_timeout_s)
-            if self._connection.request_timeout_s is not None
-            else DEFAULT_PTY_REQUEST_TIMEOUT_S
+            float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 300.0
         )
         endpoint = await self._await_sdk_call(
             handle.raw.get_endpoint(DEFAULT_EXECD_PORT),
@@ -1370,6 +1386,7 @@ class OpenSandboxProvider:
             spec=spec,
             request_timeout_s=request_timeout_s,
         )
+        await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
         return session
 
@@ -1394,6 +1411,7 @@ class OpenSandboxProvider:
             since=since,
             request_timeout_s=request_timeout_s,
         )
+        await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
         return session
 

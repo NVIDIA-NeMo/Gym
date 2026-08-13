@@ -260,6 +260,12 @@ class SandboxPtySession(Protocol):
     """One live interactive terminal. Async context manager; exit closes it."""
 
     session_id: str
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` has run; a closed session cannot run commands."""
+        ...
+
     mode: str | None
     """``"pty"`` or ``"pipe"`` once connected, ``None`` before that. Only pipe
     mode splits stderr; in PTY mode all output arrives through ``read()``."""
@@ -306,7 +312,9 @@ class SandboxPtySession(Protocol):
         ...
 
     async def close(self) -> None:
-        """Idempotent: end the session if alive and release local resources."""
+        """Idempotent: release local resources; a session this client created
+        is also ended, while an attached one is merely detached and lives on
+        for its owner."""
         ...
 
     async def __aenter__(self) -> "SandboxPtySession": ...

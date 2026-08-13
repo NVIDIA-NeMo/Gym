@@ -22,6 +22,7 @@ from typing import Any
 import aiohttp
 import pytest
 
+import nemo_gym.sandbox.providers.opensandbox.pty as pty_module
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtyError, SandboxPtySpec
 from nemo_gym.sandbox.providers.opensandbox.pty import (
     OpenSandboxPtySession,
@@ -122,11 +123,20 @@ class FakeHttpClient:
         self.ws_calls.append((url, headers))
         if self._ws_error is not None:
             raise self._ws_error
+        if isinstance(self._ws, list):
+            return self._ws.pop(0)
         assert self._ws is not None
         return self._ws
 
     async def close(self) -> None:
         self.closed = True
+
+
+@pytest.fixture(autouse=True)
+def _no_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sockets in these tests end deliberately; only the reconnect tests below
+    opt back into the re-dial schedule."""
+    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", ())
 
 
 async def _session_over(
@@ -616,6 +626,136 @@ async def test_provider_aclose_closes_live_pty_sessions(monkeypatch: pytest.Monk
     assert client.closed, "aclose must close PTY-owned aiohttp clients"
     assert ws.closed
     await session.close()
+
+
+async def test_provider_tracks_sessions_strongly_and_prunes_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    import gc
+
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/base", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "protocol": "http"})
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: FakeHttpClient(ws=FakeWs([CONNECTED])))
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+
+    first = await provider.create_pty(handle, SandboxPtySpec())
+    # Strong reference: dropping the caller's handle must not let the session
+    # be collected before its aiohttp client is closed.
+    first_id = id(first)
+    del first
+    gc.collect()
+    assert any(id(s) == first_id for s in provider._pty_sessions)
+
+    # Closing retires it on the next create; the new session stays tracked.
+    for tracked in list(provider._pty_sessions):
+        await tracked.close()
+    second = await provider.create_pty(handle, SandboxPtySpec())
+    assert not any(id(s) == first_id for s in provider._pty_sessions)
+    assert second in provider._pty_sessions
+    await provider.aclose()
+
+
+async def test_socket_drop_reattaches_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", (0,))
+    first = FakeWs([CONNECTED, _binary(b"\x01ab")])
+    first.closed = True  # dies after two frames, no exit: a shed socket
+    replay = b"\x03" + (2).to_bytes(8, "big") + b"cd"
+    second = FakeWs([_binary(replay), _text({"type": "exit", "exit_code": 0})])
+    second.closed = True
+    client = FakeHttpClient(ws=[first, second])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    assert await session.read() == b"ab"
+    assert await session.read() == b"cd", "output must resume across the re-dial"
+    assert await session.wait_exit() == 0
+    # The re-dial must resume from the bytes already received and take the
+    # socket back from whatever holds it.
+    assert "since=2" in client.ws_calls[1][0] and "takeover=1" in client.ws_calls[1][0]
+    await session.close()
+
+
+async def test_takeover_close_does_not_reattach(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module, "_RECONNECT_DELAYS", (0,))
+    ws = FakeWs([CONNECTED], close_code=pty_module.WS_CLOSE_TAKEN_OVER)
+    ws.closed = True
+    client = FakeHttpClient(ws=[ws])  # a re-dial would pop an empty list and fail
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    with pytest.raises(SandboxPtyError, match="taken over"):
+        await session.wait_exit(timeout_s=5)
+    assert len(client.ws_calls) == 1, "a deliberate takeover must not be fought"
+    await session.close()
+
+
+async def test_open_pty_session_rejects_exit_before_connected() -> None:
+    # A process that exits (or a socket that closes) before the `connected`
+    # frame must fail creation rather than yield a session with mode=None.
+    ws = FakeWs([_text({"type": "exit", "exit_code": 0})])
+    ws.closed = True  # the stream ends right after its frames
+    client = FakeHttpClient(ws=ws)
+    with pytest.raises(SandboxPtyError):
+        await open_pty_session(
+            client=client,  # type: ignore[arg-type]
+            base_url="http://server/base",
+            headers={},
+            spec=SandboxPtySpec(),
+            request_timeout_s=5.0,
+        )
+    assert client.closed
+
+
+async def test_ended_session_is_closed_and_prune_releases_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/base", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "protocol": "http"})
+    clients: list[FakeHttpClient] = []
+
+    def make_client() -> FakeHttpClient:
+        ws = FakeWs([CONNECTED])
+        ws.closed = True  # the stream ends on its own after `connected`
+        clients.append(FakeHttpClient(ws=ws))
+        return clients[-1]
+
+    monkeypatch.setattr(provider, "_pty_http_client", make_client)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+
+    first = await provider.create_pty(handle, SandboxPtySpec())
+    # The fake stream ends after `connected`, so the pump finishes on its own:
+    # the session must report closed without an explicit close().
+    await first._pump_task
+    assert first.closed
+
+    # The next create retires it, releasing the aiohttp client it still held —
+    # without DELETEing server-side state: the pump may have ended because
+    # another client took the session over and still runs it.
+    await provider.create_pty(handle, SandboxPtySpec())
+    assert clients[0].closed, "pruning must release the ended session's client"
+    assert clients[0].delete_calls == [], "pruning must never end the session server-side"
+    assert first not in provider._pty_sessions
+    await provider.aclose()
 
 
 async def test_attach_never_deletes_a_session_it_did_not_create() -> None:
