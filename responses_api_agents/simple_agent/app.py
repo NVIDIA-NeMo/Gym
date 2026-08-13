@@ -302,14 +302,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         cookies = request.cookies
 
-        # seed_session_response = await self.server_client.post(
-        #     server_name=self.config.resources_server.name,
-        #     url_path="/seed_session",
-        #     json=body,
-        #     cookies=cookies,
-        # )
-        # await raise_for_status(seed_session_response)
-        # cookies = seed_session_response.cookies
+        seed_session_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body,
+            cookies=cookies,
+        )
+        await raise_for_status(seed_session_response)
+        cookies = seed_session_response.cookies
 
         # request._cookies = cookies
         # inner_response = await self.responses(
@@ -317,6 +317,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         #     response=response,
         #     body=body.responses_create_params,
         # )
+        # model_response_json = inner_response.model_dump()
 
         response = await self.server_client.post(
             server_name=self.config.name,
@@ -326,9 +327,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
         model_response_json = await get_response_json(response)
-        # model_response_json = inner_response.model_dump()
-        # TODO @bxyu-nvidia: Use starlette.requests.cookie_parser
-        # cookies = response.cookies
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
