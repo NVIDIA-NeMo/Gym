@@ -121,15 +121,13 @@ if (( SLURM_PROCID == 0 )); then
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $PREFILL_SERVER_PORT \
         --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-address \$this_node_hostname \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --api-server-count 1 \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
         &
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
@@ -151,43 +149,35 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --headless \
         --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-start-rank \$SLURM_PROCID \
         --data-parallel-address \$PREFILL_HEAD \
-        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
 elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
     # Decode head
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $DECODE_SERVER_PORT \
         --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-address \$DECODE_HEAD \
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-        --api-server-count 1 \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --api-server-count 1
 else
     # Decode worker
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --headless \
         --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
         --data-parallel-address \$DECODE_HEAD \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --data-parallel-rpc-port $DECODE_DP_RPC_PORT
 fi
 EOF
 )
