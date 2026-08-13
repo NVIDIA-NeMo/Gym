@@ -11,13 +11,65 @@ MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SBATCH_EXCLUDE=${SBATCH_EXCLUDE:-}
 SBATCH_TIME=${SBATCH_TIME:-04:00:00}
+# Optionally bound full-rollout concurrency after measuring adapter and model-server backpressure.
+# When unset, preserve Gym's existing configured/default behavior.
+NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-}
+NUM_SAMPLES_IN_PARALLEL_ARG=""
 # auto uses NUM_NODES when sbatch advertises --segment; none omits it; a positive integer overrides it.
 VLLM_SLURM_SEGMENT=${VLLM_SLURM_SEGMENT:-auto}
 export UCX_NET_DEVICES="${UCX_NET_DEVICES:-mlx5_0:1}"
 
+if [[ -n "$NUM_SAMPLES_IN_PARALLEL" ]]; then
+    if [[ ! "$NUM_SAMPLES_IN_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: NUM_SAMPLES_IN_PARALLEL must be a positive integer; got '$NUM_SAMPLES_IN_PARALLEL'." >&2
+        exit 1
+    fi
+    NUM_SAMPLES_IN_PARALLEL_ARG="++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL"
+fi
+
 SBATCH_EXCLUDE_ARGS=()
 if [[ -n "$SBATCH_EXCLUDE" ]]; then
-    SBATCH_EXCLUDE_ARGS+=(--exclude="$SBATCH_EXCLUDE")
+    # Exclusion lists can outlive cluster topology changes. Revalidate immediately before
+    # submission so stale node names do not make sbatch reject the entire job.
+    if ! requested_excludes=$(scontrol show hostnames "$SBATCH_EXCLUDE"); then
+        echo "ERROR: Could not expand SBATCH_EXCLUDE='$SBATCH_EXCLUDE'." >&2
+        exit 1
+    fi
+
+    if ! cluster_nodes=$(scontrol show nodes --oneliner); then
+        echo "ERROR: Could not query Slurm's node inventory." >&2
+        exit 1
+    fi
+
+    declare -A cluster_node_set=()
+    while IFS= read -r node_record; do
+        node=${node_record#NodeName=}
+        node=${node%% *}
+        [[ -n "$node" ]] && cluster_node_set["$node"]=1
+    done <<< "$cluster_nodes"
+
+    valid_excludes=()
+    stale_excludes=()
+    while IFS= read -r node; do
+        [[ -z "$node" ]] && continue
+        if [[ -n "${cluster_node_set[$node]:-}" ]]; then
+            valid_excludes+=("$node")
+        else
+            stale_excludes+=("$node")
+        fi
+    done <<< "$requested_excludes"
+
+    if (( ${#stale_excludes[@]} )); then
+        stale_excludes_csv=$(IFS=,; echo "${stale_excludes[*]}")
+        echo "WARNING: Ignoring exclusions absent from Slurm's current node inventory: $stale_excludes_csv" >&2
+    fi
+    if (( ${#valid_excludes[@]} )); then
+        valid_excludes_csv=$(IFS=,; echo "${valid_excludes[*]}")
+        echo "Using ${#valid_excludes[@]} valid node exclusions."
+        SBATCH_EXCLUDE_ARGS+=(--exclude="$valid_excludes_csv")
+    else
+        echo "WARNING: No requested node exclusions exist in Slurm's current node inventory." >&2
+    fi
 fi
 
 should_run_eval=$(( $# > 0 ))
@@ -72,7 +124,7 @@ gym eval run \
     ++policy_base_url=http://\$(getent hosts "\$PREFILL_HEAD" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
-    ++upload_rollouts_to_wandb=false \
+    ++upload_rollouts_to_wandb=false $NUM_SAMPLES_IN_PARALLEL_ARG \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000
