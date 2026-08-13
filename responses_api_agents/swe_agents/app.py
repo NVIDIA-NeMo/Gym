@@ -16,6 +16,7 @@
 import asyncio
 import base64
 import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -312,9 +313,49 @@ class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
 ########################################
 
 
-def _is_pinned_commit(ref: str) -> bool:
-    """True for a hex object id (immutable); False for HEAD, branch, and tag refs."""
-    return re.fullmatch(r"[0-9a-fA-F]{7,40}", ref) is not None
+def _is_full_commit(ref: str) -> bool:
+    """True for a full 40-hex object id (immutable)."""
+    return re.fullmatch(r"[0-9a-fA-F]{40}", ref) is not None
+
+
+def _repo_slug(repo: Optional[str]) -> str:
+    """Filesystem token identifying the configured repository."""
+    if not repo:
+        return "default-repo"
+    name = re.sub(r"\.git$", "", repo.rstrip("/").rsplit("/", 1)[-1]) or "repo"
+    return f"{name}-{hashlib.sha256(repo.encode()).hexdigest()[:8]}"
+
+
+def _resolve_remote_commit(repo: Optional[str], ref: str) -> str:
+    """The full commit SHA `ref` points to, resolving mutable refs against the remote.
+
+    Full 40-hex ids pass through unchanged (immutable, no network). Everything
+    else (HEAD, branches, tags) is resolved with `git ls-remote`, so setup
+    trees are keyed by what the ref points to now — never by whatever a local
+    checkout happens to contain.
+    """
+    if _is_full_commit(ref):
+        return ref.lower()
+    if not repo:
+        raise ValueError(
+            f"agent_framework_commit={ref!r} is not a full commit SHA and no "
+            "agent_framework_repo is configured to resolve it against; pin a "
+            "full 40-hex SHA or configure the repository URL."
+        )
+    result = subprocess_run(
+        ["git", "ls-remote", repo, ref, f"refs/heads/{ref}", f"refs/tags/{ref}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        sha = line.split("\t", 1)[0].strip()
+        if _is_full_commit(sha):
+            return sha.lower()
+    raise ValueError(
+        f"could not resolve agent_framework_commit={ref!r} against {repo}; "
+        "pin a full 40-hex SHA or use a branch/tag that exists on the remote."
+    )
 
 
 @contextmanager
@@ -378,18 +419,24 @@ class BaseDatasetHarnessProcessor(BaseModel):
         configured = global_config_dict.get(CACHE_DIR_KEY_NAME) if global_config_dict is not None else None
         return (Path(configured) if configured else CACHE_DIR) / "swe_agents"
 
+    @staticmethod
+    def _cache_dir_is_default() -> bool:
+        global_config_dict = maybe_get_global_config_dict()
+        configured = global_config_dict.get(CACHE_DIR_KEY_NAME) if global_config_dict is not None else None
+        return not configured or Path(configured) == CACHE_DIR.expanduser().resolve()
+
     def resolve_setup_dir(self, name: str) -> Path:
-        """A pre-staged install-relative tree when present, else the tree under the cache root.
+        """A pre-staged install-relative tree when `cache_dir` is default, else the cache-root tree.
 
         Deployments that bake the setup trees at build time stage them next to
         the package (the pre-`cache_dir` layout); abandoning those would mean a
         multi-GB re-clone per node, or a hard failure on egress-restricted
-        clusters. Presence of the pre-staged tree is fixed at image-build time,
-        so this resolution is stable for the lifetime of a deployment — remove
-        the pre-staged tree to migrate to the cache root.
+        clusters. An explicitly configured `cache_dir` opts out: the user's
+        choice wins over the compatibility fallback. Both inputs are fixed for
+        the lifetime of a deployment, so resolution is stable over time.
         """
         legacy_dir = self.parent_dir / name
-        if legacy_dir.exists():
+        if legacy_dir.exists() and self._cache_dir_is_default():
             print(f"Using pre-staged setup tree at {legacy_dir}", flush=True)
             return legacy_dir
         return self.setup_root / name
@@ -1542,15 +1589,16 @@ fi
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
-    def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
-        """Ensure OpenHands checkout matches config.agent_framework_commit.
+    def _sync_openhands_to_commit(self, openhands_dir: Path, target: str) -> None:
+        """Ensure the OpenHands checkout is at `target` (a resolved, full commit SHA).
 
-        The config is treated as the golden truth. If the local HEAD differs
-        from the target commit, this fetches from the remote, discards any
-        local changes (tracked modifications and untracked files, while
-        preserving gitignored paths like `.venv`), and checks out the target.
+        The caller resolves mutable refs against the remote first
+        (`_resolve_remote_commit`), so comparing against the local object store
+        here is sound — a moved remote branch can no longer be mistaken for
+        current. If the local HEAD differs, this fetches, discards local
+        changes (preserving gitignored paths like `.venv`), and checks out the
+        target.
         """
-        target = self.config.agent_framework_commit
 
         def _git(*args: str) -> str:
             result = subprocess_run(
@@ -1569,7 +1617,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
 
         if resolved_target and resolved_target == current_commit:
             print(
-                f"OpenHands already at config commit {current_commit[:12]} (target={target})",
+                f"OpenHands already at target commit {current_commit[:12]}",
                 flush=True,
             )
             return
@@ -1591,27 +1639,25 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _openhands_tree_valid(setup_dir: Path) -> bool:
         return (setup_dir / "OpenHands" / ".venv" / "bin" / "python").exists()
 
-    def _openhands_setup_target(self) -> Path:
-        # A valid pre-staged tree wins (see resolve_setup_dir); anything else
-        # builds under the cache root, so the rmtree below can never rewrite a
-        # pre-staged tree other nodes may be executing from. OpenHands is the
-        # only processor whose checkout commit comes from config (the others
-        # hardcode their pins per code version), so only its shared tree can be
-        # retargeted by a concurrently starting run: file_lock is held during
-        # setup() only, and a later run's `reset --hard` would move the tree
-        # under this one. Key the cache tree by commit when the value is an
-        # immutable object id; mutable refs (HEAD, branches) can't key a cache
-        # and keep the shared tree + ensure-commit flow instead.
+    def _openhands_setup_target(self, commit: str) -> Path:
+        # A valid pre-staged tree wins while cache_dir is default (see
+        # resolve_setup_dir); anything else builds under the cache root, so the
+        # rmtree below can never rewrite a pre-staged tree other nodes may be
+        # executing from. OpenHands is the only processor whose checkout comes
+        # from config (the others hardcode their pins per code version), so its
+        # cache trees are keyed by repository identity + resolved commit SHA:
+        # file_lock is held during setup() only, and without the keying a later
+        # run configured with a different ref could `reset --hard` the shared
+        # tree while containers still execute from it.
         legacy_dir = self.parent_dir / "swe_openhands_setup"
-        if legacy_dir.exists() and self._openhands_tree_valid(legacy_dir):
+        if legacy_dir.exists() and self._cache_dir_is_default() and self._openhands_tree_valid(legacy_dir):
             print(f"Using pre-staged setup tree at {legacy_dir}", flush=True)
             return legacy_dir
-        commit = self.config.agent_framework_commit
-        base = self.setup_root / "swe_openhands_setup"
-        return base / commit if _is_pinned_commit(commit) else base
+        return self.setup_root / "swe_openhands_setup" / _repo_slug(self.config.agent_framework_repo) / commit
 
     def setup(self) -> Path:
-        setup_dir = self._openhands_setup_target()
+        commit = _resolve_remote_commit(self.config.agent_framework_repo, self.config.agent_framework_commit)
+        setup_dir = self._openhands_setup_target(commit)
 
         with file_lock(setup_dir, "OpenHands setup"):
             openhands_dir = setup_dir / "OpenHands"
@@ -1619,7 +1665,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
 
             if self._openhands_tree_valid(setup_dir):
                 print(f"OpenHands already set up at {setup_dir}", flush=True)
-                self._sync_openhands_to_config_commit(openhands_dir)
+                self._sync_openhands_to_commit(openhands_dir, commit)
                 return setup_dir
 
             print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
@@ -1631,7 +1677,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
 MINIFORGE_DIR={miniforge_dir} \\
 OPENHANDS_DIR={openhands_dir} \\
 AGENT_FRAMEWORK_REPO={self.config.agent_framework_repo} \\
-AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
+AGENT_FRAMEWORK_COMMIT={commit} \\
     {script_fpath}"""
             self._run_setup_command(command)
 

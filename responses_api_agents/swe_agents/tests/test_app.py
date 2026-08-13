@@ -426,15 +426,37 @@ class TestBaseDatasetHarnessProcessor:
             patch.object(
                 BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
             ),
+            patch.object(swe_app, "maybe_get_global_config_dict", return_value=None),
         ):
             # Nothing staged: build under the cache root.
             assert processor.resolve_setup_dir("swe_x_setup") == cache_root / "swe_x_setup"
-            # A pre-staged install-relative tree always wins while it exists,
-            # even if something created the cache-root directory meanwhile
-            # (e.g. a crashed attempt) — resolution stays stable over time.
+            # At the default cache_dir, a pre-staged install-relative tree wins
+            # while it exists, even if something created the cache-root
+            # directory meanwhile (e.g. a crashed attempt) — resolution stays
+            # stable over time.
             (legacy_root / "swe_x_setup").mkdir(parents=True)
             (cache_root / "swe_x_setup").mkdir(parents=True)
             assert processor.resolve_setup_dir("swe_x_setup") == legacy_root / "swe_x_setup"
+
+    def test_resolve_setup_dir_honors_explicit_cache_dir(self, tmp_path: Path) -> None:
+        # An explicitly configured cache_dir opts out of the pre-staged
+        # fallback: SWE must honor cache_dir=/shared/cache even in an image
+        # that ships legacy trees.
+        processor = BaseDatasetHarnessProcessor(config=_minimal_server_config())
+        cache_root = tmp_path / "cache"
+        legacy_root = tmp_path / "legacy"
+        (legacy_root / "swe_x_setup").mkdir(parents=True)
+        config_dict = OmegaConf.create({"cache_dir": str(cache_root)})
+        with (
+            patch.object(
+                BaseDatasetHarnessProcessor, "setup_root", new_callable=lambda: property(lambda self: cache_root)
+            ),
+            patch.object(
+                BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
+            ),
+            patch.object(swe_app, "maybe_get_global_config_dict", return_value=config_dict),
+        ):
+            assert processor.resolve_setup_dir("swe_x_setup") == cache_root / "swe_x_setup"
 
     def test_setup_returns_none(self) -> None:
         config = _minimal_server_config()
@@ -508,7 +530,7 @@ class TestOpenHandsSetupDirResolution:
         config = _minimal_server_config().model_copy(update={"agent_framework_commit": commit})
         return OpenHandsHarnessProcessor(config=config)
 
-    def _patched_roots(self, cache_root: Path, legacy_root: Path) -> ExitStack:
+    def _patched_roots(self, cache_root: Path, legacy_root: Path, config_dict=None) -> ExitStack:
         stack = ExitStack()
         stack.enter_context(
             patch.object(
@@ -520,21 +542,36 @@ class TestOpenHandsSetupDirResolution:
                 BaseDatasetHarnessProcessor, "parent_dir", new_callable=lambda: property(lambda self: legacy_root)
             )
         )
+        stack.enter_context(patch.object(swe_app, "maybe_get_global_config_dict", return_value=config_dict))
         return stack
 
-    def test_pinned_commit_keys_the_cache_tree(self, tmp_path: Path) -> None:
-        processor = self._processor(self.SHA)
-        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
-            expected = tmp_path / "cache" / "swe_openhands_setup" / self.SHA
-            assert processor._openhands_setup_target() == expected
-
-    def test_valid_prestaged_tree_wins(self, tmp_path: Path) -> None:
-        processor = self._processor(self.SHA)
-        legacy_setup = tmp_path / "legacy" / "swe_openhands_setup"
+    def _make_valid_legacy_tree(self, legacy_root: Path) -> Path:
+        legacy_setup = legacy_root / "swe_openhands_setup"
         (legacy_setup / "OpenHands" / ".venv" / "bin").mkdir(parents=True)
         (legacy_setup / "OpenHands" / ".venv" / "bin" / "python").touch()
+        return legacy_setup
+
+    def test_target_keys_by_repo_identity_and_commit(self, tmp_path: Path) -> None:
+        processor = self._processor(self.SHA)
         with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
-            assert processor._openhands_setup_target() == legacy_setup
+            expected = tmp_path / "cache" / "swe_openhands_setup" / swe_app._repo_slug(None) / self.SHA
+            assert processor._openhands_setup_target(self.SHA) == expected
+
+    def test_valid_prestaged_tree_wins_at_default_cache_dir(self, tmp_path: Path) -> None:
+        processor = self._processor(self.SHA)
+        legacy_setup = self._make_valid_legacy_tree(tmp_path / "legacy")
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
+            assert processor._openhands_setup_target(self.SHA) == legacy_setup
+
+    def test_valid_prestaged_tree_ignored_when_cache_dir_configured(self, tmp_path: Path) -> None:
+        # An explicitly configured cache_dir opts out of the compatibility
+        # fallback: the user's choice wins over a pre-staged tree.
+        processor = self._processor(self.SHA)
+        self._make_valid_legacy_tree(tmp_path / "legacy")
+        config_dict = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})
+        with self._patched_roots(tmp_path / "cache", tmp_path / "legacy", config_dict=config_dict):
+            expected = tmp_path / "cache" / "swe_openhands_setup" / swe_app._repo_slug(None) / self.SHA
+            assert processor._openhands_setup_target(self.SHA) == expected
 
     def test_invalid_prestaged_tree_builds_under_cache_root(self, tmp_path: Path) -> None:
         # A half-baked pre-staged tree must not be rmtree'd and rebuilt in
@@ -542,14 +579,33 @@ class TestOpenHandsSetupDirResolution:
         processor = self._processor(self.SHA)
         (tmp_path / "legacy" / "swe_openhands_setup").mkdir(parents=True)
         with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
-            expected = tmp_path / "cache" / "swe_openhands_setup" / self.SHA
-            assert processor._openhands_setup_target() == expected
+            expected = tmp_path / "cache" / "swe_openhands_setup" / swe_app._repo_slug(None) / self.SHA
+            assert processor._openhands_setup_target(self.SHA) == expected
 
-    def test_mutable_refs_use_the_shared_cache_tree(self, tmp_path: Path) -> None:
-        for ref in ("HEAD", "main", "feature/x"):
-            processor = self._processor(ref)
-            with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
-                assert processor._openhands_setup_target() == tmp_path / "cache" / "swe_openhands_setup"
+
+class TestResolveRemoteCommit:
+    def test_full_sha_passes_through_without_network(self) -> None:
+        with patch.object(swe_app, "subprocess_run") as run_mock:
+            assert swe_app._resolve_remote_commit("https://x/repo.git", "DEADBEEF" * 5) == "deadbeef" * 5
+            run_mock.assert_not_called()
+
+    def test_mutable_ref_resolves_via_ls_remote(self) -> None:
+        result = MagicMock()
+        result.stdout = f"{'a1' * 20}\trefs/heads/main\n"
+        with patch.object(swe_app, "subprocess_run", return_value=result) as run_mock:
+            assert swe_app._resolve_remote_commit("https://x/repo.git", "main") == "a1" * 20
+            assert "ls-remote" in run_mock.call_args.args[0]
+
+    def test_non_sha_without_repo_raises(self) -> None:
+        with pytest.raises(ValueError, match="full 40-hex SHA"):
+            swe_app._resolve_remote_commit(None, "HEAD")
+
+    def test_unresolvable_ref_raises(self) -> None:
+        result = MagicMock()
+        result.stdout = ""
+        with patch.object(swe_app, "subprocess_run", return_value=result):
+            with pytest.raises(ValueError, match="could not resolve"):
+                swe_app._resolve_remote_commit("https://x/repo.git", "nonexistent-branch")
 
 
 class TestNVInternalDatasetProcessor:
