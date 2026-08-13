@@ -139,6 +139,9 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     assert agent.agent_server_module == "responses_api_agents.legal_agent_bench_native_agent.app"
     assert agent.runtime_tasks_dir == resource.harbor_tasks_dir
     assert agent.skills_dir == resource.harness_skills_dir
+    assert agent.runtime_builder_provider_options == {}
+    assert agent.agent_sandbox_provider_options == {}
+    assert agent.verifier_sandbox_provider_options == {}
     assert agent.agent_kwargs.max_turns == 60
     assert len(agent.datasets) == 1
     assert agent.datasets[0].type == "benchmark"
@@ -203,8 +206,49 @@ def test_configurable_benchmark_variants_resolve(filename, expected_agent, expec
         assert agent.agent_kwargs.claude_code_version == "2.1.211"
     elif expected_module == "responses_api_agents.codex_agent.app":
         assert agent.agent_kwargs.codex_version == "0.144.4"
+        assert agent.agent_kwargs.cwd == "/sandbox/nemo-gym-legal-agent-bench/workspace/output"
     assert agent.datasets[0].type == "benchmark"
     assert agent.runtime_tasks_dir.endswith("data/runtime/harbor_tasks/legal_agent_bench")
+    assert agent.runtime_builder_provider_options == {}
+    assert agent.agent_sandbox_provider_options == {}
+    assert agent.verifier_sandbox_provider_options == {}
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_agent"),
+    [
+        ("config.yaml", "legal_agent_bench_benchmark_native_agent"),
+        ("config_hermes.yaml", "legal_agent_bench_benchmark_hermes_agent"),
+        ("config_claude_code.yaml", "legal_agent_bench_benchmark_claude_code_agent"),
+        ("config_codex.yaml", "legal_agent_bench_benchmark_codex_agent"),
+    ],
+)
+def test_configurable_variants_decode_phase_provider_options_from_environment(
+    monkeypatch, filename, expected_agent
+) -> None:
+    monkeypatch.setenv(
+        "NEMO_GYM_LAB_RUNTIME_BUILDER_PROVIDER_OPTIONS",
+        "{policy: /tmp/lab-builder-policy.yaml}",
+    )
+    monkeypatch.setenv(
+        "NEMO_GYM_LAB_AGENT_SANDBOX_PROVIDER_OPTIONS",
+        "{policy: /tmp/lab-agent-policy.yaml}",
+    )
+    monkeypatch.setenv(
+        "NEMO_GYM_LAB_VERIFIER_SANDBOX_PROVIDER_OPTIONS",
+        "{policy: /tmp/lab-verifier-policy.yaml}",
+    )
+    initial_config = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR / filename),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+    )
+
+    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial_config)
+    agent = resolved[expected_agent].responses_api_agents.legal_agent_bench_agent
+
+    assert agent.runtime_builder_provider_options == {"policy": "/tmp/lab-builder-policy.yaml"}
+    assert agent.agent_sandbox_provider_options == {"policy": "/tmp/lab-agent-policy.yaml"}
+    assert agent.verifier_sandbox_provider_options == {"policy": "/tmp/lab-verifier-policy.yaml"}
 
 
 @pytest.mark.parametrize(

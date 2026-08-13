@@ -85,6 +85,10 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit_per_host: int = 1024
 
     global_aiohttp_client_request_debug: bool = False
+    # Disabled by default so ordinary Gym traffic cannot be silently redirected by
+    # ambient proxy variables. Sandboxed runtimes whose provider deliberately
+    # exposes policy-enforced egress through HTTP(S)_PROXY may opt in.
+    global_aiohttp_trust_env: bool = False
 
     global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
         default=60,
@@ -159,6 +163,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
+        trust_env=cfg.global_aiohttp_trust_env,
     )
 
     global _GLOBAL_AIOHTTP_CLIENT

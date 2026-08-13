@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -24,10 +23,19 @@ from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
+
+# Server processes may run from a component-local working directory with an
+# installed ``nemo_gym`` ahead of the checkout on sys.path.  Derive the source
+# root from this file and put it first so LAB's vendored runtime assets are
+# resolved from the same checkout as the agent implementation on every host.
+PACKAGE_DIR = Path(__file__).resolve().parent
+PARENT_DIR = PACKAGE_DIR.parents[1]
+if str(PARENT_DIR) not in sys.path:
+    sys.path.insert(0, str(PARENT_DIR))
+
 from fastapi import Body, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -54,7 +62,6 @@ from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor.tools imp
 )
 
 
-PACKAGE_DIR = Path(__file__).resolve().parent
 PORTABLE_PYTHON_SH = PACKAGE_DIR / "setup_scripts" / "_portable_python.sh"
 DATASET_ALIAS = "legal_agent_bench"
 INITIAL_USER_PROMPT = "Please begin working on the task described in the system prompt."
@@ -73,8 +80,20 @@ PINNED_NPM_VERSION = re.compile(
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
-IMMUTABLE_IMAGE = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
-CODEX_MODEL_CATALOG_PATH = "/trajectories_mount/codex_model_catalog.json"
+SANDBOX_ROOT = "/sandbox/nemo-gym-legal-agent-bench"
+SANDBOX_AGENT_SOURCE = f"{SANDBOX_ROOT}/agent_source"
+SANDBOX_AGENT_DEPS = f"{SANDBOX_ROOT}/agent_deps"
+SANDBOX_RUNTIME = f"{SANDBOX_ROOT}/runtime"
+SANDBOX_WORKSPACE = f"{SANDBOX_ROOT}/workspace"
+SANDBOX_VDR = f"{SANDBOX_WORKSPACE}/vdr"
+SANDBOX_OUTPUT = f"{SANDBOX_WORKSPACE}/output"
+SANDBOX_SCRATCH = f"{SANDBOX_WORKSPACE}/scratch"
+SANDBOX_SKILLS = f"{SANDBOX_WORKSPACE}/skills"
+SANDBOX_VERIFIER = f"{SANDBOX_ROOT}/verifier"
+SANDBOX_TESTS = f"{SANDBOX_VERIFIER}/tests"
+SANDBOX_LOGS = f"{SANDBOX_VERIFIER}/logs"
+LAB_SANDBOX_ENV = {"NODE_PATH": "/usr/local/lib/node_modules"}
+CODEX_MODEL_CATALOG_PATH = f"{SANDBOX_RUNTIME}/codex_model_catalog.json"
 CODEX_MODEL_CATALOG = {
     "models": [
         {
@@ -102,15 +121,33 @@ CODEX_MODEL_CATALOG = {
     ]
 }
 
+
+def codex_model_catalog(model_name: str) -> dict[str, Any]:
+    """Return Codex metadata for both proxied and direct policy routing.
+
+    Codex indexes the catalog by the configured model slug.  Gym's in-process
+    proxy uses ``gym-policy-model``, while a direct remote endpoint requires the
+    provider's real model name. Keep the proxy alias and add the selected model
+    as a second entry so one portable runtime works for both routes.
+    """
+    catalog = json.loads(json.dumps(CODEX_MODEL_CATALOG))
+    if model_name != catalog["models"][0]["slug"]:
+        direct_model = json.loads(json.dumps(catalog["models"][0]))
+        direct_model["slug"] = model_name
+        direct_model["display_name"] = model_name
+        catalog["models"].append(direct_model)
+    return catalog
+
+
 GENERIC_HARNESS_PREAMBLE = """\
 You are an AI agent running in an automated Legal Agent Bench evaluation.
 
 ## Workspace layout
 
-- Source documents are under `/workspace/vdr` and `$VDR_DIR`. Treat them as read-only.
-- Write every final deliverable under `/workspace/output` and `$OUTPUT_DIR`.
-- Use `/workspace/workspace` for scratch files.
-- Skill manuals and their supporting assets are under `/workspace/skills`.
+- Source documents are under `$VDR_DIR`. Treat them as read-only.
+- Write every final deliverable under `$OUTPUT_DIR`.
+- Use `$WORKSPACE_DIR` for scratch files.
+- Skill manuals and their supporting assets are under `$SKILLS_DIR`.
 - Do not search for task configuration, rubric, verifier, test, or judge files. They are intentionally
   unavailable while you work.
 
@@ -124,35 +161,50 @@ import asyncio
 import inspect
 import json
 import os
-import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.error import HTTPError
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
-sys.path.insert(0, "/agent_source_mount")
-os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + "/agent_deps_mount/bin"
-os.environ["VDR_DIR"] = "/workspace/vdr"
-os.environ["OUTPUT_DIR"] = "/workspace/output"
-os.environ["WORKSPACE_DIR"] = "/workspace/workspace"
-os.environ["SKILLS_DIR"] = "/workspace/skills"
-os.environ["HOME"] = "/workspace/workspace"
+SANDBOX_ROOT = "/sandbox/nemo-gym-legal-agent-bench"
+AGENT_SOURCE = f"{SANDBOX_ROOT}/agent_source"
+AGENT_DEPS = f"{SANDBOX_ROOT}/agent_deps"
+RUNTIME = f"{SANDBOX_ROOT}/runtime"
+WORKSPACE = f"{SANDBOX_ROOT}/workspace"
+
+sys.path.insert(0, AGENT_SOURCE)
+os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + f"{AGENT_DEPS}/bin"
+os.environ["VDR_DIR"] = f"{WORKSPACE}/vdr"
+os.environ["OUTPUT_DIR"] = f"{WORKSPACE}/output"
+os.environ["WORKSPACE_DIR"] = f"{WORKSPACE}/scratch"
+os.environ["SKILLS_DIR"] = f"{WORKSPACE}/skills"
+os.environ["HOME"] = f"{WORKSPACE}/scratch"
+os.environ["TMPDIR"] = f"{WORKSPACE}/scratch"
 # The inner runner receives its complete configuration below. Prevent Gym's
 # shared aiohttp client from invoking Hydra's CLI config loader in the output
 # directory when the native agent makes its first model request.
 os.environ.setdefault("NEMO_GYM_CONFIG_DICT", "{}")
-os.chdir("/workspace/output")
+os.chdir(os.environ["OUTPUT_DIR"])
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import (
+    GlobalAIOHTTPAsyncClientConfig,
+    ServerClient,
+    is_global_aiohttp_client_setup,
+    set_global_aiohttp_client,
+)
 
-runner = json.loads(Path("/trajectories_mount/runner.json").read_text())
+runner = json.loads(Path(f"{RUNTIME}/runner.json").read_text())
 # ECS Fargate injects this value after resolving the host-side policy URL through
 # its SSH reverse tunnel. Other providers use the URL persisted in runner.json.
 model_url = os.environ.get("LAB_POLICY_MODEL_URL", runner["model_url"]).rstrip("/")
+model_api_key = os.environ.get("LAB_POLICY_API_KEY")
+model_url_root = model_url.removesuffix("/v1").rstrip("/")
 model_url_v1 = model_url if model_url.endswith("/v1") else model_url + "/v1"
-status_path = Path("/trajectories_mount/runner_status.json")
+status_path = Path(f"{RUNTIME}/runner_status.json")
 
 
 def write_status(*, ok, phase, error=None):
@@ -163,12 +215,27 @@ try:
     parsed_model_url = urlsplit(model_url)
     if not parsed_model_url.hostname:
         raise ValueError(f"Policy model URL has no hostname: {model_url!r}")
-    model_port = parsed_model_url.port or (443 if parsed_model_url.scheme == "https" else 80)
-    with socket.create_connection(
-        (parsed_model_url.hostname, model_port),
-        timeout=runner.get("model_connect_timeout_seconds", 10),
-    ):
-        pass
+    # Use a proxy-aware HTTP request rather than a raw TCP socket. Policy-enforcing
+    # providers such as OpenShell expose permitted egress through HTTP(S)_PROXY and
+    # intentionally block direct sockets. Strip only the terminal API-version segment
+    # so Gym policy proxies can answer their quiet 200 liveness route while preserving
+    # any rollout-scoped path prefix.
+    probe_path = parsed_model_url.path.removesuffix("/v1") or "/"
+    if not probe_path.endswith("/"):
+        probe_path += "/"
+    probe_url = urlunsplit(parsed_model_url._replace(path=probe_path, query="", fragment=""))
+    try:
+        probe_headers = {"Authorization": f"Bearer {model_api_key}"} if model_api_key else {}
+        with urlopen(
+            Request(probe_url, headers=probe_headers, method="GET"),
+            timeout=runner.get("model_connect_timeout_seconds", 10),
+        ):
+            pass
+    except HTTPError as exc:
+        # Any application response proves transport connectivity, but authentication
+        # or policy denials mean the agent cannot use the endpoint.
+        if exc.code in {401, 403}:
+            raise
 except Exception as exc:
     message = f"Policy model is unreachable from the LAB sandbox: {model_url} ({type(exc).__name__}: {exc})"
     write_status(ok=False, phase="model_connectivity", error=message)
@@ -193,10 +260,17 @@ try:
             return {}
 
         hermes_model_metadata.fetch_endpoint_model_metadata = empty_endpoint_model_metadata
+        # Current Hermes releases perform a second, optional local-server
+        # context probe when endpoint metadata is empty. Gym's rollout proxy is
+        # neither Ollama, LM Studio, llama.cpp, nor a public model catalog, so
+        # probing those routes only emits misleading 404s. Preserve Hermes's
+        # normal fallback context behavior without issuing discovery requests.
+        hermes_model_metadata._query_local_context_length = empty_endpoint_model_metadata
         hermes_usage_pricing.fetch_endpoint_model_metadata = empty_endpoint_model_metadata
 
     client = ServerClient.model_construct(
         global_config_dict={
+            "global_aiohttp_trust_env": runner.get("http_proxy_from_environment", False),
             "policy_model": {
                 "responses_api_models": {
                     "policy_model": {},
@@ -204,7 +278,10 @@ try:
             }
         }
     )
-    client._build_server_base_url = lambda _cfg: model_url
+    # ServerClient appends protocol paths such as /v1/responses itself, while
+    # SDK-style harnesses consume the versioned base URL below. Accept either a
+    # root or /v1 sandbox override without duplicating the API version.
+    client._build_server_base_url = lambda _cfg: model_url_root
 
     base = {
         "host": "0.0.0.0",
@@ -216,22 +293,82 @@ try:
     }
     kwargs = {key: value for key, value in base.items() if key in config_class.model_fields}
     kwargs.update(runner.get("agent_kwargs") or {})
+    if model_api_key and "model" in config_class.model_fields and not kwargs.get("model"):
+        # Gym model proxies substitute their configured model when a harness
+        # omits it or uses the proxy-local placeholder. A direct provider
+        # endpoint cannot do that, so give SDK/CLI harnesses the selected model.
+        kwargs["model"] = runner["model_name"]
     config = config_class(**kwargs)
     agent = agent_class(config=config, server_client=client)
+
+    if model_api_key:
+        # Direct remote endpoints need the configured provider credential. The
+        # secret enters only through the agent sandbox environment: it is not
+        # serialized into runner.json or staged into the verifier sandbox.
+        original_post = client.post
+
+        async def authenticated_post(*args, **kwargs):
+            headers = dict(kwargs.pop("headers", {}) or {})
+            headers.setdefault("Authorization", f"Bearer {model_api_key}")
+            return await original_post(*args, headers=headers, **kwargs)
+
+        object.__setattr__(client, "post", authenticated_post)
+
+        if "anthropic_api_key" in config_class.model_fields:
+            object.__setattr__(config, "anthropic_api_key", model_api_key)
+        if "openai_api_key" in config_class.model_fields:
+            object.__setattr__(config, "openai_api_key", model_api_key)
+        if runner.get("disable_endpoint_metadata_probe"):
+            # Hermes constructs its OpenAI client inside responses() with a
+            # local-proxy sentinel. Replace only that constructor argument for
+            # this inner process so direct endpoints receive the real key.
+            import run_agent as hermes_run_agent
+
+            original_ai_agent = hermes_run_agent.AIAgent
+
+            class AuthenticatedAIAgent(original_ai_agent):
+                def __init__(self, *args, **kwargs):
+                    kwargs["api_key"] = model_api_key
+                    super().__init__(*args, **kwargs)
+
+            hermes_run_agent.AIAgent = AuthenticatedAIAgent
 
     if hasattr(agent, "resolve_model_base_url"):
         object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: model_url_v1)
     if hasattr(agent, "_resolve_model_base_url"):
         object.__setattr__(agent, "_resolve_model_base_url", lambda *args, **kwargs: model_url_v1)
     if hasattr(agent, "_resolve_base_url"):
-        object.__setattr__(agent, "_resolve_base_url", lambda *args, **kwargs: model_url)
+        # Claude Code appends /v1/messages to ANTHROPIC_BASE_URL itself. Give
+        # its private root resolver the unversioned URL even when the provider
+        # override was supplied with a terminal /v1 segment.
+        object.__setattr__(agent, "_resolve_base_url", lambda *args, **kwargs: model_url_root)
 
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate(runner["responses_create_params"])
+    if model_api_key and body.model is None:
+        body = body.model_copy(update={"model": runner["model_name"]})
     response_kwargs = {"body": body}
     if "request" in inspect.signature(agent.responses).parameters:
         response_kwargs["request"] = SimpleNamespace(path_params={})
-    response = asyncio.run(agent.responses(**response_kwargs))
-    Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
+    async def invoke_agent():
+        # This runner calls the selected agent directly rather than starting its
+        # Gym webserver, so initialize the shared HTTP client that webserver
+        # startup would normally create. OpenShell injects policy-enforced proxy
+        # variables; other providers retain aiohttp's direct-connection default.
+        http_client = None
+        if not is_global_aiohttp_client_setup():
+            http_client = set_global_aiohttp_client(
+                GlobalAIOHTTPAsyncClientConfig(
+                    global_aiohttp_trust_env=runner.get("http_proxy_from_environment", False),
+                )
+            )
+        try:
+            return await agent.responses(**response_kwargs)
+        finally:
+            if http_client is not None:
+                await http_client.close()
+
+    response = asyncio.run(invoke_agent())
+    Path(f"{RUNTIME}/response.json").write_text(response.model_dump_json())
 except Exception as exc:
     write_status(ok=False, phase="agent_execution", error=f"{type(exc).__name__}: {exc}")
     raise
@@ -255,13 +392,18 @@ class LegalAgentBenchAgentConfig(BaseResponsesAPIAgentConfig):
     model_connect_timeout_seconds: int = Field(default=10, ge=1)
     verifier_timeout_seconds: int = Field(default=3600, ge=1)
     runtime_build_timeout_seconds: int = Field(default=3600, ge=1)
+    sandbox_staging_timeout_seconds: int = Field(default=900, ge=1)
     image_build_timeout_seconds: int = Field(default=3600, ge=1)
     sandbox_ttl_seconds: int = Field(default=14400, ge=1)
     sandbox_provider: str | dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
     sandbox_image: Optional[str] = None
-    runtime_docker_platform: Optional[str] = None
+    runtime_builder_provider_options: dict[str, Any] = Field(default_factory=dict)
+    agent_sandbox_provider_options: dict[str, Any] = Field(default_factory=dict)
+    verifier_sandbox_provider_options: dict[str, Any] = Field(default_factory=dict)
+    opensandbox_request_fraction: Optional[float] = Field(default=0.25, gt=0, le=1)
     docker_network: Optional[str] = "host"
     sandbox_model_base_url: Optional[str] = None
+    sandbox_model_api_key_env: Optional[str] = None
     image_repository: str = "nemo-gym-legal-agent-bench"
     results_dir: str = "results/legal_agent_bench"
 
@@ -326,6 +468,18 @@ def _create_archive(destination: Path, entries: list[tuple[Path, str]]) -> None:
             archive.add(source, arcname=arcname, recursive=True)
 
 
+def _prepare_sandbox_upload(path: Path) -> None:
+    """Make a non-secret transfer archive readable by a non-root sandbox user.
+
+    Some providers copy the host file's mode while creating the destination as
+    root. Temporary files start as mode 0600, which would make the shared
+    upload API unusable with an image whose default user is non-root. All LAB
+    transfer archives are created beneath private temporary/cache directories
+    and contain no model or judge credentials.
+    """
+    path.chmod(0o644)
+
+
 def _validate_archive_member(member: tarfile.TarInfo) -> None:
     if member.name in {".", "./"} and member.isdir():
         return
@@ -358,32 +512,58 @@ def _copy_downloaded_file(source: Path, destination: Path) -> None:
     shutil.copyfile(source, destination)
 
 
-def ensure_runtime_archive(deps_dir: Path) -> Path:
-    """Create one immutable, process-safe transport archive for a cached runtime."""
-    archive_path = deps_dir.parent / f"{deps_dir.name}.tar.gz"
-    if archive_path.is_file():
-        return archive_path
-    lock_path = deps_dir.parent / f".{deps_dir.name}.archive.lock"
-    with lock_path.open("a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+def _validate_runtime_archive(archive_path: Path) -> None:
+    """Validate the trusted-installer output before another sandbox extracts it."""
+    root = PurePosixPath("agent_deps")
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = archive.getmembers()
+        if not members:
+            raise LegalAgentBenchArtifactError("LAB runtime builder returned an empty archive")
+        for member in members:
+            path = PurePosixPath(member.name)
+            if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+                raise LegalAgentBenchArtifactError(f"Unsafe LAB runtime archive path: {member.name!r}")
+            if path != root and root not in path.parents:
+                raise LegalAgentBenchArtifactError(f"LAB runtime archive entry is outside {root}: {member.name!r}")
+            if member.issym() or member.islnk():
+                target = PurePosixPath(member.linkname)
+                if target.is_absolute():
+                    raise LegalAgentBenchArtifactError(
+                        f"LAB runtime archive contains an absolute link: {member.name!r}"
+                    )
+                # Tar symbolic links are relative to the link's parent, while
+                # hard-link targets are archive-root-relative member names.
+                resolved = target if member.islnk() else path.parent.joinpath(target)
+                normalized: list[str] = []
+                for part in resolved.parts:
+                    if part == "..":
+                        if not normalized:
+                            raise LegalAgentBenchArtifactError(
+                                f"LAB runtime archive link escapes its root: {member.name!r}"
+                            )
+                        normalized.pop()
+                    elif part not in {"", "."}:
+                        normalized.append(part)
+                normalized_path = PurePosixPath(*normalized)
+                if normalized_path != root and root not in normalized_path.parents:
+                    raise LegalAgentBenchArtifactError(f"LAB runtime archive link escapes its root: {member.name!r}")
+            elif not (member.isdir() or member.isreg()):
+                raise LegalAgentBenchArtifactError(
+                    "LAB runtime archives may contain only directories, regular files, and internal links: "
+                    f"{member.name!r}"
+                )
+
+
+async def _acquire_file_lock(path: Path) -> Any:
+    """Acquire an interprocess lock without blocking the async server loop."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = path.open("a+")
+    while True:
         try:
-            if archive_path.is_file():
-                return archive_path
-            with tempfile.NamedTemporaryFile(
-                suffix=".tar.gz",
-                prefix=f".{deps_dir.name}-",
-                dir=deps_dir.parent,
-                delete=False,
-            ) as temporary:
-                temporary_path = Path(temporary.name)
-            try:
-                _create_archive(temporary_path, [(deps_dir, "agent_deps_mount")])
-                temporary_path.replace(archive_path)
-            finally:
-                temporary_path.unlink(missing_ok=True)
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    return archive_path
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock_file
+        except BlockingIOError:
+            await asyncio.sleep(0.1)
 
 
 def agent_key(agent_server_module: str) -> str:
@@ -463,35 +643,17 @@ def agent_runtime_env(agent_server_module: str, agent_kwargs: dict[str, Any]) ->
     return {environment_variable: f"{package}@{normalized_version}"}
 
 
-def ensure_agent_runtime(
+def _runtime_recipe(
     agent_server_module: str,
     *,
     agent_kwargs: dict[str, Any],
     image: str,
-    docker_network: Optional[str],
-    timeout_seconds: int,
-    docker_platform: Optional[str] = None,
-) -> Path:
+    provider: Mapping[str, Any],
+) -> tuple[str, Path, dict[str, str]]:
     key = agent_key(agent_server_module)
     script = resolve_agent_setup_script(agent_server_module)
     requirements = PARENT_DIR / "responses_api_agents" / key / "requirements.txt"
     runtime_env = agent_runtime_env(agent_server_module, agent_kwargs)
-    docker = shutil.which("docker")
-    if not docker:
-        raise FileNotFoundError("Docker CLI is required to provision Legal Agent Bench agent dependencies")
-    if docker_platform:
-        subprocess.run(
-            [docker, "pull", "--platform", docker_platform, image],
-            check=True,
-            timeout=timeout_seconds,
-        )
-    image_info = subprocess.run(
-        [docker, "image", "inspect", "--format", "{{.Id}}:{{.Os}}/{{.Architecture}}", image],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    ).stdout.strip()
     recipe = _recipe_hash(
         [
             PORTABLE_PYTHON_SH,
@@ -501,81 +663,32 @@ def ensure_agent_runtime(
             PARENT_DIR / "README.md",
             PARENT_DIR / "nemo_gym",
         ],
-        values=[image_info, json.dumps(runtime_env, sort_keys=True)],
+        values=[
+            image,
+            json.dumps(runtime_env, sort_keys=True),
+            json.dumps(provider, sort_keys=True, default=str),
+        ],
     )
-    cache_root = PACKAGE_DIR / ".deps" / key
-    deps_dir = cache_root / recipe
-    sentinel = deps_dir / ".installed"
-    if sentinel.is_file() and sentinel.read_text().strip() == recipe:
-        return deps_dir
+    return recipe, script, runtime_env
 
-    cache_root.mkdir(parents=True, exist_ok=True)
-    lock_root = PACKAGE_DIR / ".deps" / ".locks"
-    lock_root.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_root / f"{key}-{recipe}.lock"
-    with lock_path.open("a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            if sentinel.is_file() and sentinel.read_text().strip() == recipe:
-                return deps_dir
 
-            with tempfile.TemporaryDirectory(prefix=f".{recipe}-bundle-", dir=cache_root) as bundle_raw:
-                bundle = Path(bundle_raw)
-                shutil.copy2(PARENT_DIR / "pyproject.toml", bundle / "pyproject.toml")
-                shutil.copy2(PARENT_DIR / "README.md", bundle / "README.md")
-                shutil.copytree(PARENT_DIR / "nemo_gym", bundle / "nemo_gym")
-                staged_agent = bundle / "responses_api_agents" / key
-                (staged_agent / "scripts").mkdir(parents=True)
-                shutil.copy2(requirements, staged_agent / "requirements.txt")
-                shutil.copy2(script, staged_agent / "scripts" / script.name)
-                staged_setup = bundle / "responses_api_agents" / "legal_agent_bench_agent" / "setup_scripts"
-                staged_setup.mkdir(parents=True)
-                shutil.copy2(PORTABLE_PYTHON_SH, staged_setup / PORTABLE_PYTHON_SH.name)
-
-                build_dir = Path(tempfile.mkdtemp(prefix=f".{recipe}-build-", dir=cache_root))
-                try:
-                    env = {
-                        "PORTABLE_PYTHON_SH": (
-                            "/nemo_gym_mount/responses_api_agents/legal_agent_bench_agent/"
-                            "setup_scripts/_portable_python.sh"
-                        ),
-                        "DEPS_DIR": "/agent_deps",
-                        "NEMO_GYM_ROOT": "/nemo_gym_mount",
-                        "HOME": "/tmp",
-                        **runtime_env,
-                    }
-                    command = [
-                        docker,
-                        "run",
-                        "--rm",
-                        "--user",
-                        f"{os.getuid()}:{os.getgid()}",
-                        "--volume",
-                        f"{bundle}:/nemo_gym_mount:ro",
-                        "--volume",
-                        f"{build_dir}:/agent_deps",
-                    ]
-                    if docker_platform:
-                        command.extend(["--platform", docker_platform])
-                    if docker_network:
-                        command.extend(["--network", docker_network])
-                    for name, value in env.items():
-                        command.extend(["--env", f"{name}={value}"])
-                    command.extend(
-                        [image, "bash", f"/nemo_gym_mount/responses_api_agents/{key}/scripts/{script.name}"]
-                    )
-                    subprocess.run(command, check=True, timeout=timeout_seconds)
-                    (build_dir / ".installed").write_text(recipe)
-                    if deps_dir.exists():
-                        shutil.rmtree(build_dir)
-                    else:
-                        build_dir.replace(deps_dir)
-                finally:
-                    if build_dir.exists():
-                        shutil.rmtree(build_dir)
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    return deps_dir
+def _create_runtime_builder_input(destination: Path, agent_server_module: str, script: Path) -> None:
+    key = agent_key(agent_server_module)
+    requirements = PARENT_DIR / "responses_api_agents" / key / "requirements.txt"
+    _create_archive(
+        destination,
+        [
+            (PARENT_DIR / "pyproject.toml", "nemo_gym_mount/pyproject.toml"),
+            (PARENT_DIR / "README.md", "nemo_gym_mount/README.md"),
+            (PARENT_DIR / "nemo_gym", "nemo_gym_mount/nemo_gym"),
+            (requirements, f"nemo_gym_mount/responses_api_agents/{key}/requirements.txt"),
+            (script, f"nemo_gym_mount/responses_api_agents/{key}/scripts/{script.name}"),
+            (
+                PORTABLE_PYTHON_SH,
+                "nemo_gym_mount/responses_api_agents/legal_agent_bench_agent/setup_scripts/_portable_python.sh",
+            ),
+        ],
+    )
 
 
 def _empty_response(model_name: str) -> NeMoGymResponse:
@@ -614,7 +727,7 @@ def sandbox_model_url(
 
 
 def host_tunnel_model_url(model_url: str) -> str:
-    """Translate wildcard listeners into a concrete host endpoint for an ECS reverse tunnel."""
+    """Translate wildcard listeners into an address usable on a shared host network or tunnel."""
     parsed = urlsplit(model_url)
     if (parsed.hostname or "").lower() not in {"0.0.0.0", "::"}:
         return model_url
@@ -816,6 +929,22 @@ def _sandbox_resources(task_dir: Path) -> SandboxResources:
     )
 
 
+def _fractional_resource_requests(resources: SandboxResources, fraction: float) -> dict[str, Any]:
+    """Keep Kubernetes requests below LAB limits while preserving non-shareable resources."""
+    requests: dict[str, Any] = {}
+    if resources.cpu is not None:
+        requests["cpu"] = resources.cpu * fraction
+    if resources.memory_mib is not None:
+        requests["memory_mib"] = max(1, math.ceil(resources.memory_mib * fraction))
+    if resources.disk_gib is not None:
+        requests["disk_gib"] = resources.disk_gib
+    if resources.gpu:
+        requests["gpu"] = resources.gpu
+    if resources.gpu and resources.gpu_type is not None:
+        requests["gpu_type"] = resources.gpu_type
+    return requests
+
+
 def _environment_hash(environment_dir: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(item for item in environment_dir.rglob("*") if item.is_file()):
@@ -848,7 +977,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
     _image_lock: asyncio.Lock = PrivateAttr()
     _runtime_lock: asyncio.Lock = PrivateAttr()
     _session_results_dir: Path = PrivateAttr()
-    _deps_dir: Optional[Path] = PrivateAttr(default=None)
+    _runtime_archives: dict[str, Path] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, context: Any) -> None:
         self._sem = asyncio.Semaphore(self.config.concurrency)
@@ -873,37 +1002,133 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
 
     async def _ensure_runtime(self, image: str) -> Path:
         async with self._runtime_lock:
-            if self._deps_dir is None:
-                self._deps_dir = await asyncio.to_thread(
-                    ensure_agent_runtime,
-                    self.config.agent_server_module,
-                    agent_kwargs=self.config.agent_kwargs,
-                    image=image,
-                    docker_network=self.config.docker_network,
-                    docker_platform=self.config.runtime_docker_platform,
-                    timeout_seconds=self.config.runtime_build_timeout_seconds,
-                )
-            return self._deps_dir
+            provider = self._provider_config()
+            recipe, script, runtime_env = _runtime_recipe(
+                self.config.agent_server_module,
+                agent_kwargs=self.config.agent_kwargs,
+                image=image,
+                provider=provider,
+            )
+            if recipe in self._runtime_archives:
+                return self._runtime_archives[recipe]
+
+            key = agent_key(self.config.agent_server_module)
+            cache_root = PACKAGE_DIR / ".deps" / key
+            cache_root.mkdir(parents=True, exist_ok=True)
+            archive_path = cache_root / f"{recipe}.tar.gz"
+            if archive_path.is_file():
+                _validate_runtime_archive(archive_path)
+                self._runtime_archives[recipe] = archive_path
+                return archive_path
+
+            lock_path = PACKAGE_DIR / ".deps" / ".locks" / f"{key}-{recipe}.lock"
+            lock_file = await _acquire_file_lock(lock_path)
+            try:
+                if archive_path.is_file():
+                    _validate_runtime_archive(archive_path)
+                    self._runtime_archives[recipe] = archive_path
+                    return archive_path
+
+                with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as temporary:
+                    builder_input = Path(temporary.name)
+                with tempfile.NamedTemporaryFile(
+                    suffix=".tar.gz",
+                    prefix=f".{recipe}-",
+                    dir=cache_root,
+                    delete=False,
+                ) as temporary:
+                    downloaded_runtime = Path(temporary.name)
+                builder_sandbox: Optional[AsyncSandbox] = None
+                try:
+                    _create_runtime_builder_input(
+                        builder_input,
+                        self.config.agent_server_module,
+                        script,
+                    )
+                    _prepare_sandbox_upload(builder_input)
+                    builder_resources = SandboxResources(cpu=1, memory_mib=4096, disk_gib=10)
+                    builder_options = self._resource_provider_options(provider, builder_resources)
+                    builder_options.update(self.config.runtime_builder_provider_options)
+                    builder_sandbox = AsyncSandbox(
+                        provider,
+                        SandboxSpec(
+                            image=image,
+                            ttl_s=self.config.sandbox_ttl_seconds,
+                            workdir="/tmp",
+                            env=LAB_SANDBOX_ENV,
+                            resources=builder_resources,
+                            metadata=self._sandbox_metadata(),
+                            provider_options=builder_options,
+                        ),
+                    )
+                    await builder_sandbox.start()
+                    root_result = await builder_sandbox.exec(f"mkdir -p {SANDBOX_ROOT}", timeout_s=300)
+                    if root_result.return_code != 0 or root_result.error_type is not None:
+                        raise RuntimeError(
+                            root_result.stderr or root_result.stdout or "Failed to create LAB sandbox root"
+                        )
+                    await builder_sandbox.upload(builder_input, f"{SANDBOX_ROOT}/runtime-builder-input.tar.gz")
+                    build_root = f"{SANDBOX_ROOT}/runtime-builder"
+                    nemo_gym_root = f"{build_root}/nemo_gym_mount"
+                    deps_root = f"{build_root}/agent_deps"
+                    environment = {
+                        "PORTABLE_PYTHON_SH": (
+                            f"{nemo_gym_root}/responses_api_agents/legal_agent_bench_agent/"
+                            "setup_scripts/_portable_python.sh"
+                        ),
+                        "DEPS_DIR": deps_root,
+                        "NEMO_GYM_ROOT": nemo_gym_root,
+                        "TMPDIR": f"{build_root}/tmp",
+                        **runtime_env,
+                    }
+                    result = await builder_sandbox.exec(
+                        f"rm -rf {build_root} && mkdir -p {build_root}/home {build_root}/tmp {deps_root} && "
+                        f"tar -xzf {SANDBOX_ROOT}/runtime-builder-input.tar.gz -C {build_root} && "
+                        f"export HOME={build_root}/home && "
+                        f"bash {nemo_gym_root}/responses_api_agents/{key}/scripts/{script.name} && "
+                        f"tar -czf {SANDBOX_ROOT}/runtime-builder-output.tar.gz -C {build_root} agent_deps",
+                        cwd="/tmp",
+                        env=environment,
+                        timeout_s=self.config.runtime_build_timeout_seconds,
+                    )
+                    if result.return_code != 0:
+                        detail = result.stderr or result.stdout or "LAB runtime builder failed"
+                        raise RuntimeError(detail[-4000:])
+                    await builder_sandbox.download(
+                        f"{SANDBOX_ROOT}/runtime-builder-output.tar.gz",
+                        downloaded_runtime,
+                    )
+                    _validate_runtime_archive(downloaded_runtime)
+                    _prepare_sandbox_upload(downloaded_runtime)
+                    downloaded_runtime.replace(archive_path)
+                finally:
+                    if builder_sandbox is not None:
+                        await builder_sandbox.stop()
+                    builder_input.unlink(missing_ok=True)
+                    downloaded_runtime.unlink(missing_ok=True)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+
+            self._runtime_archives[recipe] = archive_path
+            return archive_path
 
     async def _ensure_image(self, task_dir: Path) -> str:
         if self.config.sandbox_image:
-            if _provider_name(self._provider_config()) != "docker" and not IMMUTABLE_IMAGE.fullmatch(
-                self.config.sandbox_image
-            ):
-                raise LegalAgentBenchConfigurationError(
-                    "Non-Docker LAB sandbox_image must use a complete immutable @sha256 digest"
-                )
             return self.config.sandbox_image
         if _provider_name(self._provider_config()) != "docker":
             raise LegalAgentBenchConfigurationError(
-                "Non-Docker LAB sandboxes require sandbox_image to reference an immutable registry image"
+                "Non-Docker LAB sandboxes require a provider-compatible sandbox_image"
             )
         environment_dir = task_dir / "environment"
         image = f"{self.config.image_repository}:{_environment_hash(environment_dir)[:16]}"
         async with self._image_lock:
             docker = shutil.which("docker")
             if not docker:
-                raise FileNotFoundError("Docker CLI is required for Legal Agent Bench")
+                raise FileNotFoundError(
+                    "Docker CLI is required to auto-build the default Legal Agent Bench image; "
+                    "set sandbox_image to use an existing image"
+                )
             inspect, _stdout, _stderr = await _run_process(
                 [docker, "image", "inspect", image],
                 cwd=environment_dir,
@@ -924,10 +1149,6 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         if self.config.sandbox_model_base_url:
             return self.config.sandbox_model_base_url
         provider_name = _provider_name(self._provider_config())
-        if provider_name not in {"docker", "ecs_fargate"}:
-            raise LegalAgentBenchConfigurationError(
-                "Non-Docker LAB sandboxes require sandbox_model_base_url reachable from the provider"
-            )
         try:
             model_config = get_first_server_config_dict(
                 self.server_client.global_config_dict,
@@ -942,20 +1163,48 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         prefixed_url = apply_rollout_prefix(base_url, rollout_id) if rollout_id else base_url
         if provider_name == "docker":
             return sandbox_model_url(prefixed_url, docker_network=self.config.docker_network)
-        return host_tunnel_model_url(prefixed_url)
+        if provider_name == "ecs_fargate":
+            return host_tunnel_model_url(prefixed_url)
+        if provider_name in {"apptainer", "enroot"}:
+            return host_tunnel_model_url(prefixed_url)
 
-    def _agent_provider_options(self, model_url: str) -> dict[str, Any]:
-        """Return provider-specific routing without exposing policy credentials to the sandbox."""
-        if _provider_name(self._provider_config()) != "ecs_fargate" or self.config.sandbox_model_base_url:
+        hostname = (urlsplit(prefixed_url).hostname or "").lower()
+        if hostname in {"localhost", "127.0.0.1", "0.0.0.0", "::1", "::"}:
+            raise LegalAgentBenchConfigurationError(
+                f"LAB sandbox provider {provider_name!r} cannot use the host-local policy URL; "
+                "set sandbox_model_base_url to a policy proxy reachable from that provider"
+            )
+        return prefixed_url
+
+    def _resource_provider_options(
+        self,
+        provider: Mapping[str, Any],
+        resources: SandboxResources,
+    ) -> dict[str, Any]:
+        fraction = self.config.opensandbox_request_fraction
+        if _provider_name(provider) != "opensandbox" or fraction is None:
             return {}
-        return {
-            "outside_endpoints": [
+        return {"resource_requests": _fractional_resource_requests(resources, fraction)}
+
+    def _agent_provider_options(
+        self,
+        provider: Mapping[str, Any],
+        model_url: str,
+        resources: SandboxResources,
+    ) -> dict[str, Any]:
+        """Return provider-specific routing without exposing policy credentials to the sandbox."""
+        options = self._resource_provider_options(provider, resources)
+        options.update(self.config.agent_sandbox_provider_options)
+        if _provider_name(provider) == "ecs_fargate" and not self.config.sandbox_model_base_url:
+            outside_endpoints = list(options.get("outside_endpoints") or [])
+            outside_endpoints.append(
                 {
                     "url": model_url,
                     "env_var": "LAB_POLICY_MODEL_URL",
                 }
-            ]
-        }
+            )
+            options["outside_endpoints"] = outside_endpoints
+        return options
 
     def _model_name(self) -> str:
         global_config = getattr(getattr(self, "server_client", None), "global_config_dict", None)
@@ -1030,7 +1279,8 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         if agent_key(self.config.agent_server_module) == "codex_agent":
             extra_config = dict(agent_kwargs.get("extra_config") or {})
             if "model_catalog_json" not in extra_config:
-                (paths["runtime"] / "codex_model_catalog.json").write_text(json.dumps(CODEX_MODEL_CATALOG, indent=2))
+                catalog = codex_model_catalog(self._model_name())
+                (paths["runtime"] / "codex_model_catalog.json").write_text(json.dumps(catalog, indent=2))
                 extra_config["model_catalog_json"] = CODEX_MODEL_CATALOG_PATH
             agent_kwargs["extra_config"] = extra_config
         runner = {
@@ -1038,8 +1288,10 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
             "agent_server_class": self.config.agent_server_class,
             "agent_config_class": self.config.agent_config_class,
             "agent_kwargs": agent_kwargs,
+            "model_name": self._model_name(),
             "model_url": model_url,
             "model_connect_timeout_seconds": self.config.model_connect_timeout_seconds,
+            "http_proxy_from_environment": _provider_name(self._provider_config()) == "openshell",
             "disable_endpoint_metadata_probe": agent_key(self.config.agent_server_module) == "hermes_agent",
             "responses_create_params": params.model_dump(mode="json", exclude_none=True),
         }
@@ -1047,7 +1299,10 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
 
     def _provider_config(self) -> dict[str, Any]:
         global_config = getattr(getattr(self, "server_client", None), "global_config_dict", None)
-        provider = resolve_provider_config(self.config.sandbox_provider, global_config)
+        try:
+            provider = resolve_provider_config(self.config.sandbox_provider, global_config)
+        except (TypeError, ValueError) as exc:
+            raise LegalAgentBenchConfigurationError(f"Invalid sandbox provider configuration: {exc}") from exc
         if _provider_name(provider) != "docker":
             return provider
 
@@ -1069,27 +1324,36 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
 
     def _sandbox_metadata(self) -> dict[str, Any]:
         global_config = getattr(getattr(self, "server_client", None), "global_config_dict", None)
-        return resolve_provider_metadata(self.config.sandbox_provider, global_config)
+        try:
+            return resolve_provider_metadata(self.config.sandbox_provider, global_config)
+        except (TypeError, ValueError) as exc:
+            raise LegalAgentBenchConfigurationError(f"Invalid sandbox provider metadata: {exc}") from exc
 
     def _agent_sandbox(
         self,
         *,
         image: str,
         task_dir: Path,
-        skills_dir: Path,
-        deps_dir: Path,
-        paths: dict[str, Path],
         model_url: str,
     ) -> AsyncSandbox:
+        provider = self._provider_config()
+        resources = _sandbox_resources(task_dir)
+        sandbox_env = dict(LAB_SANDBOX_ENV)
+        if self.config.sandbox_model_api_key_env:
+            model_api_key = os.environ.get(self.config.sandbox_model_api_key_env)
+            if not model_api_key:
+                raise LegalAgentBenchConfigurationError("Configured sandbox_model_api_key_env is unset or empty")
+            sandbox_env["LAB_POLICY_API_KEY"] = model_api_key
         return AsyncSandbox(
-            self._provider_config(),
+            provider,
             SandboxSpec(
                 image=image,
                 ttl_s=self.config.sandbox_ttl_seconds,
-                workdir="/workspace/output",
-                resources=_sandbox_resources(task_dir),
+                workdir="/tmp",
+                env=sandbox_env,
+                resources=resources,
                 metadata=self._sandbox_metadata(),
-                provider_options=self._agent_provider_options(model_url),
+                provider_options=self._agent_provider_options(provider, model_url, resources),
             ),
         )
 
@@ -1098,16 +1362,21 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         *,
         image: str,
         task_dir: Path,
-        paths: dict[str, Path],
     ) -> AsyncSandbox:
+        provider = self._provider_config()
+        resources = _sandbox_resources(task_dir)
+        provider_options = self._resource_provider_options(provider, resources)
+        provider_options.update(self.config.verifier_sandbox_provider_options)
         return AsyncSandbox(
-            self._provider_config(),
+            provider,
             SandboxSpec(
                 image=image,
                 ttl_s=self.config.sandbox_ttl_seconds,
-                workdir="/logs/agent/artifacts/lab-run/output",
-                resources=_sandbox_resources(task_dir),
+                workdir="/tmp",
+                env=LAB_SANDBOX_ENV,
+                resources=resources,
                 metadata=self._sandbox_metadata(),
+                provider_options=provider_options,
             ),
         )
 
@@ -1117,7 +1386,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         *,
         task_dir: Path,
         skills_dir: Path,
-        deps_dir: Path,
+        runtime_archive: Path,
         paths: dict[str, Path],
     ) -> None:
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as temporary:
@@ -1126,26 +1395,31 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
             _create_archive(
                 archive_path,
                 [
-                    (paths["agent_source"], "agent_source_mount"),
+                    (paths["agent_source"], "agent_source"),
                     (task_dir / "documents", "workspace/vdr"),
                     (skills_dir, "workspace/skills"),
-                    (paths["runtime"], "trajectories_mount"),
+                    (paths["runtime"], "runtime"),
                 ],
             )
-            await sandbox.upload(archive_path, "/tmp/legal-agent-bench-agent-input.tar.gz")
-            await sandbox.upload(ensure_runtime_archive(deps_dir), "/tmp/legal-agent-bench-runtime.tar.gz")
+            _prepare_sandbox_upload(archive_path)
+            _prepare_sandbox_upload(runtime_archive)
+            root_result = await sandbox.exec(
+                f"mkdir -p {SANDBOX_ROOT}", timeout_s=self.config.sandbox_staging_timeout_seconds
+            )
+            if root_result.return_code != 0 or root_result.error_type is not None:
+                raise RuntimeError(root_result.stderr or root_result.stdout or "Failed to create LAB sandbox root")
+            await sandbox.upload(archive_path, f"{SANDBOX_ROOT}/agent-input.tar.gz")
+            await sandbox.upload(runtime_archive, f"{SANDBOX_ROOT}/runtime.tar.gz")
         finally:
             archive_path.unlink(missing_ok=True)
 
         command = (
-            "mkdir -p /agent_source_mount /agent_deps_mount /trajectories_mount "
-            "/workspace/vdr /workspace/skills /workspace/output /workspace/workspace && "
-            "tar -xzf /tmp/legal-agent-bench-agent-input.tar.gz -C / && "
-            "tar -xzf /tmp/legal-agent-bench-runtime.tar.gz -C / && "
-            "chmod -R a+rX,a-w /agent_source_mount /agent_deps_mount /workspace/vdr /workspace/skills && "
-            "chown -R nobody:nogroup /trajectories_mount /workspace/output /workspace/workspace"
+            f"mkdir -p {SANDBOX_ROOT} {SANDBOX_OUTPUT} {SANDBOX_SCRATCH} && "
+            f"tar -xzf {SANDBOX_ROOT}/agent-input.tar.gz -C {SANDBOX_ROOT} && "
+            f"tar -xzf {SANDBOX_ROOT}/runtime.tar.gz -C {SANDBOX_ROOT} && "
+            f"chmod -R a+rX,a-w {SANDBOX_AGENT_SOURCE} {SANDBOX_AGENT_DEPS} {SANDBOX_VDR} {SANDBOX_SKILLS}"
         )
-        result = await sandbox.exec(command, timeout_s=300, user="root")
+        result = await sandbox.exec(command, timeout_s=self.config.sandbox_staging_timeout_seconds)
         if result.return_code != 0:
             raise RuntimeError(result.stderr or result.stdout or "Failed to stage LAB agent sandbox")
 
@@ -1154,20 +1428,19 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
         for filename in ("response.json", "runner_status.json"):
             destination = download_dir / filename
             try:
-                await sandbox.download(f"/trajectories_mount/{filename}", destination)
+                await sandbox.download(f"{SANDBOX_RUNTIME}/{filename}", destination)
             except Exception:
                 continue
             downloads[filename] = destination
 
         archive_path = download_dir / "output.tar.gz"
         archive_result = await sandbox.exec(
-            "tar -czf /tmp/legal-agent-bench-output.tar.gz -C /workspace/output .",
-            timeout_s=300,
-            user="root",
+            f"tar -czf {SANDBOX_ROOT}/output.tar.gz -C {SANDBOX_OUTPUT} .",
+            timeout_s=self.config.sandbox_staging_timeout_seconds,
         )
         if archive_result.return_code != 0:
             raise RuntimeError(archive_result.stderr or archive_result.stdout or "Failed to collect LAB output")
-        await sandbox.download("/tmp/legal-agent-bench-output.tar.gz", archive_path)
+        await sandbox.download(f"{SANDBOX_ROOT}/output.tar.gz", archive_path)
         downloads["output.tar.gz"] = archive_path
         return downloads
 
@@ -1206,33 +1479,65 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                     (task_dir / "tests", "tests"),
                 ],
             )
-            await sandbox.upload(archive_path, "/tmp/legal-agent-bench-verifier-input.tar.gz")
+            _prepare_sandbox_upload(archive_path)
+            root_result = await sandbox.exec(
+                f"mkdir -p {SANDBOX_ROOT}", timeout_s=self.config.sandbox_staging_timeout_seconds
+            )
+            if root_result.return_code != 0 or root_result.error_type is not None:
+                reason = root_result.stderr or root_result.stdout or "Failed to create LAB verifier sandbox root"
+                return {}, root_result.error_type == "timeout", reason[-2000:]
+            await sandbox.upload(archive_path, f"{SANDBOX_ROOT}/verifier-input.tar.gz")
         finally:
             archive_path.unlink(missing_ok=True)
 
-        command = (
-            "rm -rf /tests /logs/agent /logs/verifier && mkdir -p /logs/verifier && "
-            "tar -xzf /tmp/legal-agent-bench-verifier-input.tar.gz -C / && "
-            "chmod -R a-w /logs/agent && "
-            "bash /tests/test.sh"
+        stage_command = (
+            f"rm -rf {SANDBOX_VERIFIER} && mkdir -p {SANDBOX_VERIFIER} && "
+            f"tar -xzf {SANDBOX_ROOT}/verifier-input.tar.gz -C {SANDBOX_VERIFIER} && "
+            f"mkdir -p {SANDBOX_LOGS}/verifier && "
+            f"chmod -R a-w {SANDBOX_LOGS}/agent"
         )
+        stage_result = await sandbox.exec(
+            stage_command,
+            cwd="/tmp",
+            timeout_s=self.config.sandbox_staging_timeout_seconds,
+        )
+        if stage_result.return_code != 0 or stage_result.error_type is not None:
+            timed_out = stage_result.error_type == "timeout"
+            reason = stage_result.stderr or stage_result.stdout or "Failed to stage LAB verifier sandbox"
+            return {}, timed_out, reason[-2000:]
+
+        verifier_env = {
+            **_verifier_env(task_dir),
+            "LAB_TESTS_DIR": SANDBOX_TESTS,
+            "LAB_LOGS_DIR": SANDBOX_LOGS,
+        }
         result = await sandbox.exec(
-            command,
-            cwd="/workspace/output",
-            env=_verifier_env(task_dir),
+            f"bash {SANDBOX_TESTS}/test.sh",
+            cwd=f"{SANDBOX_LOGS}/agent/artifacts/lab-run/output",
+            env=verifier_env,
             timeout_s=self.config.verifier_timeout_seconds,
-            user="root",
         )
+
+        verifier_filenames = ("reward.json", "scores.json", "transcript.jsonl", "report.html", "error.json")
+        manifest_command = (
+            "for filename in "
+            + " ".join(verifier_filenames)
+            + f'; do test -f "{SANDBOX_LOGS}/verifier/$filename" && printf "%s\\n" "$filename"; done; true'
+        )
+        manifest_result = await sandbox.exec(manifest_command, cwd="/tmp", timeout_s=60)
+        if manifest_result.return_code != 0 or manifest_result.error_type is not None:
+            reason = manifest_result.stderr or manifest_result.stdout or "Failed to list LAB verifier artifacts"
+            return {}, manifest_result.error_type == "timeout", reason[-2000:]
+        available = set(manifest_result.stdout.splitlines()) & set(verifier_filenames)
 
         downloaded: dict[str, bytes] = {}
         with tempfile.TemporaryDirectory(prefix="legal-agent-bench-verifier-") as temporary_dir:
             temporary_path = Path(temporary_dir)
-            for filename in ("reward.json", "scores.json", "transcript.jsonl", "report.html", "error.json"):
-                destination = temporary_path / filename
-                try:
-                    await sandbox.download(f"/logs/verifier/{filename}", destination)
-                except Exception:
+            for filename in verifier_filenames:
+                if filename not in available:
                     continue
+                destination = temporary_path / filename
+                await sandbox.download(f"{SANDBOX_LOGS}/verifier/{filename}", destination)
                 if not stat.S_ISREG(destination.lstat().st_mode):
                     return {}, result.error_type == "timeout", f"Verifier returned unsafe {filename}"
                 downloaded[filename] = destination.read_bytes()
@@ -1291,7 +1596,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
             "model": model_name,
             "task": task_name,
             "run_id": paths["root"].name,
-            "tool_runtime": "gym-agent-in-docker",
+            "tool_runtime": "gym-agent-in-sandbox",
             "agent_server_module": self.config.agent_server_module,
             "agent_server_class": self.config.agent_server_class,
             "skills": list(REQUIRED_SKILLS),
@@ -1488,7 +1793,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 staging_temp = tempfile.TemporaryDirectory(prefix="legal-agent-bench-stage-")
                 staged_paths = self._paths_for_root(Path(staging_temp.name), create=True)
                 image = await self._ensure_image(task_dir)
-                deps_dir = await self._ensure_runtime(image)
+                runtime_archive = await self._ensure_runtime(image)
                 self._stage_agent_source(staged_paths)
                 model_url = self._model_url(body)
                 self._write_runner_config(staged_paths, params, model_url)
@@ -1496,9 +1801,6 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 sandbox = self._agent_sandbox(
                     image=image,
                     task_dir=task_dir,
-                    skills_dir=skills_dir,
-                    deps_dir=deps_dir,
-                    paths=staged_paths,
                     model_url=model_url,
                 )
                 await sandbox.start()
@@ -1506,16 +1808,15 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                     sandbox,
                     task_dir=task_dir,
                     skills_dir=skills_dir,
-                    deps_dir=deps_dir,
+                    runtime_archive=runtime_archive,
                     paths=staged_paths,
                 )
                 with tempfile.TemporaryDirectory(prefix="legal-agent-bench-agent-") as download_raw:
                     started = time.time()
                     agent_result = await sandbox.exec(
-                        "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py",
-                        cwd="/workspace/output",
+                        f"{SANDBOX_AGENT_DEPS}/bin/python {SANDBOX_RUNTIME}/agent_runner.py",
+                        cwd=SANDBOX_OUTPUT,
                         timeout_s=self.config.agent_timeout_seconds,
-                        user="nobody",
                     )
                     agent_elapsed = time.time() - started
                     downloads = await self._collect_agent_sandbox(sandbox, Path(download_raw))
@@ -1575,7 +1876,7 @@ class LegalAgentBenchAgent(SimpleResponsesAPIAgent):
                 )
 
                 if not agent_failed:
-                    verifier_sandbox = self._verifier_sandbox(image=image, task_dir=task_dir, paths=paths)
+                    verifier_sandbox = self._verifier_sandbox(image=image, task_dir=task_dir)
                     await verifier_sandbox.start()
                     verifier_downloads, verifier_timed_out, verifier_failure = await self._stage_and_run_verifier(
                         verifier_sandbox, task_dir, paths

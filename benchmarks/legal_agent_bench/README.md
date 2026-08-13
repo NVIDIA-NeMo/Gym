@@ -25,10 +25,11 @@ agent during dataset collation.
 
 ## Requirements
 
-- Python 3.13.13 and the repository environment installed with `uv`
-- Docker with a running daemon for the default local backend and portable
-  harness provisioning
-- The `sandbox` dependency extra when using ECS Fargate
+- Python 3.13.14 and the repository environment installed with `uv`
+- One supported Gym sandbox provider: Docker, ECS Fargate, Enroot, Apptainer,
+  OpenSandbox, Daytona, or OpenShell
+- The provider's local CLI, service, credentials, and Gym dependency extra, as
+  documented under `nemo_gym/sandbox/providers/<provider>/`
 - Authorized OpenAI-compatible policy and judge endpoints in the root
   `env.yaml`
 - At least 10 GB of free working space
@@ -38,6 +39,8 @@ Not required:
 - Separate Harbor, Hermes, Claude Code, or Codex installations
 - Anthropic or OpenAI vendor subscriptions or CLI logins for the Claude Code
   and Codex harnesses
+- Docker when a non-Docker provider is selected and a compatible LAB image is
+  already available
 
 Gym provisions the pinned harness dependencies automatically. Every harness
 uses the configured policy model endpoint. Access to your configured policy and
@@ -46,21 +49,26 @@ judge endpoints is still required and may itself be metered or paid.
 See the [resource-server README](../../resources_servers/legal_agent_bench/README.md)
 for endpoint configuration, source and license details, cache locations, and
 troubleshooting. The initial source download is several hundred MiB, and the
-first rollout builds a document-tooling Docker image that can take several
-minutes.
+first rollout provisions the selected harness inside a temporary sandbox. The
+default Docker backend also builds the document-tooling image on first use.
 
 ## Set up
 
 From the repository root:
 
 ```bash
-uv venv --python 3.12
+uv venv --python 3.13.14
 source .venv/bin/activate
 uv sync --extra dev
+```
+
+For Docker, verify the default local backend:
+
+```bash
 docker info >/dev/null
 ```
 
-For a remote sandbox provider, also install its dependencies with:
+For SDK-backed providers, install the sandbox dependencies as well:
 
 ```bash
 uv sync --extra dev --extra sandbox
@@ -274,7 +282,9 @@ starting values for full evaluations:
 | --- | ---: | --- |
 | Complete agent phase | 10,800 seconds (3 hours) | Use for all harnesses. Claude Code and Codex also receive this as their inner harness timeout. |
 | One policy-model request | 1,800 seconds (30 minutes) | Used by the native and Harbor loops. This is intentionally generous for slow local reasoning models. |
+| Native tool preflight | 120 seconds | Allows document tooling to initialize on a cold or CPU-throttled sandbox. This does not increase the timeout for normal tool calls. |
 | Shell command | 60 seconds | Used by the native and Harbor loops. Hermes uses a 180-second terminal timeout. A shell timeout is returned to the agent as a tool error. |
+| Sandbox staging/collection | 900 seconds (15 minutes) | Covers extraction and collection of portable runtimes and task artifacts. Remote providers should give file-transfer API requests at least the same budget. Reduce concurrency if large parallel transfers saturate the provider. |
 | Complete verifier phase | 3,600 seconds (1 hour) | Covers output staging, all criterion calls, and artifact collection. |
 | One judge request | 90 seconds, with one retry | Increase only when the judge endpoint is healthy but consistently needs longer than 90 seconds. |
 
@@ -301,8 +311,10 @@ default native benchmark, the relevant override paths are:
 
 ```text
 +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.agent_timeout_seconds=<seconds>
++legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.sandbox_staging_timeout_seconds=<seconds>
 +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.verifier_timeout_seconds=<seconds>
 +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.agent_kwargs.model_timeout_seconds=<seconds>
++legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.agent_kwargs.preflight_timeout_seconds=<seconds>
 +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.agent_kwargs.shell_timeout=<seconds>
 +legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench.judge_request_timeout_seconds=<seconds>
 ```
@@ -335,76 +347,134 @@ the corresponding `legal_agent_bench_benchmark_claude_code_agent` or
 agent-server default stays at `1`; changing only `--concurrency` leaves the
 server-side semaphore serial.
 
-## Use ECS Fargate
+## Choose a sandbox provider
 
-Gym's native `ecs_fargate` provider can run the native, Hermes, Claude Code,
-or Codex LAB variants without changing their agent loops. The reference ECS
-infrastructure is discovered from `/<ssm_project>/ecs-sandbox/config` in SSM;
-`ssm_project` defaults to `harbor`. Configure an AWS profile locally and export
-the profile and region before starting Gym:
+The native, Hermes, Claude Code, and Codex variants use Gym's shared sandbox
+API. Their runtime builder, agent phase, and isolated verifier phase all use the
+same selected provider. The Harbor compatibility variant uses Harbor's own
+container orchestration instead and is Docker-only.
 
-```bash
-export AWS_PROFILE=gym-ecs
-export AWS_REGION=us-east-1
-export AWS_DEFAULT_REGION="$AWS_REGION"
-```
+| Provider | LAB image | Policy-proxy routing | Provider setup |
+| --- | --- | --- | --- |
+| Docker (default) | Automatically built locally, or `sandbox_image` | Derived loopback URLs are translated for Docker Desktop or Linux bridge networking | Running Docker daemon |
+| ECS Fargate | OCI registry image; prefer an immutable digest | Automatic Gym SSH reverse tunnel | AWS/SSM/ECR/S3 infrastructure and TCP access to the task SSH sidecar |
+| Enroot | Registry/Docker URI or local `.sqsh` | Shares the orchestrator host network | `enroot` CLI |
+| Apptainer | Registry/Docker URI or local `.sif` | Shares the orchestrator host network | `apptainer` CLI |
+| OpenSandbox | Provider-accessible OCI image | Set a reachable proxy URL when Gym's proxy is host-local | OpenSandbox service and credentials |
+| Daytona | Provider-accessible OCI image or provider-supported snapshot configuration | Set a reachable proxy URL when Gym's proxy is host-local | Daytona service and credentials |
+| OpenShell | Provider-accessible OCI image | Set a reachable proxy URL when Gym's proxy is host-local | OpenShell gateway and credentials when required |
 
-The orchestrator must be able to reach the ECS task SSH sidecar on TCP port
-`52222`. The SSM configuration must provide the cluster, subnets, security
-groups, task roles, ECR repository, S3 staging bucket, and SSH-sidecar key
-ARNs. Install the `sandbox` dependency extra as shown above.
+For the checked-in ECS Fargate configuration, export `AWS_PROFILE`,
+`AWS_REGION`, and `AWS_DEFAULT_REGION`. Gym discovers the reference
+infrastructure from `/<ssm_project>/ecs-sandbox/config` in SSM;
+`ssm_project` defaults to `harbor`. That configuration must identify the ECS
+cluster, subnets, security groups, task roles, ECR repository, S3 staging
+bucket, and SSH-sidecar key material. The orchestrator must be able to reach
+the task SSH sidecar on TCP port `52222`. See each provider YAML and README for
+its current environment variables and service-specific options.
 
-Build the shared LAB environment for `linux/amd64`, push it to ECR, and use its
-immutable digest. The prepared LAB tasks currently share this environment:
+Non-Docker providers do not invoke the Docker CLI. Supply a provider-compatible
+image through `NEMO_GYM_LAB_SANDBOX_IMAGE` or the `sandbox_image` override. The
+image must contain LAB's document tooling plus `bash`, `curl`, and `tar`, and
+must permit writes under `/sandbox`. The first rollout starts a short-lived runtime
+builder sandbox with outbound package-download access. The resulting portable,
+content-addressed runtime is reused by later rollouts.
 
-```bash
-LAB_ENV_DIR=resources_servers/legal_agent_bench/data/runtime/harbor_tasks/legal_agent_bench/antitrust-competition__analyze-antitrust-hsr-strategy/environment
-ECR_REPOSITORY=<account>.dkr.ecr.<region>.amazonaws.com/<repository>
-ECR_REGISTRY=${ECR_REPOSITORY%%/*}
-ECR_REPOSITORY_NAME=${ECR_REPOSITORY#*/}
-LAB_IMAGE_TAG=legal-agent-bench-smoke
+OpenShell's Docker compute driver additionally requires `iproute2`, a
+restricted `sandbox` user and group, and a work directory writable by that
+identity. Images generated by LAB preparation include these requirements.
 
-aws ecr get-login-password --region "$AWS_REGION" |
-  docker login --username AWS --password-stdin "$ECR_REGISTRY"
-docker buildx build \
-  --platform linux/amd64 \
-  --tag "$ECR_REPOSITORY:$LAB_IMAGE_TAG" \
-  --push \
-  "$LAB_ENV_DIR"
-LAB_IMAGE_DIGEST=$(aws ecr describe-images \
-  --region "$AWS_REGION" \
-  --repository-name "$ECR_REPOSITORY_NAME" \
-  --image-ids "imageTag=$LAB_IMAGE_TAG" \
-  --query 'imageDetails[0].imageDigest' \
-  --output text)
-export LAB_ECS_IMAGE="$ECR_REPOSITORY@$LAB_IMAGE_DIGEST"
-docker pull --platform linux/amd64 "$LAB_ECS_IMAGE"
-```
+For OpenSandbox, LAB treats each task's declared CPU, memory, disk, and GPU as
+its limits. The checked-in agent configs set `opensandbox_request_fraction:
+0.25`, which requests 25% of the CPU and memory limits while retaining the full
+disk and GPU requests. This request/limit split permits deliberate
+oversubscription when many LAB sandboxes run concurrently. It matches the
+[Mini SWE Agent 2 example](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml),
+which requests 0.5 of a 2 CPU limit and 2 GiB of an 8 GiB memory limit. It
+applies to the runtime builder, agent, and verifier. Raise the fraction toward
+`1.0` if your cluster needs firmer CPU or memory reservations, or set it to
+`null` to disable the split. For example, add
+`+legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.opensandbox_request_fraction=0.5`
+to the native `gym eval run` command below.
 
-Run one native smoke through ECS:
+The standard provider YAMLs define a top-level sandbox named `sandbox`. Select
+one by adding its config and pointing the LAB agent at that name. This native
+example works for Docker, ECS Fargate, Enroot, Apptainer, OpenSandbox, Daytona,
+or OpenShell by replacing `<provider>` and `<image>`:
 
 ```bash
 gym eval run \
   --model-type vllm_model \
   --benchmark legal_agent_bench \
-  --config nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml \
+  --config nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml \
   --split benchmark \
-  --output results/legal_agent_bench_native_ecs_smoke.jsonl \
+  --output results/legal_agent_bench_native_<provider>_smoke.jsonl \
   --concurrency 1 \
   --limit 1 \
   +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.sandbox_provider=sandbox \
-  "+legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.sandbox_image=${LAB_ECS_IMAGE}" \
-  +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.runtime_docker_platform=linux/amd64
+  +legal_agent_bench_benchmark_native_agent.responses_api_agents.legal_agent_bench_agent.sandbox_image=<image>
 ```
 
-ECS tunnels the rollout-scoped Gym policy-model URL into the agent task, so
-model credentials remain in Gym and `sandbox_model_base_url` is unnecessary.
-An explicit `sandbox_model_base_url` still bypasses the tunnel when the endpoint
-is already reachable from the task. The verifier contacts the configured judge
-endpoint directly, so that endpoint must be reachable from the Fargate VPC.
-Each completed rollout creates one agent task followed by one verifier task;
-both are stopped during cleanup. Artifacts use the same local paths documented
-above.
+For Hermes, Claude Code, or Codex, replace the benchmark and the native agent
+prefix with the corresponding variant prefix. `sandbox_image` is passed through
+unchanged, so use the native reference expected by the selected provider rather
+than converting it in LAB.
+
+ECS Fargate automatically tunnels the rollout-scoped Gym policy proxy. Enroot
+and Apptainer can reach a host-local proxy through their shared host network.
+OpenSandbox, Daytona, and OpenShell cannot reach the orchestrator's loopback
+address. Prefer exposing the credential-free Gym policy proxy on a route
+reachable from the sandbox, then set `NEMO_GYM_SANDBOX_MODEL_BASE_URL` or the
+`sandbox_model_base_url` override. Do not put credentials in that URL. If only
+a directly authenticated model endpoint is reachable, set
+`NEMO_GYM_LAB_SANDBOX_MODEL_API_KEY_ENV` to the name of a launcher environment
+variable containing a narrowly scoped, short-lived model key. LAB copies that
+key only into the agent sandbox as `LAB_POLICY_API_KEY`; it is not serialized
+into the runner configuration or supplied to the runtime builder or verifier.
+The evaluated agent can read its own environment, so this fallback accepts key
+exposure to untrusted agent code. Use a dedicated key with the minimum required
+permissions and rotate it after the run. Every provider's verifier sandbox must
+also be able to reach the configured judge endpoint.
+
+OpenShell should use three separate policies through
+`runtime_builder_provider_options`, `agent_sandbox_provider_options`, and
+`verifier_sandbox_provider_options`. Give the builder only dependency-registry
+egress, the agent only policy-proxy egress, and the verifier only judge egress.
+The filesystem policy must allow the image runtime and
+`/opt/legal-agent-bench` read-only and `/sandbox` writable. OpenShell injects a
+policy-enforcing HTTP(S) proxy; the LAB runner opts Gym's inner HTTP client into
+that proxy only for this provider. In the builder policy, configure the
+`registry.npmjs.org` endpoint with `protocol: rest`, `access: read-only`,
+`enforcement: enforce`, and `allow_encoded_slash: true`; npm uses encoded
+slashes when resolving scoped packages such as the Claude Code dependency.
+See OpenShell's
+[policy schema](https://docs.nvidia.com/openshell/latest/reference/policy-schema#endpoint-object).
+
+Benchmark variants inherit their agent configuration, so supply the complete
+phase-option maps through the decoded environment settings rather than adding
+nested map keys on the command line:
+
+```bash
+export NEMO_GYM_LAB_RUNTIME_BUILDER_PROVIDER_OPTIONS='{policy: /path/to/builder-policy.yaml}'
+export NEMO_GYM_LAB_AGENT_SANDBOX_PROVIDER_OPTIONS='{policy: /path/to/agent-policy.yaml}'
+export NEMO_GYM_LAB_VERIFIER_SANDBOX_PROVIDER_OPTIONS='{policy: /path/to/verifier-policy.yaml}'
+```
+
+The values are OmegaConf mappings and default to `{}`, so they have no effect
+on providers that do not need phase-specific options.
+
+Before spending model tokens, exercise create, upload, execute, download, and
+cleanup through the same public API. For a checked-in provider YAML:
+
+```bash
+python responses_api_agents/legal_agent_bench_agent/scripts/smoke_provider.py \
+  --config nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml \
+  --image <image>
+```
+
+You can also use `--provider <name>` instead of `--config ...` to smoke a
+provider's constructor defaults. A passing lifecycle smoke does not test the
+policy or judge endpoints; follow it with the one-task `gym eval run` above.
 
 ## Manage servers separately
 
@@ -469,6 +539,10 @@ task. The default roots are `results/legal_agent_bench/native_jobs`,
 `results/legal_agent_bench/claude_code_jobs`, and
 `results/legal_agent_bench/codex_jobs`. Harbor uses
 `results/legal_agent_bench/harbor_jobs`.
+Set `NEMO_GYM_LAB_RESULTS_DIR` before `gym eval run` to redirect the native and
+configurable artifact root, for example to VM-native storage when Gym runs in
+a Linux VM over a macOS-shared checkout. The rollout JSONL paths remain the
+ones supplied with `--output`.
 
 Each configurable output row includes `artifact_dir`, `run_summary_path`,
 `agent_trace_path`, `agent_stdout_path`, `agent_stderr_path`,

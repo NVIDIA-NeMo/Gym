@@ -17,10 +17,11 @@ selects the native loop; Harbor is available explicitly as
 
 ## Requirements
 
-- Python 3.13.13 and [uv](https://docs.astral.sh/uv/)
-- Docker with a running daemon for local execution and portable runtime
-  provisioning. ECS Fargate execution is also supported with an immutable
-  registry image; see the benchmark README.
+- Python 3.13.14 and [uv](https://docs.astral.sh/uv/)
+- One Gym sandbox backend for the native/configurable runner: Docker, ECS
+  Fargate, Enroot, Apptainer, OpenSandbox, Daytona, or OpenShell. Docker is the
+  zero-configuration default; the provider matrix is in the benchmark README.
+- Docker specifically when using the separate Harbor compatibility variant
 - An OpenAI-compatible policy endpoint and judge endpoint
 - At least 10 GB of free working space for preparation and the first Docker build
 
@@ -35,9 +36,9 @@ uses the configured policy model endpoint. Access to the configured policy and
 judge endpoints is still required and may itself be metered or paid.
 
 The pinned source download is about 579 MiB; allow a few GiB of free working
-space during preparation. The first task also builds a
-document-tooling Docker image and can take several minutes. Later tasks reuse
-Docker layers.
+space during preparation. With the default Docker provider, the first task also
+builds a document-tooling image and can take several minutes. Other providers
+reuse a supplied compatible image.
 
 From a fresh clone, create the repository environment:
 
@@ -45,8 +46,11 @@ From a fresh clone, create the repository environment:
 uv venv --python 3.13.14
 source .venv/bin/activate
 uv sync --extra dev
-docker info >/dev/null
 ```
+
+Run `docker info` when using Docker or Harbor. Install the repository's
+`sandbox` extra and complete the provider-specific setup when using an
+SDK-backed provider.
 
 Keep this environment activated when running LAB commands. Invoke `gym`
 directly rather than `uv run gym` for workflows that start servers: Ray starts
@@ -140,7 +144,7 @@ The commands below describe the lower-level resource-server and standalone
 agent workflow.
 
 The resource-server discovery config predates the benchmark wrapper and starts
-the Harbor compatibility agent:
+the Docker-only Harbor compatibility agent:
 
 ```bash
 gym env start \
@@ -226,8 +230,9 @@ gym env start \
 This setting is forwarded to each task verifier as
 `LAB_JUDGE_PARALLELISM`.
 
-The task container requires network access because the policy agent and
-verifier call configured endpoints.
+The selected agent sandbox requires access to Gym's policy proxy, and the
+separate verifier sandbox requires access to the configured judge endpoint.
+See the benchmark README for provider-specific proxy routing.
 
 ### Output, context, and timeout limits
 
@@ -289,10 +294,13 @@ are browsable and safe under concurrent execution. `<model>` is the configured
 normalized, and the run ID is an eight-character unique suffix. Starting or
 validating an agent server does not create an empty session directory; the
 directory is created by its first rollout.
-The Docker image is content-addressed from the task environment and reused
-across harnesses. Agent and verifier phases use separate containers: the agent
+Docker can build a content-addressed image from the task environment
+automatically. Other providers use the configured image reference unchanged.
+The selected provider is also used to build the portable harness runtime and is
+reused for the agent and verifier phases. Agent and verifier phases use
+separate sandboxes: the agent
 sees only its selected Gym package and public task inputs, while the verifier
-starts after that container is destroyed and receives the completed LAB run
+starts after the agent sandbox is destroyed and receives the completed LAB run
 read-only.
 
 To inspect a native or configurable smoke run:
@@ -323,9 +331,14 @@ or more criteria fail; use `criteria_pass_rate` to see partial success.
   `model_connection_failed`, `agent_timed_out`, `verifier_failed`,
   `verifier_timed_out`, `sandbox_failed`, `task_failed`,
   `configuration_failed`, and `mask_sample`. Before the harness starts, the
-  runner checks the policy endpoint from inside Docker. On Docker Desktop,
-  derived loopback model URLs are automatically routed through
-  `host.docker.internal`; `sandbox_model_base_url` is an explicit override.
+  runner checks the policy endpoint from inside the selected sandbox. Docker
+  translates derived loopback URLs when needed, ECS Fargate creates a reverse
+  tunnel, Enroot and Apptainer share the host network, and remote providers need
+  an explicitly reachable `sandbox_model_base_url` when Gym's proxy is
+  host-local. Prefer a credential-free reachable proxy. If a direct endpoint is
+  the only option, the configurable runner supports an agent-only key through
+  `sandbox_model_api_key_env`; use a narrowly scoped, short-lived key because
+  the evaluated agent can read its own environment.
   Connectivity, harness, sandbox, and verifier failures are masked, skip
   judging when applicable, and carry `_ng_failure_class`, which routes them to
   the failure sidecar for bounded retry. Task-loading and harness-configuration
@@ -344,8 +357,8 @@ or more criteria fail; use `criteria_pass_rate` to see partial success.
   the model explicitly and its internal policy proxy does not implement model
   discovery. This does not suppress access logs for actual chat-completion
   requests.
-- If Docker appears idle on the first rollout, inspect `docker ps` and the
-  `gym env start` terminal; Harbor is normally building the task image.
+- If Docker appears idle on the first Harbor rollout, inspect `docker ps` and
+  the `gym env start` terminal; Harbor is normally building the task image.
 - Do not copy or publish `data/runtime/`: it can contain local judge credentials.
 - Results are revision-specific and should not be compared directly with runs
   that use a different task snapshot or skill set.

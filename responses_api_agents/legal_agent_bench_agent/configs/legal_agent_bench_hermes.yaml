@@ -19,11 +19,17 @@ legal_agent_bench_hermes_agent:
       concurrency: 1
       agent_timeout_seconds: 10800
       verifier_timeout_seconds: 3600
+      sandbox_staging_timeout_seconds: 900
+      results_dir: ${oc.env:NEMO_GYM_LAB_RESULTS_DIR,results/legal_agent_bench}
       sandbox_provider:
         docker: {}
-      sandbox_image: null
-      runtime_docker_platform: null
-      sandbox_model_base_url: null
+      sandbox_image: ${oc.env:NEMO_GYM_LAB_SANDBOX_IMAGE,null}
+      runtime_builder_provider_options: ${oc.decode:${oc.env:NEMO_GYM_LAB_RUNTIME_BUILDER_PROVIDER_OPTIONS,{}}}
+      agent_sandbox_provider_options: ${oc.decode:${oc.env:NEMO_GYM_LAB_AGENT_SANDBOX_PROVIDER_OPTIONS,{}}}
+      verifier_sandbox_provider_options: ${oc.decode:${oc.env:NEMO_GYM_LAB_VERIFIER_SANDBOX_PROVIDER_OPTIONS,{}}}
+      opensandbox_request_fraction: 0.25
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      sandbox_model_api_key_env: ${oc.env:NEMO_GYM_LAB_SANDBOX_MODEL_API_KEY_ENV,null}
       agent_server_module: responses_api_agents.hermes_agent.app
       agent_server_class: HermesAgent
       agent_config_class: HermesAgentConfig
