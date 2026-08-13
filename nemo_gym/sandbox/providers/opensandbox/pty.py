@@ -50,45 +50,10 @@ CHAN_REPLAY = 3
 REPLAY_HEADER_BYTES = 9
 WS_CLOSE_TAKEN_OVER = 4001
 WS_CLOSE_POLICY_VIOLATION = 1008
-# Backoff for connect-class transients (proxy route not ready, backend
-# unreachable, socket re-dial): the execd bind window is short.
-_PTY_RETRY_DELAYS = (
-    0.25,
-    0.5,
-    1.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-    2.0,
-)
+# Backoff for connect-class transients. Front-loaded for the short execd bind
+# window; the tail rides out per-replica informer lag (each retry re-rolls the
+# load-balanced replica, so 404 "pod IP not yet available" clears quickly).
+_PTY_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
 
 # Mirrors execd's shell pick (bash when available, else sh) for env-only specs.
 _DEFAULT_SHELL_SNIPPET = 'exec "$(command -v bash || echo sh)"'
