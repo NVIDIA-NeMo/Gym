@@ -193,6 +193,7 @@ atexit.register(global_aiohttp_client_exit)
 
 # This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
 MAX_NUM_TRIES = 3
+MAX_SECONDS_TRIES = 120
 
 _NUM_SERVER_DISCONNECTED_ERROR: int = 0
 _NUM_CLIENT_OS_ERROR: int = 0

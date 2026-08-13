@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import math
+import time
 from asyncio import sleep
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import (
     Annotated,
     Any,
@@ -116,6 +120,7 @@ from typing_extensions import TypedDict
 from nemo_gym.server_utils import (
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
+    MAX_SECONDS_TRIES,
     ClientResponse,
     get_response_json,
     raise_for_status,
@@ -781,10 +786,13 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 # Clients
 ########################################
 
-# See https://platform.openai.com/docs/guides/error-codes/api-errors
-# 500 is internal server error, which may sporadically occur
-# 502 is Bad gateway (when the endpoint is overloaded)
-# 504 is Gateway timeout (when the endpoint config has too low of a gateway timeout setting for the model to finish generating)
+# See https://platform.openai.com/docs/guides/error-codes/api-errors.
+# 429 Too Many Requests: the caller exceeded a request or token rate limit.
+# 500 Internal Server Error: the model service encountered a transient internal failure.
+# 502 Bad Gateway: a gateway received an invalid response from the upstream model service.
+# 503 Service Unavailable: the model service is temporarily unavailable or overloaded.
+# 504 Gateway Timeout: a gateway timed out waiting for the model service to finish generating.
+# 520 Web Server Returned an Unknown Error: a proxy received an unexpected response from the model service.
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 
@@ -817,8 +825,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         max_num_tries = MAX_NUM_TRIES
+        max_end_time = time.monotonic() + MAX_SECONDS_TRIES
+        sleep_time = 0.5
         tries = 0
-        while tries < max_num_tries:
+        while tries < max_num_tries and time.monotonic() < max_end_time:
             tries += 1
             response = await request(**request_kwargs)
 
@@ -833,7 +843,31 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
                     flush=True,
                 )
-                await sleep(0.5)
+
+                retry_delay = sleep_time
+                retry_after = response.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        retry_delay = float(retry_after)
+                        if not math.isfinite(retry_delay) or retry_delay < 0:
+                            raise ValueError("Retry-After delay must be a non-negative finite number")
+                    except ValueError:
+                        try:
+                            retry_at = parsedate_to_datetime(retry_after)
+                            if retry_at.tzinfo is None:
+                                retry_at = retry_at.replace(tzinfo=timezone.utc)
+                            retry_delay = max(
+                                0.0,
+                                (retry_at - datetime.now(timezone.utc)).total_seconds(),
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            retry_delay = sleep_time
+
+                sleep_time *= 2
+                if time.monotonic() + retry_delay >= max_end_time:
+                    break
+
+                await sleep(retry_delay)
                 continue
             else:
                 return response
