@@ -111,7 +111,6 @@ IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
-DEFAULT_PTY_REQUEST_TIMEOUT_S = 300.0
 
 
 def validate_image_pull_policy(image_pull_policy: str) -> str:
@@ -1330,9 +1329,7 @@ class OpenSandboxProvider:
         # A None connection timeout would also disable aiohttp's own 300s
         # default, leaving create/attach unbounded against a stalled proxy.
         request_timeout_s = (
-            float(self._connection.request_timeout_s)
-            if self._connection.request_timeout_s is not None
-            else DEFAULT_PTY_REQUEST_TIMEOUT_S
+            float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 300.0
         )
         endpoint = await self._await_sdk_call(
             handle.raw.get_endpoint(DEFAULT_EXECD_PORT),
