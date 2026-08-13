@@ -1,7 +1,7 @@
 config_paths:
 - benchmarks/gpqa/config.yaml
-# - benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
-# - benchmarks/tau2/configs/tau2.yaml
+- benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
+- benchmarks/tau2/configs/tau2.yaml
 - benchmarks/aalcr/config.yaml
 - benchmarks/scicode/config.yaml
 - benchmarks/omniscience/config.yaml
