@@ -28,6 +28,9 @@ from nemo_gym.sandbox.providers.base import (
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 
 
+pytestmark = pytest.mark.sandbox
+
+
 def _provider() -> opensandbox_provider.OpenSandboxProvider:
     return opensandbox_provider.OpenSandboxProvider(probe={"command": None})
 
