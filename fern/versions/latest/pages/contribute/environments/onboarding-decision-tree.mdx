@@ -1,82 +1,32 @@
 ---
 title: "Onboarding decision tree"
-description: "Choose whether to reuse a resources server, add a benchmark overlay, or create a new environment."
+description: "Choose whether to reuse a resources server or create a new one."
 position: 1
 ---
 
-A **resources server** implements scoring, tools, and per-task state. An **environment** is that measurement surface composed with an agent, a model, and datasets. A **benchmark** is a versioned evaluation protocol on top of a resources server: canonical split, prompt, `prepare_script`, and documented repeats.
+You do not always need a new environment. Most benchmarks reuse a scorer that already exists.
 
-You do not always need a new environment. You need a new resources server only when no existing server can score the task.
-
-<Tip>
-Search the catalog before you scaffold anything:
+Search first:
 
 ```bash
 gym search "grade school math"
-gym list resources-servers
-gym list benchmarks
-gym list environments
 ```
 
-`gym list environments` is the unified catalog (in-tree workloads are labeled `no-manifest` until they grow a `manifest.yaml`). `gym list resources-servers` lists config selectors under `resources_servers/*/configs/`, which is a different namespace.
-</Tip>
-
-## Which guide to follow
-
-| You are… | Follow |
-| --- | --- |
-| Reusing an existing scorer with a new dataset, prompt, or repeats | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
-| Building a new scorer, tools, or session state | [New Environment](/contribute/environments/new-environment) and [Single-Step Environment](/environment-tutorials/single-step-environment) |
-| Wrapping a third-party runner that owns the episode | [Integrate external libraries](/environment-tutorials/integrate-external-environments) |
-| Needing a GUI VM, browser, repo sandbox, or search stack | [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks) |
-| Changing only prompts or data on an existing bench | Same overlay; bump the documented version if the change affects comparison |
+Then pick a path:
 
 ```mermaid
 flowchart TD
-  A[Add work to NeMo Gym] --> B{Training env or named eval?}
-
-  B -->|Training environment| C{Does a resources server already score this?}
-  B -->|Benchmark / eval protocol| D{Does a resources server already score this?}
-
-  C -->|Yes| E[environments/ overlay via config_paths]
-  C -->|No| F[gym env init --resources-server]
-
-  D -->|Yes| G[benchmarks/ overlay via config_paths]
-  D -->|No| H{Native verify, external harness, or sandbox?}
-
-  H -->|Python verify / tools / state| F
-  H -->|External library owns the episode| I[Agent /run adapter]
-  H -->|GUI VM, browser, repo sandbox, search| J[Reuse in-tree sandbox or search server]
-
-  G --> K[Add a benchmark]
-  E --> L[New Environment]
-  F --> L
-  I --> M[Integrate external libraries]
-  J --> N[Complex benchmarks]
+  A[Can an existing resources server score this task?] -->|Yes| B[Add a benchmark]
+  A -->|No| C[New Environment]
 ```
 
-## Catalog path vs experimental manifest path
-
-In-tree workloads today are YAML configs under `benchmarks/`, `environments/`, and `resources_servers/`. None of them ship a `manifest.yaml`.
-
-| Path | Commands | Use when |
+| Path | When | Guide |
 | --- | --- | --- |
-| **Catalog (default)** | Copy an overlay such as `benchmarks/gsm8k`, or `gym env init --resources-server` | Contributing to this repository |
-| **Manifest (experimental)** | `gym env init --environment` / `--benchmark`, `gym env validate`, `gym env test NAME`, `gym env publish` | Trying the new scaffold; requires a `VERIFIER_FIXTURE` the catalog does not yet export |
+| Reuse | Same verifier, new data, prompt, or repeats | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
+| New scorer | You need new `verify()`, tools, or state | [New Environment](/contribute/environments/new-environment) |
 
-`gym env init --benchmark --reuse-verifier` fails against production scorers such as `math_with_judge` because they do not export `VERIFIER_FIXTURE`. Reuse them with `config_paths` and `_inherit_from` instead — see [Add a benchmark](/contribute/environments/adding-a-benchmark#reuse-an-existing-resources-server).
+Copy [`benchmarks/gsm8k`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/gsm8k) when reusing a scorer such as `math_with_judge`, `mcqa`, or `code_gen`.
 
-## Composition patterns
-
-| Pattern | What to copy | Example |
-| --- | --- | --- |
-| Inherit resources server and agent | `config_paths` plus `_inherit_from` on both | [`benchmarks/gsm8k/config.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/gsm8k/config.yaml) |
-| Inherit resources server, swap agent | Chain the server YAML and an agent YAML | [`benchmarks/swebench/verified/opencode.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/verified/opencode.yaml) |
-| Bundled server config | Resources-server YAML already includes agent and datasets | `tavily_search` (not under `benchmarks/`) |
-| Inline resources server | Benchmark `config.yaml` defines the server | [`benchmarks/browsecomp/config.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/browsecomp/config.yaml) |
-
-## Related Topics
-
-- [Environments vs Benchmarks](/about/concepts/evaluation#environments-vs-benchmarks)
-- [How Benchmarks Relate to Environments](/evaluation/benchmarks#how-benchmarks-relate-to-environments)
-- [CLI commands](/reference/cli-commands)
+<Note>
+Need a GUI VM, browser, repo sandbox, or a third-party runner? See [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks) and [Integrate external libraries](/environment-tutorials/integrate-external-environments). Do not use `gym env init --benchmark --reuse-verifier` against in-tree servers; they do not export `VERIFIER_FIXTURE`.
+</Note>
