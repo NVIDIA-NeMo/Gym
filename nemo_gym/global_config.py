@@ -209,7 +209,7 @@ def _load_config_yaml(config_path):
 
 
 def _nemo_gym_openai_requirement() -> Optional[str]:
-    """Return nemo-gym's own openai requirement string (e.g. ``openai<=2.7.2``).
+    """Return nemo-gym's own openai requirement string (name plus specifier, as declared in its metadata).
 
     Returns ``None`` when the requirement cannot be determined (nemo-gym not
     installed as a distribution, ``packaging`` unavailable, only marker'd
@@ -237,8 +237,8 @@ def _openai_version_matches_nemo_gym_constraint(version: str) -> bool:
 
     head_server_deps normally pins the parent process's openai version into every
     sub-venv for consistency. When the parent environment ships an openai release
-    outside nemo-gym's own constraint (e.g. openai 2.52.x preinstalled in the base
-    image while nemo-gym caps openai<=2.7.2), that pin makes every
+    outside nemo-gym's own constraint (e.g. the base image preinstalls a newer
+    openai than nemo-gym's cap allows), that pin makes every
     sub-venv resolution unsatisfiable — and the dry-run prefetch then bakes
     venvs that contain nothing but pip. The parser uses this to fail fast (or,
     with the explicit opt-in, to fall back to nemo-gym's own resolution) instead
@@ -768,6 +768,10 @@ Found global config dict yaml:
             # accepts it; otherwise the sub-venv resolutions are unsatisfiable and the venvs come
             # out empty (see _openai_version_matches_nemo_gym_constraint).
             allow_openai_skew = global_config_dict.setdefault(ALLOW_OPENAI_VERSION_SKEW_KEY_NAME, False)
+            if not isinstance(allow_openai_skew, bool):
+                raise ConfigError(
+                    f"{ALLOW_OPENAI_VERSION_SKEW_KEY_NAME} must be a boolean (true/false), got {allow_openai_skew!r}."
+                )
             if _openai_version_matches_nemo_gym_constraint(openai_version):
                 head_server_deps.append(f"openai=={openai_version}")
             elif allow_openai_skew:

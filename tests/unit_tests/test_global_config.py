@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
-from pytest import MonkeyPatch, mark, raises
+from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
@@ -166,16 +166,34 @@ class TestGlobalConfig:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
-        with raises(ConfigError, match="allow_openai_version_skew"):
+        with raises(ConfigError, match="allow_openai_version_skew") as excinfo:
             get_global_config_dict()
+        # The error must name both sides of the conflict.
+        assert "openai==2.52.0" in str(excinfo.value)
+        assert "openai<=2.7.2" in str(excinfo.value)
 
-    def test_head_server_deps_omits_pin_with_explicit_skew_opt_in(self, monkeypatch: MonkeyPatch) -> None:
+    def test_head_server_deps_omits_pin_with_explicit_skew_opt_in(
+        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+    ) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
         self._mock_parse_environment(monkeypatch, DictConfig({"allow_openai_version_skew": True}))
 
-        global_config_dict = get_global_config_dict()
+        with caplog.at_level("WARNING"):
+            global_config_dict = get_global_config_dict()
         assert not any(dep.startswith("openai") for dep in global_config_dict["head_server_deps"])
         assert global_config_dict["allow_openai_version_skew"] is True
+        # The warning must name both sides of the skew.
+        assert "openai==2.52.0" in caplog.text
+        assert "openai<=2.7.2" in caplog.text
+
+    def test_head_server_deps_rejects_non_boolean_skew_opt_in(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
+        # YAML/CLI plumbing can hand the key through as a string; "false" is
+        # truthy and must not silently enable the skew.
+        self._mock_parse_environment(monkeypatch, DictConfig({"allow_openai_version_skew": "false"}))
+
+        with raises(ConfigError, match="must be a boolean"):
+            get_global_config_dict()
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
