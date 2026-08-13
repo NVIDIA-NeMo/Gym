@@ -32,8 +32,8 @@ apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 
 cd /opt
-# Reuse the vLLM container's python3 so we strongly align the Python versions across vLLM and Gym.
-uv venv --python \$(which python3) Gym_venv
+# Python 3.13.14 is Gym main's Python version.
+uv venv --python 3.13.14 Gym_venv
 source Gym_venv/bin/activate
 
 # We use this flow to support use cases where env.yaml, etc config files are mounted
