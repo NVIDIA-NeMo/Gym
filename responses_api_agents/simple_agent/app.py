@@ -304,6 +304,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
         model_response_json = await get_response_json(response)
+        cookies = response.cookies
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
