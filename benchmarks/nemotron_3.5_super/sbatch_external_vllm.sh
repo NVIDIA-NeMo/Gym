@@ -128,6 +128,7 @@ if (( SLURM_PROCID == 0 )); then
         --api-server-count 1 \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
+        --max-num-batched-tokens 135680 \
         &
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
@@ -156,7 +157,8 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         --data-parallel-address \$PREFILL_HEAD \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+            '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
+        --max-num-batched-tokens 135680
 elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
     # Decode head
 
@@ -171,7 +173,8 @@ elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
         --api-server-count 1 \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --max-num-batched-tokens 33920
 else
     # Decode worker
 
@@ -185,7 +188,8 @@ else
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --max-num-batched-tokens 33920
 fi
 EOF
 )
