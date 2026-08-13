@@ -52,7 +52,6 @@ experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%
 # ++upload_rollouts_to_wandb=false: Rollouts file is massive. We leave on the cluster.
 # global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
 # port_range_low, port_range_high: Move into ephemeral ports
-# ++uvicorn_timeout_worker_healthcheck=600: Tau2 and Tau3 servers may take a long time to spin up since we import the Tau repo which has hefty dependencies.
 gym eval run \
     $@ \
     +wandb_project=$USER-gym-eval \
@@ -71,8 +70,7 @@ gym eval run \
     ++upload_rollouts_to_wandb=false \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
-    ++port_range_high=64000 \
-    ++uvicorn_timeout_worker_healthcheck=600
+    ++port_range_high=64000
 
 
 if (( $EXPORT_TO_CSV )); then
