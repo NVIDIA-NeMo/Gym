@@ -1,6 +1,6 @@
 ---
 title: "Onboarding decision tree"
-description: "Choose whether to reuse a resources server, create a new one, or add a new harness."
+description: "Choose whether to reuse a scorer, create a new one, or add a different agent."
 position: 1
 ---
 import { NavButton } from "../../../../../components/NavButton";
@@ -8,14 +8,14 @@ import { NavButton } from "../../../../../components/NavButton";
 <NavButton href="/contribute/environments" label="Contribute environments" direction="back" />
 
 <Info>
-**Before you choose a path:** complete [Development Setup](/contribute/development-setup) and the [Quickstart](/get-started/quickstart) (`env.yaml` with model credentials).
+You have a benchmark to contribute. First decide whether Gym already has a **scorer** — the program that grades the model's answer.
 
-**1.** Search existing scorers · **2.** Pick overlay, new server, or harness · **3.** Follow the linked guide
+**Before you start:** [Development Setup](/contribute/development-setup) and the [Quickstart](/get-started/quickstart) (create root `env.yaml` with your model API key).
 </Info>
 
-An **environment** is the measurement surface: tasks, verifier, tools, and state. A **benchmark** is a versioned eval on top of that surface — usually a new dataset, prompt, and `prepare.py`, not a new server.
+A **scorer** lives under `resources_servers/` and implements `verify()`. An **overlay** is a folder under `benchmarks/` that reuses a scorer (new dataset and prompt; no new scoring code). Gym's default agent is `simple_agent` (one turn, no GUI or sandbox).
 
-Search the catalog before you create anything. A bare `gym search "…"` queries the **environments** catalog, not scorers:
+Search for an existing scorer. A bare `gym search "…"` searches environments, not scorers — include the type:
 
 ```bash
 gym search resources-servers "grade school math"
@@ -23,32 +23,34 @@ gym list resources-servers
 gym search benchmarks math
 ```
 
-Then pick the row that matches what you actually need to add:
+Pick the row that matches what you need to add, then open that guide:
 
-| You need | You create | Start here |
+| You need | You create | Open this guide |
 | --- | --- | --- |
-| Same scorer, new data / prompt / split | Overlay under `benchmarks/<name>/` | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
-| New `verify()`, tools, or session state | Resources server under `resources_servers/<name>/` | [New Environment](/contribute/environments/new-environment) |
-| New agent loop, GUI, sandbox, or third-party runner | Agent server or a library wrap | [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks) |
+| Same scorer, new dataset | Folder under `benchmarks/` | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
+| New scoring code | Folder under `resources_servers/` | [New Environment](/contribute/environments/new-environment) |
+| GUI, sandbox, or external runner | A different agent, or wrap a library | [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks) |
 
 <Cards>
   <Card title="Reuse a scorer" href="/contribute/environments/adding-a-benchmark">
-    Copy `benchmarks/gsm8k` (math), `benchmarks/gpqa` (multiple choice), or `benchmarks/livecodebench/v5_2408_2502` (code). No `app.py`.
+    Copy `benchmarks/gsm8k` (math), `benchmarks/gpqa` (multiple choice), or `benchmarks/livecodebench/v5_2408_2502` (code). You will not write `app.py`.
 
     <Badge intent="success" minimal outlined>most common</Badge>
   </Card>
   <Card title="Create a new scorer" href="/contribute/environments/new-environment">
-    Scaffold a resources server, implement `verify()`, and satisfy the five-row CI gate.
+    Add scoring code, tests, and five example tasks.
 
     <Badge minimal outlined>new resources server</Badge>
   </Card>
-  <Card title="New harness or wrap a library" href="/environment-tutorials/integrate-external-environments">
-    The scorer already exists, but the episode is driven by a different agent or an external benchmark runner.
+  <Card title="Different agent or wrap a library" href="/environment-tutorials/integrate-external-environments">
+    The scorer exists, but the model must use a GUI, sandbox, or third-party runner.
 
     <Badge minimal outlined>advanced</Badge>
   </Card>
 </Cards>
 
 <Note>
-Still unsure? If an existing resources server can grade the task, it is an overlay. Only scaffold `resources_servers/` when you must change how the reward is computed.
+If an existing scorer can grade the task, add an overlay. Create a new resources server only when you must change how the score is computed.
 </Note>
+
+**Next:** open the matching card. If you are unsure, start with [Add a benchmark](/contribute/environments/adding-a-benchmark).

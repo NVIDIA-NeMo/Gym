@@ -396,7 +396,7 @@ Commands for developing, running, and inspecting environments. An environment de
 Scaffold a resources server, or create a manifest-backed environment or benchmark skeleton. Workload scaffolds include a manifest, Gym config, sample data, and the extension points selected by the integration profile.
 
 <Note>
-`--environment` / `--benchmark` / `--reuse-verifier` write the experimental manifest contract. In-tree scorers do not export `VERIFIER_FIXTURE`. For catalog contributions, copy a YAML overlay such as `benchmarks/gsm8k` or run `gym env init --resources-server`. See the [onboarding decision tree](/contribute/environments/onboarding-decision-tree).
+`--environment` / `--benchmark` / `--reuse-verifier` create an experimental layout. Scorers in this repository do not export `VERIFIER_FIXTURE`. To contribute a catalog benchmark, copy `benchmarks/gsm8k` or run `gym env init --resources-server`. See the [onboarding decision tree](/contribute/environments/onboarding-decision-tree).
 </Note>
 
 | Option | Description |

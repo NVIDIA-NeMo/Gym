@@ -4,57 +4,39 @@ description: "Vetted workflows for AI coding assistants bundled with NeMo Gym."
 position: 5
 ---
 
-NeMo Gym ships **agent skills** — curated instruction files that teach AI coding assistants how to work effectively in this repository. They encode endorsed workflows for common tasks like adding benchmarks, debugging rollouts, and maintaining the docs site, so agents can follow project conventions without guesswork.
+Point an AI coding assistant at this repository and it can follow Gym's endorsed workflows — adding a benchmark, debugging a failed run, or editing these docs — without guessing.
 
-Skills are versioned with the repo and kept up to date as Gym evolves. Gym will continue to add skills as new workflows stabilize.
+No extra install: clone Gym, then ask in plain language (for example, "add a new benchmark" or "debug this rollout failure").
 
-## Where Skills Live
+<Tip>
+Adding a benchmark? Humans start at the [onboarding decision tree](/contribute/environments/onboarding-decision-tree). Assistants should follow [`.agents/skills/add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) — copy an existing overlay first; add a new scorer only when nothing can grade the task.
+</Tip>
 
-| Directory | Assistants |
+## Where skills live
+
+One source of truth: [`.agents/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills). Claude Code and Codex use the same files through [`.claude/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills) and [`.codex/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills), so copies cannot drift.
+
+## Available skills
+
+| Skill | Use it when you want to |
 |---|---|
-| [`.agents/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills) | Canonical cross-agent skills |
-| [`.claude/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills) | Claude Code compatibility links |
-| [`.codex/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) | Codex compatibility links |
+| [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) | Add a benchmark overlay or a new scorer |
+| [`nemo-gym-reward-profiling`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-reward-profiling) | Run `gym eval run` / `gym eval profile` and inspect scores |
+| [`nemo-gym-debugging`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-debugging) | Diagnose empty JSONL, scorer errors, or stuck jobs |
+| [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs) | Add, move, or remove pages on this docs site |
+| [`nemo-gym-blade-analysis`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-blade-analysis) | Write a BLADE-style report from rollout files |
+| [`nemo-gym-pivot-datasets`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-pivot-datasets) | Build training/eval rows from rollout files |
+| [`gh-stack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/gh-stack) | Stack pull requests with the `gh-stack` CLI |
 
-Skills have one source of truth under `.agents/skills/`. Claude Code and Codex reach that same content through their native discovery paths, so references, scripts, and instructions cannot drift between copies.
-
-<Info>
-Assistants discover skills automatically when they are pointed at a local Gym checkout. No extra install step is required beyond cloning the repository.
-</Info>
-
-## Available Skills
-
-| Skill | What it covers |
-|---|---|
-| [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) | End-to-end workflow for adding a new benchmark or training environment |
-| [`nemo-gym-reward-profiling`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-reward-profiling) | `gym env start`, `gym eval run`, and `gym eval profile` baselining |
-| [`nemo-gym-debugging`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-debugging) | Diagnosing failed rollouts, partial JSONL, verifier errors, and infra issues |
-| [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs) | Adding, moving, and removing pages on the Fern docs site |
-| [`nemo-gym-blade-analysis`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-blade-analysis) | BLADE-style benchmark reports from rollout evidence |
-| [`nemo-gym-pivot-datasets`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-pivot-datasets) | Creating and validating pivot datasets from rollout artifacts |
-| [`gh-stack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/gh-stack) | Stacked pull request workflows with the `gh-stack` CLI extension |
-
-Compatible agents discover skills from the canonical tree directly. Native-path links provide compatibility for agents that require their own directory.
-
-## Using Skills
-
-When you work with an AI coding assistant in a Gym checkout, mention the task in natural language — for example, "add a new benchmark" or "debug this rollout failure." Assistants that support skills will match your request against the skill descriptions and follow the bundled workflow.
-
-You can also point an assistant at a specific skill file if you want a particular playbook:
+To pin a playbook instead of relying on auto-discovery:
 
 ```text
 Follow .agents/skills/add-benchmark/SKILL.md to integrate this benchmark.
 ```
 
-<Tip>
-The [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs) skill mirrors the procedures in the [Fern docs README](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md) — use it when contributing documentation changes.
-</Tip>
-
----
-
 ## Related Topics
 
-- [Development Setup](/contribute/development-setup) — environment setup, CI, and commit requirements
-- [Add a Benchmark](/contribute/environments/adding-a-benchmark) — overlay-first tutorial that complements the `add-benchmark` skill
-- [Onboarding decision tree](/contribute/environments/onboarding-decision-tree) — reuse vs new server
-- [Contribute Environments](/contribute/environments) — guidance for new training environments
+- [Onboarding decision tree](/contribute/environments/onboarding-decision-tree) — overlay vs new scorer vs a different agent
+- [Add a benchmark](/contribute/environments/adding-a-benchmark) — human copy-paste walkthrough (same path as the skill)
+- [New Environment](/contribute/environments/new-environment) — new scoring code
+- [Development Setup](/contribute/development-setup) — install, CI, and `git commit -s`
