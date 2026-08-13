@@ -34,6 +34,7 @@ this module provides:
 import json
 import logging
 from copy import deepcopy
+from hashlib import sha256
 from typing import Any, Iterator, Optional
 from uuid import uuid4
 
@@ -105,6 +106,35 @@ def _input_message_text(item: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _synthetic_replay_item_id(item: dict[str, Any], prefix: str) -> str:
+    """Return a stable ID for a replay item whose wire representation omitted one."""
+    payload = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return f"{prefix}_{sha256(payload).hexdigest()[:24]}"
+
+
+def _normalize_replayed_output_item(item: Any) -> Any:
+    """Fill optional response metadata omitted when Codex replays prior output.
+
+    The Responses wire API accepts output items without their server-generated
+    IDs and accepts ``output_text`` parts without annotations when those items
+    are supplied as subsequent input. Gym's shared response/input models require
+    both fields because they also model newly generated output. Add only those
+    transport defaults so the conversation content survives strict validation.
+    """
+    if not isinstance(item, dict):
+        return item
+    item_type = item.get("type")
+    if item_type == "reasoning" and not item.get("id"):
+        item["id"] = _synthetic_replay_item_id(item, "rs")
+    elif item_type == "message" and item.get("role") == "assistant":
+        if not item.get("id"):
+            item["id"] = _synthetic_replay_item_id(item, "msg")
+        for part in item.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                part.setdefault("annotations", [])
+    return item
+
+
 def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, Any], NamespaceMap]:
     """Map a streaming-dialect request body onto the strict non-streaming params shape.
 
@@ -131,6 +161,7 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            item = _normalize_replayed_output_item(item)
             if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the
