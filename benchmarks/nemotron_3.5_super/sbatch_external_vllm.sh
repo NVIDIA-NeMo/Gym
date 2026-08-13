@@ -40,6 +40,8 @@ EVAL_COMMAND=$(cat <<EOF
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
+apt update && apt install -y graphviz
+
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
@@ -91,8 +93,6 @@ command=$(cat <<EOF
 #!/bin/bash
 
 set -euo pipefail
-
-apt update && apt install -y graphviz
 
 # Input arguments and validation
 PREFILL_HEAD=\$PREFILL_HEAD
