@@ -85,6 +85,8 @@ def _minimal_server_config() -> SWEBenchWrapperConfig:
         swebench_tests_timeout=900,
         model_server=ModelServerRef(type="responses_api_models", name="test_model"),
         concurrency=1,
+        # A full SHA short-circuits _resolve_remote_commit (no repo, no network).
+        agent_framework_commit="deadbeef" * 5,
     )
 
 

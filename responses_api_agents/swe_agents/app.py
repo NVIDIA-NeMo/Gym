@@ -1656,7 +1656,22 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         return self.setup_root / "swe_openhands_setup" / _repo_slug(self.config.agent_framework_repo) / commit
 
     def setup(self) -> Path:
-        commit = _resolve_remote_commit(self.config.agent_framework_repo, self.config.agent_framework_commit)
+        repo = self.config.agent_framework_repo
+        ref = self.config.agent_framework_commit
+        legacy_dir = self.parent_dir / "swe_openhands_setup"
+        if (
+            not repo
+            and not _is_full_commit(ref)
+            and legacy_dir.exists()
+            and self._cache_dir_is_default()
+            and self._openhands_tree_valid(legacy_dir)
+        ):
+            # Baked tree with no remote to resolve `ref` against: use it as
+            # shipped (the pre-resolution local-HEAD sync was a no-op here).
+            print(f"Using pre-staged setup tree at {legacy_dir} (no resolvable remote)", flush=True)
+            return legacy_dir
+
+        commit = _resolve_remote_commit(repo, ref)
         setup_dir = self._openhands_setup_target(commit)
 
         with file_lock(setup_dir, "OpenHands setup"):
