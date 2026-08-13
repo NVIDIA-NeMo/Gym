@@ -24,8 +24,7 @@ set -xeuo pipefail
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-ray_dependency="ray[default]==2.55.1"
-uv pip install --system "\$ray_dependency" fastokens vllm-router
+uv pip install --system fastokens vllm-router
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -46,11 +45,7 @@ git remote add origin $NEMO_GYM_GIT_URL
 git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
 
-# See the script for more information.
-python benchmarks/nemotron_3.5_super/downgrade_python.py
-
 uv sync --active
-uv pip install "\$ray_dependency"
 
 ########################################
 # START Benchmark specific preparation
