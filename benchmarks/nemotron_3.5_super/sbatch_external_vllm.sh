@@ -132,7 +132,7 @@ if (( SLURM_PROCID == 0 )); then
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $PREFILL_SERVER_PORT \
-        --data-parallel-size $NUM_PREFILL_NODES \
+        --data-parallel-size (( $NUM_PREFILL_NODES * $VLLM_PREFILL_DP_SIZE_LOCAL)) \
         --data-parallel-address \$this_node_hostname \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --api-server-count 1 \
@@ -159,7 +159,7 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --headless \
-        --data-parallel-size $NUM_PREFILL_NODES \
+        --data-parallel-size (( $NUM_PREFILL_NODES * $VLLM_PREFILL_DP_SIZE_LOCAL ))\
         --data-parallel-start-rank \$SLURM_PROCID \
         --data-parallel-address \$PREFILL_HEAD \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
