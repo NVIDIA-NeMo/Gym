@@ -18,9 +18,12 @@ routing/eviction logic is driven directly, the transport via a fake aiohttp sess
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
+
+from nemo_gym.sandbox import SandboxEndpoint
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -37,7 +40,7 @@ PROVIDER = {
 
 
 def _pool(**overrides) -> SandboxPool:
-    kwargs = dict(provider=PROVIDER, image="img", size=2)
+    kwargs = dict(provider=PROVIDER, image="img", size=2, entrypoint=["/start-with-nginx.sh"])
     kwargs.update(overrides)
     return SandboxPool(**kwargs)
 
@@ -54,16 +57,20 @@ class TestPoolConfigValidation:
     def test_empty_domain_is_a_hard_error(self):
         bad = {"opensandbox": {"connection": {"domain": "", "api_key": "k"}}}
         with pytest.raises(ValueError, match="OPENSANDBOX_BASE_URL"):
-            SandboxPool(provider=bad, image="img")
+            SandboxPool(provider=bad, image="img", entrypoint=["start"])
 
     def test_empty_api_key_is_a_hard_error(self):
         bad = {"opensandbox": {"connection": {"domain": "http://sandbox.example", "api_key": ""}}}
         with pytest.raises(ValueError, match="OPENSANDBOX_API_KEY"):
-            SandboxPool(provider=bad, image="img")
+            SandboxPool(provider=bad, image="img", entrypoint=["start"])
 
     def test_empty_image_is_a_hard_error(self):
         with pytest.raises(ValueError, match="NS_SANDBOX_IMAGE"):
-            SandboxPool(provider=PROVIDER, image="")
+            SandboxPool(provider=PROVIDER, image="", entrypoint=["start"])
+
+    def test_direct_create_without_service_start_is_a_hard_error(self):
+        with pytest.raises(ValueError, match="requires entrypoint or service_command"):
+            SandboxPool(provider=PROVIDER, image="img")
 
     def test_ctor_is_pure_no_event_loop_required(self):
         # Constructing outside any running loop must work (pure ctor rule).
@@ -170,6 +177,13 @@ class _FakeAiohttpSession:
         self.calls.append(("DELETE", url, dict(headers or {})))
         return self.responses.pop(0)
 
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append(("GET", url, dict(headers or {})))
+        return self.responses.pop(0)
+
+    async def close(self):
+        self.closed = True
+
 
 class TestSandboxBackend:
     """The nemo_skills subclass; skipped when nemo_skills is not installed (per-server dep)."""
@@ -180,20 +194,13 @@ class TestSandboxBackend:
         import gym_sandbox
 
         sandbox = gym_sandbox.GymSandbox(
-            pool=dict(provider=PROVIDER, image="img", size=1),
+            pool=_pool(size=1),
             host="127.0.0.1",
             port="6000",
             disable_session_restore=True,
         )
         _admit(sandbox._pool, 0)
         return sandbox
-
-    def test_backend_registers_with_the_nemo_skills_registry(self):
-        pytest.importorskip("nemo_skills")
-        import gym_sandbox
-        from nemo_skills.code_execution.sandbox import sandboxes
-
-        assert sandboxes["sandbox_pool"] is gym_sandbox.GymSandbox
 
     def test_send_request_routes_with_pool_headers_and_session(self, backend):
         ok = '{"process_status": "completed", "stdout": "", "stderr": ""}'
@@ -245,224 +252,197 @@ class TestSandboxBackend:
         assert "sess-a" not in backend._pool._session_to_slot
 
 
-class TestHealWarmupRace:
-    """The heal loop must never race duplicate creates into a slot warmup still owns —
-    a late duplicate overwrites base_url under pinned sessions and breaks stickiness
-    (observed under slow pod creation)."""
+class _FakeSandbox:
+    instances = []
+    fail_claim = False
 
-    def test_create_slot_is_single_flight(self):
-        pool = _pool()
-        calls = {"n": 0}
+    def __init__(self, provider):
+        self.provider = provider
+        self.spec = None
+        self.stops = 0
+        self.uploads = []
+        self.commands = []
+        self.instances.append(self)
 
-        async def fake_inner(slot):
-            calls["n"] += 1
-            await asyncio.sleep(0.05)
-
-        pool._create_slot_inner = fake_inner
-
-        async def main():
-            await asyncio.gather(pool._create_slot(pool._slots[0]), pool._create_slot(pool._slots[0]))
-
-        asyncio.run(main())
-        assert calls["n"] == 1, "second concurrent create for the same slot must be a no-op"
-
-    def test_heal_loop_waits_for_warmup(self):
-        pool = _pool()
-        assert pool._warmup_done is False
-        healed = []
-        pool._heal_slot = lambda slot: healed.append(slot.index)
-
-        async def one_heal_pass():
-            pool._health_interval_s = 0.01
-            task = asyncio.create_task(pool._heal_loop())
-            await asyncio.sleep(0.05)
-            pool._closed = True
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        asyncio.run(one_heal_pass())
-        assert healed == [], "heal loop must not touch slots before warmup completes"
-
-
-class TestEnvStringify:
-    def test_env_values_are_stringified(self):
-        from sandbox_pool import SandboxPool
-
-        pool = SandboxPool(
-            provider={"opensandbox": {"connection": {"domain": "http://sandbox.example", "api_key": "k"}}},
-            image="img:tag",
-            env={"NUM_WORKERS": 4, "FLAG": True},
-        )
-        # The create API's env map is string->string; ints/bools 422 server-side.
-        assert pool._env == {"NUM_WORKERS": "4", "FLAG": "True"}
-
-
-class TestPoolRefFallback:
-    """pool_ref acquire semantics — SDK required (create is monkeypatched, no network)."""
-
-    def _pool(self, **overrides):
-        from sandbox_pool import SandboxPool
-
-        kwargs = dict(
-            provider={"opensandbox": {"connection": {"domain": "http://sandbox.example", "api_key": "k"}}},
-            image="img:tag",
-            pool_ref="warm-pool",
-            size=1,
-            service_command="sh -c 'start & echo ok'",
-        )
-        kwargs.update(overrides)
-        return SandboxPool(**kwargs)
-
-    def test_pool_full_falls_back_to_direct_create(self, monkeypatch):
-        opensandbox = pytest.importorskip("opensandbox")
-        calls = []
-
-        async def fake_create(**kwargs):
-            calls.append(kwargs)
-            if "extensions" in kwargs:
-                raise RuntimeError("pool exhausted")
-            return object()
-
-        monkeypatch.setattr(opensandbox.Sandbox, "create", staticmethod(fake_create))
-        pool = self._pool()
-        pool._connection_config = object()
-        sandbox, from_pool = asyncio.run(pool._acquire_sandbox())
-        assert from_pool is False and sandbox is not None
-        assert calls[0]["extensions"] == {"poolRef": "warm-pool"}
-        # The fallback create carries the full direct spec, not the pool claim shape.
-        assert "extensions" not in calls[1] and calls[1]["image"] == "img:tag"
-
-    def test_pool_failure_raises_when_fallback_disabled(self, monkeypatch):
-        opensandbox = pytest.importorskip("opensandbox")
-
-        async def fake_create(**kwargs):
+    async def start(self, spec):
+        self.spec = spec
+        if self.fail_claim and spec.provider_options.get("extensions"):
             raise RuntimeError("pool exhausted")
+        return self
 
-        monkeypatch.setattr(opensandbox.Sandbox, "create", staticmethod(fake_create))
-        pool = self._pool(pool_fallback=False)
-        pool._connection_config = object()
+    async def stop(self):
+        self.stops += 1
+
+    async def endpoint(self, port):
+        return SandboxEndpoint(endpoint=f"https://sandbox.example/{port}", headers={"X-Route": "r"})
+
+    async def upload(self, local_path, remote_path):
+        self.uploads.append((local_path, remote_path))
+
+    async def exec(self, command):
+        self.commands.append(command)
+        return SimpleNamespace(return_code=0)
+
+
+class TestPoolSandboxApi:
+    @pytest.fixture(autouse=True)
+    def fake_sandbox(self, monkeypatch):
+        import sandbox_pool
+
+        _FakeSandbox.instances = []
+        _FakeSandbox.fail_claim = False
+        monkeypatch.setattr(sandbox_pool, "AsyncSandbox", _FakeSandbox)
+
+    def test_pool_ref_and_direct_fallback_use_sandbox_specs(self):
+        pool = _pool(
+            size=1,
+            pool_ref="warm-pool",
+            env={"NUM_WORKERS": 4},
+            resources={"cpu": 2, "memory_mib": 4096},
+            resource_requests={"cpu": 0.5, "memory_mib": 1024},
+        )
+
+        sandbox, from_pool = asyncio.run(pool._acquire_sandbox())
+        assert from_pool is True
+        assert sandbox.spec.provider_options == {"extensions": {"poolRef": "warm-pool"}}
+        assert sandbox.spec.ports == (6000,)
+        assert sandbox.provider == PROVIDER
+
+        _FakeSandbox.fail_claim = True
+        sandbox, from_pool = asyncio.run(pool._acquire_sandbox())
+        assert from_pool is False
+        assert sandbox.spec.entrypoint == ["/start-with-nginx.sh"]
+        assert sandbox.spec.env == {"NUM_WORKERS": 4}
+        assert sandbox.spec.resources.cpu == 2
+        assert sandbox.spec.resources.memory_mib == 4096
+        assert sandbox.spec.provider_options == {"resource_requests": {"cpu": 0.5, "memory_mib": 1024}}
+
+    def test_pool_failure_raises_when_fallback_disabled(self):
+        pool = _pool(size=1, pool_ref="warm-pool", pool_fallback=False)
+        _FakeSandbox.fail_claim = True
         with pytest.raises(RuntimeError, match="pool exhausted"):
             asyncio.run(pool._acquire_sandbox())
 
-    def test_pool_claim_skips_prepare_and_fallback_does_not(self, monkeypatch):
-        opensandbox = pytest.importorskip("opensandbox")
-        prepared = []
+    def test_claim_skips_prepare_and_direct_create_runs_it(self):
+        pool = _pool(
+            size=1,
+            pool_ref="warm-pool",
+            setup_files={"/opt/setup.py": "/tmp/setup.py"},
+            setup_commands=["check"],
+            service_command="start &",
+        )
 
-        async def fake_create(**kwargs):
-            if "extensions" in kwargs and fake_create.pool_ok:
-                return "pool-pod"
-            if "extensions" in kwargs:
-                raise RuntimeError("pool exhausted")
-            return "direct-pod"
+        async def healthy(*args, **kwargs):
+            return None
 
-        monkeypatch.setattr(opensandbox.Sandbox, "create", staticmethod(fake_create))
-        pool = self._pool()
-        pool._connection_config = object()
+        pool._wait_healthy = healthy
+        asyncio.run(pool._create_slot_inner(pool._slots[0]))
+        assert _FakeSandbox.instances[-1].uploads == []
+        assert _FakeSandbox.instances[-1].commands == []
+        assert pool._slots[0].base_url == "https://sandbox.example/6000"
+        assert pool._slots[0].headers == {"X-Route": "r"}
 
-        async def fake_prepare(sandbox):
-            prepared.append(sandbox)
+        pool._slots[0].sandbox = None
+        _FakeSandbox.fail_claim = True
+        asyncio.run(pool._create_slot_inner(pool._slots[0]))
+        assert _FakeSandbox.instances[-1].uploads == [("/tmp/setup.py", "/opt/setup.py")]
+        assert _FakeSandbox.instances[-1].commands == ["check", "start &"]
 
-        async def fake_endpoint_flow(slot, sandbox):
-            slot.sandbox = sandbox
-            slot.healthy = True
+    def test_slow_heal_does_not_block_other_health_checks(self):
+        pool = _pool(size=2, health_interval_s=0.01)
+        pool._warmup_done = True
+        pool._http = _FakeAiohttpSession([_FakeAiohttpResponse(200) for _ in range(20)])
+        _admit(pool, 1)
+        pool._slots[1].sandbox = _FakeSandbox(PROVIDER)
+        heal_started = asyncio.Event()
 
-        pool._prepare = fake_prepare
+        async def blocked_create(slot):
+            heal_started.set()
+            await asyncio.Future()
 
-        async def run_inner(pool_ok):
-            fake_create.pool_ok = pool_ok
-            sandbox, from_pool = await pool._acquire_sandbox()
-            if pool._needs_prepare and not from_pool:
-                await pool._prepare(sandbox)
-            return sandbox
-
-        assert asyncio.run(run_inner(True)) == "pool-pod"
-        assert prepared == []
-        assert asyncio.run(run_inner(False)) == "direct-pod"
-        assert prepared == ["direct-pod"]
-
-
-class TestProxyAuthHeaders:
-    """Mirror of the provider's proxy-mode auth (PR 2462). The SDK's execd-facing
-    clients authenticate only via ConnectionConfig.headers, so without the key
-    there the create ready gate's health ping 401s on servers that enforce auth
-    on /proxy/* routes and every claim dies at ready_timeout."""
-
-    def _captured_kwargs(self, monkeypatch, connection) -> dict:
-        opensandbox = pytest.importorskip("opensandbox")
-        import opensandbox.config.connection as osb_connection
-
-        captured: dict = {}
-
-        class FakeConnectionConfig:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-        monkeypatch.setattr(osb_connection, "ConnectionConfig", FakeConnectionConfig)
-
-        async def fake_create(**kwargs):
-            # Warmup must not reach the network; a fast failure leaves the slot
-            # empty and lets start() finish so we can inspect the config.
-            raise RuntimeError("no network in tests")
-
-        monkeypatch.setattr(opensandbox.Sandbox, "create", staticmethod(fake_create))
-        pool = _pool(provider={"opensandbox": {"connection": connection}}, size=1)
+        pool._create_slot_inner = blocked_create
 
         async def main():
-            await pool.start()
+            pool._tasks.append(asyncio.create_task(pool._heal_loop()))
+            await heal_started.wait()
+            await asyncio.sleep(0.04)
+            assert sum(method == "GET" for method, _, _ in pool._http.calls) >= 2
             await pool.aclose()
 
         asyncio.run(main())
-        return captured
 
-    def test_proxy_mode_carries_the_api_key_as_a_header(self, monkeypatch):
-        captured = self._captured_kwargs(
-            monkeypatch,
-            {
-                "domain": "http://sandbox.example",
-                "api_key": "key",
-                "use_server_proxy": True,
-            },  # pragma: allowlist secret
-        )
-        assert captured["headers"] == {"OPEN-SANDBOX-API-KEY": "key"}  # pragma: allowlist secret
+    def test_heal_attempts_rotate_across_unhealthy_slots(self):
+        pool = _pool(size=3, health_interval_s=0.01, heal_concurrency=1)
+        pool._warmup_done = True
+        attempted = []
 
-    def test_direct_mode_never_injects_the_key(self, monkeypatch):
-        # A direct sandbox endpoint runs untrusted code and must never see the key.
-        captured = self._captured_kwargs(
-            monkeypatch,
-            {"domain": "http://sandbox.example", "api_key": "key"},  # pragma: allowlist secret
-        )
-        assert "headers" not in captured
+        async def fail_fast(slot):
+            attempted.append(slot.index)
 
-    def test_caller_supplied_headers_survive_and_win(self, monkeypatch):
-        captured = self._captured_kwargs(
-            monkeypatch,
-            {
-                "domain": "http://sandbox.example",
-                "api_key": "key",  # pragma: allowlist secret
-                "use_server_proxy": True,
-                "headers": {"X-Route": "r", "OPEN-SANDBOX-API-KEY": "explicit"},  # pragma: allowlist secret
-            },
-        )
-        assert captured["headers"] == {
-            "X-Route": "r",
-            "OPEN-SANDBOX-API-KEY": "explicit",  # pragma: allowlist secret
-        }
+        pool._heal_slot = fail_fast
 
-    def test_normalize_endpoint_adds_the_key_only_in_proxy_mode(self):
-        from types import SimpleNamespace
+        async def main():
+            pool._tasks.append(asyncio.create_task(pool._heal_loop()))
+            for _ in range(30):
+                if set(attempted) == {0, 1, 2}:
+                    break
+                await asyncio.sleep(0.01)
+            await pool.aclose()
 
-        resolved = SimpleNamespace(endpoint="sandbox.example/v1/sandboxes/sbx/proxy/6000", headers={})
+        asyncio.run(main())
+        assert set(attempted) == {0, 1, 2}
 
-        proxied = _pool()  # PROVIDER sets use_server_proxy: True
-        _, headers = proxied._normalize_endpoint(resolved)
-        assert headers == {"OPEN-SANDBOX-API-KEY": "k"}
+    def test_cancelled_admission_stops_the_sandbox(self):
+        pool = _pool(size=1)
+        waiting = asyncio.Event()
 
-        # A direct endpoint terminates at the sandbox, which runs untrusted code.
-        direct = _pool(
-            provider={"opensandbox": {"connection": {"domain": "http://sandbox.example", "api_key": "k"}}},
-        )
-        _, headers = direct._normalize_endpoint(resolved)
-        assert headers == {}
+        async def wait_forever(*args, **kwargs):
+            waiting.set()
+            await asyncio.Future()
+
+        pool._wait_healthy = wait_forever
+
+        async def main():
+            task = asyncio.create_task(pool._create_slot_inner(pool._slots[0]))
+            await waiting.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(main())
+        assert _FakeSandbox.instances[0].stops == 1
+        assert pool._slots[0].sandbox is None
+
+    def test_cancelled_aclose_finishes_cleanup(self):
+        class BlockingSandbox(_FakeSandbox):
+            stop_started = asyncio.Event()
+            finish_stop = asyncio.Event()
+
+            async def stop(self):
+                self.stop_started.set()
+                await self.finish_stop.wait()
+                await super().stop()
+
+        pool = _pool(size=1)
+        sandbox = BlockingSandbox(PROVIDER)
+        pool._slots[0].sandbox = sandbox
+        pool._http = _FakeAiohttpSession([])
+
+        async def main():
+            first = asyncio.create_task(pool.aclose())
+            await sandbox.stop_started.wait()
+            second = asyncio.create_task(pool.aclose())
+            first.cancel()
+            await asyncio.sleep(0)
+            first.cancel()
+            await asyncio.sleep(0)
+            assert not second.done()
+            sandbox.finish_stop.set()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            await second
+
+        asyncio.run(main())
+        assert sandbox.stops == 1
+        assert pool._slots[0].sandbox is None
+        assert pool._http.closed is True

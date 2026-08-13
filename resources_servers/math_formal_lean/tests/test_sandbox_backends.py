@@ -12,22 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Backend tests for the lean sandbox clients: the additive base_url/header extension must
-leave the default byte-identical, and the OpenSandbox exec client must reproduce the NS
-server's process_status contract exactly (reference: local_sandbox_server.py:631-685)."""
+"""Backend tests for the Lean sandbox clients."""
 
 import asyncio
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-
-from resources_servers.math_formal_lean.sandbox_client import (  # noqa: E402
+from resources_servers.math_formal_lean.sandbox_client import (
     GymSandboxLean4Client,
     Lean4SandboxClient,
 )
@@ -40,28 +32,10 @@ PROVIDER = {
 }
 
 
-class TestHttpClientStaysByteIdentical:
+class TestHttpClientDefaults:
     def test_default_url_is_unchanged(self):
         client = Lean4SandboxClient()
         assert client._get_execute_url() == "http://127.0.0.1:6000/execute"
-
-    def test_base_url_override_and_headers(self):
-        seen = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen["url"] = str(request.url)
-            seen["auth"] = request.headers.get("open-sandbox-api-key")
-            return httpx.Response(200, json={"process_status": "completed", "stdout": "", "stderr": ""})
-
-        client = Lean4SandboxClient(
-            base_url="http://sandbox.example/v1/sandboxes/sbx/proxy/6000",
-            extra_headers={"OPEN-SANDBOX-API-KEY": "k"},
-        )
-        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        out = asyncio.run(client.execute_lean4("theorem t : True := trivial", timeout=5.0))
-        assert out["process_status"] == "completed"
-        assert seen["url"] == "http://sandbox.example/v1/sandboxes/sbx/proxy/6000/execute"
-        assert seen["auth"] == "k"
 
 
 class _FakeSandbox:
@@ -100,12 +74,12 @@ class _FakeSandbox:
 
 @pytest.fixture()
 def fake_sandbox(monkeypatch):
-    import nemo_gym.sandbox.api as api
+    import resources_servers.math_formal_lean.sandbox_client as sandbox_client
 
     _FakeSandbox.instances = []
     _FakeSandbox.next_exec_result = None
     _FakeSandbox.next_raise_on_exec = None
-    monkeypatch.setattr(api, "AsyncSandbox", _FakeSandbox)
+    monkeypatch.setattr(sandbox_client, "AsyncSandbox", _FakeSandbox)
     return _FakeSandbox
 
 
@@ -148,6 +122,15 @@ class TestGymSandboxLean4Client:
         assert out["stdout"] == "partial", "partial stdout must survive, matching the NS server"
         assert out["stderr"].endswith("Execution timed out after 30.0 seconds\n")
 
+    def test_output_truncation_matches_the_ns_contract(self, fake_sandbox):
+        fake_sandbox.next_exec_result = SimpleNamespace(return_code=137, stdout="1234", stderr="abcd")
+        out = asyncio.run(_client(max_output_characters=3).execute_lean4("slow", timeout=30.0))
+        assert out == {
+            "process_status": "timeout",
+            "stdout": "123<output cut>",
+            "stderr": "abc<output cut>",
+        }
+
     def test_infra_failure_degrades_to_error_and_still_tears_down(self, fake_sandbox):
         fake_sandbox.next_raise_on_exec = RuntimeError("proxy exploded")
         out = asyncio.run(_client().execute_lean4("x", timeout=5.0))
@@ -159,7 +142,7 @@ class TestGymSandboxLean4Client:
         client = _client(max_concurrent=1, acquire_timeout_s=0.05)
 
         async def main():
-            sem = client._get_semaphore()
+            sem = client._semaphore
             await sem.acquire()  # exhaust admission
             try:
                 return await client.execute_lean4("x", timeout=5.0)
@@ -169,6 +152,25 @@ class TestGymSandboxLean4Client:
         out = asyncio.run(main())
         assert out == {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
         assert not fake_sandbox.instances, "no pod may be created past a failed admission"
+
+    def test_fresh_pod_is_stopped_when_exec_is_cancelled(self, fake_sandbox, monkeypatch):
+        entered = asyncio.Event()
+
+        async def block(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(fake_sandbox, "exec", block)
+
+        async def scenario():
+            task = asyncio.create_task(_client().execute_lean4("theorem t : True := trivial"))
+            await entered.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+        assert fake_sandbox.instances[0].stopped
 
 
 class TestPooledMode:
@@ -205,6 +207,102 @@ class TestPooledMode:
         assert bad.stopped
         assert second["process_status"] == "completed"
         assert len(fake_sandbox.instances) >= 2
+
+    def test_pool_retries_initial_create_failure(self, fake_sandbox, monkeypatch):
+        client = _client(pool_size=1, acquire_timeout_s=1.0)
+        create = client._create_pool_pod
+        attempts = 0
+
+        async def flaky_create():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("control plane unavailable")
+            return await create()
+
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(_):
+            await real_sleep(0)
+
+        monkeypatch.setattr(client, "_create_pool_pod", flaky_create)
+        monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+        async def scenario():
+            out = await client.execute_lean4("theorem t : True := trivial", timeout=5.0)
+            await client.close()
+            return out
+
+        out = asyncio.run(scenario())
+        assert out["process_status"] == "completed"
+        assert attempts == 2
+        assert all(box.stopped for box in fake_sandbox.instances)
+
+    @pytest.mark.parametrize("blocked_method", ["upload", "exec"])
+    def test_cancelled_lease_is_stopped_and_replaced(self, fake_sandbox, blocked_method):
+        client = _client(pool_size=1, acquire_timeout_s=1.0)
+
+        async def scenario():
+            client.start_pool()
+            while client._pool is None or client._pool.qsize() == 0:
+                await asyncio.sleep(0)
+            leased = fake_sandbox.instances[0]
+            entered = asyncio.Event()
+
+            async def blocked_operation(*args, **kwargs):
+                entered.set()
+                await asyncio.Event().wait()
+
+            setattr(leased, blocked_method, blocked_operation)
+            task = asyncio.create_task(client.execute_lean4("theorem t : True := trivial", timeout=5.0))
+            await entered.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            while client._pool is None or client._pool.qsize() == 0:
+                await asyncio.sleep(0)
+            replacement = fake_sandbox.instances[-1]
+            await client.close()
+            return leased, replacement
+
+        leased, replacement = asyncio.run(scenario())
+        assert leased.stopped
+        assert replacement is not leased
+        assert replacement.stopped
+
+    def test_cancelled_close_finishes_cleanup(self, fake_sandbox):
+        client = _client(pool_size=1)
+
+        async def scenario():
+            client.start_pool()
+            while client._pool is None or client._pool.qsize() == 0:
+                await asyncio.sleep(0)
+            sandbox = fake_sandbox.instances[0]
+            stop_started = asyncio.Event()
+            finish_stop = asyncio.Event()
+            original_stop = sandbox.stop
+
+            async def blocked_stop():
+                stop_started.set()
+                await finish_stop.wait()
+                await original_stop()
+
+            sandbox.stop = blocked_stop
+            closing = asyncio.create_task(client.close())
+            await stop_started.wait()
+            closing.cancel()
+            await asyncio.sleep(0)
+            closing.cancel()
+            await asyncio.sleep(0)
+            assert not closing.done()
+            finish_stop.set()
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+            await client.close()
+
+        asyncio.run(scenario())
+        assert len(fake_sandbox.instances) == 1
+        assert all(box.stopped for box in fake_sandbox.instances)
 
 
 class TestLeanPoolRef:

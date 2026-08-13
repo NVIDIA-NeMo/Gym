@@ -12,19 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""NeMo-Skills sandbox backend that routes through an OpenSandbox pod pool.
+"""NeMo-Skills backend that routes sessions through a shared sandbox pool.
 
-Registers ``sandbox_type: sandbox_pool`` with the nemo_skills sandbox registry. The
-class IS a ``LocalSandbox`` — same request preparation, same session bookkeeping — with the
-transport re-pointed: each request resolves (base_url, headers) from the pool by session
-uuid, and rides a shared AIOHTTP session (httpx/httpcore's O(n^2) connection pooling
-collapses at high concurrency — see CLAUDE.md; measured: health-only GETs fell
-from 87 to 8 calls/s between 64 and 512 in-flight on httpx). Exception TYPES stay httpx
-because the nemo_skills base class's execute_code catches those; anything non-200 or
-transport-level is normalized to the NS timeout contract so infra failures degrade rewards
-without new error shapes.
-
-Importing this module is the opt-in: the default ``local`` backend never imports it.
+The resources server owns the pool lifetime and registers this backend when selected.
+Subclassing ``LocalSandbox`` preserves its request and session behavior while replacing
+only the HTTP transport.
 """
 
 import asyncio
@@ -40,21 +32,14 @@ from sandbox_pool import SandboxPool
 
 LOGGER = logging.getLogger(__name__)
 
-# The pool the owning server can warm up at lifespan startup (set by the first construction).
-CURRENT_POOL: Optional[SandboxPool] = None
-
 
 class GymSandbox(ns_sandbox.LocalSandbox):
     """LocalSandbox with the transport routed through an OpenSandbox pod pool over aiohttp."""
 
-    def __init__(self, pool: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+    def __init__(self, pool: SandboxPool, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        if not pool:
-            raise ValueError("sandbox_type=sandbox_pool requires a 'pool' config dict")
-        global CURRENT_POOL
-        self._pool = SandboxPool(**pool)
+        self._pool = pool
         self._aiohttp: Optional[aiohttp.ClientSession] = None
-        CURRENT_POOL = self._pool
 
     def _session(self) -> aiohttp.ClientSession:
         if self._aiohttp is None or self._aiohttp.closed:
@@ -130,11 +115,7 @@ class GymSandbox(ns_sandbox.LocalSandbox):
 
     async def close(self) -> None:
         try:
-            await self._pool.aclose()
-        finally:
             if self._aiohttp is not None and not self._aiohttp.closed:
                 await self._aiohttp.close()
+        finally:
             await super().close()
-
-
-ns_sandbox.sandboxes["sandbox_pool"] = GymSandbox
