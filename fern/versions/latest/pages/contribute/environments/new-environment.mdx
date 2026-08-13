@@ -61,7 +61,7 @@ resources_servers/my_server/
 In YAML, the scorer block is `{name}_resources_server` and the agent block is `{name}_simple_agent`. Pass the agent block as `--agent`.
 
 <Warning>
-For pull requests to this repository, run `gym env init --resources-server` only.
+For pull requests to this repository, run `gym env init --resources-server` only. `--environment`, `--reuse-verifier`, and `--benchmark` create an experimental layout — see the accordion at the bottom of this page.
 </Warning>
 
 **Next:** implement `verify()` in `app.py`.
@@ -202,6 +202,23 @@ Follow [Add a benchmark](/contribute/environments/adding-a-benchmark) from step 
 If you have compute, inspect reward distribution on at least ~500 prompts with 16 responses each (Qwen3-4B, Qwen 30B A3B, or equivalent). For tool-calling, report tool-call metrics vs reward.
 
 A useful training check isolates this environment (for example GRPO with NeMo RL, 64 prompts per step, 16 rollouts per prompt). Include curves and config links in the PR if you run it.
+</Accordion>
+
+<Accordion title="Experimental manifest contract">
+This layout is experimental and not required for catalog PRs. Environments and benchmarks in this repository do not ship `manifest.yaml`. The commands below are implemented but incomplete.
+
+```bash
+gym env init --environment my_eval --profile custom-gym-verifier
+gym env validate my_eval
+gym env test my_eval
+gym env publish my_eval
+```
+
+`--reuse-verifier` requires the reused server to export `VERIFIER_FIXTURE`. Production scorers do not. Reuse them with `config_paths` and `_inherit_from` instead.
+
+The fixture contract (full-reward, zero-reward, malformed, plus reseed when `seeded`) is the local bar on that path. Publication records readiness as `experimental`. CODEOWNERS, immutable versions, and a hosted catalog index are not automated yet.
+
+Integration profiles (`custom-gym-verifier`, `custom-gym-agent-loop`, `external-agent-loop`, `external-rollout-driver`) classify where the episode is driven. They are authored labels, not a runtime dispatcher. See `nemo_gym/environment/manifest.py` and [CLI: gym env init](/reference/cli-commands#gym-env-init).
 </Accordion>
 
 <Accordion title="Recommended technical design">
