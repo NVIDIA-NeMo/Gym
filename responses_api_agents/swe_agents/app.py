@@ -2577,7 +2577,7 @@ class RunOpenHandsAgent(BaseModel):
     ) -> ActiveContainerCommand:
         # Stream output to log file as it appears
         logs_dir = self.config.persistent_dir / "apptainer_logs"
-        logs_dir.mkdir(exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
         log_file_path = logs_dir / f"{self.config.instance_id}_{command.mode}.log"
         log_file = open(log_file_path, "w")
 
