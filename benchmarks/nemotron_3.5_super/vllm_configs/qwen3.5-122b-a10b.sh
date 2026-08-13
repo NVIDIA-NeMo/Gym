@@ -14,12 +14,9 @@ VLLM_COMMON_ARGS=(
     --mm-encoder-tp-mode data
     --enable-chunked-prefill
     --no-enable-prefix-caching
-    --kv-cache-dtype fp8
     --enable-expert-parallel
     --no-disable-hybrid-kv-cache-manager
     --no-async-scheduling
-    # Isolate compiled/CUDA-graph execution while retaining the required MoE weight layout.
-    --enforce-eager
     --block-size 128
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
@@ -27,4 +24,5 @@ VLLM_COMMON_ARGS=(
     --max-num-batched-tokens 33920
     --max-num-seqs 256
     --max-cudagraph-capture-size 256
+    --limit-mm-per-prompt '{"image":4,"video":1}'
 )
