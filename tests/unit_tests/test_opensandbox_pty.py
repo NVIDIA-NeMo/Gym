@@ -618,6 +618,38 @@ async def test_provider_aclose_closes_live_pty_sessions(monkeypatch: pytest.Monk
     await session.close()
 
 
+async def test_provider_tracks_sessions_strongly_and_prunes_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    import gc
+
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/base", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "protocol": "http"})
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: FakeHttpClient(ws=FakeWs([CONNECTED])))
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+
+    first = await provider.create_pty(handle, SandboxPtySpec())
+    # Strong reference: dropping the caller's handle must not let the session
+    # be collected before its aiohttp client is closed.
+    first_id = id(first)
+    del first
+    gc.collect()
+    assert any(id(s) == first_id for s in provider._pty_sessions)
+
+    # Closing retires it on the next create; the new session stays tracked.
+    for tracked in list(provider._pty_sessions):
+        await tracked.close()
+    second = await provider.create_pty(handle, SandboxPtySpec())
+    assert not any(id(s) == first_id for s in provider._pty_sessions)
+    assert second in provider._pty_sessions
+    await provider.aclose()
+
+
 async def test_attach_never_deletes_a_session_it_did_not_create() -> None:
     from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
 

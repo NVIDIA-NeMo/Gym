@@ -18,7 +18,6 @@ import asyncio
 import logging
 import re
 import shlex
-import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -581,7 +580,10 @@ class OpenSandboxProvider:
         # create, so the provider owns this one: built once, reused by every
         # ConnectionConfig, closed in aclose().
         self._transport: Any | None = None
-        self._pty_sessions: weakref.WeakSet[Any] = weakref.WeakSet()
+        # Strong references: a session dropped without close() would leak its
+        # aiohttp client (GC cannot close it); aclose() closes whatever is
+        # still open, and closed sessions are pruned on the next create/attach.
+        self._pty_sessions: set[Any] = set()
 
     def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
         """Add the configured default image pull policy to SDK create extensions."""
@@ -1124,6 +1126,7 @@ class OpenSandboxProvider:
             spec=spec,
             request_timeout_s=request_timeout_s,
         )
+        self._pty_sessions = {live for live in self._pty_sessions if not live.closed}
         self._pty_sessions.add(session)
         return session
 
@@ -1148,6 +1151,7 @@ class OpenSandboxProvider:
             since=since,
             request_timeout_s=request_timeout_s,
         )
+        self._pty_sessions = {live for live in self._pty_sessions if not live.closed}
         self._pty_sessions.add(session)
         return session
 

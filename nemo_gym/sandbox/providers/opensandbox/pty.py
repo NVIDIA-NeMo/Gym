@@ -105,6 +105,11 @@ class OpenSandboxPtySession:
         self._closed = False
         self._pump_task = asyncio.create_task(self._pump())
 
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` has run; a closed session cannot run commands."""
+        return self._closed
+
     async def _pump(self) -> None:
         """Sole reader of the WebSocket; fans frames out to queue/future/event."""
         try:

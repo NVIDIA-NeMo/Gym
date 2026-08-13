@@ -260,6 +260,12 @@ class SandboxPtySession(Protocol):
     """One live interactive terminal. Async context manager; exit closes it."""
 
     session_id: str
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` has run; a closed session cannot run commands."""
+        ...
+
     mode: str | None
     """``"pty"`` or ``"pipe"`` once connected, ``None`` before that. Only pipe
     mode splits stderr; in PTY mode all output arrives through ``read()``."""

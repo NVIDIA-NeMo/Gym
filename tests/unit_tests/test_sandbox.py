@@ -1517,6 +1517,124 @@ async def test_pty_exec_on_existing_session() -> None:
     await sandbox.stop()
 
 
+class _LiveShellSession:
+    """Live-session fake: echoes the typed line, then answers the marker."""
+
+    def __init__(self, *, hang: bool = False) -> None:
+        self.written: list[bytes] = []
+        self._pending: list[bytes] = []
+        self._hang = hang
+        self.closed = False
+
+    async def write(self, data: bytes) -> None:
+        self.written.append(data)
+        if self._hang:
+            return
+        typed = data.decode()
+        quoted = typed.splitlines()[-1].split("'")
+        token = quoted[3] + quoted[5]
+        self._pending = [typed.encode(), b"live-output\r\n", f"{token}:0\r\n".encode()]
+
+    async def read(self, *, timeout_s: float | None = None) -> bytes:
+        if self._hang:
+            await asyncio.sleep(3600)
+        return self._pending.pop(0) if self._pending else b""
+
+    async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
+        raise TimeoutError
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_pty_exec_reuses_live_session_when_none_passed() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    class OneCreateProvider(PlainSandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.creates = 0
+
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _LiveShellSession:
+            self.creates += 1
+            if self.creates > 1:
+                raise AssertionError("exec must reuse the live session, not open a new one")
+            return _LiveShellSession()
+
+    provider = OneCreateProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    live = await sandbox.pty.create("/bin/bash")
+
+    result = await sandbox.pty.exec("make")
+    assert result.return_code == 0
+    assert "live-output" in result.stdout
+    assert live.written, "the command must run inside the live session"
+    assert not live.closed, "implicit reuse must leave the session open"
+    await sandbox.stop()
+
+
+async def test_pty_exec_shaping_args_force_one_shot() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    class MixedProvider(PlainSandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.live = _LiveShellSession()
+            self.one_shots: list[SandboxPtySpec] = []
+
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> object:
+            if spec.command == "/bin/bash":
+                return self.live
+            self.one_shots.append(spec)
+
+            class OneShot:
+                closed = False
+
+                async def read(self, *, timeout_s: float | None = None) -> bytes:
+                    return b""
+
+                read_stderr = read
+
+                async def wait_exit(self, *, timeout_s: float | None = None) -> int:
+                    return 0
+
+                async def close(self) -> None:
+                    self.closed = True
+
+            return OneShot()
+
+    provider = MixedProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    await sandbox.pty.create("/bin/bash")
+
+    # env is fixed at create(), so this call cannot reuse the live session.
+    result = await sandbox.pty.exec("make", env={"A": "1"})
+    assert result.return_code == 0
+    assert provider.one_shots and provider.one_shots[0].env == {"A": "1"}
+    assert not provider.live.written, "shaping arguments must not touch the live session"
+    await sandbox.stop()
+
+
+async def test_pty_exec_implicit_timeout_retires_session() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    class HangingLiveProvider(PlainSandboxProvider):
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _LiveShellSession:
+            return _LiveShellSession(hang=True)
+
+    sandbox = AsyncSandbox(HangingLiveProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    live = await sandbox.pty.create("/bin/bash")
+
+    result = await sandbox.pty.exec("stuck", timeout_s=0.05)
+    assert (result.return_code, result.error_type) == (125, "timeout")
+    assert live.closed, "a timed-out implicitly reused session must be retired"
+    assert sandbox.pty._live_session() is None
+    await sandbox.stop()
+
+
 async def test_pty_attach_requires_capability() -> None:
     plain = AsyncSandbox(PlainSandboxProvider())
     await plain.start(SandboxSpec(image="image:tag"))

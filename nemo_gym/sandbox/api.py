@@ -103,6 +103,12 @@ class SandboxPty:
 
     def __init__(self, sandbox: "AsyncSandbox") -> None:
         self._sandbox = sandbox
+        self._sessions: list[SandboxPtySession] = []
+
+    def _live_session(self) -> SandboxPtySession | None:
+        """First still-open session created or attached through this sandbox."""
+        self._sessions = [s for s in self._sessions if not s.closed]
+        return self._sessions[0] if self._sessions else None
 
     async def create(
         self,
@@ -134,7 +140,7 @@ class SandboxPty:
             raise NotImplementedError(
                 f"Sandbox provider {provider_name!r} does not support PTY sessions; use exec() instead"
             )
-        return await sandbox._provider.create_pty(
+        session = await sandbox._provider.create_pty(
             sandbox._require_handle(),
             SandboxPtySpec(
                 command=command,
@@ -146,6 +152,8 @@ class SandboxPty:
                 pty=pty,
             ),
         )
+        self._sessions.append(session)
+        return session
 
     async def attach(
         self,
@@ -166,9 +174,11 @@ class SandboxPty:
         if not isinstance(sandbox._provider, SupportsSandboxPtyAttach):
             provider_name = getattr(sandbox._provider, "name", type(sandbox._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support re-attaching PTY sessions")
-        return await sandbox._provider.attach_pty(
+        session = await sandbox._provider.attach_pty(
             sandbox._require_handle(), session_id, takeover=takeover, since=since
         )
+        self._sessions.append(session)
+        return session
 
     async def exec(
         self,
@@ -185,20 +195,29 @@ class SandboxPty:
     ) -> SandboxExecResult:
         """Run one command in a terminal session and collect its output.
 
-        Without ``session`` this opens a session for the command, drains it and
-        closes it. With ``session`` the command runs in that live session, which
-        stays open and keeps its shell state; ``cwd``/``env``/``user``/``rows``/
-        ``cols``/``pty`` are then ignored because they are fixed at
-        ``create()``. In a live session the output also contains the shell's
-        echo of the command, ``stderr`` is best-effort (pipe mode only), and a
-        command that ends the shell (``exit``) raises ``SandboxPtyError``.
+        Without ``session``, the oldest live session opened through this
+        sandbox's ``create()``/``attach()`` is reused — provided the call sets
+        none of the session-shaping arguments (``cwd``/``env``/``user``,
+        non-default ``rows``/``cols``, or ``pty=False``), since those are fixed
+        at ``create()``. When no live session exists (or shaping arguments are
+        given) a private session is opened for the command, drained and closed.
+        With ``session`` the command runs in that live session, which stays open
+        and keeps its shell state. In a live session the output also contains
+        the shell's echo of the command, ``stderr`` is best-effort (pipe mode
+        only), and a command that ends the shell (``exit``) raises
+        ``SandboxPtyError``.
 
         PTY mode returns all output on ``stdout`` and ``None`` stderr; pipe mode
         splits the two. A command that outlives ``timeout_s`` returns
         ``error_type="timeout"`` like ``sandbox.exec()`` rather than raising;
-        with ``session`` that command keeps running and leaves unread output
-        behind, so discard the session rather than reusing it.
+        in an explicitly passed session that command keeps running and leaves
+        unread output behind, so discard the session rather than reusing it (an
+        implicitly reused session is retired automatically).
         """
+        implicit = False
+        if session is None and cwd is None and env is None and user is None and pty and (rows, cols) == (24, 80):
+            session = self._live_session()
+            implicit = session is not None
         if session is not None:
             if cwd is not None or env is not None or user is not None:
                 raise ValueError(
@@ -208,8 +227,19 @@ class SandboxPty:
             try:
                 return await asyncio.wait_for(_run_in_pty_session(session, command), timeout=timeout_s)
             except (TimeoutError, asyncio.TimeoutError):
+                if implicit:
+                    # The caller has no handle on this session and its stream
+                    # now carries the stray command's output; retire it so the
+                    # next implicit exec cannot inherit it.
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
                 return _pty_timeout_result(command, timeout_s, reusable=False)
         session = await self.create(command, cwd=cwd, env=env, rows=rows, cols=cols, user=user, pty=pty)
+        # A one-shot session is private to this call; keep it out of the
+        # implicit-reuse pool so a concurrent exec cannot pick it mid-drain.
+        self._sessions.remove(session)
         try:
 
             async def drain(read: Callable[[], Awaitable[bytes]]) -> bytes:
