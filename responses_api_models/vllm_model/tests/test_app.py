@@ -4602,7 +4602,7 @@ class TestTopLogprobsHandling:
         assert result["top_logprobs"] == 0
         assert result["logprobs"] is True
         assert result["return_tokens_as_token_ids"] is True
-        assert result["return_token_ids"] is True
+        assert "return_token_ids" not in result
 
         # Inbound non-zero value must also be overridden, not inherited.
         result = model._preprocess_chat_completion_create_params(
@@ -4735,7 +4735,7 @@ class TestTopLogprobsHandling:
         app = model.setup_webserver()
 
         async def mock_create_chat_completion(**kwargs):
-            assert kwargs["return_token_ids"] is True
+            assert "return_token_ids" not in kwargs
             return self._capture_chat_completion_dict(
                 logprobs={
                     "content": [

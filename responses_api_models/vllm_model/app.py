@@ -605,9 +605,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 top_logprobs=0,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
-                # Standard vLLM returns exact prompt and generation IDs in the
-                # same response when this extension is enabled.
-                return_token_ids=True,
             )
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
