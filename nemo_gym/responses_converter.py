@@ -26,7 +26,6 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import (
-    RESPONSES_TO_TRAIN,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
@@ -57,6 +56,8 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     Reasoning,
     TokenIDLogProbMixin,
+    _validate_atomic_token_metadata,
+    training_variant_of,
 )
 
 
@@ -67,6 +68,26 @@ def _message_content_to_text(content: Any) -> str:
     return "".join(part.get("text", "") for part in content or [] if isinstance(part, dict))
 
 
+def _optional_token_count(value: Any) -> Optional[int]:
+    """Return a provider-reported token count without coercing missing/invalid values to zero."""
+    return value if type(value) is int and value >= 0 else None
+
+
+def _usage_detail(usage: Any, detail_group: str, detail_name: str, *top_level_aliases: str) -> Optional[int]:
+    """Read one canonical nested token detail, then named provider aliases."""
+    details = getattr(usage, detail_group, None)
+    value = details.get(detail_name) if isinstance(details, dict) else getattr(details, detail_name, None)
+    value = _optional_token_count(value)
+    if value is not None:
+        return value
+    for name in top_level_aliases:
+        value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+        value = _optional_token_count(value)
+        if value is not None:
+            return value
+    return None
+
+
 class ResponsesConverterState(BaseModel):
     return_token_id_information: bool
 
@@ -74,11 +95,13 @@ class ResponsesConverterState(BaseModel):
 
     content_buffer: str = ""
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
+    assistant_item_buffered: bool = False
 
     token_information: Optional[TokenIDLogProbMixin] = None
 
     def flush_assistant(self) -> None:
-        if not (self.content_buffer or self.tool_calls_buffer):
+        if not (self.assistant_item_buffered or self.content_buffer or self.tool_calls_buffer):
+            self.token_information = None
             return
 
         shared_params = dict(
@@ -87,7 +110,7 @@ class ResponsesConverterState(BaseModel):
             tool_calls=self.tool_calls_buffer,
         )
 
-        if self.return_token_id_information and self.token_information:
+        if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
                 **self.token_information.model_dump(exclude_none=True),
@@ -99,6 +122,16 @@ class ResponsesConverterState(BaseModel):
 
         self.content_buffer = ""
         self.tool_calls_buffer = []
+        self.assistant_item_buffered = False
+        self.token_information = None
+
+
+def _token_information_from_mapping(value: Dict[str, Any]) -> Optional[TokenIDLogProbMixin]:
+    """Return validated token metadata when the mapping contains it."""
+    _validate_atomic_token_metadata(value)
+    if "prompt_token_ids" not in value:
+        return None
+    return TokenIDLogProbMixin.model_validate(value)
 
 
 class ResponsesConverter(BaseModel):
@@ -160,16 +193,23 @@ class ResponsesConverter(BaseModel):
                     self._format_function_call(m, state)
                 case "function_call_output":
                     self._format_function_call_output(m, state)
-                case _:  # pragma: no cover
-                    raise NotImplementedError(f"Unsupported message type: {m}")
+                case _:
+                    # This fires mid-rollout, on whichever model server downconverts.
+                    # Most types that reach it are Responses-only by design.
+                    # They are not an omission here.
+                    # The item itself is left out of the message.
+                    # A compaction record carries an opaque blob, and the tag is what identifies the problem.
+                    raise NotImplementedError(
+                        f"{m['type']!r} has no Chat Completions representation, so this rollout "
+                        f"cannot be downconverted. Route it to a model server that passes "
+                        f"Responses through (nemo_gym serves these unconverted), or add a "
+                        f"`case {m['type']!r}` here if the type does have a chat equivalent."
+                    )
 
-            if self.return_token_id_information and m.get("prompt_token_ids"):
-                state.token_information = TokenIDLogProbMixin(
-                    prompt_token_ids=m["prompt_token_ids"],
-                    generation_token_ids=m["generation_token_ids"],
-                    generation_log_probs=m["generation_log_probs"],
-                    routed_experts=m.get("routed_experts"),
-                )
+            if self.return_token_id_information:
+                token_information = _token_information_from_mapping(m)
+                if token_information is not None:
+                    state.token_information = token_information
 
         state.flush_assistant()
 
@@ -196,6 +236,10 @@ class ResponsesConverter(BaseModel):
         max_output_tokens = responses_create_params.pop("max_output_tokens", None)
         if max_output_tokens is not None:
             responses_create_params["max_tokens"] = max_output_tokens
+
+        reasoning = responses_create_params.pop("reasoning", None)
+        if reasoning is not None and reasoning.get("effort") is not None:
+            responses_create_params["reasoning_effort"] = reasoning["effort"]
 
         tools = responses_create_params.pop("tools", None)
         if tools:
@@ -229,8 +273,29 @@ class ResponsesConverter(BaseModel):
         state.flush_assistant()
 
         assert "call_id" in m
+        output = m["output"]
+        if isinstance(output, str):
+            content = output
+        elif isinstance(output, list):
+            unsupported_types = sorted(
+                {part.get("type", "<missing>") for part in output if part.get("type") != "input_text"}
+            )
+            if unsupported_types:
+                raise NotImplementedError(
+                    "Cannot convert Responses function_call_output "
+                    f"for call {m['call_id']!r} to a Chat Completions tool message: "
+                    "Chat tool messages cannot represent content part type(s) "
+                    f"{', '.join(repr(part_type) for part_type in unsupported_types)}"
+                )
+            content = [{"type": "text", "text": part["text"]} for part in output]
+        else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
+            raise TypeError(
+                "Responses function_call_output must be a string or a list of structured content parts, "
+                f"got {type(output).__name__}"
+            )
+
         converted = NeMoGymChatCompletionToolMessageParam(
-            content=m["output"],
+            content=content,
             role="tool",
             tool_call_id=m["call_id"],
         )
@@ -262,6 +327,7 @@ class ResponsesConverter(BaseModel):
 
         match m["role"]:
             case "assistant":
+                state.assistant_item_buffered = True
                 final_content = ""
                 if m["content"] is None:
                     # Tool-call only turns have "None" according to the official API spec.
@@ -320,6 +386,7 @@ class ResponsesConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        state.assistant_item_buffered = True
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
             state.content_buffer += self._wrap_reasoning_in_think_tags(texts)
@@ -329,6 +396,7 @@ class ResponsesConverter(BaseModel):
         m: dict,
         state: ResponsesConverterState,
     ) -> None:
+        state.assistant_item_buffered = True
         assert "call_id" in m
         tool_call = NeMoGymChatCompletionMessageToolCallParam(
             id=m["call_id"],
@@ -345,8 +413,10 @@ class ResponsesConverter(BaseModel):
     # =======================================================
 
     def _chat_completion_to_responses_tools(
-        self, chat_completions_tools: List[NeMoGymChatCompletionToolParam]
+        self, chat_completions_tools: Optional[List[NeMoGymChatCompletionToolParam]]
     ) -> List[NeMoGymFunctionToolParam]:
+        if chat_completions_tools is None:
+            return []
         return [tool["function"] | {"type": "function"} for tool in chat_completions_tools]
 
     def chat_completion_to_responses_create_params(
@@ -359,7 +429,9 @@ class ResponsesConverter(BaseModel):
             metadata=chat_completion_create_params.metadata,
             model=chat_completion_create_params.model,
             parallel_tool_calls=chat_completion_create_params.parallel_tool_calls,
-            reasoning=Reasoning(reasoning_effort=chat_completion_create_params.reasoning_effort),
+            reasoning=Reasoning(effort=chat_completion_create_params.reasoning_effort)
+            if chat_completion_create_params.reasoning_effort is not None
+            else None,
             service_tier=chat_completion_create_params.service_tier,
             store=chat_completion_create_params.store,
             temperature=chat_completion_create_params.temperature,
@@ -432,18 +504,13 @@ class ResponsesConverter(BaseModel):
                 )
             )
 
-        if self.return_token_id_information and "prompt_token_ids" in message_dict:
+        token_information = _token_information_from_mapping(message_dict) if self.return_token_id_information else None
+        if token_information is not None:
             last_response_output_item = response_output[-1]
-            train_cls = RESPONSES_TO_TRAIN[last_response_output_item.__class__]
-            extra_training_fields = {}
-            if "routed_experts" in message_dict and message_dict["routed_experts"] is not None:
-                extra_training_fields["routed_experts"] = message_dict["routed_experts"]
+            train_cls = training_variant_of(last_response_output_item.__class__)
             response_output[-1] = train_cls(
                 **last_response_output_item.model_dump(),
-                prompt_token_ids=message_dict["prompt_token_ids"],
-                generation_token_ids=message_dict["generation_token_ids"],
-                generation_log_probs=message_dict["generation_log_probs"],
-                **extra_training_fields,
+                **token_information.model_dump(exclude_none=True),
             )
 
         return response_output
@@ -465,10 +532,13 @@ class ResponsesConverter(BaseModel):
             elif role == "assistant":
                 output_items.extend(self.postprocess_assistant_message_dict(message))
             elif role == "tool":
+                content = message["content"]
+                if isinstance(content, list):
+                    content = [{"type": "input_text", "text": part["text"]} for part in content]
                 output_items.append(
                     NeMoGymFunctionCallOutput(
                         call_id=message["tool_call_id"],
-                        output=message["content"],
+                        output=content,
                         status="completed",
                     )
                 )
@@ -489,12 +559,30 @@ class ResponsesConverter(BaseModel):
 
         usage = None
         if chat_completion.usage:
+            cached_tokens = _usage_detail(
+                chat_completion.usage,
+                "prompt_tokens_details",
+                "cached_tokens",
+                "cached_input_tokens",
+                "cache_read_input_tokens",
+            )
+            reasoning_tokens = _usage_detail(
+                chat_completion.usage,
+                "completion_tokens_details",
+                "reasoning_tokens",
+                "reasoning_output_tokens",
+            )
             usage = NeMoGymResponseUsage(
                 input_tokens=chat_completion.usage.prompt_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(
+                    cached_tokens=cached_tokens if cached_tokens is not None else 0,
+                ),
                 output_tokens=chat_completion.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=chat_completion.usage.prompt_tokens + chat_completion.usage.completion_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=reasoning_tokens if reasoning_tokens is not None else 0
+                ),
+                # Provider totals can use accounting that differs from prompt + completion.
+                total_tokens=chat_completion.usage.total_tokens,
             )
 
         incomplete_details = None
@@ -530,9 +618,50 @@ class ResponsesConverter(BaseModel):
             metadata=responses_create_params.metadata,
             instructions=responses_create_params.instructions,
             user=responses_create_params.user,
+            status="incomplete" if incomplete_details is not None else "completed",
             incomplete_details=incomplete_details,
             usage=usage,
         )
+
+
+# Responses output-item types that mark the start of the model's own generation.
+# split_responses_input_output_items cuts at the first item of one of these types.
+# Everything before it is replayed prompt.
+# Everything after is the segment carrying sampled tokens.
+#
+# "message" is absent because the role == "assistant" check below already covers an assistant message.
+# A user, system or developer message must not open the segment.
+_RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
+    {
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "function_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "reasoning",
+        "web_search_call",
+    }
+)
+
+# These item types are not model-generated.
+# They include client-supplied tool results, approvals, and context-management data.
+# Excluding them from the boundary set prevents tool results from starting the sampled segment.
+#
+# The SDK unions do not distinguish generated items from client-supplied items.
+_RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
+    {
+        "computer_call_output",
+        "custom_tool_call_output",
+        "function_call_output",
+        "local_shell_call_output",
+        "mcp_approval_response",
+    }
+)
 
 
 def split_responses_input_output_items(
@@ -541,19 +670,21 @@ def split_responses_input_output_items(
     if not items:
         return [], []
 
+    split_at = len(items)
     for i, item in enumerate(items):
-        if (
-            getattr(item, "role", None) == "assistant"
-            or getattr(item, "type", None)
-            in {
-                "reasoning",
-                "reasoning_item",
-            }
-            or getattr(item, "type", None) in ("function_call",)
-        ):
+        # The role shortcut is for assistant messages only.
+        # Applied to any item carrying a role, it outranks the type set below and decides the split
+        # on its own, so a non-message item that happens to have role == "assistant" would open the
+        # trained segment however it is classified.
+        # Every item type with a role is a message at the pinned SDK, so this is the same behaviour
+        # here, stated in a way later versions cannot subvert.
+        item_type = getattr(item, "type", None)
+        is_assistant_message = item_type == "message" and getattr(item, "role", None) == "assistant"
+        if is_assistant_message or item_type in _RESPONSE_OUTPUT_BOUNDARY_TYPES:
+            split_at = i
             break
 
-    return items[:i], items[i:]
+    return items[:split_at], items[split_at:]
 
 
 # Backward-compatible aliases

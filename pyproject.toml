@@ -25,7 +25,7 @@ dynamic = [
 ]
 description = "NeMo Gym is a library for building reinforcement learning environments"
 license = {file = "LICENSE"}
-requires-python = ">=3.12"
+requires-python = ">=3.13.14"
 authors = [{ name = "NVIDIA" }]
 maintainers = [{ name = "NVIDIA" }]
 
@@ -57,7 +57,7 @@ classifiers = [
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Mathematics",
@@ -110,6 +110,11 @@ dependencies = [
     "pydantic",
     "pydantic_core",
     "devtools",
+
+    # Packaging: Validates SPDX license expressions in environment manifests.
+    # Updated Tue Aug 11, 2026 with packaging==25.0
+    # License: Apache-2.0 OR BSD-2-Clause https://github.com/pypa/packaging/tree/25.0
+    "packaging>=24.2",
 
     # FastAPI: Used for server infrastructure
     # Updated Thu Mar 26, 2026 with fastapi==0.135.2
@@ -200,32 +205,44 @@ dependencies = [
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
     "python-multipart>=0.0.22",
 
+    # pyarrow: columnar data library (transitive dependency via mlflow, pinned for security)
+    # mlflow caps pyarrow<25; versions >=23.0.1 have cp313 wheels and address use-after-free.
+    # Updated: Tue Jul 29, 2026 with pyarrow>=23.0.1
+    # License: Apache 2.0 https://github.com/apache/arrow/blob/main/LICENSE
+    "pyarrow>=23.0.1",
+
     # wandb: E2E rollout collection data and metrics upload
     # Updated: Mon May 19, 2026 with wandb==0.27.0
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
     "wandb",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
-    # Updated: Mon May 19, 2026 with GitPython>=3.1.50
+    # Updated: Mon Aug 04, 2026 with GitPython>=3.1.57
     # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
-    "GitPython>=3.1.50",
+    "GitPython>=3.1.57",
 
     # pyasn1: ASN.1 library (transitive dependency via google-auth, pinned for security)
     # Updated: Tue Jul 29, 2026 with pyasn1>=0.6.4
     # License: BSD 2-Clause https://pyasn1.readthedocs.io/en/latest/license.html
     "pyasn1>=0.6.4",
 
-    # gprof2dot and pydot: Used for outputting dot graphs for profiling.
-    # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
-    # gprof2dot License: GNU Lesser General Public License v3.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     # pydot License: MIT https://github.com/pydot/pydot/blob/a2bee1e770698867332516fb2878fac262b4ffc5/LICENSES/MIT.txt
-    "gprof2dot",
     "pydot",
 ]
 
 [project.optional-dependencies]
 all = [
     "nemo-gym[dev,sandbox]",
+]
+
+vllm = [
+    # Pin to the same version used by local_vllm_model / genrm_model server venvs.
+    # Updated: Mon Aug 04, 2026 with vllm==0.24.0
+    "vllm==0.24.0",
+    # Pin flashinfer to the exact version vllm 0.24.0 specifies, ensuring pre-compiled
+    # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
+    # flashinfer>=0.2 bundles compiled kernels in the python package directly.
+    "flashinfer-python==0.6.12",
 ]
 
 sandbox = [
@@ -240,14 +257,13 @@ sandbox = [
     # License: Apache 2.0
     "opensandbox>=0.1.15",
 
-    # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
-    # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
-    # lifecycle calls. Upper bound <0.1: the SDK is alpha 0.0.x and the provider also relies on
-    # its generated protos (openshell._proto), so minor bumps can break call shapes; the
-    # SDK-conformance unit test guards the raise of this ceiling.
-    # Updated: Tue Jul 14, 2026 with openshell>=0.0.92,<0.1
-    # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
-    "openshell>=0.0.92,<0.1",
+    # httpx-aiohttp: aiohttp-backed httpx transport used by the OpenSandbox
+    # provider's `connection.transport_backend: aiohttp`; without it the
+    # provider silently falls back to the httpx transport with only a warning.
+    # Pulls in aiohttp (aiohttp<4,>=3.10).
+    # Updated: Tue Aug 11, 2026 with httpx-aiohttp>=0.2.0
+    # License: BSD 3-Clause https://github.com/karpetrosyan/httpx-aiohttp/blob/master/LICENSE
+    "httpx-aiohttp>=0.2.0",
 
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
@@ -260,8 +276,25 @@ sandbox = [
     "boto3>=1.34",
 ]
 
+# Keep OpenShell opt-in so its platform-specific SDK wheel cannot block installs for other providers.
+openshell = [
+    # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
+    # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
+    # lifecycle calls. Upper bound <0.1: the SDK is alpha 0.0.x and the provider also relies on
+    # its generated protos (openshell._proto), so minor bumps can break call shapes; the
+    # SDK-conformance unit test guards the raise of this ceiling.
+    # Updated: Tue Jul 14, 2026 with openshell>=0.0.92,<0.1
+    # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
+    "openshell>=0.0.92,<0.1",
+]
+
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
+    # gprof2dot: Used for outputting dot graphs for profiling.
+    # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14
+    # License: LGPLv3+ https://github.com/jrfonseca/gprof2dot/blob/master/COPYING.LESSER
+    "gprof2dot",
+
     # Pre-commit: Used for pre-commit hooks.
     # Updated: Thu Sep 04, 2025 with pre-commit==4.3.0
     # License: MIT https://github.com/pre-commit/pre-commit/blob/e70b313c8017b2b6d7844e91795c9d41b9ceb9fb/LICENSE
@@ -293,10 +326,25 @@ dev = [
     "pytest",
     "pytest-asyncio",
 
+    # DefusedXML: Hardened XML parsing for the GitLab JUnit relay receiver.
+    # License: Python Software Foundation License
+    "defusedxml>=0.7.1",
+
     # Requests-mock: Used for mocking HTTP requests in tests
     # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
     # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     "requests-mock",
+]
+
+[dependency-groups]
+# Codec-bearing packages excluded from the shipped package and container.
+# Not published to PyPI. Versions are resolved and tracked in uv.lock.
+# docker/install_codec_deps.sh pins these explicitly to their uv.lock versions;
+# update the script when uv lock bumps them.
+codec = [
+    "opencv-python-headless",
+    "torchvision",
+    "torchaudio",
 ]
 
 [build-system]
@@ -312,10 +360,33 @@ required-version = ">=0.9.30"
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
 ]
+# override-dependencies overrides transitive dep version pins that conflict with
+# Python 3.13 wheel availability. Server venvs inherit this via the editable
+# nemo-gym install (uv >=0.11.24).
+override-dependencies = [
+    # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
+    "spacy>=3.8.13",
+
+    # Codec-bearing packages — never installed in the shipped package or container.
+    # Binary wheels bundle libavcodec / static FFmpeg executables (H.264, H.265, AAC)
+    # that may incur MPEG-LA royalties. Servers that genuinely need these declare
+    # them in their own overrides.txt (requirements.txt servers) or
+    # [tool.uv] override-dependencies (pyproject.toml servers), which takes
+    # precedence. Reinstall for testing via docker/install_codec_deps.sh.
+    "opencv-python-headless; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
-# here is also silently dropped from them (uv >=0.11.24). Don't add a package any
-# server needs. Context: https://github.com/NVIDIA-NeMo/Gym/pull/1835
+# here is also silently dropped from them (uv >=0.11.24). Servers that need a
+# dropped package must re-enable it via their own overrides.txt or
+# [tool.uv] override-dependencies. Context: https://github.com/NVIDIA-NeMo/Gym/pull/1835
 exclude-dependencies = [
+    # fasttext-wheel has no cp313 wheels and fails to compile on Python 3.13
+    # (missing #include <cstdint> in src/args.cc). Excluded as a transitive dep
+    # of unbabel-comet; wmt_translation does not import fasttext at runtime.
+    "fasttext-wheel",
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",
@@ -333,6 +404,9 @@ exclude-dependencies = [
     "wcwidth",
     "werkzeug",
     "waitress",
+    # diskcache has unfixed CVEs and is no longer a transitive dep since vllm>=0.24.0.
+    # Explicitly block it to prevent re-introduction via future transitive pulls.
+    "diskcache",
 ]
 
 [tool.setuptools.package-data]
@@ -554,7 +628,7 @@ exclude_also = [
 [tool.ruff]
 # Line length configuration
 line-length = 119
-target-version = "py312"
+target-version = "py313"
 
 cache-dir = "cache/.ruff_cache"
 # Exclude common directories that shouldn't be linted
