@@ -42,6 +42,7 @@ from nemo_gym.sandbox.providers.base import (
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
 
 LOGGER = logging.getLogger(__name__)
@@ -700,7 +701,7 @@ class ApptainerProvider:
 
         # Always best-effort remove the host staging dir, even if stop failed.
         try:
-            shutil.rmtree(inst.staging_dir, ignore_errors=False)
+            _remove_writable_tree(inst.staging_dir)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
 

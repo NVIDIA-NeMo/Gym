@@ -184,7 +184,7 @@ def test_serialize_env_file_rejects_invalid_input(env: dict[Any, Any], error: ty
 
 
 def test_private_env_file_is_mode_0600_and_always_removed(tmp_path: Path) -> None:
-    content = b"TOKEN='not-a-real-secret'\n"
+    content = b"TOKEN='not-a-real-secret'\n"  # pragma: allowlist secret
 
     with apptainer_provider._private_env_file(tmp_path, content) as path:
         assert path is not None
@@ -387,13 +387,18 @@ async def test_create_start_failure_cleans_up(
         nonlocal env_file
         env_file = _env_file_path(argv)
         assert env_file.exists()
-        assert "not-a-real-secret" not in argv
+        assert "not-a-real-secret" not in argv  # pragma: allowlist secret
         return (1, "", "boom")
 
     provider, _rec = _make_provider(monkeypatch, responder)
 
     with pytest.raises(apptainer_provider.ApptainerCreateError, match="failed"):
-        await provider.create(SandboxSpec(image="docker://img", env={"TOKEN": "not-a-real-secret"}))
+        await provider.create(
+            SandboxSpec(
+                image="docker://img",
+                env={"TOKEN": "not-a-real-secret"},  # pragma: allowlist secret
+            )
+        )
     assert env_file is not None and not env_file.exists()
     assert not staging.exists()
 
@@ -414,8 +419,13 @@ async def test_create_start_timeout_cleans_up(
 
     provider, _rec = _make_provider(monkeypatch, responder)
     with pytest.raises(apptainer_provider.ApptainerCreateError, match="timed out") as exc_info:
-        await provider.create(SandboxSpec(image="docker://img", env={"TOKEN": "not-a-real-secret"}))
-    assert "not-a-real-secret" not in str(exc_info.value)
+        await provider.create(
+            SandboxSpec(
+                image="docker://img",
+                env={"TOKEN": "not-a-real-secret"},  # pragma: allowlist secret
+            )
+        )
+    assert "not-a-real-secret" not in str(exc_info.value)  # pragma: allowlist secret
     assert env_file is not None and not env_file.exists()
     assert not staging.exists()
 
@@ -560,7 +570,10 @@ async def test_exec_timeout(fake_binary: str, monkeypatch: pytest.MonkeyPatch, t
 
     provider, _rec = _make_provider(monkeypatch, responder)
     result = await provider.exec(
-        _make_handle(tmp_path, env={"TOKEN": "not-a-real-secret"}),
+        _make_handle(
+            tmp_path,
+            env={"TOKEN": "not-a-real-secret"},  # pragma: allowlist secret
+        ),
         "sleep 99",
         timeout_s=1,
     )
@@ -568,7 +581,7 @@ async def test_exec_timeout(fake_binary: str, monkeypatch: pytest.MonkeyPatch, t
     assert result.return_code == apptainer_provider.SANDBOX_RUNTIME_RETURN_CODE
     assert result.error_type == "timeout"
     assert result.stdout is None
-    assert "not-a-real-secret" not in (result.stderr or "")
+    assert "not-a-real-secret" not in (result.stderr or "")  # pragma: allowlist secret
     assert env_file is not None and not env_file.exists()
 
 
@@ -752,6 +765,23 @@ async def test_close_success(fake_binary: str, monkeypatch: pytest.MonkeyPatch, 
     assert _contains_seq(rec.calls[0]["argv"], [FAKE_BINARY, "instance", "stop", "nemo-gym-x"])
 
 
+async def test_close_removes_read_only_sandbox_tree(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    locked = staging / "runtime"
+    locked.mkdir(parents=True)
+    artifact = locked / "python"
+    artifact.write_text("runtime")
+    artifact.chmod(0o444)
+    locked.chmod(0o555)
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    await provider.close(_make_handle(staging))
+
+    assert not staging.exists()
+
+
 async def test_close_missing_instance_is_success(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -807,7 +837,7 @@ async def test_close_staging_removal_failure_is_logged(
     def boom(path: Any, ignore_errors: bool = False) -> None:
         raise OSError("locked")
 
-    monkeypatch.setattr(apptainer_provider.shutil, "rmtree", boom)
+    monkeypatch.setattr(apptainer_provider, "_remove_writable_tree", boom)
     with caplog.at_level("WARNING"):
         await provider.close(_make_handle(staging))  # does not raise
     assert "failed to remove staging dir" in caplog.text
