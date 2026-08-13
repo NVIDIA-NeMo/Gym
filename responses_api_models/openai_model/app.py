@@ -59,6 +59,17 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    retry_empty_completions: int = Field(
+        default=0,
+        description=(
+            "Retry the upstream chat completion up to N extra times when the "
+            "returned message has neither content nor tool_calls (reasoning-only "
+            "turns from always-thinking models, e.g. nemotron-3.5-lightning stops "
+            "after emitting only reasoning_content on ~1 in 10 agentic turns; "
+            "OpenHands aborts the episode on such an empty message). 0 disables."
+        ),
+    )
+
 
 class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
@@ -97,7 +108,17 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         body_dict["model"] = self.config.openai_model
         async with self._semaphore:
             openai_response_dict = await self._client.create_chat_completion(**body_dict)
+            for _ in range(self.config.retry_empty_completions):
+                if not self._completion_is_empty(openai_response_dict):
+                    break
+                openai_response_dict = await self._client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)
+
+    @staticmethod
+    def _completion_is_empty(response_dict: Dict[str, Any]) -> bool:
+        choices = response_dict.get("choices") or []
+        message = (choices[0] or {}).get("message") or {} if choices else {}
+        return not message.get("content") and not message.get("tool_calls")
 
 
 if __name__ == "__main__":
