@@ -32,6 +32,7 @@ from resources_servers.openair_congestion.client import _tool_response, choose_a
 DATA_DIR = Path(__file__).parent / "data"
 DEFAULT_INPUT = DATA_DIR / "example.jsonl"
 DEFAULT_OUTPUT = DATA_DIR / "example_rollouts.jsonl"
+EVIDENCE_MAX_STEPS = 2
 NEUTRAL_USER_PROMPT = (
     "Inspect the observed telemetry and choose exactly one safe congestion-control tool call or noop."
 )
@@ -42,7 +43,6 @@ _STEP_INFO_KEYS = (
     "kpi_source",
     "dynamics_mode",
     "reward_version",
-    "service_accounting",
     "reward_measurements",
     "reward_terms",
     "causal_action_effects",
@@ -77,14 +77,23 @@ async def _generate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         entrypoint="app.py",
         name="openair_congestion_example_generator",
         pool_size=1,
-        agent_max_steps=16,
+        agent_max_steps=EVIDENCE_MAX_STEPS,
     )
     env = OpenAirCongestionEnv(config=config, server_client=MagicMock(spec=ServerClient))
     transport = httpx.ASGITransport(app=env.setup_webserver())
     generated: list[dict[str, Any]] = []
 
     async with httpx.AsyncClient(transport=transport, base_url="http://example") as client:
-        for task_index, row in enumerate(rows):
+        for task_index, source_row in enumerate(rows):
+            # Keep the checked-in receipt compact while still showing one
+            # intervention followed by persistent synthetic state transitions.
+            row = {
+                **source_row,
+                "max_steps": min(
+                    int(source_row.get("max_steps", EVIDENCE_MAX_STEPS)),
+                    EVIDENCE_MAX_STEPS,
+                ),
+            }
             reset_response = await client.post("/reset", json=row)
             reset_response.raise_for_status()
             reset = reset_response.json()

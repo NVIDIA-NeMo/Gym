@@ -86,6 +86,42 @@ def test_self_contained_replay_examples_are_congested_and_regime_distinct():
     assert len(set(first_policy_text.values())) == len(regimes)
 
 
+def test_synthetic_replay_never_delivers_more_than_offered():
+    observations, _ = build_trajectory(
+        seed=0,
+        difficulty=0.1,
+        regime_mix={"prb_exhaustion": 1.0},
+        tier="replay",
+        n_steps=16,
+    )
+
+    for observation in observations:
+        for cell in observation.cells:
+            for ue in cell.ues:
+                assert ue.delivered_mbps <= ue.offered_mbps
+
+    env = ReplayEnv(pool_size=1, max_steps_default=4)
+    _, meta = env.reset(
+        seed=0,
+        difficulty=0.1,
+        regime_mix={"prb_exhaustion": 1.0},
+        scenario_id="delivery-bound",
+        tier="replay",
+        max_steps=4,
+    )
+    adjusted, _, _, _ = env.step(
+        meta.episode_id,
+        ToolCall(
+            name="set_scheduler_policy",
+            arguments={"cell_id": 0, "policy": "MaxCI"},
+        ),
+    )
+    env.close(meta.episode_id)
+    for cell in adjusted.cells:
+        for ue in cell.ues:
+            assert ue.delivered_mbps <= ue.offered_mbps
+
+
 def test_scheduler_policies_expose_real_tradeoffs():
     noop = _run_one(ToolCall(name="noop", arguments={}))
     rr = _run_one(
@@ -281,17 +317,10 @@ def test_admission_ledger_matches_emitted_topology():
         )
     )
     cell = next(cell for cell in result.observation.cells if cell.cell_id == 0)
-    accounting = result.info["service_accounting"]
 
     assert len(cell.ues) == baseline_count // 2
     assert cell.rrc_connected_ues == len(cell.ues)
     assert result.observation.global_.n_ues_total == sum(len(item.ues) for item in result.observation.cells)
-    assert accounting["requested_service_mbps"] >= accounting["admitted_service_mbps"]
-    assert accounting["unadmitted_service_mbps"] == pytest.approx(
-        accounting["requested_service_mbps"] - accounting["admitted_service_mbps"]
-    )
-    assert accounting["step_forced_termination_events"] == baseline_count - len(cell.ues)
-    assert accounting["step_forced_terminated_service_mbps"] > 0.0
 
 
 def test_guardrail_uses_current_topology_after_admission_change():
@@ -325,46 +354,3 @@ def test_guardrail_uses_current_topology_after_admission_change():
 
     assert info["guardrail_accepted"] is False
     assert "target_id=1 not present in cell 0" in info["rejection_reason"]
-
-
-def test_globally_numbered_ue_id_listed_in_cell_is_accepted():
-    env = ReplayEnv(pool_size=1, max_steps_default=2)
-    _, meta = env.reset(
-        seed=7001,
-        difficulty=0.8,
-        regime_mix={"prb_exhaustion": 1.0},
-        scenario_id="global-ue-ids",
-        tier="T2",
-        max_steps=2,
-    )
-    episode = env._episodes[meta.episode_id]
-    remapped = []
-    for observation in episode.trajectory:
-        cells = []
-        for cell in observation.cells:
-            offset = cell.cell_id * 8
-            cells.append(
-                cell.model_copy(
-                    update={"ues": [ue.model_copy(update={"ue_id": offset + ue.ue_id}) for ue in cell.ues]}
-                )
-            )
-        remapped.append(observation.model_copy(update={"cells": cells}))
-    episode.trajectory = remapped
-
-    try:
-        _, _, _, info = env.step(
-            meta.episode_id,
-            ToolCall(
-                name="set_prb_cap",
-                arguments={
-                    "cell_id": 2,
-                    "target": "ue",
-                    "target_id": 19,
-                    "max_prb": 200,
-                },
-            ),
-        )
-    finally:
-        env.close(meta.episode_id)
-
-    assert info["guardrail_accepted"] is True

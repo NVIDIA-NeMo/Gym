@@ -4,12 +4,6 @@
 import pytest
 
 from resources_servers.openair_congestion.client import choose_action, drive_episode
-from resources_servers.openair_congestion.openair_congestion.render import (
-    to_policy_text,
-)
-from resources_servers.openair_congestion.openair_congestion.replay_env import (
-    ReplayEnv,
-)
 
 
 def _observation(
@@ -45,56 +39,6 @@ def test_choose_action_conditions_relief_on_visible_kpis():
         "name": "noop",
         "arguments": {},
     }
-
-
-def test_choose_action_uses_compact_t2_decision_contract():
-    env = ReplayEnv(pool_size=1, max_steps_default=16)
-    observation, meta = env.reset(
-        seed=911117,
-        difficulty=0.9,
-        regime_mix={"interference": 1.0},
-        scenario_id="interference",
-        tier="T2",
-        max_steps=16,
-    )
-    env.close(meta.episode_id)
-    observation = observation.model_copy(
-        update={
-            "cells": [
-                cell.model_copy(
-                    update={
-                        "ues": [
-                            ue.model_copy(
-                                update={
-                                    "ue_id": cell.cell_id * 8 + ue.ue_id,
-                                }
-                            )
-                            for ue in cell.ues
-                        ]
-                    }
-                )
-                for cell in observation.cells
-            ]
-        }
-    )
-
-    policy_text = to_policy_text(observation)
-    action = choose_action(policy_text, 0)
-
-    assert action == {
-        "name": "set_prb_cap",
-        "arguments": {
-            "cell_id": 2,
-            "target": "ue",
-            "target_id": 19,
-            "max_prb": 200,
-        },
-    }
-    text_with_global_ue_history = policy_text.replace(
-        "\nA|one_tool_call_or_noop",
-        '\nL|set_prb_cap|{"cell_id":2,"max_prb":200,"target":"ue","target_id":19}|none\nA|one_tool_call_or_noop',
-    )
-    assert choose_action(text_with_global_ue_history, 0) == action
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Deterministic guardrail per ``docs/PLAN.md`` §4.5.
+"""Deterministic validation for congestion-control tool calls.
 
 Every action passes through :func:`check` before being dispatched to the
 actuator path. Rejected actions short-circuit actuator dispatch:

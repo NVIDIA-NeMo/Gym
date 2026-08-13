@@ -23,7 +23,7 @@ label is derived from the dynamics, not opined by a model -- any reviewer can
 recompute it, which is the whole point.
 
 Each golden row is a decision point drawn from the do-nothing (noop)
-trajectory of a held-out seed -- "the network has been left alone for k steps
+trajectory of a fixed evaluation seed -- "the network has been left alone for k steps
 and is now congested; what is the best single action?" -- scored by
 *episode-level value*: apply the candidate now, then coast (noop) to the end,
 and sum the reward from the action onward. Coasting after the action, not just
@@ -36,23 +36,19 @@ effect over the horizon. Each row carries:
 Margin is the opportunity: how much the best single action beats inaction
 here. Near-zero margin means the state is not a real decision point, so
 evaluation focuses on the positive-margin subset. The set spans all five
-congestion regimes, which also surfaces *where* actions matter -- current v0
-margins are concentrated under interference and near-zero under prb_exhaustion.
-Do not imply qos-competition opportunity coverage without a regenerated
-benchmark receipt.
+congestion regimes, which also surfaces *where* actions matter. Treat the
+regime breakdown from each regenerated benchmark as the evidence for that run.
 
 Scoring a policy is one intervention: at each golden state, apply the policy's
 action, coast to the end, and measure how much of the golden margin it
 recovers, `(policy_value - noop_value) / (golden_value - noop_value)`, clipped
 to [0, 1]. The validity checks are intentionally minimal: an oracle that
 replays the golden action recovers ~all the margin and noop recovers none.
-Random guardrail-valid play is reported descriptively, not used as a gate,
-because it can be harmful under persistent synthetic setpoint dynamics. The
-hand-written relief rule is likewise a finding, not a gate.
+The hand-written relief rule is reported descriptively, not used as a gate.
 
 This is a v0: best-single-intervention value over a finite action grid, not
-multi-step optimal control, on a held-out seed band disjoint from
-training/eval.
+multi-step optimal control, on a fixed evaluation seed band. This contribution
+does not establish that those seeds are disjoint from an external training run.
 
 Usage:
     python resources_servers/openair_congestion/golden_set.py
@@ -73,10 +69,9 @@ from openair_congestion.schemas import Observation, ToolCall
 from resources_servers.openair_congestion.backends import ReplayBackend
 
 
-# Held-out seed band, disjoint from the training seeds (grpo_train derives
-# 42 + iter*100k + group*17), the SFT band (740-763), and the eval manifest
-# (18000-series). Difficulty is high so the sampled states are congested and
-# the decisions actually matter.
+# Fixed evaluation seed band. Difficulty is high so the sampled states are
+# congested and the decisions actually matter. External training workflows
+# must enforce their own disjoint train/evaluation split.
 _GOLDEN_SEEDS = (33001, 33002, 33003, 33004, 33005, 33006, 33007, 33008)
 _GOLDEN_DIFFICULTY = 0.9
 # The set spans every congestion regime, so the benchmark covers the scenario
@@ -216,7 +211,7 @@ def generate_golden_set(
     regimes: tuple[str, ...] = _GOLDEN_REGIMES,
     decision_steps: tuple[int, ...] = _DECISION_STEPS,
 ) -> list[GoldenRow]:
-    backend = ReplayBackend(replay_root="data/replay", pool_size=8, max_steps_default=_MAX_STEPS)
+    backend = ReplayBackend(pool_size=8, max_steps_default=_MAX_STEPS)
     rows: list[GoldenRow] = []
     for regime in regimes:
         for seed in seeds:
@@ -264,7 +259,7 @@ def _recovery(policy_value: float, noop_value: float, golden_value: float) -> fl
 
 
 def score_policy_against_golden(rows: list[GoldenRow], policy: PolicyFn, *, opportunities_only: bool = True) -> dict:
-    backend = ReplayBackend(replay_root="data/replay", pool_size=8, max_steps_default=_MAX_STEPS)
+    backend = ReplayBackend(pool_size=8, max_steps_default=_MAX_STEPS)
     exact_hits, recoveries, scored_rows = 0, [], 0
     for row in rows:
         if opportunities_only and row.margin <= _OPPORTUNITY_MARGIN:
@@ -309,7 +304,7 @@ def main() -> None:
         opp = [r for r in rr if r.margin > _OPPORTUNITY_MARGIN]
         top = max((r.margin for r in rr), default=0.0)
         print(f"{regime:<18} {len(rr):>7} {len(opp):>14} {top:>12.3f}")
-    print("\n(opportunities are where a single action beats coasting -- current v0 is concentrated in interference)\n")
+    print("\n(opportunities are states where one action beats coasting)\n")
 
     if args.out:
         with open(args.out, "w") as f:
@@ -318,18 +313,16 @@ def main() -> None:
         print(f"golden set written to {args.out}\n")
 
     if not args.no_validate:
-        # Import here so generation has no dependency on the sweep module.
-        from resources_servers.openair_congestion.model_sweep import _make_random_valid, choose_action
+        # Reuse the small offline client heuristic; hosted-model evaluation is
+        # intentionally outside this deterministic benchmark.
+        from resources_servers.openair_congestion.client import choose_action
 
         # The benchmark's validity claims are only that the oracle recovers
-        # the margin and noop does not.  Random guardrail-valid play is
-        # descriptive: persistent synthetic caps can make it worse than
-        # noop, so treating it as an ordering gate would hide a real safety
-        # signal.  `relief` is also reported as a regime-specific finding.
+        # the margin and noop does not. The scripted relief rule is reported
+        # as a regime-specific finding rather than an ordering gate.
         anchors: dict[str, PolicyFn] = {
             "oracle": _oracle_policy(rows),
-            "relief": lambda obs, _c=choose_action: _c(obs, 0),
-            "random-valid": _wrap_random_valid(_make_random_valid()),
+            "scripted": lambda obs, _c=choose_action: _c(obs, 0),
             "noop": lambda obs: {"name": "noop", "arguments": {}},
         }
         print(f"{'policy':<16} {'exact-match':>12} {'margin-recovered':>18}")
@@ -342,12 +335,12 @@ def main() -> None:
 
         # Per-regime relief recovery: the finding that the hand-written relief
         # rule is regime-specific -- an argument for learning the policy.
-        print("\nrelief recovery by regime (the expert rule is tuned for PRB exhaustion):")
+        print("\nscripted recovery by regime (the rule is tuned for PRB exhaustion):")
         for regime in _GOLDEN_REGIMES:
             regime_rows = [r for r in rows if r.regime == regime and r.margin > _OPPORTUNITY_MARGIN]
             if not regime_rows:
                 continue
-            r = score_policy_against_golden(regime_rows, anchors["relief"])
+            r = score_policy_against_golden(regime_rows, anchors["scripted"])
             print(f"  {regime:<18} {r['mean_margin_recovered']:>6.3f}  ({r['scored_rows']} opportunities)")
 
         ok = recovered["oracle"] > 0.95 and recovered["noop"] < 0.01
@@ -363,19 +356,6 @@ def _oracle_policy(rows: list[GoldenRow]) -> PolicyFn:
 
     def _fn(obs: str) -> dict[str, Any]:
         return by_hash.get(hashlib.sha256(obs.encode()).hexdigest()[:16], {"name": "noop", "arguments": {}})
-
-    return _fn
-
-
-def _wrap_random_valid(policy) -> PolicyFn:
-    import random
-
-    rng = random.Random(0)
-    step = {"i": 0}
-
-    def _fn(obs: str) -> dict[str, Any]:
-        step["i"] += 1
-        return policy(obs, step["i"], rng)
 
     return _fn
 

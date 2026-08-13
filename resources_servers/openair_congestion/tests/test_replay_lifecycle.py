@@ -117,27 +117,3 @@ def test_close_waits_for_inflight_step(monkeypatch):
     assert not close_errors
     with pytest.raises(KeyError):
         env.step(episode_id, _ACTION)
-
-
-def test_render_waits_for_inflight_step():
-    env, episode_id = _make_episode()
-    episode = env._episodes[episode_id]
-    render_done = threading.Event()
-    render_errors: list[BaseException] = []
-
-    def _render():
-        try:
-            env.render(episode_id)
-        except BaseException as exc:  # pragma: no cover - assertion reports it
-            render_errors.append(exc)
-        finally:
-            render_done.set()
-
-    with episode.lock:
-        render_thread = threading.Thread(target=_render)
-        render_thread.start()
-        assert not render_done.wait(timeout=0.1)
-
-    render_thread.join(timeout=5.0)
-    assert render_done.is_set()
-    assert not render_errors

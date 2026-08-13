@@ -17,9 +17,8 @@
 
 Drives one full episode against the served environment over the real HTTP
 surface (POST /reset, then a POST /step loop) using a scripted
-congestion-relief heuristic in place of an LLM policy. Compact T2 observations
-use the shared deterministic expert contract; prose observations select one
-condition-appropriate setpoint and then coast while it persists. Per-step tool
+congestion-relief heuristic in place of an LLM policy. The heuristic selects
+one condition-appropriate setpoint and then coasts while it persists. Per-step tool
 calls, guardrail verdicts, and rewards are printed, then the episode return.
 
 If a gym is running (`gym env start` with this server's config), the demo connects
@@ -55,9 +54,6 @@ from resources_servers.openair_congestion.app import (
     OpenAirCongestionEnv,
     OpenAirCongestionResourcesServerConfig,
 )
-from resources_servers.openair_congestion.openair_congestion.t2_policy_features import (
-    derive_t2_expert_action_from_text,
-)
 
 
 SERVER_NAME = "openair_congestion"
@@ -91,14 +87,11 @@ def _load_task_row() -> dict:
 def choose_action(observation: str, step_idx: int) -> dict[str, Any]:
     """Choose one condition-appropriate deterministic relief setpoint.
 
-    Compact T2 text uses its exact policy-visible decision contract. The prose
-    policy intervenes once, then coasts while the replay setpoint persists,
+    The policy intervenes once, then coasts while the replay setpoint persists,
     using only rendered KPIs: aggressive handover for cell-edge pressure,
     round-robin for a fairness deficit, and higher UL power only when PRB
     pressure is high and link quality is healthy.
     """
-    if (observation or "").startswith("T|"):
-        return derive_t2_expert_action_from_text(observation).model_dump()
     if step_idx > 0:
         return {"name": "noop", "arguments": {}}
 
@@ -252,7 +245,6 @@ def _start_local_server() -> str:
         port=_free_port(),
         entrypoint="app.py",
         name=SERVER_NAME,
-        replay_root=str(Path(__file__).parent / "data" / "replay"),
     )
     # The env never calls out through server_client; an empty one satisfies
     # the constructor without a head server.

@@ -39,12 +39,14 @@ import math
 import time
 from typing import Any, Optional
 
+from fastapi import Request
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JSONSchemaValidationError
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import Field, PrivateAttr, ValidationInfo, field_validator
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall
+from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.gymnasium import GymnasiumServer
 
 # Load the backend layer before the colocated domain imports so an incomplete
@@ -53,7 +55,7 @@ from resources_servers.openair_congestion.backends import Backend, select_backen
 
 
 # isort: split
-from openair_congestion.render import T2_OBSERVATION_RENDER, to_policy_text
+from openair_congestion.render import to_policy_text
 from openair_congestion.schemas import ToolCall
 from openair_congestion.tools import TOOL_SCHEMA_BY_NAME
 
@@ -101,41 +103,16 @@ _DEFAULT_OBSERVATION_RENDER = "openair_natural_language_v1"
 def _episode_contract(
     capabilities: dict[str, Any],
     reward_contract: dict[str, Any],
-    tier: str,
-    *,
-    n_cells: int,
-    max_target_id: int,
 ) -> dict[str, Any]:
     """Return the explicit contract consumed by external rollout trainers."""
 
-    contract = {
+    return {
         **capabilities,
         **reward_contract,
-        "observation_render": (T2_OBSERVATION_RENDER if tier.upper() == "T2" else _DEFAULT_OBSERVATION_RENDER),
+        "observation_render": _DEFAULT_OBSERVATION_RENDER,
+        "supports_explicit_close": True,
+        "supports_step_idempotency": True,
     }
-    if tier.upper() == "T2":
-        # The shared Gymnasium agent consumes this optional contract before
-        # the first model turn. It makes the model-facing tool schemas match
-        # the narrow service-safe T2 runtime guardrail instead of advertising
-        # six actions that T2 deliberately rejects.
-        contract["tool_contract"] = {
-            "allowed_names": ["noop", "set_prb_cap"],
-            "parameter_overrides": {
-                "set_prb_cap": {
-                    "cell_id": {
-                        "minimum": 0,
-                        "maximum": max(0, int(n_cells) - 1),
-                    },
-                    "target": {"enum": ["ue"]},
-                    "target_id": {
-                        "minimum": 0,
-                        "maximum": max(0, int(max_target_id)),
-                    },
-                    "max_prb": {"minimum": 200, "maximum": 273},
-                }
-            },
-        }
-    return contract
 
 
 class OpenAirCongestionResourcesServerConfig(BaseResourcesServerConfig):
@@ -145,13 +122,11 @@ class OpenAirCongestionResourcesServerConfig(BaseResourcesServerConfig):
     # because the config node type uses ConfigDict(extra='allow').
     backend: str = "replay"
     # Replay-backend knobs; defaults match openair_congestion.replay_env.ReplayEnv.
-    replay_root: str = "data/replay"
     pool_size: int = Field(default=32, ge=1)
     max_steps_default: int = Field(default=60, ge=1)
-    # dataset_replay knobs: replay a recorded dataset (KPI snapshots or GRPO
-    # rollout traces; see dataset_backend.py) instead of synthesizing
-    # trajectories. cell_capacity_mbps feeds the reward's throughput
-    # normalizer; trace episodes recording cell_capacity_mbps_total override it.
+    # dataset_replay knobs: replay nested KPI snapshot JSONL instead of
+    # synthesizing trajectories. cell_capacity_mbps feeds the reward's
+    # throughput normalizer.
     dataset_path: str = "data/fixtures/sample_provided.jsonl"
     cell_capacity_mbps: float = 60.0
     reward_weights: Optional[dict[str, float]] = None
@@ -219,13 +194,15 @@ class OpenAirCongestionEnv(GymnasiumServer):
 
     config: OpenAirCongestionResourcesServerConfig
 
-    # Backend built once at startup so a bad replay_root / unknown backend
-    # name fails at boot, not on the first rollout. Pydantic private attr.
+    # Backend built once at startup so an unknown backend fails at boot, not
+    # on the first rollout. Pydantic private attr.
     _backend: Optional[Backend] = None
     # Allocation and session registration must be one atomic operation.  The
     # backend leak reaper treats any allocation absent from session_state as
     # orphaned, so concurrent resets cannot safely overlap that interval.
     _reset_lock: Optional[asyncio.Lock] = None
+    _step_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+    _step_response_cache: dict[str, tuple[str, tuple, float]] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -263,10 +240,14 @@ class OpenAirCongestionEnv(GymnasiumServer):
                 await asyncio.to_thread(self.backend.close, state["episode_id"])
             except KeyError:
                 pass
+            except Exception:
+                self.session_state.setdefault(session_id, state)
+                raise
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         if session_id is None:
             raise ValueError("session_id must not be None")
+        self._step_response_cache.pop(session_id, None)
         requested_seed = metadata.get("seed")
         if requested_seed is not None:
             if isinstance(requested_seed, bool) or not isinstance(requested_seed, int):
@@ -287,6 +268,15 @@ class OpenAirCongestionEnv(GymnasiumServer):
             for key in ("seed", "difficulty", "regime_mix", "scenario_id", "tier", "max_steps")
             if metadata.get(key) is not None
         }
+        # The paired agent can drive at most ``agent_max_steps`` turns. Pass
+        # that same effective budget into the backend so replay does not
+        # precompute unreachable observations from an omitted or oversized
+        # task-row value.
+        effective_max_steps = min(
+            int(requested_max_steps or self.config.max_steps_default),
+            self.config.agent_max_steps,
+        )
+        task_params["max_steps"] = effective_max_steps
         assert self._reset_lock is not None
         async with self._reset_lock:
             await self._reap_expired_sessions()
@@ -299,6 +289,9 @@ class OpenAirCongestionEnv(GymnasiumServer):
                     await asyncio.to_thread(self.backend.close, stale["episode_id"])
                 except KeyError:
                     pass  # already closed inside the env
+                except Exception:
+                    self.session_state.setdefault(session_id, stale)
+                    raise
 
             first_obs, meta = await asyncio.to_thread(
                 self.backend.reset,
@@ -309,12 +302,6 @@ class OpenAirCongestionEnv(GymnasiumServer):
                 contract = _episode_contract(
                     self.backend.capabilities(),
                     self.backend.reward_contract(meta.tier),
-                    meta.tier,
-                    n_cells=first_obs.global_.n_cells,
-                    max_target_id=max(
-                        (ue.ue_id for cell in first_obs.cells for ue in cell.ues),
-                        default=0,
-                    ),
                 )
                 self.session_state[session_id] = {
                     "episode_id": meta.episode_id,
@@ -327,10 +314,7 @@ class OpenAirCongestionEnv(GymnasiumServer):
                     "last_activity_monotonic": time.monotonic(),
                     # Cap at the agent's turn budget so the server truncates no later
                     # than the agent and the episode slot is freed via close_session().
-                    "max_agent_steps": min(
-                        int(task_params.get("max_steps") or self.config.max_steps_default),
-                        self.config.agent_max_steps,
-                    ),
+                    "max_agent_steps": effective_max_steps,
                 }
             except BaseException:
                 try:
@@ -348,6 +332,36 @@ class OpenAirCongestionEnv(GymnasiumServer):
         }
 
     async def step(
+        self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
+    ) -> tuple[Optional[str], float, bool, bool, dict]:
+        """Apply one turn, deduplicating transport retries from the paired agent."""
+
+        if session_id is None:
+            raise ValueError("session_id must not be None")
+        request_id = metadata.get("_ng_step_request_id")
+        if request_id is None:
+            return await self._step_once(action, metadata, session_id)
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
+            raise ValueError("_ng_step_request_id must be a non-empty string of at most 128 characters")
+
+        lock = self._step_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            cached = self._step_response_cache.get(session_id)
+            if cached is not None and cached[0] == request_id:
+                return cached[1]
+
+            result = await self._step_once(action, metadata, session_id)
+            now = time.monotonic()
+            self._step_response_cache[session_id] = (request_id, result, now)
+            cutoff = now - self.config.session_ttl_s
+            for cached_session_id, (_, _, cached_at) in list(self._step_response_cache.items()):
+                if cached_at < cutoff:
+                    self._step_response_cache.pop(cached_session_id, None)
+                    if cached_session_id not in self.session_state:
+                        self._step_locks.pop(cached_session_id, None)
+            return result
+
+    async def _step_once(
         self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
     ) -> tuple[Optional[str], float, bool, bool, dict]:
         if session_id is None:
@@ -523,6 +537,10 @@ class OpenAirCongestionEnv(GymnasiumServer):
             # The underlying env can close an episode on a terminal step.  It
             # is still safe to consume our session state exactly once.
             summary = {"ok": True, "already_closed_by_backend": True}
+        except Exception:
+            # Keep retry ownership unless a newer reset already replaced it.
+            self.session_state.setdefault(session_id, state)
+            raise
         return {"ok": True, "already_closed": False, "summary": summary}
 
     async def close_session(self, session_id: Optional[str]) -> None:
@@ -537,6 +555,18 @@ class OpenAirCongestionEnv(GymnasiumServer):
         if session_id is None:
             raise ValueError("session_id must not be None")
         return await self._release_session(session_id)
+
+    async def _close_endpoint(self, request: Request) -> dict[str, Any]:
+        """Release the cookie-scoped OpenAir episode without resetting it."""
+
+        return await self.explicit_close(request.session.get(SESSION_ID_KEY))
+
+    def setup_webserver(self):
+        """Add the OpenAir-only cleanup route to the shared Gymnasium API."""
+
+        app = super().setup_webserver()
+        app.post("/close")(self._close_endpoint)
+        return app
 
 
 if __name__ == "__main__":

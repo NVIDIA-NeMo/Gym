@@ -46,7 +46,7 @@ _N_TRIALS = 8
 
 
 def _make_backend() -> ReplayBackend:
-    return ReplayBackend(replay_root="data/replay", pool_size=64, max_steps_default=60)
+    return ReplayBackend(pool_size=64, max_steps_default=60)
 
 
 def _task_params(seed: int, difficulty: float) -> dict:
@@ -268,34 +268,13 @@ class TestPerStepRewardProperties:
         rejected = compute_breakdown(prev, curr, self._ACTION, rejected=True)["total"]
         assert rejected < accepted
 
-    def test_reward_wrappers_forward_versioned_profile_arguments(self):
+    def test_reward_wrappers_match_breakdown(self):
         prev = self._first_obs()
         action = ToolCall(name="noop", arguments={})
-        expected = compute_breakdown(
-            prev,
-            prev,
-            action,
-            reward_version="openair_t2_v3",
-        )
+        expected = compute_breakdown(prev, prev, action)
 
-        assert (
-            compute_terms(
-                prev,
-                prev,
-                action,
-                reward_version="openair_t2_v3",
-            )
-            == expected["terms"]
-        )
-        assert (
-            compute(
-                prev,
-                prev,
-                action,
-                reward_version="openair_t2_v3",
-            )
-            == expected["total"]
-        )
+        assert compute_terms(prev, prev, action) == expected["terms"]
+        assert compute(prev, prev, action) == expected["total"]
 
     def test_rejected_step_scores_below_accepted_step_through_the_env(self):
         # Same seed, two fresh episodes, one step each: an accepted relief

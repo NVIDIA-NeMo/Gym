@@ -23,7 +23,6 @@ openair_congestion:
       # node type has extra='allow'). backend: 'replay' (default, causal and
       # CI-safe) or 'dataset_replay' (recorded transitions, diagnostics only).
       backend: replay
-      replay_root: data/replay
       pool_size: 32
       max_steps_default: 60
       # Truncation-budget fallback for task rows that omit max_steps; must not
@@ -34,19 +33,16 @@ openair_congestion:
       session_ttl_s: 3600.0
       protocol_violation_penalty: -1.0
       # dataset_replay knobs — flip `backend: dataset_replay` and point
-      # dataset_path at a recorded JSONL (KPI snapshots or GRPO rollout
-      # traces, auto-detected; see README, Dataset Formats). Task rows must
+      # dataset_path at recorded KPI-snapshot JSONL. Task rows must
       # omit scenario_id (the seed then picks a dataset episode) or set it to
       # a dataset episode key; data/example.jsonl pins replay scenario names
       # and pairs with the default backend only. cell_capacity_mbps is the
-      # reward throughput normalizer; trace episodes recording
-      # cell_capacity_mbps_total override it.
+      # reward throughput normalizer.
       # backend: dataset_replay
       # dataset_path: data/fixtures/sample_provided.jsonl
       # cell_capacity_mbps: 60.0
-      # reward_weights must match the profile the dataset was recorded under;
-      # openair_v2_measured runs zero the synthetic-proxy terms:
-      # reward_weights: {w_sla: 0.0, w_sla_level: 0.0, w_buffer: 0.0, w_action: 0.0}
+      # Optional reward_weights overrides must match the contract used for any
+      # comparison with previously recorded scores.
 openair_congestion_gymnasium_agent:
   responses_api_agents:
     # Inner key 'gymnasium_agent' must match the shared

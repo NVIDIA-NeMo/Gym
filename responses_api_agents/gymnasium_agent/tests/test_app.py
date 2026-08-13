@@ -19,14 +19,8 @@ import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.gymnasium_agent.app import (
-    GymnasiumAgent,
-    GymnasiumAgentConfig,
-    GymnasiumAgentRunRequest,
-    _apply_tool_contract,
-)
+from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
 
 def _make_agent(max_steps=10, observability=True):
@@ -114,8 +108,6 @@ def _wire_mock_client(agent, responses_per_url):
 
     async def _post(server_name, url_path, json=None, cookies=None, **kw):
         call_log.append((server_name, url_path, json))
-        if url_path == "/close" and url_path not in responses_per_url:
-            return _FakeHttpResp({"ok": True, "already_closed": True, "summary": {}})
         payload = responses_per_url[url_path].pop(0)
         return _FakeHttpResp(payload)
 
@@ -146,43 +138,6 @@ class TestConfig:
     def test_default_max_steps(self):
         assert _make_agent().config.max_steps == 10
 
-    def test_tool_contract_cannot_loosen_task_schema(self):
-        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
-            {
-                "input": "x",
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": "set_prb_cap",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "max_prb": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "maximum": 273,
-                                }
-                            },
-                        },
-                        "strict": False,
-                    }
-                ],
-            }
-        )
-
-        with pytest.raises(ValueError, match="may not loosen"):
-            _apply_tool_contract(
-                body,
-                {
-                    "allowed_names": ["set_prb_cap"],
-                    "parameter_overrides": {
-                        "set_prb_cap": {
-                            "max_prb": {"maximum": 300},
-                        }
-                    },
-                },
-            )
-
 
 class TestRun:
     @pytest.mark.asyncio
@@ -193,7 +148,6 @@ class TestRun:
             "/reset": [{"observation": "go", "info": {}}],
             model_path: [_model_response("move A")],
             "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
-            "/close": [{"ok": True, "already_closed": True, "summary": {}}],
         }
         seen = []
 
@@ -215,6 +169,7 @@ class TestRun:
         urls = [url for url, _headers in seen]
         assert urls.count("/reset") == 1
         assert urls.count("/step") == 1
+        assert urls.count("/close") == 0
         model_calls = [(u, h) for (u, h) in seen if u == model_path]
         assert model_calls == [(model_path, None)]
 
@@ -222,7 +177,7 @@ class TestRun:
     async def test_successful_rollout_survives_close_http_failure(self):
         agent = _make_agent()
         payloads = {
-            "/reset": [{"observation": "go", "info": {}}],
+            "/reset": [{"observation": "go", "info": {"supports_explicit_close": True}}],
             "/v1/responses": [_model_response("move A")],
             "/step": [
                 {
@@ -284,7 +239,7 @@ class TestRun:
         call_log = _wire_mock_client(
             agent,
             {
-                "/reset": [{"observation": "start", "info": {}}],
+                "/reset": [{"observation": "start", "info": {"supports_step_idempotency": True}}],
                 "/v1/responses": [
                     _model_response("turn-1", output_toks=10),
                     _model_response("turn-2", output_toks=20),
@@ -301,6 +256,10 @@ class TestRun:
         result = await agent.run(req, body)
         assert result.reward == 1.0
         assert result.terminated is True
+        step_bodies = [payload for _server, url, payload in call_log if url == "/step"]
+        request_ids = [payload["_ng_step_request_id"] for payload in step_bodies]
+        assert len(request_ids) == len(set(request_ids)) == 2
+        assert all(isinstance(request_id, str) and request_id for request_id in request_ids)
         # Inspect turn-2 model call body: its input must contain the full turn-1 output item,
         # not a flattened string, and the obs-1 appended as user message.
         turn2_body = [body for (s, u, body) in call_log if u == "/v1/responses"][1]
@@ -318,97 +277,12 @@ class TestRun:
         assert any(getattr(m, "role", None) == "user" and getattr(m, "content", "") == "obs-1" for m in turn2_input)
 
     @pytest.mark.asyncio
-    async def test_reset_tool_contract_filters_and_tightens_model_tools(self):
-        agent = _make_agent(max_steps=1)
-        tool_parameters = {
-            "additionalProperties": False,
-            "properties": {
-                "cell_id": {"type": "integer", "minimum": 0, "maximum": 3},
-                "target": {"type": "string", "enum": ["ue"]},
-                "target_id": {"type": "integer", "minimum": 0, "maximum": 23},
-                "max_prb": {"type": "integer", "minimum": 0, "maximum": 273},
-            },
-            "required": ["cell_id", "target", "target_id", "max_prb"],
-            "type": "object",
-        }
-        call_log = _wire_mock_client(
-            agent,
-            {
-                "/reset": [
-                    {
-                        "observation": "start",
-                        "info": {
-                            "tool_contract": {
-                                "allowed_names": ["noop", "set_prb_cap"],
-                                "parameter_overrides": {
-                                    "set_prb_cap": {
-                                        "cell_id": {"minimum": 0, "maximum": 2},
-                                        "max_prb": {"minimum": 200, "maximum": 273},
-                                    }
-                                },
-                            }
-                        },
-                    }
-                ],
-                "/v1/responses": [_model_response("turn")],
-                "/step": [
-                    {
-                        "observation": None,
-                        "reward": 0.0,
-                        "terminated": True,
-                        "truncated": False,
-                        "info": {},
-                    }
-                ],
-            },
-        )
-        req = MagicMock()
-        req.cookies = {}
-        body = GymnasiumAgentRunRequest(
-            responses_create_params={
-                "input": [{"role": "user", "content": "x"}],
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": "set_scheduler_policy",
-                        "parameters": {"type": "object", "properties": {}},
-                        "strict": False,
-                    },
-                    {
-                        "type": "function",
-                        "name": "set_prb_cap",
-                        "parameters": tool_parameters,
-                        "strict": False,
-                    },
-                    {
-                        "type": "function",
-                        "name": "noop",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {},
-                            "additionalProperties": False,
-                        },
-                        "strict": False,
-                    },
-                ],
-            }
-        )
-
-        await agent.run(req, body)
-
-        model_body = next(payload for _server, url, payload in call_log if url == "/v1/responses")
-        assert [tool["name"] for tool in model_body.tools] == ["set_prb_cap", "noop"]
-        properties = model_body.tools[0]["parameters"]["properties"]
-        assert properties["cell_id"]["maximum"] == 2
-        assert properties["max_prb"]["minimum"] == 200
-
-    @pytest.mark.asyncio
     async def test_max_steps_sets_truncated(self):
         agent = _make_agent(max_steps=2)
         call_log = _wire_mock_client(
             agent,
             {
-                "/reset": [{"observation": None, "info": {}}],
+                "/reset": [{"observation": None, "info": {"supports_explicit_close": True}}],
                 "/v1/responses": [_model_response("a"), _model_response("b")],
                 "/step": [
                     {"observation": "obs-1", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
@@ -433,7 +307,7 @@ class TestRun:
         async def _post(server_name, url_path, json=None, cookies=None, **kw):
             call_log.append((server_name, url_path, json, cookies))
             if url_path == "/reset":
-                response = _FakeHttpResp({"observation": "start", "info": {}})
+                response = _FakeHttpResp({"observation": "start", "info": {"supports_explicit_close": True}})
                 response.cookies = {"session": "episode-cookie"}
                 return response
             if url_path == "/close":
@@ -460,7 +334,12 @@ class TestRun:
         async def _post(server_name, url_path, json=None, cookies=None, **kw):
             call_log.append((server_name, url_path, json, cookies))
             if url_path == "/reset":
-                response = _FakeHttpResp({"observation": {"not": "text"}, "info": {}})
+                response = _FakeHttpResp(
+                    {
+                        "observation": {"not": "text"},
+                        "info": {"supports_explicit_close": True},
+                    }
+                )
                 response.cookies = {"session": "episode-cookie"}
                 return response
             if url_path == "/close":
@@ -480,14 +359,14 @@ class TestRun:
         assert close_calls[0][3] == {"session": "episode-cookie"}
 
     @pytest.mark.asyncio
-    async def test_inbound_request_cookies_are_not_forwarded_to_environment(self):
+    async def test_inbound_request_cookies_are_preserved_for_environment(self):
         agent = _make_agent(max_steps=2)
         call_log = []
 
         async def _post(server_name, url_path, json=None, cookies=None, **kw):
             call_log.append((server_name, url_path, json, cookies))
             if url_path == "/reset":
-                return _FakeHttpResp({"observation": "start", "info": {}})
+                return _FakeHttpResp({"observation": "start", "info": {"supports_explicit_close": True}})
             if url_path == "/close":
                 return _FakeHttpResp({"ok": True, "already_closed": False, "summary": {}})
             raise RuntimeError("model server unavailable")
@@ -503,9 +382,9 @@ class TestRun:
         reset_calls = [entry for entry in call_log if entry[1] == "/reset"]
         close_calls = [entry for entry in call_log if entry[1] == "/close"]
         assert len(reset_calls) == 1
-        assert reset_calls[0][3] == {}
+        assert reset_calls[0][3] == {"session": "existing-cookie"}
         assert len(close_calls) == 1
-        assert close_calls[0][3] == {}
+        assert close_calls[0][3] == {"session": "existing-cookie"}
 
     @pytest.mark.asyncio
     async def test_usage_accumulates_across_turns(self):

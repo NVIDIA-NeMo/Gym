@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Loader and backend tests for the dataset ingestion path
-# (dataset_backend.py), covering both the KPI-snapshot and the GRPO
-# rollout-trace formats. Fully offline: fixtures live under data/fixtures/.
+# Loader and backend tests for the nested snapshot JSONL ingestion path.
+# Fully offline: fixtures live under data/fixtures/.
 import json
 import math
 import threading
@@ -36,7 +35,6 @@ from resources_servers.openair_congestion.dataset_backend import (
 
 FIXTURES = Path(__file__).resolve().parent.parent / "data" / "fixtures"
 SNAPSHOT_FIXTURE = FIXTURES / "sample_provided.jsonl"
-TRACE_FIXTURE = FIXTURES / "sample_trace.jsonl"
 
 NOOP = ToolCall(name="noop", arguments={})
 
@@ -127,6 +125,35 @@ class TestSnapshotLoader:
             load_provided_dataset(bad)
 
     @pytest.mark.parametrize(
+        ("steps", "message"),
+        [
+            ([0, 0], "duplicate 'step' value 0"),
+            ([0, 1.5], "'step' must be an integer"),
+            ([0, None], "'step' must be present on every row"),
+        ],
+    )
+    def test_explicit_step_indices_fail_closed(self, tmp_path, steps, message):
+        bad = tmp_path / "bad_steps.jsonl"
+        rows = []
+        for step in steps:
+            row = {
+                "episode_id": "e",
+                "cells": [
+                    {
+                        "prb_util_dl_p50": 0.5,
+                        "ues": [{"delivered_mbps": 1.0}],
+                    }
+                ],
+            }
+            if step is not None:
+                row["step"] = step
+            rows.append(row)
+        bad.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        with pytest.raises(ValueError, match=message):
+            load_provided_dataset(bad)
+
+    @pytest.mark.parametrize(
         ("container", "field", "value"),
         [
             ("cell", "prb_util_dl_p50", 1.2),
@@ -196,412 +223,41 @@ class TestSnapshotLoader:
         assert list(episodes) == [key]  # full key preserved for scenario_id matching
         assert len(episodes[key].observations[0].episode_id) <= 64
 
-    def test_csv_adapter_point_round_trips(self, tmp_path):
-        # Flat shape, one line per UE per timestep (see _rows_from_csv).
+    def test_csv_input_is_rejected(self, tmp_path):
         csv_path = tmp_path / "provided.csv"
-        csv_path.write_text(
-            "episode_id,step,t_s,cell_id,prb_util_dl_p50,ue_id,offered_mbps,delivered_mbps,bler,sinr_db\n"
-            "e0,0,0.0,0,0.5,0,10,9,0.05,12\n"
-            "e0,0,0.0,0,0.5,1,10,8,0.05,10\n"
-            "e0,1,5.0,0,0.6,0,10,9.5,0.04,12\n"
-            "e0,1,5.0,0,0.6,1,10,8.5,0.05,10\n"
-        )
-        episodes = load_provided_dataset(csv_path)
-        assert list(episodes) == ["e0"]
-        assert len(episodes["e0"].observations) == 2
-        assert len(episodes["e0"].observations[0].cells[0].ues) == 2
+        csv_path.write_text("episode_id,step,cell_id,prb_util_dl_p50,ue_id,delivered_mbps\ne0,0,0,0.5,0,9\n")
 
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        [
-            ("step", "1.5"),
-            ("cell_id", "0.5"),
-            ("ue_id", "2.25"),
-        ],
-    )
-    def test_csv_rejects_fractional_integer_fields(
-        self,
-        tmp_path,
-        field,
-        value,
-    ):
-        csv_path = tmp_path / "fractional.csv"
-        fields = {
-            "step": "0",
-            "cell_id": "0",
-            "ue_id": "0",
-        }
-        fields[field] = value
-        csv_path.write_text(
-            "episode_id,step,t_s,cell_id,prb_util_dl_p50,ue_id,"
-            "offered_mbps,delivered_mbps,bler,sinr_db\n"
-            f"e0,{fields['step']},0.0,{fields['cell_id']},0.5,"
-            f"{fields['ue_id']},10,9,0.05,12\n"
-            "e0,1,5.0,0,0.6,0,10,9.5,0.04,12\n"
-        )
-
-        with pytest.raises(
-            ValueError,
-            match=rf"fractional\.csv:2.*{field}.*{value}",
-        ):
+        with pytest.raises(ValueError, match="nested snapshot JSONL"):
             load_provided_dataset(csv_path)
 
-
-class TestTraceLoader:
-    @staticmethod
-    def _trace_row(*, iteration, step):
-        return {
-            "iter": iteration,
-            "episode_id": "reused",
-            "step": step,
-            "tool_sent": {"name": "noop", "arguments": {}},
-            "reward_measurements": {
-                "aggregate_delivered_mbps": 10.0,
-                "n_ues": 2,
-            },
-        }
-
-    def test_trace_fixture_is_detected_and_parsed(self):
-        episodes = load_provided_dataset(TRACE_FIXTURE)
-        assert sorted(episodes) == ["ep_000341", "ep_000342"]
-        assert len(episodes["ep_000341"].observations) == 3
-        assert len(episodes["ep_000342"].observations) == 3
-        for source in episodes.values():
-            for obs in source.observations:
-                assert isinstance(obs, Observation)
-
-    def test_reused_episode_ids_are_partitioned_by_iteration(self, tmp_path):
-        path = tmp_path / "reused_ids.jsonl"
-        rows = [self._trace_row(iteration=iteration, step=step) for iteration in (0, 1) for step in (0, 1)]
-        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-
-        episodes = load_provided_dataset(path)
-
-        assert sorted(episodes) == ["reused::iter=0", "reused::iter=1"]
-        assert all(len(source.observations) == 2 for source in episodes.values())
-
-    @pytest.mark.parametrize(
-        "steps",
-        [
-            pytest.param((0, 0), id="duplicate"),
-            pytest.param((1, 0), id="non-monotonic"),
-        ],
-    )
-    def test_trace_steps_must_be_unique_and_strictly_increasing(self, tmp_path, steps):
-        path = tmp_path / "bad_step_order.jsonl"
-        rows = [self._trace_row(iteration=0, step=step) for step in steps]
-        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-
-        with pytest.raises(ValueError, match="strictly increasing"):
-            load_provided_dataset(path)
-
-    def test_aggregates_reconstruct_recorded_measurements(self):
-        # Step 1 of ep_000341 carries the full measurement set; the
-        # reconstructed single-cell observation must reproduce every
-        # aggregate that trace row recorded.
-        rows = [json.loads(line) for line in TRACE_FIXTURE.open()]
-        recorded = next(r for r in rows if r["episode_id"] == "ep_000341" and r["step"] == 1)["reward_measurements"]
-        obs = load_provided_dataset(TRACE_FIXTURE)["ep_000341"].observations[1]
-        cell = obs.cells[0]
-        assert len(obs.cells) == 1
-        assert len(cell.ues) == int(recorded["n_ues"])
-        assert sum(ue.delivered_mbps for ue in cell.ues) == pytest.approx(recorded["aggregate_delivered_mbps"])
-        assert cell.fairness_jain == pytest.approx(recorded["mean_jain_fairness"])
-        assert cell.sla_violations_last_window == int(recorded["sla_violations"])
-        assert cell.prb_util_dl_p99 == pytest.approx(0.85 + 0.15 * recorded["prb_pressure"])
-        assert cell.prach_collision_rate == pytest.approx(0.05 + 0.45 * recorded["access_pressure"])
-
-    def test_recomputed_reward_measurements_match_the_trace(self):
-        # Re-running compute_breakdown over a reconstructed (prev, curr) pair
-        # must reproduce the trace's aggregate-level measurements. Per-UE
-        # quantities (elastic Jain fairness) are flattened and excluded.
-        from openair_congestion import rewards
-
-        rows = [json.loads(line) for line in TRACE_FIXTURE.open()]
-        recorded = next(r for r in rows if r["episode_id"] == "ep_000341" and r["step"] == 1)["reward_measurements"]
-        episodes = load_provided_dataset(TRACE_FIXTURE)
-        breakdown = rewards.compute_breakdown(
-            prev_obs=episodes["ep_000341"].observations[0],
-            curr_obs=episodes["ep_000341"].observations[1],
-            action=NOOP,
-            rejected=False,
-        )
-        recomputed = breakdown["measurements"]
-        for key in (
-            "sla_violations",
-            "aggregate_delivered_mbps",
-            "mean_jain_fairness",
-            "prb_pressure",
-            "access_pressure",
-            "fairness_deficit",
-            "buffer_pressure",
-            "n_ues",
-        ):
-            assert recomputed[key] == pytest.approx(recorded[key]), key
-
-    def test_trace_service_accounting_reaches_the_t2_reward(self, tmp_path):
-        path = tmp_path / "t2_service_trace.jsonl"
-        rows = []
-        for step, accounting in enumerate(
-            (
-                {
-                    "requested_service_mbps": 20.0,
-                    "admitted_service_mbps": 20.0,
-                    "delivered_service_mbps": 18.0,
-                },
-                {
-                    "requested_service_mbps": 20.0,
-                    "admitted_service_mbps": 10.0,
-                    "delivered_service_mbps": 8.0,
-                    "forced_terminated_service_mbps": 5.0,
-                    "cumulative_forced_terminated_service_mbps": 5.0,
-                    "forced_termination_events": 1.0,
-                    "step_forced_terminated_service_mbps": 5.0,
-                    "step_forced_termination_events": 1.0,
-                    "unadmitted_service_mbps": 10.0,
-                    "undelivered_admitted_service_mbps": 2.0,
-                },
-            )
-        ):
-            rows.append(
-                {
-                    "iter": 0,
-                    "episode_id": "t2_service",
-                    "tier": "T2",
-                    "step": step,
-                    "tool_sent": {"name": "noop", "arguments": {}},
-                    "reward_measurements": {
-                        "aggregate_delivered_mbps": accounting["delivered_service_mbps"],
-                        "n_ues": 2,
-                        **accounting,
-                    },
-                }
-            )
-        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-
-        backend = _make_backend(
-            dataset_path=str(path),
-            reward_weights={"w_reject": 0.75},
-        )
-        _, meta = backend.reset({"scenario_id": "t2_service"})
-        _, reward, _, info = backend.step(meta.episode_id, NOOP)
-        backend.close(meta.episode_id)
-
-        assert meta.tier == "T2"
-        assert info["reward_profile"] == "openair_t2_v3"
-        assert info["reward_weights"]["w_reject"] == pytest.approx(0.75)
-        assert info["prb_pressure_threshold"] == pytest.approx(0.85)
-        for key, value in accounting.items():
-            assert info["service_accounting"][key] == pytest.approx(value)
-        assert info["reward_measurements"]["requested_service_mbps"] == pytest.approx(20.0)
-        assert info["reward_measurements"]["admitted_service_mbps"] == pytest.approx(10.0)
-        assert info["reward_measurements"]["step_forced_termination_events"] == pytest.approx(1.0)
-        assert info["reward_terms"]["service_denial"] < 0.0
-        assert info["reward_terms"]["forced_termination"] < 0.0
-        assert reward == pytest.approx(info["reward_terms"]["total"])
-
-    def test_snapshot_requested_and_admitted_measurements_are_preserved(self, tmp_path):
-        path = tmp_path / "service_snapshot.jsonl"
-        rows = []
-        for step in (0, 1):
-            rows.append(
-                {
-                    "episode_id": "service_snapshot",
-                    "step": step,
-                    "global": {"tier": "T2"},
-                    "cells": [
-                        {
-                            "cell_id": 0,
-                            "prb_util_dl_p50": 0.9,
-                            "ues": [
-                                {
-                                    "ue_id": 0,
-                                    "requested_mbps": 12.0,
-                                    "admitted_mbps": 7.0,
-                                    "offered_mbps": 7.0,
-                                    "delivered_mbps": 6.0,
-                                }
-                            ],
-                        }
-                    ],
-                }
-            )
-        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-
-        source = load_provided_dataset(path)["service_snapshot"]
-
-        assert source.observations[1].cells[0].ues[0].requested_mbps == pytest.approx(12.0)
-        assert source.observations[1].cells[0].ues[0].admitted_mbps == pytest.approx(7.0)
-        assert source.service_accounting[1]["requested_service_mbps"] == pytest.approx(12.0)
-        assert source.service_accounting[1]["admitted_service_mbps"] == pytest.approx(7.0)
-
-    def test_sparse_trace_row_defaults_to_uncongested(self):
-        # Step 0 of ep_000342 carries only the required measurement keys:
-        # pressures default to 0, fairness passes through.
-        obs = load_provided_dataset(TRACE_FIXTURE)["ep_000342"].observations[0]
-        cell = obs.cells[0]
-        assert cell.prb_util_dl_p99 == pytest.approx(0.85)  # zero pressure
-        assert cell.prach_collision_rate == 0.0
-        assert cell.sla_violations_last_window == 0
-        assert cell.fairness_jain == pytest.approx(0.95)
-        assert all(ue.buffer_occupancy_kb == 0.0 for ue in cell.ues)
-
-    def test_trace_row_missing_measurements_fails_fast(self, tmp_path):
-        bad = tmp_path / "trace.jsonl"
+    def test_grpo_trace_rows_are_rejected(self, tmp_path):
+        trace_path = tmp_path / "trace.jsonl"
         rows = [
             {
-                "episode_id": "e",
-                "step": 0,
-                "tool_sent": {"name": "noop", "arguments": {}},
-                "reward_measurements": {"aggregate_delivered_mbps": 10.0, "n_ues": 2},
-            },
-            {"episode_id": "e", "step": 1, "tool_sent": {"name": "noop", "arguments": {}}},
-        ]
-        bad.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-        with pytest.raises(ValueError, match="reward_measurements"):
-            load_provided_dataset(bad)
-
-    def test_trace_row_missing_required_key_names_it(self, tmp_path):
-        bad = tmp_path / "trace.jsonl"
-        row = {"episode_id": "e", "step": 0, "reward_measurements": {"aggregate_delivered_mbps": 10.0}}
-        bad.write_text(json.dumps(row) + "\n")
-        with pytest.raises(ValueError, match="n_ues"):
-            load_provided_dataset(bad)
-
-    def test_recorded_cell_capacity_is_loaded_per_episode(self):
-        episodes = load_provided_dataset(TRACE_FIXTURE)
-        assert episodes["ep_000341"].cell_capacity_mbps == pytest.approx(120.0)
-        assert episodes["ep_000342"].cell_capacity_mbps == pytest.approx(120.0)
-        # Snapshot data records no capacity; the config knob applies.
-        assert load_provided_dataset(SNAPSHOT_FIXTURE)["lab_run_a"].cell_capacity_mbps is None
-
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        [
-            ("n_ues", 0),
-            ("n_ues", 1.5),
-            ("aggregate_delivered_mbps", -1.0),
-            ("mean_jain_fairness", 1.1),
-            ("prb_pressure", -0.1),
-            ("access_pressure", 999.0),
-            ("requested_service_mbps", -1.0),
-            ("sla_violations", 1.5),
-        ],
-    )
-    def test_invalid_trace_measurements_fail_closed(self, tmp_path, field, value):
-        path = tmp_path / "trace_bad_measurement.jsonl"
-        rows = []
-        for step in range(2):
-            measurements = {
-                "aggregate_delivered_mbps": 10.0,
-                "n_ues": 2,
-                "cell_capacity_mbps_total": 120.0,
-            }
-            if step == 1:
-                measurements[field] = value
-            rows.append(
-                {
-                    "episode_id": "e",
-                    "step": step,
-                    "tool_sent": {"name": "noop", "arguments": {}},
-                    "reward_measurements": measurements,
-                }
-            )
-        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-
-        with pytest.raises(ValueError, match=rf"trace_bad_measurement\.jsonl:2.*{field}"):
-            load_provided_dataset(path)
-
-    @pytest.mark.parametrize("capacity", [0.0, -1.0, "1e999"])
-    def test_invalid_recorded_capacity_fails_closed(self, tmp_path, capacity):
-        path = tmp_path / "trace_bad_capacity.jsonl"
-        rows = [
-            {
-                "episode_id": "e",
+                "episode_id": "e0",
                 "step": step,
                 "tool_sent": {"name": "noop", "arguments": {}},
                 "reward_measurements": {
                     "aggregate_delivered_mbps": 10.0,
                     "n_ues": 2,
-                    "cell_capacity_mbps_total": capacity,
                 },
             }
             for step in range(2)
         ]
+        trace_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        with pytest.raises(ValueError, match="nested KPI snapshot"):
+            load_provided_dataset(trace_path)
+
+    def test_malformed_recorded_action_fails_with_line_number(self, tmp_path):
+        rows = [json.loads(line) for line in SNAPSHOT_FIXTURE.open() if line.strip()][:2]
+        rows[0]["recorded_action"] = {"name": "not_a_tool", "arguments": {}}
+        path = tmp_path / "recorded_action.jsonl"
         path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
 
-        with pytest.raises(ValueError, match=r"trace_bad_capacity\.jsonl:1.*cell_capacity_mbps_total"):
+        with pytest.raises(ValueError, match=r"recorded_action\.jsonl:1") as exc_info:
             load_provided_dataset(path)
-
-    def test_inconsistent_recorded_capacity_fails_closed(self, tmp_path):
-        path = tmp_path / "trace_inconsistent_capacity.jsonl"
-        rows = []
-        for step, capacity in enumerate((120.0, 121.0)):
-            rows.append(
-                {
-                    "episode_id": "e",
-                    "step": step,
-                    "tool_sent": {"name": "noop", "arguments": {}},
-                    "reward_measurements": {
-                        "aggregate_delivered_mbps": 10.0,
-                        "n_ues": 2,
-                        "cell_capacity_mbps_total": capacity,
-                    },
-                }
-            )
-        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-
-        with pytest.raises(ValueError, match=r"episode 'e'.*inconsistent cell_capacity_mbps_total"):
-            load_provided_dataset(path)
-
-    def test_replaying_recorded_actions_reproduces_recorded_rewards(self):
-        # With the recorded action, guardrail outcome, and
-        # cell_capacity_mbps_total, compute_breakdown over reconstructed
-        # pairs reproduces the trace's per-step reward exactly.
-        from openair_congestion import rewards
-
-        rows = [json.loads(line) for line in TRACE_FIXTURE.open()]
-        episodes = load_provided_dataset(TRACE_FIXTURE)
-        for key in ("ep_000341", "ep_000342"):
-            obs = episodes[key].observations
-            for step in (1, 2):
-                row = next(r for r in rows if r["episode_id"] == key and r["step"] == step)
-                breakdown = rewards.compute_breakdown(
-                    prev_obs=obs[step - 1],
-                    curr_obs=obs[step],
-                    action=ToolCall(**row["tool_sent"]),
-                    rejected=row["rejected"],
-                    cell_capacity_mbps=episodes[key].cell_capacity_mbps,
-                )
-                assert breakdown["total"] == pytest.approx(row["reward"]), (key, step)
-
-    def test_backend_step_uses_recorded_capacity(self):
-        # ep_000341's rows record cell_capacity_mbps_total=120; replaying the
-        # recorded (accepted) actions through the backend, with the config
-        # knob left at its 60.0 default, reproduces the recorded rewards.
-        rows = [json.loads(line) for line in TRACE_FIXTURE.open()]
-        backend = _make_backend(dataset_path=str(TRACE_FIXTURE))
-        _, meta = backend.reset({"scenario_id": "ep_000341"})
-        for step in (1, 2):
-            row = next(r for r in rows if r["episode_id"] == "ep_000341" and r["step"] == step)
-            _, reward, _, info = backend.step(meta.episode_id, ToolCall(**row["tool_sent"]))
-            assert info["guardrail_accepted"] is True
-            assert reward == pytest.approx(row["reward"])
-        backend.close(meta.episode_id)
-
-    def test_backend_replays_trace_episodes(self):
-        backend = _make_backend(dataset_path=str(TRACE_FIXTURE))
-        first_obs, meta = backend.reset({"scenario_id": "ep_000342"})
-        assert meta.scenario_id == "ep_000342"
-        assert meta.max_steps == 2  # 3 trace rows -> 2 steps
-        assert len(first_obs.cells[0].ues) == 6
-        for expected_idx in (1, 2):
-            obs, reward, done, info = backend.step(meta.episode_id, NOOP)
-            assert math.isfinite(reward)
-            assert info["step_idx"] == expected_idx
-            assert info["dynamics_mode"] == DATASET_DYNAMICS_MODE
-            assert done is (expected_idx == 2)
-        backend.close(meta.episode_id)
+        assert "unknown tool" in str(exc_info.value)
 
 
 class TestDatasetReplayBackend:
@@ -659,8 +315,12 @@ class TestDatasetReplayBackend:
             assert info["training_usable"] is False
             assert info["diagnostic_only"] is True
             assert info["guardrail_accepted"] is True
+            assert "service_accounting" not in info
             # Pass-through: KPIs are the recorded row, untouched by the action.
             assert obs.cells[0].prb_util_dl_p50 == pytest.approx(expected_p50)
+            ue_payload = obs.cells[0].ues[0].model_dump()
+            assert "requested_mbps" not in ue_payload
+            assert "admitted_mbps" not in ue_payload
             # agent_aux is stamped like the other backends.
             assert obs.agent_aux.step_idx == expected_idx
             assert obs.agent_aux.last_action.name == "noop"
@@ -669,44 +329,26 @@ class TestDatasetReplayBackend:
         summary = backend.close(meta.episode_id)
         assert summary == {"ok": True, "n_steps": 3}
 
-    def test_t2_dataset_uses_t2_reward_profile(self, tmp_path):
-        path = tmp_path / "t2.jsonl"
-        rows = []
-        for step, delivered in enumerate((10.0, 8.0)):
-            rows.append(
-                {
-                    "episode_id": "t2_recording",
-                    "step": step,
-                    "global": {"tier": "T2"},
-                    "cells": [
-                        {
-                            "cell_id": 0,
-                            "prb_util_dl_p50": 0.9,
-                            "ues": [
-                                {
-                                    "ue_id": 0,
-                                    "offered_mbps": 20.0,
-                                    "delivered_mbps": delivered,
-                                    "bler": 0.1,
-                                    "sinr_db": 5.0,
-                                }
-                            ],
-                        }
-                    ],
-                }
-            )
+    def test_recorded_action_is_inert_diagnostic_metadata(self, tmp_path):
+        rows = [json.loads(line) for line in SNAPSHOT_FIXTURE.open() if line.strip()][:3]
+        recorded_action = {
+            "name": "set_scheduler_policy",
+            "arguments": {"cell_id": 0, "policy": "RR"},
+        }
+        rows[0]["recorded_action"] = recorded_action
+        path = tmp_path / "recorded_action.jsonl"
         path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        backend = _make_backend(dataset_path=str(path))
+        _, meta = backend.reset({"scenario_id": "lab_run_a"})
 
-        backend = _make_backend(dataset_path=path)
-        _, meta = backend.reset({"scenario_id": "t2_recording"})
+        obs, _, _, info = backend.step(meta.episode_id, NOOP)
+        assert info["recorded_action"] == recorded_action
+        assert info["training_usable"] is False
+        assert obs.cells[0].prb_util_dl_p50 == pytest.approx(0.70)
+
         _, _, _, info = backend.step(meta.episode_id, NOOP)
+        assert info["recorded_action"] is None
         backend.close(meta.episode_id)
-
-        assert meta.tier == "T2"
-        assert info["reward_version"] == "openair_t2_v3"
-        assert info["reward_terms"]["delta_sla"] == 0.0
-        assert info["reward_terms"]["delta_tput"] == 0.0
-        assert "delivery_gap" in info["reward_terms"]
 
     def test_reward_exception_leaves_episode_state_unchanged(self, monkeypatch):
         backend = _make_backend()

@@ -60,6 +60,18 @@ def test_oracle_pins_to_one_and_noop_to_zero():
     assert noop["scored_rows"] == oracle["scored_rows"] > 0
 
 
+def test_cli_validation_runs_compact_local_benchmark(monkeypatch, capsys):
+    import sys
+
+    rows = _small_set()
+    monkeypatch.setattr(golden_set, "generate_golden_set", lambda: rows)
+    monkeypatch.setattr(sys, "argv", ["golden_set.py"])
+
+    golden_set.main()
+
+    assert "benchmark validity (oracle recovers ~1, noop ~0): PASS" in capsys.readouterr().out
+
+
 def test_recovery_is_bounded_for_an_adversarial_policy():
     rows = _small_set()
     # A policy that always makes a catastrophic (guardrail-rejected) call must

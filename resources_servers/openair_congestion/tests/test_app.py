@@ -170,71 +170,19 @@ class TestReset:
         assert info["dynamics_mode"] == "synthetic_action_effect_v5_conditioned_tradeoffs"
         assert info["causal_action_effects"] is True
         assert info["training_usable"] is True
+        assert info["supports_explicit_close"] is True
+        assert info["supports_step_idempotency"] is True
 
     @pytest.mark.asyncio
-    async def test_t2_reset_and_step_render_policy_visible_service_state(self):
+    async def test_reset_rejects_deferred_t2_tier(self):
         env = _make_env()
         metadata = dict(
             _TASK_METADATA,
             tier="T2",
             regime_mix={"prb_exhaustion": 1.0},
         )
-        initial, reset_info = await env.reset(metadata, session_id="t2-policy")
-
-        assert initial.startswith("T|")
-        assert "\nP|" in initial
-        assert "\nU|" in initial
-        assert "\nD|" in initial
-        assert reset_info["backend"] == "replay"
-        assert reset_info["action_affects_observation"] is True
-        assert reset_info["reward_profile"] == "openair_t2_v3"
-        assert reset_info["observation_render"] == "t2_compact_pipe_v2"
-        assert reset_info["tool_contract"] == {
-            "allowed_names": ["noop", "set_prb_cap"],
-            "parameter_overrides": {
-                "set_prb_cap": {
-                    "cell_id": {"minimum": 0, "maximum": 2},
-                    "target": {"enum": ["ue"]},
-                    "target_id": {"minimum": 0, "maximum": 7},
-                    "max_prb": {"minimum": 200, "maximum": 273},
-                }
-            },
-        }
-        assert reset_info["reward_weights"] == {
-            "w_sla": 1.0,
-            "w_tput": 2.0,
-            "w_fair": 5.0,
-            "w_buffer": 0.15,
-            "w_sla_level": 0.8,
-            "w_prb_level": 0.4,
-            "w_access_level": 0.3,
-            "w_fair_level": 0.35,
-            "w_action": 0.0,
-            "w_reject": 0.5,
-        }
-
-        next_observation, _, terminated, truncated, step_info = await env.step(
-            _tool_response("noop", {}),
-            metadata,
-            session_id="t2-policy",
-        )
-
-        assert not terminated
-        assert not truncated
-        assert next_observation is not None
-        assert next_observation.startswith("T|")
-        assert "\nP|" in next_observation
-        assert "\nU|" in next_observation
-        assert "\nD|" in next_observation
-        for key in (
-            "backend",
-            "action_affects_observation",
-            "reward_profile",
-            "reward_weights",
-            "observation_render",
-            "tool_contract",
-        ):
-            assert step_info[key] == reset_info[key]
+        with pytest.raises(ValueError, match="tier"):
+            await env.reset(metadata, session_id="t2-policy")
 
     @pytest.mark.asyncio
     async def test_dataset_reset_advertises_the_effective_reward_configuration(self):
@@ -372,6 +320,29 @@ class TestReset:
         # The only replay slot is immediately reusable.
         _, info = await env.reset(dict(_TASK_METADATA, seed=7002), session_id="next")
         assert info["episode_id"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested_max_steps", [None, 1_000_000])
+    async def test_backend_reset_uses_the_agent_step_budget(self, monkeypatch, requested_max_steps):
+        env = _make_env(agent_max_steps=2)
+        metadata = dict(_TASK_METADATA)
+        if requested_max_steps is None:
+            metadata.pop("max_steps")
+        else:
+            metadata["max_steps"] = requested_max_steps
+        captured = {}
+        original_reset = env.backend.reset
+
+        def recording_reset(task_params, **kwargs):
+            captured.update(task_params)
+            assert task_params.get("max_steps") == 2
+            return original_reset(task_params, **kwargs)
+
+        monkeypatch.setattr(env.backend, "reset", recording_reset)
+        await env.reset(metadata, session_id="sid")
+
+        assert captured["max_steps"] == 2
+        assert env.session_state["sid"]["max_agent_steps"] == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("max_steps", [0, -1, 1.5, True])
@@ -594,6 +565,22 @@ class TestStep:
         assert info["reward_terms"]["total"] == pytest.approx(reward)
 
     @pytest.mark.asyncio
+    async def test_duplicate_step_request_returns_cached_transition(self):
+        env = _make_env()
+        _, reset_info = await env.reset(dict(_TASK_METADATA), session_id="sid")
+        metadata = {"_ng_step_request_id": "turn-1"}
+
+        first = await env.step(_tool_response("noop", {}), metadata, session_id="sid")
+        second = await env.step(_tool_response("noop", {}), metadata, session_id="sid")
+
+        assert second == first
+        assert env.session_state["sid"]["episode_id"] == reset_info["episode_id"]
+        assert env.session_state["sid"]["n_steps"] == 1
+
+        await env.close_session("sid")
+        assert await env.step(_tool_response("noop", {}), metadata, session_id="sid") == first
+
+    @pytest.mark.asyncio
     async def test_step_without_reset_truncates_gracefully(self):
         env = _make_env()
         obs, reward, term, trunc, info = await env.step(_tool_response("noop", {}), {}, session_id="ghost")
@@ -610,12 +597,50 @@ class TestStep:
         with pytest.raises(ValueError, match="session_id"):
             await env.explicit_close(session_id=None)
 
+    @pytest.mark.asyncio
+    async def test_failed_close_can_be_retried(self, monkeypatch):
+        env = _make_env(pool_size=1)
+        _, info = await env.reset(dict(_TASK_METADATA), session_id="session-a")
+        original_close = env.backend.close
+        calls = 0
+
+        def flaky_close(episode_id):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("close failure")
+            return original_close(episode_id)
+
+        monkeypatch.setattr(env.backend, "close", flaky_close)
+        with pytest.raises(RuntimeError, match="close failure"):
+            await env.explicit_close("session-a")
+
+        assert env.session_state["session-a"]["episode_id"] == info["episode_id"]
+        result = await env.explicit_close("session-a")
+        assert result["already_closed"] is False
+        assert "session-a" not in env.session_state
+
 
 class TestRoutes:
     def test_gymnasium_routes_registered(self):
         env = _make_env()
         routes = {r.path for r in env.setup_webserver().routes}
-        assert {"/reset", "/step", "/aggregate_metrics"}.issubset(routes)
+        assert {"/reset", "/step", "/close", "/aggregate_metrics"}.issubset(routes)
+
+    @pytest.mark.asyncio
+    async def test_explicit_close_route_is_cookie_scoped_and_idempotent(self):
+        env = _make_env(pool_size=1)
+        app = env.setup_webserver()
+        async with _http_client(app) as client:
+            reset = await client.post("/reset", json=_reset_body())
+            assert reset.status_code == 200
+            first = await client.post("/close", json={})
+            second = await client.post("/close", json={})
+
+        assert first.status_code == 200
+        assert first.json()["already_closed"] is False
+        assert second.status_code == 200
+        assert second.json()["already_closed"] is True
 
 
 def _http_client(app) -> httpx.AsyncClient:
@@ -710,11 +735,7 @@ class TestHTTPSurface:
 
 class TestBackends:
     def test_close_failure_keeps_episode_tracked(self, monkeypatch):
-        backend = ReplayBackend(
-            replay_root="data/replay",
-            pool_size=1,
-            max_steps_default=2,
-        )
+        backend = ReplayBackend(pool_size=1, max_steps_default=2)
         _, meta = backend.reset(dict(_TASK_METADATA, max_steps=2))
 
         def _raise_close_error(episode_id):

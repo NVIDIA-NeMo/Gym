@@ -5,54 +5,49 @@ position: 6
 ---
 import { NavButton } from "../../../../components/NavButton";
 
-This tutorial walks through the OpenAir congestion-control resource server, a
-complete multi-turn environment in which an agent reads 5G cell and UE
-telemetry and chooses one network-control tool call per turn. You will run the
-environment locally, inspect its state and verifier contracts, generate
-reproducible rollout evidence, and prepare it for model evaluation and GRPO
-training.
+This tutorial walks through `openair_congestion`, a multi-turn environment in
+which a policy reads 5G cell and UE telemetry and chooses one bounded network
+control per turn. You will run its causal synthetic replay, inspect the
+programmatic verifier, diagnose recorded KPI data, generate deterministic
+evidence, and use the standard Gym evaluation and NeMo RL paths.
 
 <NavButton href="/environment-tutorials/stateful-environment" label="Stateful Environment" direction="prev" />
 
 <Note>
-The bundled default backend is a deterministic synthetic model. It is useful
-for resource-server development, controlled policy comparisons, and training
+The bundled backend is a deterministic synthetic model. It is useful for
+resource-server development, controlled policy comparisons, and training
 experiments, but it is not a live OpenAirInterface or FlexRIC deployment and
-does not establish physical network fidelity.
+does not establish physical-network fidelity.
 </Note>
 
 ## What you will build
 
-Each episode repeats the following closed loop:
+Each episode repeats one explicit loop:
 
 ```text
 task row
   |
   v
-system instruction + eight tool schemas + current 5G KPIs
+system instruction + eight tool schemas + current KPIs
   |
   v
-model emits exactly one tool call
+policy emits exactly one tool call
   |
   v
-guardrail validates the tool and arguments
+resource-server guardrail validates the call
   |
   v
-deterministic backend applies the setpoint
+causal deterministic replay applies the setpoint
   |
   v
-next KPIs + decomposed reward + termination state
+next KPIs + decomposed programmatic reward
   |
-  +---------------------------> next model turn
+  +---------------------------> next policy turn
 ```
 
-The agent learns a task-specific workflow: read congestion indicators, select
-a safe intervention, observe the result, and decide whether to intervene
-again or call `noop`.
-
-The environment is also the verifier. There is no LLM judge. The server
-computes the score from the previous observation, the selected action, the
-resulting observation, and the selected reward profile.
+There is no LLM judge. The environment computes reward from the previous KPI
+state, the selected action, the resulting state, and the versioned reward
+contract.
 
 ## Prerequisites
 
@@ -65,43 +60,39 @@ uv sync --all-extras --all-groups
 source .venv/bin/activate
 ```
 
-All CPU sections in this tutorial run without a model endpoint, GPU, OAI lab,
-or external simulator.
+The scripted client, package tests, JSONL inspection, and golden-set generation
+run without a model endpoint, GPU, OAI lab, or external simulator.
 
-## 1. Inspect the environment package
+## 1. Inspect the package
 
-The implementation lives under
-`resources_servers/openair_congestion/`:
+The main files are:
 
 ```text
 resources_servers/openair_congestion/
-├── app.py                         # NeMo Gym reset/step/close API
+├── app.py                         # reset/step/close API
 ├── backends.py                    # backend contract and selection
-├── client.py                      # self-contained scripted HTTP client
-├── dataset_backend.py             # recorded-data diagnostic replay
-├── generate_example_rollouts.py   # reproducible example artifacts
-├── golden_set.py                  # finite-grid single-intervention benchmark
-├── model_sweep.py                 # scripted and optional real-model sweep
+├── client.py                      # scripted HTTP client
+├── dataset_backend.py             # recorded-data diagnostics
+├── generate_example_rollouts.py   # reproducible API trajectories
+├── golden_set.py                  # finite-grid single-intervention oracle
 ├── configs/openair_congestion.yaml
 ├── data/example.jsonl
 └── openair_congestion/
     ├── guardrail.py
     ├── replay_env.py
-    ├── reward_profiles.py
     ├── rewards.py
     ├── schemas.py
     └── tools.py
 ```
 
-The YAML config connects two servers:
+The YAML config composes:
 
-- `openair_congestion`, which owns episode state, dynamics, and reward; and
+- `openair_congestion`, which owns episode state, dynamics, guardrails, and
+  reward; and
 - `openair_congestion_gymnasium_agent`, which alternates model calls with
   resource-server steps.
 
-Open
-[`configs/openair_congestion.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/openair_congestion/configs/openair_congestion.yaml)
-and find the default settings:
+The default resource settings are:
 
 ```yaml
 backend: replay
@@ -112,11 +103,10 @@ session_ttl_s: 3600.0
 protocol_violation_penalty: -1.0
 ```
 
-`agent_max_steps` is the model-turn budget. Keeping it aligned with the task
-row's `max_steps` prevents the resource server and agent harness from
-disagreeing about when an episode ends.
+`agent_max_steps` is the fallback model-turn budget. Keep it aligned with the
+task row's `max_steps` so the agent and resource server agree on truncation.
 
-## 2. Run a complete episode locally
+## 2. Run a complete local episode
 
 Run the scripted client:
 
@@ -125,176 +115,114 @@ python resources_servers/openair_congestion/client.py
 ```
 
 The client boots an in-process FastAPI server when no Gym server is already
-running. It then uses the same `/reset`, `/step`, and `/close` surface used by
-the shared Gymnasium agent.
+running, then uses the same `/reset`, `/step`, and `/close` endpoints as the
+shared Gymnasium agent. A run prints one accepted or rejected action per step
+and a finite episode return.
 
-Expected output has one accepted action per step and a finite episode return:
+Identical task inputs and action sequences reproduce identical synthetic
+trajectories. A code or reward-version change may intentionally change the
+numbers.
 
-```text
-reset: episode_id=... seed=7001 scenario_id=prb_exhaustion
-step  0: ... reward=... accepted
-...
-episode over: terminated=... truncated=... steps=16 return=...
-```
+## 3. Understand the policy contract
 
-The exact numbers are deterministic for the same code, installed optional
-dependency set, task row, and action sequence. A different commit—or switching
-between the bundled fallback and optional `congestion_gen` generator—may
-intentionally change them when dynamics or a versioned reward profile changes.
+A task row supplies a system instruction, function-tool schemas, evaluator
+metadata, and a neutral user request. At reset, the server appends current KPI
+telemetry. Difficulty, regime, and scenario labels remain evaluator metadata
+and are not rendered into the policy message.
 
-## 3. Understand the model-facing contract
+The canonical observation schema is in `openair_congestion/schemas.py`:
 
-A task row supplies:
-
-1. a system instruction;
-2. function-tool schemas for the requested tier;
-3. evaluator metadata such as seed and difficulty; and
-4. a neutral user request.
-
-At reset, the environment appends the current telemetry as a new user
-message. Generator labels such as `difficulty`, `regime_mix`, and
-`scenario_id` are not rendered into model-facing telemetry, so a policy must
-reason from KPIs rather than select a memorized policy from a scenario name.
-
-For a non-T2 episode, the rendered user message has this shape:
-
-```text
-5G RAN telemetry @ t=0.0s (step 0, tier replay):
-KPI source: replay. Telemetry is synthetic and should be treated as benchmark
-data, not measured OAI/FlexRIC KPM.
-- Cell 0: DL PRB util p50=55%, p99=65%; UL PRB util p50=22%;
-  sched latency p99 18ms; Jain fairness 0.98; PRACH collision rate 0%;
-  2 UEs RRC-connected; 1 SLA violation(s) in last 5s.
-    UE 0 (5QI 9): offered 20.0 Mbps, delivered 18.0 Mbps, SINR 12.0 dB,
-    BLER 5%, mean MCS 20, buffer 100 kB, PDB violations 0 (ok).
-    UE 1 (5QI 9): offered 30.0 Mbps, delivered 14.0 Mbps, SINR 6.0 dB,
-    BLER 12%, mean MCS 13, buffer 800 kB, PDB violations 1 (SLA-VIOLATION).
-Choose one tool call (or noop) to address congestion now. Output only the tool call.
-```
-
-The canonical schema is in `openair_congestion/schemas.py`:
-
-| Scope | Fields |
+| Scope | Representative fields |
 |---|---|
 | Cell | PRB p50/p99, uplink PRB, scheduler latency, connected UE count, PRACH collision rate, Jain fairness, SLA violations |
-| UE | offered/requested/admitted/delivered Mbps, PRB cap, BLER, MCS, SINR, buffer occupancy, PDB violations, and 5QI |
-| Episode | time, episode ID, tier, KPI source/provenance, last action, last reward, last rejection, and step index |
+| UE | offered and delivered Mbps, PRB cap, BLER, MCS, SINR, buffer occupancy, PDB violations, 5QI |
+| Episode | time, episode ID, KPI provenance, last action, last reward, last rejection, step index |
 
-The scalar reward is not model-generated. After the policy calls a tool, the
-environment computes and records the reward and its per-term breakdown.
+The default `replay` path exposes eight tools:
 
-The default replay tiers expose eight tools:
-
-| Tool | Control |
+| Tool | Synthetic control |
 |---|---|
 | `set_scheduler_policy` | PF, RR, or MaxCI scheduling |
-| `set_prb_cap` | persistent UE PRB cap in the synthetic backend |
+| `set_prb_cap` | Persistent PRB cap for an observed UE |
 | `set_mcs_bounds` | MCS and BLER target bounds |
-| `set_qos_weights` | per-5QI scheduling weights |
-| `set_admission_policy` | admission threshold |
+| `set_qos_weights` | Per-5QI scheduling weights |
+| `set_admission_policy` | Admission threshold; `slice_reservation` must be empty because slices are not modeled |
 | `set_handover_trigger` | A3 offset and time-to-trigger |
 | `set_ul_power_control` | P0 and fractional path-loss compensation |
-| `noop` | deliberately keep current setpoints |
+| `noop` | Keep current setpoints for one step |
 
-The model must emit exactly one function call. Missing, malformed, unknown,
-or multiple calls terminate the episode with a finite negative protocol
-penalty. A well-formed but unsafe call is rejected by the guardrail and scored
-as a rejected transition.
+The policy must emit exactly one function call. Missing, malformed, unknown,
+or multiple calls terminate the episode with a finite protocol penalty. A
+well-formed unsafe call is rejected by the guardrail and scored as a rejected
+transition.
 
-For T2, reset returns an explicit narrow action contract. Before the first
-model turn, the shared Gymnasium agent filters the model-facing schemas to
-`noop` and UE-targeted `set_prb_cap`, constrains `cell_id` to the observed
-three-cell topology, and constrains `max_prb` to `200..273`. The server
-guardrail independently enforces the same contract.
+Accepted replay controls are persistent setpoints. Supported setpoint changes
+can alter later synthetic KPIs; applying the same setpoint again is idempotent.
 
 <Warning>
-These names describe network controls, but the bundled backend applies
-deterministic synthetic effects. It does not send OAI telnet commands or
-FlexRIC RC messages.
+The tool names describe network controls, but the bundled backend applies
+synthetic effects. It does not send OAI or FlexRIC control messages.
 </Warning>
 
-## 4. Follow one reset and step
+## 4. Follow state and reward
 
 The resource server stores one backend episode per cookie-scoped session.
-`reset()`:
+`reset()` reclaims expired sessions, reads the task parameters, starts a
+backend episode, and renders its first KPI state.
 
-1. reclaims expired sessions;
-2. reads seed, difficulty, tier, regime mix, and horizon from the task row;
-3. starts a backend episode;
-4. stores its episode ID and cumulative reward; and
-5. renders the first KPI observation.
+For each `step()`, the server:
 
-On `step()`, the server parses exactly one tool call and delegates to the
-backend. The deterministic replay backend:
+1. parses exactly one tool call;
+2. validates its schema, topology references, and safety bounds;
+3. applies the accepted setpoint to deterministic replay;
+4. constructs the next KPI state;
+5. computes and commits the reward transactionally; and
+6. returns the next observation and termination state.
 
-1. validates the action and topology references;
-2. applies persistent parameter-aware setpoints;
-3. constructs the next KPI state;
-4. computes the reward breakdown;
-5. commits the step transactionally; and
-6. returns the next rendered observation.
+A failed reward computation does not partially advance an episode. Normal
+completion, truncation, protocol failure, and explicit close release the
+session. Inactive sessions left by a hard client crash are reclaimed after
+the configured lease.
 
-A failed reward computation does not partially advance the episode. Close and
-orphan reaping wait for in-flight steps, so concurrent rollouts cannot silently
-reuse or remove an active episode.
-
-## 5. Inspect the verifier
-
-The verifier is
-[`rewards.compute_breakdown`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/openair_congestion/openair_congestion/rewards.py).
-Every step result includes:
-
-- `reward_version`;
-- raw `reward_measurements`;
-- weighted `reward_terms`;
-- `service_accounting`; and
-- the scalar total used by evaluation or training.
-
-The objective is congestion cost. A clean steady transition can score `0`;
-worse congestion makes the return more negative, while material KPI
-improvement can earn positive transition credit.
-
-The terms cover:
-
-- SLA violations;
-- delivered throughput;
-- Jain fairness;
-- PRB, access, fairness, and buffer pressure;
-- action magnitude and rejected actions; and
-- for T2, admitted, denied, undelivered, and forcibly terminated service.
-
-Reward profiles are selected centrally:
-
-- T2 uses `openair_t2_v3`, an absolute-state service objective.
-- Other replay tiers preserve the frozen `openair_v1` contract.
+Every successful backend step contains the `openair_v1` reward version, raw
+measurements, weighted terms, and scalar total. Protocol violations instead
+receive the configured fixed penalty. The terms cover SLA violations,
+throughput, Jain fairness, PRB/access/fairness/buffer pressure, action
+magnitude, and rejected actions.
 
 Always compare policies on the same task manifest, backend, reward version,
-and horizon. A score from a different profile is not directly comparable.
+horizon, and decoding settings.
 
-## 6. Distinguish the two replay backends
+## 5. Choose the right replay backend
 
-| Backend | Causal action effects | Appropriate use |
+| Backend | Action changes the next state? | Appropriate use |
 |---|---:|---|
-| `replay` | Yes, within the synthetic model | Development, controlled evaluation, SFT/GRPO experiments |
-| `dataset_replay` | No | Data ingestion, reward recomputation, diagnostics |
+| `replay` | Yes, within synthetic dynamics | Development, controlled evaluation, SFT/GRPO experiments |
+| `dataset_replay` | No | Data ingestion, reward recomputation, contract diagnostics |
 
-The default `replay` backend generates a deterministic trajectory and updates
-future KPIs when an accepted action changes a setpoint.
+The default `replay` backend is causal within its synthetic dynamics: an
+accepted setpoint can change future synthetic KPIs.
 
-`dataset_replay` serves prerecorded next observations. Because the current
-action cannot change those observations, the server marks its rollouts
-`training_usable: false` and `diagnostic_only: true`.
+`dataset_replay` serves the recorded next observation even when the current
+policy chooses a different action. It marks results `training_usable: false`
+and `diagnostic_only: true`.
 
 <Warning>
-Do not train a policy from `dataset_replay` as if its transitions were causal.
-It is a diagnostic adapter, not an offline counterfactual simulator.
+Do not use `dataset_replay` as an on-policy GRPO environment or as evidence
+that one policy controls the network better than another. It contains no
+counterfactual next state for an action that was not recorded.
 </Warning>
 
-### Inspect the checked-in recorded data
+### Inspect the checked-in recording
 
-Temporarily set these keys under
-`openair_congestion.resources_servers.openair_congestion` in
-`configs/openair_congestion.yaml`:
+Copy the config so the default replay setup remains unchanged:
+
+```bash
+cp resources_servers/openair_congestion/configs/openair_congestion.yaml \
+  /tmp/openair_congestion_dataset.yaml
+```
+
+Set these resource-server keys in the copy:
 
 ```yaml
 openair_congestion:
@@ -305,27 +233,8 @@ openair_congestion:
       cell_capacity_mbps: 60.0
 ```
 
-Dataset rows are validated at startup. Malformed topology, duplicate IDs,
-fractional integer fields, and non-finite values fail with file-and-line
-provenance.
-
-For GRPO trace rows, `step` must be unique and strictly increasing within an
-episode. If an export reuses one `episode_id` across multiple `iter` values,
-the loader separates them into scenario keys such as `episode_7::iter=2`.
-Single-iteration exports keep their original episode key.
-
-`dataset_path` is relative to `resources_servers/openair_congestion/`, because
-that directory is the resource server's working directory. For a repeatable
-first run, copy the config, select the sample's `lab_run_a` episode, and start a
-hosted inference policy:
-
-```bash
-cp resources_servers/openair_congestion/configs/openair_congestion.yaml \
-  /tmp/openair_congestion_dataset.yaml
-```
-
-Edit `/tmp/openair_congestion_dataset.yaml` to contain the three keys above,
-then prepare one diagnostic task:
+Dataset paths are relative to `resources_servers/openair_congestion/`. Select
+the sample's `lab_run_a` episode in a temporary task file:
 
 ```bash
 jq -c '.scenario_id = "lab_run_a"' \
@@ -333,18 +242,18 @@ jq -c '.scenario_id = "lab_run_a"' \
   > /tmp/openair_dataset_tasks.jsonl
 ```
 
-Start the servers:
+Start an inference-only policy:
 
 ```bash
 gym env start \
   --config /tmp/openair_congestion_dataset.yaml \
   --model-type openai_model \
-  --model gpt-4.1-2025-04-14 \
-  --model-url https://api.openai.com/v1 \
-  --model-api-key "$OPENAI_API_KEY"
+  --model "$MODEL_NAME" \
+  --model-url "$MODEL_BASE_URL" \
+  --model-api-key "$MODEL_API_KEY"
 ```
 
-In another activated terminal:
+In another activated terminal, collect one diagnostic rollout:
 
 ```bash
 gym eval run --no-serve \
@@ -355,13 +264,12 @@ gym eval run --no-serve \
   --num-repeats 1
 ```
 
-This run validates ingestion and produces guardrail/reward diagnostics. It is
-not a causal model-quality evaluation: the current action cannot alter the
-prerecorded next observation.
+This validates ingestion and exposes guardrail and reward diagnostics. It is
+not a causal policy evaluation.
 
-### Use your own JSONL
+### Use your own nested KPI-snapshot JSONL
 
-Use a concrete local destination so another engineer can reproduce the setup:
+Place the data at a reproducible package-relative location:
 
 ```bash
 mkdir -p resources_servers/openair_congestion/data/user
@@ -369,7 +277,7 @@ cp /absolute/path/my_5g_measurements.jsonl \
   resources_servers/openair_congestion/data/user/my_5g_measurements.jsonl
 ```
 
-Set:
+Then replace the resource-server keys in the copied config:
 
 ```yaml
 openair_congestion:
@@ -380,139 +288,83 @@ openair_congestion:
       cell_capacity_mbps: 60.0
 ```
 
-Each row is one timestep. Rows with the same `episode_id` form an episode and
-must provide at least two observations. At minimum, each row needs a non-empty
-`cells` list; every cell needs `prb_util_dl_p50` and a non-empty `ues` list;
-every UE needs `delivered_mbps`. See
-`data/fixtures/sample_provided.jsonl` for sparse and complete examples.
+Each nested KPI-snapshot JSONL row is one timestep. Rows sharing an
+`episode_id` form an episode and require at least two observations. At minimum,
+each row needs a non-empty `cells` list; every cell needs
+`prb_util_dl_p50` and a non-empty `ues` list; every UE needs
+`delivered_mbps`.
 
-For T2 data, add optional per-UE `requested_mbps` and `admitted_mbps`. Put
-transition-level forced-termination fields in a row-level
-`service_accounting` object. Trace-format rows can carry the same requested,
-admitted, delivered, denied, and forced-termination values in
-`reward_measurements`; the diagnostic backend forwards them to the selected
-reward profile.
+Set `kpi_source_mode` explicitly for measured snapshots. If omitted, it
+defaults to `replay` and the observation is stamped synthetic.
 
-Set each task row's `scenario_id` to one of your `episode_id` values, or omit it
-to select an episode deterministically from the task seed.
+```jsonl
+{"episode_id":"run_a","step":0,"kpi_source_mode":"measured","recorded_action":{"name":"noop","arguments":{}},"cells":[{"cell_id":0,"prb_util_dl_p50":0.55,"ues":[{"ue_id":0,"offered_mbps":20.0,"delivered_mbps":18.0,"bler":0.05,"sinr_db":12.0}]}]}
+{"episode_id":"run_a","step":1,"kpi_source_mode":"measured","cells":[{"cell_id":0,"prb_util_dl_p50":0.70,"ues":[{"ue_id":0,"offered_mbps":20.0,"delivered_mbps":16.0,"bler":0.08,"sinr_db":10.0}]}]}
+```
 
-The reset and step responses expose the effective `reward_profile`,
-`reward_weights`, and `prb_pressure_threshold`, including YAML weight
-overrides. Successful terminal and truncated transitions also keep the scored
-after-observation instead of replacing it with `null`.
+When `step` is present, every row in that episode must provide a unique integer;
+the loader sorts those rows by `step`. Malformed topology, duplicate IDs,
+fractional integer fields, and non-finite values fail with source provenance.
 
-<Warning>
-A stored scalar reward is optional only when you preserve the complete reward
-contract: before/after observations, exact action and arguments, rejection
-state, reward version and weights, normalization capacities and thresholds,
-and—for T2—service accounting. A recorded transition does not contain the
-counterfactual next state for an action that was not taken.
-</Warning>
+An optional `recorded_action` is validated and returned as diagnostic metadata;
+it does not control the prerecorded next state. Stored scalar rewards are
+ignored. The backend recomputes reward from the served before/after
+observations, the current evaluation action, guardrail result, and configured
+reward contract. This still provides no counterfactual next state for a
+different action.
 
-Recorded actions can become SFT targets after provenance and quality review.
-They do not make `dataset_replay` an on-policy GRPO environment.
+Select the custom episode in the temporary task file:
 
-## 7. Extend the environment
+```bash
+jq -c '.scenario_id = "run_a"' \
+  resources_servers/openair_congestion/data/example.jsonl \
+  > /tmp/openair_dataset_tasks.jsonl
+```
+
+Run the same `gym env start` and `gym eval run` commands from the previous
+subsection. The temporary config and task file now point at the custom JSONL.
+
+## 6. Extend the environment
 
 ### Add a KPI
 
-Adding a KPI is a contract change:
-
 1. Add the field and bounds to `openair_congestion/schemas.py`.
-2. Parse or derive it in `dataset_backend.py` and assign honest provenance:
+2. Parse or derive it in `dataset_backend.py` and label its provenance as
    measured, estimated, placeholder, or synthetic.
-3. Populate it in `openair_congestion/replay_env.py`. Update the legacy
-   `env.py` and `kpi_client.py` only if the KPI-exporter/traffic-runner path
-   needs the same field.
-4. Render it in `openair_congestion/render.py` if the policy should observe it.
-   Do not render evaluator-only labels.
-5. If it affects scoring, add an auditable measurement and term in
-   `openair_congestion/rewards.py`. Version the reward instead of silently
-   changing a frozen profile.
-6. Update fixtures, this tutorial, and focused schema, ingestion, rendering,
-   dynamics, and reward tests.
+3. Populate it in `openair_congestion/replay_env.py`.
+4. Render it in `openair_congestion/render.py` only if the policy should see it.
+5. If it affects scoring, add an auditable term and version the reward contract.
+6. Update fixtures, documentation, and focused tests.
 
 ### Add a tool
 
-Adding a tool requires an explicit effect and safety story:
+1. Define its function schema and bounds in `openair_congestion/tools.py`.
+2. Add topology and safety checks in `openair_congestion/guardrail.py`.
+3. Give it deterministic, parameter-sensitive, persistent replay effects, or
+   reject it when the synthetic topology cannot represent the action honestly.
+4. Update prompts, examples, fixtures, baselines, and focused tests.
 
-1. Define its function schema and parameter bounds in
-   `openair_congestion/tools.py`.
-2. Add topology, safety, and rate-limit checks in
-   `openair_congestion/guardrail.py`. `app.py` derives structural JSON
-   validation from the tool schema.
-3. Add deterministic, parameter-sensitive, persistent effects in
-   `openair_congestion/replay_env.py`, or reject the action if the synthetic
-   topology cannot represent it.
-4. Document the legacy runner behavior in
-   `openair_congestion/scenario_control.py`. Log-only or traffic-side behavior
-   must not be described as FlexRIC/OAI RAN actuation.
-5. Update prompts, examples, fixtures, any scripted baseline that uses the
-   tool, and guardrail/action-semantics/reward tests.
+## 7. Generate deterministic evidence
 
-<Note>
-The checked-in Gym configuration exposes only `replay` and
-`dataset_replay`. The legacy KPI-exporter and traffic-runner modules are
-implementation references, not a selectable live OAI/FlexRIC backend.
-</Note>
-
-## 8. Generate reproducible rollout evidence
-
-Regenerate the five scripted examples through the real HTTP surface:
+Regenerate the five scripted trajectories through the actual HTTP surface:
 
 ```bash
 PYTHONPATH=.:resources_servers/openair_congestion \
   python resources_servers/openair_congestion/generate_example_rollouts.py
 ```
 
-The output is
-`resources_servers/openair_congestion/data/example_rollouts.jsonl`.
-Each transition records its action, reward, reward terms, measurements,
-dynamics version, reward version, and lifecycle result.
+The output at `data/example_rollouts.jsonl` records one compact scripted run
+per example. Regenerate and test it to check wiring and reproducibility; it is
+not policy-quality evidence.
 
-These artifacts prove wiring and reproducibility. They do not prove that an
-SFT or GRPO model is better than a baseline.
-
-Run the complete resource-server test suite:
+Run the package and Gymnasium-agent tests:
 
 ```bash
 pytest resources_servers/openair_congestion/tests -q
+pytest responses_api_agents/gymnasium_agent/tests/test_app.py -q
 ```
 
-Then run the shared protocol tests:
-
-```bash
-pytest \
-  resources_servers/gymnasium/tests/test_app.py \
-  responses_api_agents/gymnasium_agent/tests/test_app.py \
-  -q
-```
-
-## 9. Check reward and policy ordering
-
-Run the offline scripted sweep:
-
-```bash
-PYTHONPATH=.:resources_servers/openair_congestion \
-  python resources_servers/openair_congestion/model_sweep.py
-```
-
-This checks the fixed policy partial order:
-
-```text
-relief > noop
-relief > random-valid
-noop > catastrophic
-random-valid > catastrophic
-```
-
-Each comparison uses paired prompt/repeat returns and must have a positive
-mean delta with a deterministic 95% bootstrap lower bound above zero.
-
-That partial order is a reward sanity check. It is not evidence that a real model
-understands telecom control.
-
-Generate the held-out finite-grid benchmark:
+Generate the finite-grid golden set:
 
 ```bash
 PYTHONPATH=.:resources_servers/openair_congestion \
@@ -520,116 +372,76 @@ PYTHONPATH=.:resources_servers/openair_congestion \
   --out results/openair_congestion_golden_set.jsonl
 ```
 
-For each held-out decision point, the generator evaluates a finite action grid,
-applies each candidate once, coasts with `noop`, and records the best value.
-This is a reproducible derived oracle for that grid and horizon—not a proof of
-globally optimal multi-step control or a universal reward ceiling.
+For each deterministic decision state, the script evaluates a bounded action
+grid, applies one candidate, coasts with `noop`, and records the best value and
+margin over inaction. This is a reproducible reward-and-dynamics sanity oracle
+for that grid and horizon. It is not a universal multi-step optimum or evidence
+that a real model understands telecom control.
 
-## 10. Evaluate real models
+## 8. Evaluate and profile a hosted policy
 
-There are two independent model choices:
-
-- `--model`, `--model-url`, and `--model-api-key` select an inference policy
-  for validation or evaluation.
-- The trainable base model, tokenizer, weights, optimizer, and SFT/GRPO
-  settings live in a NeMo RL job configuration.
-
-The GPT-4.1 command below is an inference-only hosted-policy example. NeMo Gym
-asks GPT-4.1 for tool calls and the environment scores them; `gym env start`
-does not update GPT-4.1 weights.
-
-Copy
-[`sweep_models.example.json`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/openair_congestion/sweep_models.example.json)
-and configure at least two distinct OpenAI-compatible model identities with
-predeclared capability ranks. Store API keys in environment variables named
-by each model entry.
-
-Start with a bounded exploratory run:
+Start the environment with an OpenAI-compatible endpoint:
 
 ```bash
-PYTHONPATH=.:resources_servers/openair_congestion \
-  python resources_servers/openair_congestion/model_sweep.py \
-  --models path/to/sweep_models.json \
-  --task-count 5 \
-  --repeats 2 \
-  --concurrency 4 \
-  --out results/openair_congestion_model_smoke.json
+gym env start \
+  --resources-server openair_congestion \
+  --model-type openai_model \
+  --model "$MODEL_NAME" \
+  --model-url "$MODEL_BASE_URL" \
+  --model-api-key "$MODEL_API_KEY"
 ```
 
-Only after the smoke run has no infrastructure, parse, or invalid-call
-failures should you run the contribution profile:
+In another terminal, use the standard Gym evaluation commands:
 
 ```bash
-PYTHONPATH=.:resources_servers/openair_congestion \
-  python resources_servers/openair_congestion/model_sweep.py \
-  --compliance-profile \
-  --models path/to/sweep_models.json \
-  --concurrency 16 \
-  --out results/openair_congestion_model_profile.json
+gym eval run --no-serve \
+  --agent openair_congestion_gymnasium_agent \
+  --input resources_servers/openair_congestion/data/example.jsonl \
+  --output results/openair_congestion_rollouts.jsonl \
+  --limit 5 \
+  --num-repeats 2
+
+gym eval profile \
+  --inputs results/openair_congestion_rollouts_materialized_inputs.jsonl \
+  --rollouts results/openair_congestion_rollouts.jsonl
 ```
 
-Compliance expands the five regimes into 500 prompts with 16 responses per
-prompt for each model. It requires complete identical pair coverage, zero
-failures, increasing paired mean return, and a positive deterministic 95%
-bootstrap lower bound for every adjacent capability rank.
+`gym env start` and `gym eval run` evaluate the endpoint; they do not update
+its weights. Keep the same tasks, backend, reward version, horizon, decoding
+settings, and repeats when comparing policies. Treat infrastructure, parsing,
+and invalid-call failures as failures, not as `noop`.
 
-<Note>
-This is intentionally expensive. Do not replace real endpoints with scripted
-anchors or mock servers and call the compliance gate passed.
-</Note>
+## 9. Evaluate a local checkpoint
 
-### Evaluate a local or trained checkpoint
-
-For a checkpoint compatible with the generic local-vLLM config:
+For a checkpoint compatible with the generic local-vLLM configuration:
 
 ```bash
 gym env start \
   --resources-server openair_congestion \
   --model-type local_vllm_model \
   --model /absolute/path/to/checkpoint
-```
 
-Then reuse the same fixed task manifest:
-
-```bash
 gym eval run --no-serve \
   --agent openair_congestion_gymnasium_agent \
   --input resources_servers/openair_congestion/data/example.jsonl \
   --output results/openair_trained_checkpoint.jsonl \
-  --num-repeats 1
+  --num-repeats 2
 ```
 
-Some checkpoints need a model-specific chat template or vLLM tool-call parser.
-Copy a compatible config under
-`responses_api_models/local_vllm_model/configs/` and select that config with
-`--model-type`. Keep tasks, backend, reward version, horizon, sampling settings,
-and repeats fixed when comparing checkpoints.
+Some checkpoints require a model-specific chat template or vLLM tool-call
+parser. Copy a compatible config under
+`responses_api_models/local_vllm_model/configs/` and select it with
+`--model-type`.
 
-## 11. Hand the environment to NeMo RL
+## 10. Connect causal replay to NeMo RL
 
-The resource server produces the pieces a GRPO trainer needs:
+The trainable model, tokenizer, optimizer, and SFT/GRPO parameters belong in a
+NeMo RL job configuration, not in the resource-server YAML. Use the current
+[NeMo RL GRPO tutorial](/tutorials/training-tutorials/nemo-rl-grpo) as the
+schema authority.
 
-- model-facing task and telemetry messages;
-- bounded tool schemas;
-- one scalar reward per step;
-- decomposed reward evidence for debugging; and
-- deterministic reset/step behavior for reproducibility.
-
-Use the existing [NeMo RL GRPO tutorial](/tutorials/training-tutorials/nemo-rl-grpo) for
-the training framework setup. Point the trainer's Gym configuration at
-`openair_congestion_gymnasium_agent`, keep the train and evaluation seed bands
-disjoint, and record:
-
-- the exact Gym commit;
-- model and tokenizer identities;
-- task manifests and reward version;
-- optimizer and rollout settings;
-- qualification and training receipts;
-- noop, scripted expert, SFT, and GRPO evaluation on one fixed manifest; and
-- representative successful and failed episodes.
-
-The Gym portion of a NeMo RL job should enable Gym and reference the
-training-capable vLLM and OpenAir configurations:
+The Gym portion of the job should enable Gym and reference the training model
+and OpenAir configs:
 
 ```yaml
 env:
@@ -640,57 +452,19 @@ env:
       - resources_servers/openair_congestion/configs/openair_congestion.yaml
 ```
 
-Set the model or checkpoint path in the NeMo RL model section, not in
-`configs/openair_congestion.yaml`. This contribution does not include a
-validated OpenAir-specific NeMo RL training YAML; use the current NeMo RL
-tutorial as the configuration authority and do not inherit an unrelated
-environment's hyperparameters without validation.
-
-Use causal synthetic `replay` for GRPO. `dataset_replay` can validate recorded
-data and help prepare SFT examples, but its prerecorded next state is not
-caused by the current policy action.
-
-A bounded run can validate integration without making a broad performance
-claim. Report collapse to `noop`, qualification failure, or a failed validator
-as the result rather than substituting an older run.
-
-## Contribution scope
-
-This contribution is larger than one resource-server directory. Its review
-surface includes:
-
-- `resources_servers/openair_congestion/`;
-- the shared Gymnasium explicit-close request/response and endpoint;
-- shared Gymnasium-agent lifecycle and cookie-boundary changes;
-- corresponding shared tests;
-- the root environment index; and
-- this Fern tutorial plus its navigation links.
-
-Review shared changes as framework support required by a stateful environment,
-not as unrelated refactoring.
-
-## Contribution checklist
-
-Before opening a review:
-
-- Run the scripted client.
-- Regenerate and verify deterministic example rollouts.
-- Run the full OpenAir and shared protocol test suites.
-- Run `gym env test --resources-server openair_congestion`.
-- Run the Fern documentation checker.
-- Attach a real-model profile only if it completed under the strict rules.
-- Attach a fresh GRPO receipt only if the exact branch was trained.
-- State clearly that replay is synthetic and dataset replay is diagnostic.
+Set the base model or checkpoint in the NeMo RL model section. Use causal
+`replay`, disjoint training and evaluation manifests, and a fixed evaluation
+contract across noop, scripted, SFT, and GRPO policies. This contribution does
+not ship a validated OpenAir-specific NeMo RL job YAML, so do not copy an
+unrelated environment's hyperparameters without validation.
 
 ## Limitations
 
-- The deterministic dynamics are controlled approximations, not lab
-  measurements.
-- The package does not include a live OAI actuator or FlexRIC controller.
-- Generator metadata is evaluator-only and is not model input.
-- The finite-grid oracle is not a universal optimal-control oracle.
-- Scripted rollouts are not model-quality evidence.
-- A real-model sweep and GRPO run are empirical gates separate from
-  resource-server code correctness.
+<Note>
+Replay is a deterministic synthetic approximation, not a live OAI/FlexRIC
+deployment or physical-network model. `dataset_replay` is non-causal and
+diagnostic-only. Golden-set and scripted-rollout evidence checks environment
+behavior; learned-policy quality requires separate empirical evaluation.
+</Note>
 
 <NavButton href="/environment-tutorials/mcp-resources-server" label="MCP Resources Server" direction="next" />

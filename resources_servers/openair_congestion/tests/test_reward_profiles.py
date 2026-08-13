@@ -24,43 +24,17 @@ def _reset(env: ReplayEnv, *, tier: str):
     )
 
 
+@pytest.mark.parametrize("tier", ["T1", "T2", "T3", "unknown"])
+def test_reward_profile_rejects_unsupported_tier(tier):
+    with pytest.raises(ValueError, match="not supported"):
+        select_reward_profile(tier)
+
+
 def test_reward_profile_contract():
-    assert select_reward_profile("T2") == RewardProfile(
-        version="openair_t2_v3",
-        prb_pressure_threshold=0.85,
-    )
-    assert select_reward_profile(
-        "T1",
-        connected_t1_runner=True,
-    ) == RewardProfile(
-        version="openair_v1",
-        prb_pressure_threshold=0.08,
-    )
     assert select_reward_profile("replay") == RewardProfile(
         version="openair_v1",
         prb_pressure_threshold=0.85,
     )
-
-
-def test_t2_replay_reports_v3_service_terms():
-    env = ReplayEnv(pool_size=1, max_steps_default=2)
-    first, meta = _reset(env, tier="T2")
-    episode = env._episodes[meta.episode_id]
-    for cell in first.cells:
-        for ue in cell.ues:
-            key = (cell.cell_id, ue.ue_id)
-            episode.action_state.service.requested_mbps[key] = 2.0 * ue.offered_mbps
-            episode.action_state.service.admitted_mbps[key] = ue.offered_mbps
-
-    _, _, _, info = env.step(
-        meta.episode_id,
-        ToolCall(name="noop", arguments={}),
-    )
-    env.close(meta.episode_id)
-
-    assert info["reward_version"] == "openair_t2_v3"
-    assert info["reward_terms"]["service_denial"] < 0.0
-    assert info["service_accounting"]["unadmitted_service_mbps"] > 0.0
 
 
 def test_v1_replay_matches_frozen_default_contract():

@@ -43,3 +43,11 @@ def test_prb_cap_schema_and_guardrail_reject_unsupported_slice_target():
     )
     assert result.accepted is False
     assert "target='slice'" in (result.reason or "")
+
+
+def test_admission_schema_exposes_only_empty_slice_reservation():
+    schema = TOOL_SCHEMA_BY_NAME["set_admission_policy"]["function"]["parameters"]
+    reservation = schema["properties"]["slice_reservation"]
+
+    assert reservation["additionalProperties"] is False
+    assert reservation["maxProperties"] == 0

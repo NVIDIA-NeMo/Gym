@@ -13,33 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dataset-replay backend: serve a recorded KPI dataset through the Backend
+"""Dataset-replay backend: serve recorded KPI snapshots through the Backend
 contract.
 
 ``ReplayBackend`` synthesizes trajectories from seeds; this backend replays a
 dataset file instead. Same reset/step/close contract, so switching is
 config-only (``backend: dataset_replay``).
 
-Two JSONL row formats are accepted and auto-detected from the first row (see
-the README for the column contract of each):
+The accepted format is JSONL with one nested ``cells[]`` / ``ues[]`` KPI
+snapshot per timestep. Missing optional KPI fields are synthesized with the
+same heuristics the live env uses (``openair_congestion/env.py``), so a sparse
+dataset still yields the stable observation contract used by diagnostics and
+conversion tooling.
 
-- KPI snapshots: one row per timestep with nested ``cells[]`` / ``ues[]``
-  telemetry. Missing optional KPI fields are synthesized with the same
-  heuristics the live env uses (``openair_congestion/env.py``), so a sparse
-  dataset still yields the stable observation contract used by diagnostics and
-  conversion tooling.
-- GRPO rollout traces: one row per policy step carrying a
-  ``reward_measurements`` dict (the aggregates emitted by
-  ``rewards.compute_breakdown``). Each trace row is reconstructed into a
-  single-cell observation whose aggregate KPIs — delivered throughput, mean
-  Jain fairness, PRB/access/buffer pressure, SLA violation count — reproduce
-  the recorded measurements, and a recorded ``cell_capacity_mbps_total``
-  keeps the reward's throughput normalizer at the recorded scale. Per-UE
-  structure is not recoverable from aggregates: throughput is spread evenly
-  across ``n_ues`` identical UEs, so per-UE quantities (elastic Jain
-  fairness, individual buffers, 5QI mix) are flattened.
-
-Actions are pass-through in both formats: the data is pre-recorded, so
+Actions are pass-through: the data is pre-recorded, so
 ``step()`` advances a pointer and does not mutate KPIs. The guardrail still
 runs (rejected actions earn the same penalty semantics as ReplayEnv) and the
 reward is computed over the served observation pair via the unchanged
@@ -48,16 +35,14 @@ reward is computed over the served observation pair via the unchanged
 
 from __future__ import annotations
 
-import csv
 import json
 import math
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from dataclasses import fields as dataclass_fields
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping, NoReturn, Optional
+from typing import Any, NoReturn, Optional
 
 # Load the backend contract before the colocated domain imports so an
 # incomplete checkout fails with the backend's targeted diagnostic.
@@ -81,18 +66,6 @@ from openair_congestion.tools import MAX_CELLS, MAX_UES
 # Stamped into step() info["dynamics_mode"] so trainers can tell recorded-data
 # rollouts apart from ReplayEnv's synthetic action-effect model.
 DATASET_DYNAMICS_MODE = "provided_data_passthrough_v1"
-_SERVICE_ACCOUNTING_FIELDS = (
-    "requested_service_mbps",
-    "admitted_service_mbps",
-    "delivered_service_mbps",
-    "forced_terminated_service_mbps",
-    "cumulative_forced_terminated_service_mbps",
-    "forced_termination_events",
-    "step_forced_terminated_service_mbps",
-    "step_forced_termination_events",
-    "unadmitted_service_mbps",
-    "undelivered_admitted_service_mbps",
-)
 
 # --- KPI-snapshot rows -> Observation ----------------------------------------
 #
@@ -172,10 +145,6 @@ def _parse_ue(raw: dict[str, Any], ue_idx: int) -> dict[str, Any]:
         )
     delivered = _num(raw, "delivered_mbps", 0.0, minimum=0.0)
     offered = _num(raw, "offered_mbps", max(delivered, 1.0), minimum=0.0)
-    requested = _num(raw, "requested_mbps", offered, minimum=0.0) if raw.get("requested_mbps") is not None else None
-    admitted = _num(raw, "admitted_mbps", offered, minimum=0.0) if raw.get("admitted_mbps") is not None else None
-    if requested is not None and admitted is not None and admitted > requested:
-        raise ValueError(f"admitted_mbps must be <= requested_mbps (got {admitted} > {requested})")
     sinr = _num(raw, "sinr_db", 10.0, minimum=-20.0, maximum=40.0)
     bler = _num(raw, "bler", 0.0, minimum=0.0, maximum=1.0)
     # env.py heuristics: mcs from SINR, backlog from offered - delivered,
@@ -197,8 +166,6 @@ def _parse_ue(raw: dict[str, Any], ue_idx: int) -> dict[str, Any]:
     return {
         "ue_id": _integer(raw, "ue_id", ue_idx, minimum=0, maximum=MAX_UES - 1),
         "offered_mbps": offered,
-        "requested_mbps": requested,
-        "admitted_mbps": admitted,
         "delivered_mbps": delivered,
         "bler": bler,
         "mcs_mean": mcs_mean,
@@ -318,210 +285,14 @@ def row_to_observation(
             "regime_mix": global_raw.get("regime_mix") or {},
             "tier": global_raw.get("tier", "replay"),
         },
-        # Default 'replay' keeps kpi_provenance honest (fields stamped
-        # 'synthetic'). Lab-measured rows should say so via kpi_source_mode
-        # (e.g. 'runner_snapshot'); the schema's provenance auto-fill handles
-        # the rest.
+        # Default 'replay' keeps provenance conservative (synthetic). Recorded
+        # or measured rows should label kpi_source_mode explicitly.
         "kpi_source_mode": str(row.get("kpi_source_mode", "replay")),
     }
     return Observation.model_validate(payload)
 
 
-def _service_accounting_for_observation(
-    row: dict[str, Any],
-    observation: Observation,
-) -> dict[str, float]:
-    """Return validated service accounting aligned with one recorded state."""
-
-    supplied = row.get("service_accounting") or {}
-    if not isinstance(supplied, dict):
-        raise TypeError(f"service_accounting must be an object, got {type(supplied).__name__}")
-    unknown = sorted(set(supplied) - set(_SERVICE_ACCOUNTING_FIELDS))
-    if unknown:
-        raise ValueError(f"service_accounting contains unknown field(s): {unknown}")
-
-    requested_default = sum(
-        float(ue.requested_mbps if ue.requested_mbps is not None else ue.offered_mbps)
-        for cell in observation.cells
-        for ue in cell.ues
-    )
-    admitted_default = sum(
-        float(ue.admitted_mbps if ue.admitted_mbps is not None else ue.offered_mbps)
-        for cell in observation.cells
-        for ue in cell.ues
-    )
-    delivered_default = sum(float(ue.delivered_mbps) for cell in observation.cells for ue in cell.ues)
-
-    def metric(name: str, default: float) -> float:
-        return _num(supplied, name, default, minimum=0.0)
-
-    requested = metric("requested_service_mbps", requested_default)
-    admitted = metric("admitted_service_mbps", admitted_default)
-    delivered = metric("delivered_service_mbps", delivered_default)
-    forced = metric("forced_terminated_service_mbps", 0.0)
-    cumulative_forced = metric("cumulative_forced_terminated_service_mbps", forced)
-    events = metric("forced_termination_events", 0.0)
-    step_forced = metric("step_forced_terminated_service_mbps", 0.0)
-    step_events = metric("step_forced_termination_events", 0.0)
-    return {
-        "requested_service_mbps": requested,
-        "admitted_service_mbps": admitted,
-        "delivered_service_mbps": delivered,
-        "forced_terminated_service_mbps": forced,
-        "cumulative_forced_terminated_service_mbps": cumulative_forced,
-        "forced_termination_events": events,
-        "step_forced_terminated_service_mbps": step_forced,
-        "step_forced_termination_events": step_events,
-        "unadmitted_service_mbps": metric(
-            "unadmitted_service_mbps",
-            max(0.0, requested - admitted),
-        ),
-        "undelivered_admitted_service_mbps": metric(
-            "undelivered_admitted_service_mbps",
-            max(0.0, admitted - delivered),
-        ),
-    }
-
-
-# --- GRPO trace rows -> snapshot rows -----------------------------------------
-
-
-def is_trace_row(row: dict[str, Any]) -> bool:
-    """A row carrying ``tool_sent`` or ``reward_measurements`` is a trace row."""
-    return "tool_sent" in row or "reward_measurements" in row
-
-
-def trace_row_to_snapshot(row: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild one GRPO trace row into the nested KPI-snapshot row shape.
-
-    Reads only the aggregates that ``rewards.compute_breakdown`` emits into
-    ``reward_measurements``; requires ``aggregate_delivered_mbps`` and
-    ``n_ues``, everything else defaults to its uncongested value. Pressure
-    measurements are inverted back to the KPI that produced them:
-
-        prb_pressure    -> prb_util_dl_p99      = 0.85 + 0.15 * pressure
-        access_pressure -> prach_collision_rate = 0.05 + 0.45 * pressure
-        buffer_pressure -> buffer_occupancy_kb  = (pressure + 0.7) * 1024 (if > 0)
-
-    The result is one cell with ``n_ues`` identical UEs; re-running
-    ``compute_breakdown`` over reconstructed pairs reproduces the recorded
-    aggregate measurements, but per-UE detail (elastic Jain fairness, the
-    real buffer distribution) is lost. A recorded ``cell_capacity_mbps_total``
-    is carried through so the reward's throughput normalizer keeps the
-    recorded scale (the reconstruction is single-cell, so the total is the
-    per-cell value ``compute_breakdown`` expects).
-    """
-    measurements = row.get("reward_measurements")
-    if not isinstance(measurements, dict):
-        raise ValueError(f"trace row is missing the 'reward_measurements' object; got keys {sorted(row)}")
-    for key in ("aggregate_delivered_mbps", "n_ues"):
-        if key not in measurements:
-            raise ValueError(
-                f"trace row reward_measurements is missing required key {key!r}; got keys {sorted(measurements)}"
-            )
-
-    n_ues = _integer(measurements, "n_ues", 1, minimum=1, maximum=MAX_UES)
-    delivered_total = _num(measurements, "aggregate_delivered_mbps", 0.0, minimum=0.0)
-    delivered = delivered_total / n_ues
-    requested_total = _num(
-        measurements,
-        "requested_service_mbps",
-        delivered_total,
-        minimum=0.0,
-    )
-    admitted_total = _num(
-        measurements,
-        "admitted_service_mbps",
-        requested_total,
-        minimum=0.0,
-    )
-    if admitted_total > requested_total:
-        raise ValueError(
-            "reward_measurements.admitted_service_mbps must be <= "
-            f"requested_service_mbps (got {admitted_total} > {requested_total})"
-        )
-    requested = requested_total / n_ues
-    admitted = admitted_total / n_ues
-    # Delivered traffic can exceed admitted traffic while queued traffic
-    # drains. offered_mbps retains the observation schema's load proxy while
-    # requested/admitted remain explicit, separately scored measurements.
-    offered = max(delivered, admitted)
-
-    prb_pressure = _num(measurements, "prb_pressure", 0.0, minimum=0.0, maximum=1.0)
-    p99 = min(1.0, 0.85 + 0.15 * prb_pressure)
-    p50 = max(0.0, (p99 - 0.02) / 1.15)
-
-    # Inverse of rewards._mean_access_pressure. Larger values cannot be
-    # represented by the bounded PRACH KPI and must not be silently saturated.
-    access_pressure = _num(
-        measurements,
-        "access_pressure",
-        0.0,
-        minimum=0.0,
-        maximum=(1.0 - 0.05) / 0.45,
-    )
-    prach = 0.05 + 0.45 * access_pressure if access_pressure > 0.0 else 0.0
-
-    buffer_pressure = _num(measurements, "buffer_pressure", 0.0, minimum=0.0)
-    buffer_kb = (buffer_pressure + 0.7) * 1024.0 if buffer_pressure > 0.0 else 0.0
-
-    fairness = _num(measurements, "mean_jain_fairness", 1.0, minimum=0.0, maximum=1.0)
-    sla = _integer(measurements, "sla_violations", 0, minimum=0, maximum=n_ues)
-
-    capacity: float | None = None
-    if measurements.get("cell_capacity_mbps_total") is not None:
-        capacity = _num(measurements, "cell_capacity_mbps_total", 0.0, minimum=0.0)
-        if capacity <= 0.0:
-            raise ValueError(f"cell_capacity_mbps_total must be > 0, got {capacity}")
-
-    ues = [
-        {
-            "ue_id": i,
-            "offered_mbps": offered,
-            "requested_mbps": requested,
-            "admitted_mbps": admitted,
-            "delivered_mbps": delivered,
-            "buffer_occupancy_kb": buffer_kb,
-            # Per-UE PDB flags are aggregate bookkeeping: the first `sla` UEs
-            # carry the violation so cell and UE counts stay consistent.
-            "pdb_violations": 1 if i < sla else 0,
-        }
-        for i in range(n_ues)
-    ]
-    snapshot: dict[str, Any] = {
-        "episode_id": row.get("episode_id"),
-        "iter": row.get("iter"),
-        "step": row.get("step"),
-        "global": {
-            "tier": (
-                row.get("tier")
-                or ((row.get("global") or {}).get("tier") if isinstance(row.get("global"), dict) else None)
-                or "replay"
-            )
-        },
-        "kpi_source_mode": str(row.get("kpi_source", "replay")),
-        "cell_capacity_mbps_total": capacity,
-        "service_accounting": {
-            key: measurements[key] for key in _SERVICE_ACCOUNTING_FIELDS if measurements.get(key) is not None
-        },
-        "cells": [
-            {
-                "cell_id": 0,
-                "prb_util_dl_p50": p50,
-                "prb_util_dl_p99": p99,
-                "prach_collision_rate": prach,
-                "rrc_connected_ues": n_ues,
-                "fairness_jain": fairness,
-                "sla_violations_last_window": sla,
-                "ues": ues,
-            }
-        ],
-        "_lineno": row.get("_lineno", "?"),
-    }
-    return snapshot
-
-
-# --- File loading (JSONL first; CSV adapter point) ---------------------------
+# --- File loading ------------------------------------------------------------
 
 
 def _reject_json_constant(value: str) -> NoReturn:
@@ -565,91 +336,12 @@ def _rows_from_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _csv_int(
-    rec: Mapping[str, str | None],
-    field: str,
-    *,
-    path: Path,
-    lineno: int,
-    default: int = 0,
-) -> int:
-    raw = rec.get(field)
-    if raw in (None, ""):
-        return default
-    try:
-        value = Decimal(str(raw))
-    except InvalidOperation as exc:
-        raise ValueError(f"{path}:{lineno}: {field} must be an integer, got {raw!r}") from exc
-    if not value.is_finite() or value != value.to_integral_value():
-        raise ValueError(f"{path}:{lineno}: {field} must be an integer, got {raw!r}")
-    return int(value)
-
-
-def _rows_from_csv(path: Path) -> list[dict[str, Any]]:
-    """CSV adapter for the KPI-snapshot format.
-
-    Assumed flat shape (one line per UE per timestep), regrouped into the
-    nested JSONL row shape::
-
-        episode_id, step, t_s, cell_id, prb_util_dl_p50, ue_id,
-        offered_mbps, delivered_mbps, bler, sinr_db
-
-    If a provided CSV differs, rewrite only this function so it returns the
-    same nested row dicts as ``_rows_from_jsonl``.
-    """
-    grouped: dict[tuple[str, int], dict[str, Any]] = {}
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        for lineno, rec in enumerate(csv.DictReader(fh), start=2):
-            episode = str(rec.get("episode_id") or "episode_0")
-            step = _csv_int(
-                rec,
-                "step",
-                path=path,
-                lineno=lineno,
-            )
-            row = grouped.setdefault(
-                (episode, step),
-                {"episode_id": episode, "step": step, "cells": [], "_lineno": lineno},
-            )
-            if rec.get("t_s"):
-                row["t_s"] = float(rec["t_s"])
-            cell_id = _csv_int(
-                rec,
-                "cell_id",
-                path=path,
-                lineno=lineno,
-            )
-            cell = next((c for c in row["cells"] if c["cell_id"] == cell_id), None)
-            if cell is None:
-                cell = {"cell_id": cell_id, "ues": []}
-                row["cells"].append(cell)
-            if rec.get("prb_util_dl_p50"):
-                cell["prb_util_dl_p50"] = float(rec["prb_util_dl_p50"])
-            ue: dict[str, Any] = {
-                "ue_id": _csv_int(
-                    rec,
-                    "ue_id",
-                    path=path,
-                    lineno=lineno,
-                )
-            }
-            for key in ("offered_mbps", "delivered_mbps", "bler", "sinr_db"):
-                if rec.get(key):
-                    ue[key] = float(rec[key])
-            cell["ues"].append(ue)
-    # Deterministic order: by (episode, step).
-    return [grouped[key] for key in sorted(grouped)]
-
-
 @dataclass(frozen=True)
 class EpisodeSource:
-    """One recorded episode: validated observations plus recorded reward context."""
+    """One recorded episode of validated KPI snapshots."""
 
     observations: list[Observation]
-    service_accounting: list[dict[str, float]]
-    # cell_capacity_mbps_total recorded by trace rows; None for snapshot data
-    # (the backend's cell_capacity_mbps config knob applies).
-    cell_capacity_mbps: Optional[float] = None
+    recorded_actions: list[Optional[ToolCall]]
 
 
 def _order_value(path: Path, row: dict[str, Any], key: str) -> float:
@@ -659,14 +351,42 @@ def _order_value(path: Path, row: dict[str, Any], key: str) -> float:
         raise ValueError(f"{path}:{row.get('_lineno', '?')}: non-numeric {key!r} value {row[key]!r}") from exc
 
 
+def _sort_by_explicit_step(path: Path, episode_key: str, rows: list[dict[str, Any]]) -> bool:
+    """Validate and apply an optional explicit step ordering."""
+    has_step = [row.get("step") is not None for row in rows]
+    if not any(has_step):
+        return False
+    if not all(has_step):
+        row = next(row for row in rows if row.get("step") is None)
+        raise ValueError(
+            f"{path}:{row.get('_lineno', '?')} (episode {episode_key!r}): "
+            "'step' must be present on every row when used"
+        )
+
+    seen: dict[int, int] = {}
+    for row in rows:
+        value = row["step"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(
+                f"{path}:{row.get('_lineno', '?')} (episode {episode_key!r}): 'step' must be an integer, got {value!r}"
+            )
+        if value in seen:
+            raise ValueError(
+                f"{path}:{row.get('_lineno', '?')} (episode {episode_key!r}): "
+                f"duplicate 'step' value {value} (first seen on line {seen[value]})"
+            )
+        seen[value] = row.get("_lineno", -1)
+
+    rows.sort(key=lambda row: row["step"])
+    return True
+
+
 def load_provided_dataset(path: str | Path) -> dict[str, EpisodeSource]:
     """Load and validate a dataset into per-episode observation trajectories.
 
     Returns ``{episode_key: EpisodeSource}`` with observations in timestep
-    order. The format (KPI snapshot vs. GRPO trace) is detected from the
-    first row and must be consistent across the file. Every row is fully
-    validated here so a malformed dataset fails at boot with a line-numbered
-    error, never mid-training.
+    order. Every nested KPI snapshot row is fully validated here so malformed
+    data fails at boot with a line-numbered error, never mid-replay.
     """
     path = Path(path)
     if not path.exists():
@@ -674,77 +394,30 @@ def load_provided_dataset(path: str | Path) -> dict[str, EpisodeSource]:
             f"dataset file not found: {path}. Point the config's 'dataset_path' "
             "at the dataset JSONL (see README, Dataset Formats)."
         )
-    if path.suffix.lower() in {".jsonl", ".json", ".ndjson"}:
-        rows = _rows_from_jsonl(path)
-    elif path.suffix.lower() == ".csv":
-        rows = _rows_from_csv(path)
-    else:
-        raise ValueError(
-            f"unsupported dataset extension {path.suffix!r}; expected .jsonl "
-            "(preferred) or .csv (adapter in _rows_from_csv)"
-        )
-
-    trace_mode = bool(rows and is_trace_row(rows[0]))
-    if trace_mode:
-        converted = []
-        for row in rows:
-            try:
-                converted.append(trace_row_to_snapshot(row))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{path}:{row.get('_lineno', '?')}: {exc}") from exc
-        rows = converted
+    if path.suffix.lower() != ".jsonl":
+        raise ValueError(f"unsupported dataset extension {path.suffix!r}; expected nested snapshot JSONL (.jsonl)")
+    rows = _rows_from_jsonl(path)
 
     # Group rows into episodes by 'episode_id' (or 'episode'); a dataset
-    # without one becomes a single episode in file order. GRPO collectors can
-    # reuse episode ids across iterations, so iteration becomes part of the
-    # key only when reuse is actually present (preserving existing single-iter
-    # scenario ids).
-    iterations_by_episode: dict[str, set[int]] = {}
-    if trace_mode:
-        for row in rows:
-            base_key = str(row.get("episode_id") or row.get("episode") or "episode_0")
-            iteration = row.get("iter")
-            if iteration is None:
-                continue
-            if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
-                raise ValueError(
-                    f"{path}:{row.get('_lineno', '?')}: iter must be a non-negative integer, got {iteration!r}"
-                )
-            iterations_by_episode.setdefault(base_key, set()).add(iteration)
-
+    # without one becomes a single episode in file order.
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        base_key = str(row.get("episode_id") or row.get("episode") or "episode_0")
-        key = base_key
-        if trace_mode and len(iterations_by_episode.get(base_key, set())) > 1:
-            iteration = row.get("iter")
-            if iteration is None:
-                raise ValueError(
-                    f"{path}:{row.get('_lineno', '?')}: reused episode_id {base_key!r} requires iter on every row"
-                )
-            key = f"{base_key}::iter={iteration}"
+        if not isinstance(row.get("cells"), list) or not row["cells"]:
+            raise ValueError(
+                f"{path}:{row.get('_lineno', '?')}: expected nested KPI snapshot "
+                "row with a non-empty 'cells' array; GRPO trace rows are not supported"
+            )
+        key = str(row.get("episode_id") or row.get("episode") or "episode_0")
         grouped.setdefault(key, []).append(row)
 
     episodes: dict[str, EpisodeSource] = {}
     for key, group in grouped.items():
-        if trace_mode:
-            if not all(row.get("step") is not None for row in group):
-                missing = next(row for row in group if row.get("step") is None)
-                raise ValueError(f"{path}:{missing.get('_lineno', '?')}: trace episode {key!r} is missing step")
-            ordered_steps = [_order_value(path, row, "step") for row in group]
-            if any(curr <= prev for prev, curr in zip(ordered_steps, ordered_steps[1:])):
-                raise ValueError(
-                    f"trace episode {key!r} steps must be unique and strictly increasing in file order; "
-                    f"got {ordered_steps}"
-                )
         # Order within an episode: explicit 'step' field wins, then 't_s',
         # then file order (stable sort keeps ties in file order).
-        if all(r.get("step") is not None for r in group):
-            group.sort(key=lambda r: _order_value(path, r, "step"))
-        elif all(r.get("t_s") is not None for r in group):
+        if not _sort_by_explicit_step(path, key, group) and all(r.get("t_s") is not None for r in group):
             group.sort(key=lambda r: _order_value(path, r, "t_s"))
         obs_list: list[Observation] = []
-        service_accounting: list[dict[str, float]] = []
+        recorded_actions: list[Optional[ToolCall]] = []
         for step_idx, row in enumerate(group):
             try:
                 # Placeholder id, re-stamped at reset() via model_copy.
@@ -752,7 +425,10 @@ def load_provided_dataset(path: str | Path) -> dict[str, EpisodeSource]:
                 # max_length=64 for long run names.
                 observation = row_to_observation(row, step_idx=step_idx, episode_id=f"src_{key[:56]}")
                 obs_list.append(observation)
-                service_accounting.append(_service_accounting_for_observation(row, observation))
+                raw_recorded_action = row.get("recorded_action")
+                recorded_actions.append(
+                    None if raw_recorded_action is None else ToolCall.model_validate(raw_recorded_action)
+                )
             # ValueError covers pydantic ValidationError (a subclass) and
             # float('bad'); TypeError covers structurally wrong scalar types
             # like "delivered_mbps": [1, 2] or "t_s": {} hitting float().
@@ -765,39 +441,9 @@ def load_provided_dataset(path: str | Path) -> dict[str, EpisodeSource]:
                 f"episode {key!r} has only {len(obs_list)} row(s); need >= 2 "
                 "observations per episode (each step consumes an obs pair)"
             )
-        capacities: list[tuple[float, Any]] = []
-        for row in group:
-            if row.get("cell_capacity_mbps_total") is None:
-                continue
-            try:
-                capacity_value = _num(row, "cell_capacity_mbps_total", 0.0, minimum=0.0)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{path}:{row.get('_lineno', '?')}: {exc}") from exc
-            if capacity_value <= 0.0:
-                raise ValueError(
-                    f"{path}:{row.get('_lineno', '?')}: cell_capacity_mbps_total must be > 0, got {capacity_value}"
-                )
-            capacities.append((capacity_value, row.get("_lineno", "?")))
-        capacity = capacities[0][0] if capacities else None
-        if capacity is not None:
-            mismatch = next(
-                (
-                    (value, lineno)
-                    for value, lineno in capacities[1:]
-                    if not math.isclose(value, capacity, rel_tol=1e-9, abs_tol=1e-9)
-                ),
-                None,
-            )
-            if mismatch is not None:
-                value, lineno = mismatch
-                raise ValueError(
-                    f"episode {key!r} has inconsistent cell_capacity_mbps_total: "
-                    f"{capacity} versus {value} at {path}:{lineno}"
-                )
         episodes[key] = EpisodeSource(
             observations=obs_list,
-            service_accounting=service_accounting,
-            cell_capacity_mbps=capacity,
+            recorded_actions=recorded_actions,
         )
     if not episodes:
         raise ValueError(f"dataset file {path} contains no rows")
@@ -814,9 +460,7 @@ class DatasetEpisode:
     episode_id: str
     meta: EpisodeMeta
     trajectory: list[Observation]
-    service_accounting: list[dict[str, float]]
-    # Recorded reward normalizer for trace episodes; None -> the config knob.
-    cell_capacity_mbps: Optional[float] = None
+    recorded_actions: list[Optional[ToolCall]]
     step_idx: int = 0
     closed: bool = False
     history: list[Any] = field(default_factory=list)  # guardrail.HistoryEntry
@@ -844,9 +488,8 @@ class DatasetReplayBackend(Backend):
     ) -> None:
         """
         Args:
-            dataset_path: Dataset file (.jsonl preferred, .csv via the
-                adapter). Loaded and validated eagerly so bad data fails at
-                server boot.
+            dataset_path: Nested KPI snapshot JSONL file. Loaded and validated
+                eagerly so bad data fails at server boot.
             pool_size: Max concurrent live episodes (same semantics as
                 ReplayBackend's pool).
             max_steps_default: Step budget for task rows lacking max_steps;
@@ -854,13 +497,10 @@ class DatasetReplayBackend(Backend):
             cell_capacity_mbps: Normalizer for the reward's throughput-delta
                 term. ReplayEnv gets this from its scenario fingerprint; a
                 recorded dataset has no fingerprint, so it is a config knob
-                (compute_breakdown's own default is 60.0). Trace episodes
-                that record cell_capacity_mbps_total override it per episode.
+                (compute_breakdown's own default is 60.0).
             reward_weights: Per-field overrides on rewards.DEFAULT_WEIGHTS.
                 Must match the profile the dataset was recorded under, or
-                recomputed rewards drift from the recorded ones (the
-                openair_v2_measured runs zero w_sla, w_sla_level, w_buffer
-                and w_action).
+                recomputed rewards drift from the recorded ones.
         """
         self.dataset_path = Path(dataset_path)
         self.pool_size = self._positive_integer("pool_size", pool_size)
@@ -969,8 +609,7 @@ class DatasetReplayBackend(Backend):
                         episode_id=episode_id,
                         meta=meta,
                         trajectory=trajectory,
-                        service_accounting=[dict(item) for item in source.service_accounting],
-                        cell_capacity_mbps=source.cell_capacity_mbps,
+                        recorded_actions=list(source.recorded_actions),
                     )
                     self._episodes[episode_id] = episode
                     return first_obs, meta
@@ -1016,24 +655,17 @@ class DatasetReplayBackend(Backend):
             # data, unmodified by the action.
             next_idx = min(episode.step_idx + 1, len(episode.trajectory) - 1)
             new_obs = episode.trajectory[next_idx]
+            recorded_action = episode.recorded_actions[episode.step_idx]
 
-            # Trace episodes carry their recorded capacity (single-cell
-            # reconstruction, so the recorded total is the per-cell value).
-            capacity = (
-                episode.cell_capacity_mbps if episode.cell_capacity_mbps is not None else self.cell_capacity_mbps
-            )
             reward_profile = select_reward_profile(episode.meta.tier)
-            service_accounting = episode.service_accounting[next_idx]
             reward_breakdown = _rewards.compute_breakdown(
                 prev_obs=prev_obs,
                 curr_obs=new_obs,
                 action=tool_call,
                 rejected=rejected,
-                cell_capacity_mbps=capacity,
+                cell_capacity_mbps=self.cell_capacity_mbps,
                 weights=self.reward_weights,
                 prb_pressure_threshold=reward_profile.prb_pressure_threshold,
-                service_accounting=service_accounting,
-                reward_version=reward_profile.version,
             )
             reward = float(reward_breakdown["total"])
 
@@ -1063,7 +695,7 @@ class DatasetReplayBackend(Backend):
                 "reward_measurements": reward_breakdown["measurements"],
                 "reward_terms": reward_breakdown["terms"],
                 "reward_version": reward_profile.version,
-                "service_accounting": service_accounting,
+                "recorded_action": (None if recorded_action is None else recorded_action.model_dump()),
                 **self.reward_contract(episode.meta.tier),
                 **self.capabilities(),
             }
@@ -1114,8 +746,6 @@ __all__ = [
     "DatasetEpisode",
     "DatasetReplayBackend",
     "EpisodeSource",
-    "is_trace_row",
     "load_provided_dataset",
     "row_to_observation",
-    "trace_row_to_snapshot",
 ]

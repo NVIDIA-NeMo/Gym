@@ -1,47 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Deterministic replay env for ``openair_congestion_v1`` (M4.3).
+"""Deterministic synthetic dynamics for ``openair_congestion_v1``.
 
-Per ``docs/PLAN.md`` §4.7 (pacing modes), replay mode keeps the same
-``/reset`` / ``/step`` contract as live mode but synthesises a counterfactual
-observation trajectory deterministically from ``(seed, difficulty,
-regime_mix, tier)``. This is the env mode that powers M4.4 BC seed
-generation (500 scenarios × 60 steps), M4.5 SFT validation, and the
-GRPO-warmup curriculum stage in M5.
+The environment builds a seeded KPI trajectory at reset, then applies accepted
+tool calls through a deterministic counterfactual model before computing the
+next reward. It is fast enough for local training and evaluation, but it does
+not model a physical RAN or issue live OpenAirInterface/FlexRIC controls.
 
-Why synthesised — not pre-recorded — trajectories?
-
-The kpi-exporter currently runs in ``synthetic`` mode (M3.3 deferred the
-real KPM scraper to M5; see ``INCIDENTS.md`` ``M3-003``). That means even
-"live" runs produce values from a deterministic synthetic generator. So
-recording 500 live scenarios × 60 steps would yield identical
-trajectories to what the synthesised replay produces, at 70 s per
-scenario × 500 = ~10 h of stack time. M4.3 instead reuses the
-:func:`openair_congestion.env._build_observation` helper but feeds it a
-:class:`KpiSnapshot` that is generated from the scenario fingerprint plus
-a seeded :class:`numpy.random.Generator`.
-
-Properties guaranteed:
-
-- **Determinism.** ``ReplayEnv.reset(seed=K)`` followed by 60 ``step(noop)``
-  calls produces an observation sequence whose canonicalised JSON has a
-  stable SHA-256, regardless of wall-clock or thread scheduling.
-- **Speed.** No ``time.sleep`` and no HTTP scrapes. 60 ``step``s in << 5 s
-  (the M4.3 acceptance gate).
-- **Schema fidelity.** Observations validate against the same Pydantic
-  models as live mode, so the same renderer / reward / guardrail apply.
-
-Counterfactual response to actions was *not* implemented at M4.3. For the
-synthetic-data phase, accepted non-noop actions now pass through a deterministic
-hand-coded transition model before reward is computed. The M5.1
-``models/replay_dynamics.pt`` checkpoint remains regenerable evidence for a
-learned dynamics model, but it is intentionally not required at runtime because
-model weights are ignored in clean clones.
-
-Replay observations do not expose UE-to-slice membership. Consequently, the
-synthetic action-effect model supports only UE-targeted ``set_prb_cap``
-actions: slice-targeted caps are rejected explicitly instead of being reported
-as accepted no-ops.
+Replay observations do not include UE-to-slice membership, so ``set_prb_cap``
+supports UE targets only; unsupported targets are rejected explicitly.
 """
 
 from __future__ import annotations
@@ -52,7 +19,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -60,15 +26,14 @@ import numpy as np
 from . import guardrail as _guardrail
 from . import rewards as _rewards
 from .env import (
-    LiveEpisode,
+    ObservationContext,
     _build_observation,
     _sample_scenario,
     _ScenarioFingerprint,
-    _t2_policy_guardrail,
 )
-from .kpi_client import KpiSnapshot
 from .reward_profiles import select_reward_profile
 from .schemas import EpisodeMeta, Observation, ToolCall
+from .telemetry import KpiSnapshot
 from .tools import P0_DBM_RANGE, PRB_MAX, TTT_MS_VALUES
 
 
@@ -89,21 +54,8 @@ class ReplayActionBias:
 
 
 @dataclass
-class ReplayServiceLedger:
-    """Episode-local service accounting for deterministic replay."""
-
-    requested_mbps: dict[tuple[int, int], float] = field(default_factory=dict)
-    admitted_mbps: dict[tuple[int, int], float] = field(default_factory=dict)
-    delivered_mbps: dict[tuple[int, int], float] = field(default_factory=dict)
-    cumulative_forced_terminated_mbps: float = 0.0
-    forced_termination_events: int = 0
-    step_forced_terminated_mbps: float = 0.0
-    step_forced_termination_events: int = 0
-
-
-@dataclass
 class ReplayActionState(ReplayActionBias):
-    """Persistent absolute control setpoints plus replay service state."""
+    """Persistent absolute control setpoints for synthetic replay."""
 
     prb_cap_setpoints: dict[tuple[int, str, int], int] = field(default_factory=dict)
     scheduler_policy: dict[int, str] = field(default_factory=dict)
@@ -112,7 +64,6 @@ class ReplayActionState(ReplayActionBias):
     mcs_setpoint: dict[int, tuple[int, int, float]] = field(default_factory=dict)
     qos_weights: dict[int, dict[str, float]] = field(default_factory=dict)
     admission_threshold: dict[int, float] = field(default_factory=dict)
-    service: ReplayServiceLedger = field(default_factory=ReplayServiceLedger)
     last_prb_cap_diagnostics: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -340,8 +291,6 @@ def _apply_collective_prb_caps(
                 0.0,
                 (offered[ue_id] - final[ue_id]) * 50.0,
             )
-            if ue_id in active:
-                ue["prb_cap_max_prb"] = active[ue_id]
         cell["fairness_jain"] = _jain_fairness(list(final.values()))
         unredistributed = max(0.0, total_shed - redistributed)
         # PRB pressure falls only when capped throughput is not reassigned.
@@ -422,7 +371,11 @@ def _clamp_observation_payload(data: dict[str, Any]) -> dict[str, Any]:
 
         for ue in cell.get("ues", []):
             ue["offered_mbps"] = max(0.0, float(ue.get("offered_mbps", 0.0)))
-            ue["delivered_mbps"] = max(0.0, float(ue.get("delivered_mbps", 0.0)))
+            ue["delivered_mbps"] = _clip(
+                float(ue.get("delivered_mbps", 0.0)),
+                0.0,
+                ue["offered_mbps"],
+            )
             ue["bler"] = _clip(float(ue.get("bler", 0.0)), 0.0, 1.0)
             ue["mcs_mean"] = _clip(float(ue.get("mcs_mean", 0.0)), 0.0, 27.0)
             ue["sinr_db"] = _clip(float(ue.get("sinr_db", 0.0)), -20.0, 40.0)
@@ -442,23 +395,6 @@ def _prev_cell(obs: Observation, cell_id: int):
     return next((c for c in obs.cells if c.cell_id == cell_id), None)
 
 
-def _initialize_service_ledger(
-    state: ReplayActionState,
-    observation: Observation,
-) -> None:
-    for cell in observation.cells:
-        for ue in cell.ues:
-            key = (cell.cell_id, ue.ue_id)
-            requested = float(ue.requested_mbps if ue.requested_mbps is not None else ue.offered_mbps)
-            admitted = float(ue.admitted_mbps if ue.admitted_mbps is not None else ue.offered_mbps)
-            state.service.requested_mbps.setdefault(key, max(0.0, requested))
-            state.service.admitted_mbps.setdefault(
-                key,
-                max(0.0, min(requested, admitted)),
-            )
-            state.service.delivered_mbps[key] = max(0.0, float(ue.delivered_mbps))
-
-
 def _apply_admission_setpoints(
     data: dict[str, Any],
     state: ReplayActionState,
@@ -475,122 +411,13 @@ def _apply_admission_setpoints(
             continue
         admission_ratio = _clip(float(threshold) / 100.0, 0.0, 1.0)
         admitted_count = min(len(ues), max(1, int(len(ues) * admission_ratio))) if ues and admission_ratio > 0.0 else 0
-        admitted_keys = {(cell_id, int(ue.get("ue_id", -1))) for ue in ues[:admitted_count]}
-        retained: list[dict[str, Any]] = []
-        for ue in ues:
-            ue_id = int(ue.get("ue_id", -1))
-            key = (cell_id, ue_id)
-            requested = state.service.requested_mbps.get(
-                key,
-                max(0.0, float(ue.get("requested_mbps", ue.get("offered_mbps", 0.0)))),
-            )
-            prior_admitted = state.service.admitted_mbps.get(
-                key,
-                max(0.0, float(ue.get("admitted_mbps", ue.get("offered_mbps", 0.0)))),
-            )
-            admitted = requested if key in admitted_keys else 0.0
-            state.service.requested_mbps[key] = requested
-            state.service.admitted_mbps[key] = admitted
-            if prior_admitted > 0.0 and admitted == 0.0:
-                state.service.cumulative_forced_terminated_mbps += prior_admitted
-                state.service.forced_termination_events += 1
-                state.service.step_forced_terminated_mbps += prior_admitted
-                state.service.step_forced_termination_events += 1
-            if admitted == 0.0:
-                state.service.delivered_mbps[key] = 0.0
-                continue
-            ue["requested_mbps"] = requested
-            ue["admitted_mbps"] = admitted
-            ue["offered_mbps"] = admitted
-            ue["delivered_mbps"] = min(
-                max(0.0, float(ue.get("delivered_mbps", 0.0))),
-                admitted,
-            )
-            ue["buffer_occupancy_kb"] = max(
-                0.0,
-                (admitted - float(ue["delivered_mbps"])) * 50.0,
-            )
-            retained.append(ue)
+        retained = ues[:admitted_count]
         cell["ues"] = retained
         cell["rrc_connected_ues"] = len(retained)
 
     global_data = data.get("global")
     if isinstance(global_data, dict):
         global_data["n_ues_total"] = sum(len(cell.get("ues", [])) for cell in data.get("cells", []))
-
-
-def replay_service_accounting(
-    state: ReplayActionState,
-    observation: Observation,
-) -> dict[str, Any]:
-    """Return explicit requested/admitted/delivered service measurements."""
-
-    _initialize_service_ledger(state, observation)
-    delivered_by_key = {
-        (cell.cell_id, ue.ue_id): max(0.0, float(ue.delivered_mbps)) for cell in observation.cells for ue in cell.ues
-    }
-    cell_ids = {cell.cell_id for cell in observation.cells} | {
-        cell_id for cell_id, _ue_id in state.service.requested_mbps
-    }
-    per_cell: dict[int, dict[str, float]] = {}
-    for cell_id in sorted(cell_ids):
-        keys = sorted(key for key in state.service.requested_mbps if key[0] == cell_id)
-        requested = sum(state.service.requested_mbps[key] for key in keys)
-        admitted = sum(state.service.admitted_mbps.get(key, 0.0) for key in keys)
-        delivered = sum(delivered_by_key.get(key, 0.0) for key in keys)
-        for key in keys:
-            state.service.delivered_mbps[key] = delivered_by_key.get(key, 0.0)
-        per_cell[cell_id] = {
-            "requested_service_mbps": requested,
-            "admitted_service_mbps": admitted,
-            "delivered_service_mbps": delivered,
-        }
-
-    # Include any observed UE that was not present when the service ledger was
-    # initialized. This can occur when a future replay source adds UEs.
-    for cell in observation.cells:
-        for ue in cell.ues:
-            key = (cell.cell_id, ue.ue_id)
-            if key in state.service.requested_mbps:
-                continue
-            requested = max(0.0, float(ue.offered_mbps))
-            delivered = delivered_by_key[key]
-            state.service.requested_mbps[key] = requested
-            state.service.admitted_mbps[key] = requested
-            state.service.delivered_mbps[key] = delivered
-            totals = per_cell.setdefault(
-                cell.cell_id,
-                {
-                    "requested_service_mbps": 0.0,
-                    "admitted_service_mbps": 0.0,
-                    "delivered_service_mbps": 0.0,
-                },
-            )
-            totals["requested_service_mbps"] += requested
-            totals["admitted_service_mbps"] += requested
-            totals["delivered_service_mbps"] += delivered
-
-    requested = sum(item["requested_service_mbps"] for item in per_cell.values())
-    admitted = sum(item["admitted_service_mbps"] for item in per_cell.values())
-    delivered = sum(item["delivered_service_mbps"] for item in per_cell.values())
-    forced = max(0.0, float(state.service.cumulative_forced_terminated_mbps))
-    return {
-        "version": "1.0",
-        "requested_service_mbps": requested,
-        "admitted_service_mbps": admitted,
-        "delivered_service_mbps": delivered,
-        "forced_terminated_service_mbps": forced,
-        "cumulative_forced_terminated_service_mbps": forced,
-        "forced_termination_events": float(state.service.forced_termination_events),
-        "step_forced_terminated_service_mbps": max(
-            0.0,
-            float(state.service.step_forced_terminated_mbps),
-        ),
-        "step_forced_termination_events": float(state.service.step_forced_termination_events),
-        "unadmitted_service_mbps": max(0.0, requested - admitted),
-        "undelivered_admitted_service_mbps": max(0.0, admitted - delivered),
-        "per_cell": per_cell,
-    }
 
 
 def _rebuild_action_biases(
@@ -827,9 +654,6 @@ def apply_action_effect(
         return base_next_obs
 
     state = state or ReplayActionState()
-    _initialize_service_ledger(state, prev_obs)
-    state.service.step_forced_terminated_mbps = 0.0
-    state.service.step_forced_termination_events = 0
     if accepted and action.name != "noop":
         _record_action_effect(state=state, prev_obs=prev_obs, action=action)
     _rebuild_action_biases(state=state, prev_obs=prev_obs)
@@ -841,7 +665,6 @@ def apply_action_effect(
     )
     _apply_admission_setpoints(data, state)
     obs = Observation.model_validate(_clamp_observation_payload(data))
-    _initialize_service_ledger(state, obs)
     return obs
 
 
@@ -861,7 +684,7 @@ def _synthesize_kpi_snapshot(
     - SINR is a per-UE base + gaussian noise.
     - BLER scales weakly with PRB util.
 
-    Tuned so the M4.4 BC seed has a non-degenerate reward gradient.
+    The coefficients are chosen to keep the local reward signal non-degenerate.
     """
     snap = KpiSnapshot()
     snap.source_mode = "replay"
@@ -891,7 +714,7 @@ def _synthesize_kpi_snapshot(
         # Seeded noise; std small enough that values stay realistic.
         prb_util = float(np.clip(load_ratio + sub.normal(0.0, 0.04), 0.0, 1.0))
         snap.prb_util[cell_id] = prb_util
-        snap.active_ue_count[cell_id] = float(cells_n_ues.get(cell_id, 0))
+        snap.active_ue_count[cell_id] = int(cells_n_ues.get(cell_id, 0))
 
         # Global "headroom" knob: above 1.0 the cell is over-subscribed and
         # delivered drops proportionally to overload.
@@ -902,9 +725,10 @@ def _synthesize_kpi_snapshot(
 
         for ue_id in range(cells_n_ues.get(cell_id, 0)):
             offered = float(fingerprint.offered_mbps.get((cell_id, ue_id), 1.0))
-            delivered = max(
-                0.0,
+            delivered = _clip(
                 offered * attenuation + float(sub.normal(0.0, 0.5)),
+                0.0,
+                offered,
             )
             sinr_db = float(8.0 + 2.0 * ue_id + sub.normal(0.0, 1.5))
             bler = float(np.clip(0.05 + 0.10 * prb_util + sub.normal(0.0, 0.02), 0.0, 1.0))
@@ -939,9 +763,8 @@ def build_trajectory(
 ) -> tuple[list[Observation], _ScenarioFingerprint]:
     """Standalone helper: produce the full observation trajectory for a seed.
 
-    Used by both :class:`ReplayEnv` (which slices it across `step` calls) and
-    the M4.4 BC seed builder (which iterates trajectories without an HTTP
-    layer).
+    Used by :class:`ReplayEnv`, which slices the trajectory across ``step``
+    calls, and by offline callers that need the same seeded observations.
     """
     fingerprint = _sample_scenario(
         seed=seed,
@@ -963,7 +786,7 @@ def build_trajectory(
         tier=tier,
         max_steps=n_steps,
     )
-    placeholder = LiveEpisode(
+    placeholder = ObservationContext(
         episode_id=placeholder_meta.episode_id,
         meta=placeholder_meta,
         fingerprint=fingerprint,
@@ -979,8 +802,6 @@ def build_trajectory(
             t_s=float(t),
         )
         obs_list.append(obs)
-        placeholder.prev_obs = placeholder.last_obs
-        placeholder.last_obs = obs
 
     return obs_list, fingerprint
 
@@ -1006,27 +827,19 @@ class ReplayEpisode:
 
 
 class ReplayEnv:
-    """Deterministic replay env. Same /reset → /step → /close contract as
-    :class:`openair_congestion.env.LiveEnv`, but no kpi-exporter scrape and
-    no time.sleep — observations come from a pre-built trajectory."""
+    """Deterministic env with pre-built synthetic observation trajectories."""
 
     def __init__(
         self,
         *,
-        replay_root: Path | str = "data/replay",
         pool_size: int = 32,
         max_steps_default: int = 60,
     ) -> None:
-        self.replay_root = Path(replay_root)
         self.pool_size = int(pool_size)
         self.max_steps_default = int(max_steps_default)
         self._lock = threading.Lock()
         self._episodes: dict[str, ReplayEpisode] = {}
         self._pending_resets = 0
-
-    def n_episodes_live(self) -> int:
-        with self._lock:
-            return sum(1 for ep in self._episodes.values() if not ep.closed)
 
     def reset(
         self,
@@ -1113,10 +926,6 @@ class ReplayEnv:
             # apply it causally. Slice membership is not observed, so mapping
             # a slice cap to affected UEs would invent topology.
             gr = _synthetic_replay_guardrail(action, gr)
-            # Replay must enforce the same deliberately narrow T2 action
-            # contract as LiveEnv.  Other tiers retain the historical full
-            # action surface.
-            gr = _t2_policy_guardrail(episode, action, gr)
             rejected = not gr.accepted
 
             # Advance to the next pre-baked observation. step_idx is incremented
@@ -1134,10 +943,6 @@ class ReplayEnv:
             )
 
             reward_profile = select_reward_profile(episode.fingerprint.tier)
-            service_accounting = replay_service_accounting(
-                candidate_state,
-                new_obs,
-            )
             reward_breakdown = _rewards.compute_breakdown(
                 prev_obs=prev_obs,
                 curr_obs=new_obs,
@@ -1145,8 +950,6 @@ class ReplayEnv:
                 rejected=rejected,
                 cell_capacity_mbps=episode.fingerprint.cell_capacity_mbps,
                 prb_pressure_threshold=(reward_profile.prb_pressure_threshold),
-                service_accounting=service_accounting,
-                reward_version=reward_profile.version,
             )
             reward = float(reward_breakdown["total"])
 
@@ -1161,8 +964,8 @@ class ReplayEnv:
                 if len(candidate_history) > 64:
                     candidate_history = candidate_history[-32:]
 
-            # Stamp agent_aux on the returned obs so the renderer / SFT / GRPO
-            # get the same shape as live mode.
+            # Stamp agent_aux so policy and training consumers receive the
+            # action/reward context from the preceding transition.
             from .schemas import AgentAux, LastActionEcho
 
             aux = AgentAux(
@@ -1193,27 +996,9 @@ class ReplayEnv:
                 "reward_measurements": reward_breakdown["measurements"],
                 "reward_terms": reward_breakdown["terms"],
                 "reward_version": reward_profile.version,
-                "service_accounting": service_accounting,
                 "prb_cap_dynamics": candidate_state.last_prb_cap_diagnostics,
             }
             return new_obs, reward, done, info
-
-    def render(self, episode_id: str, *, format: str = "ascii") -> Any:
-        with self._lock:
-            episode = self._episodes.get(episode_id)
-        if episode is None:
-            raise KeyError(f"unknown episode_id {episode_id!r}")
-        with episode.lock:
-            if episode.closed or not episode.trajectory:
-                raise KeyError(f"unknown episode_id {episode_id!r}")
-            obs = episode.trajectory[episode.step_idx]
-        if format == "ascii":
-            from . import render as _rd
-
-            return _rd.to_ascii(obs)
-        if format == "json":
-            return obs.model_dump(by_alias=True)
-        raise ValueError(f"unknown render format {format!r}")
 
     def close(self, episode_id: str) -> dict[str, Any]:
         with self._lock:
@@ -1230,28 +1015,15 @@ class ReplayEnv:
                 del self._episodes[episode_id]
             return {"ok": True, "n_steps": episode.step_idx}
 
-    def close_all(self) -> list[dict[str, Any]]:
-        with self._lock:
-            episode_ids = list(self._episodes)
-        summaries: list[dict[str, Any]] = []
-        for episode_id in episode_ids:
-            try:
-                summaries.append({"episode_id": episode_id, **self.close(episode_id)})
-            except KeyError:
-                continue
-        return summaries
-
 
 __all__ = [
     "ReplayEnv",
     "ReplayEpisode",
     "ReplayActionBias",
     "ReplayActionState",
-    "ReplayServiceLedger",
     "ACTION_EFFECT_VERSION",
     "action_effect_version",
     "apply_action_effect",
     "build_trajectory",
-    "replay_service_accounting",
     "_synthesize_kpi_snapshot",
 ]

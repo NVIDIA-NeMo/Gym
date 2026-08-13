@@ -7,7 +7,7 @@ import copy
 
 import pytest
 from openair_congestion.replay_env import build_trajectory
-from openair_congestion.schemas import Observation
+from openair_congestion.schemas import GlobalObservation, Observation
 
 
 def _valid_observation_dict() -> dict:
@@ -64,3 +64,9 @@ def test_observation_rejects_inconsistent_topology(mutation):
 
     with pytest.raises(ValueError):
         Observation.model_validate(data)
+
+
+@pytest.mark.parametrize("tier", ["T1", "T2", "T3"])
+def test_reset_schema_rejects_deferred_tiers(tier):
+    with pytest.raises(ValueError):
+        GlobalObservation.model_validate({"n_cells": 1, "n_ues_total": 0, "difficulty": 0.5, "tier": tier})

@@ -3,19 +3,15 @@
 """Action space for ``openair_congestion_v1`` — 7 actuator tools + ``noop``.
 
 Schemas are emitted in OpenAI function-calling shape (``{"type": "function",
-"function": {...}}``) so vLLM + Qwen3-Instruct can emit valid tool calls
-out of the box. The same dicts are consumed by:
+"function": {...}}``). The same dicts are consumed by:
 
 - ``schemas.ActionToolCall`` validation in :mod:`openair_congestion.schemas`
-- The deterministic ``guardrail.py`` (M4.2) that rejects out-of-range values
-  before they hit the backend. Replay mode uses a deterministic synthetic
-  action-effect model; synthetic-live actions are logged only; connected T1
-  only wires ``set_admission_policy`` to traffic-side stream suppression.
-  FlexRIC RC / OAI telnet actuation is future work.
+- The deterministic ``guardrail.py`` that rejects out-of-range values before
+  they hit the backend. Replay applies accepted calls to synthetic state; no
+  tool in this contribution controls live OAI/FlexRIC.
 
-Numeric bounds follow 3GPP / OAI realistic ranges (see ``docs/PLAN.md`` §4.3
-and §4.5). Bounds are intentionally narrower than the protocol spec to keep
-the action space tractable for SFT / GRPO; widen later if the policy plateaus.
+Numeric bounds follow the cited 3GPP/OAI ranges and are intentionally narrower
+than the full protocol space so validation and training remain tractable.
 
 The full list of canonical tool names is exported as ``TOOL_NAMES``; the
 OpenAI-shaped list as ``TOOLS``; per-name lookup via ``TOOL_SCHEMA_BY_NAME``.
@@ -28,8 +24,8 @@ from typing import Any
 
 # --- Operational bounds (single source of truth for guardrail + tests) ------
 
-MAX_CELLS = 4  # T1=2, T2=3, T3=4 (PLAN.md §4.7)
-MAX_UES = 24  # T3 = 4 cells * up to 6 UEs/cell, with headroom
+MAX_CELLS = 4
+MAX_UES = 24
 
 PRB_MAX = 273  # 100 MHz BW, μ=1, FR1 (3GPP 38.211 Table 4.1.1-2 row μ=1)
 MCS_MAX = 27  # 3GPP 38.214 Table 5.1.3.1-1 (mcs index 0..27 + reserved)
@@ -91,30 +87,12 @@ _CELL_ID_PROP = {
     "description": "Cell identifier (0-indexed; valid 0..n_cells-1 at runtime).",
 }
 
-_ACTION_CONNECTIVITY_NOTE = (
-    " Current deliverable #1 action provenance: replay mode uses a deterministic "
-    "synthetic action-effect model; synthetic-live mode logs accepted actions "
-    "only; connected T1 mode wires only set_admission_policy to traffic-side "
-    "simulator stream suppression. This is not FlexRIC RC or OAI telnet RAN "
-    "control."
-)
-
-_ADMISSION_CONNECTIVITY_NOTE = (
-    " Current deliverable #1 action provenance: in connected T1 mode this "
-    "suppresses one generated UE traffic stream when current estimated load "
-    "exceeds accept_threshold_pct. In replay it uses the deterministic "
-    "synthetic action-effect model; in synthetic-live it is logged only. This "
-    "is not FlexRIC RC or OAI telnet RAN control."
-)
-
-
 TOOLS: list[dict[str, Any]] = [
     _func(
         "set_scheduler_policy",
-        "Switch the per-cell MAC scheduler between proportional fair (PF), "
-        "round-robin (RR), and max-CI (MaxCI). PF is the default upstream OAI "
-        "policy; RR favours fairness over throughput; MaxCI maximises sum-rate "
-        "but starves cell-edge UEs." + _ACTION_CONNECTIVITY_NOTE,
+        "Select the synthetic per-cell scheduler setpoint. Replay models PF as "
+        "the neutral baseline, RR as fairness-oriented, and MaxCI as "
+        "throughput-oriented with a fairness tradeoff.",
         {
             "cell_id": _CELL_ID_PROP,
             "policy": {
@@ -129,7 +107,7 @@ TOOLS: list[dict[str, Any]] = [
         "set_prb_cap",
         "Cap the maximum PRBs allocated per scheduling round to a single UE. "
         "Used to throttle a hog UE that is starving the rest of the "
-        "cell." + _ACTION_CONNECTIVITY_NOTE,
+        "cell.",
         {
             "cell_id": _CELL_ID_PROP,
             "target": {
@@ -156,7 +134,7 @@ TOOLS: list[dict[str, Any]] = [
         "set_mcs_bounds",
         "Constrain the MCS index range the scheduler may select per UE, plus "
         "an outer-loop link-adaptation BLER target. Useful when channel "
-        "estimates are noisy and the default MCS picker oscillates." + _ACTION_CONNECTIVITY_NOTE,
+        "estimates are noisy and the default MCS picker oscillates.",
         {
             "cell_id": _CELL_ID_PROP,
             "mcs_min": {
@@ -184,7 +162,7 @@ TOOLS: list[dict[str, Any]] = [
         "set_qos_weights",
         "Re-weight the per-5QI scheduler priority. Larger weights win more "
         "PRBs for that 5QI. Use to defend low-latency 5QIs (e.g. 5QI=1 voice) "
-        "during congestion." + _ACTION_CONNECTIVITY_NOTE,
+        "during congestion.",
         {
             "cell_id": _CELL_ID_PROP,
             "weights": {
@@ -203,8 +181,8 @@ TOOLS: list[dict[str, Any]] = [
     _func(
         "set_admission_policy",
         "Tighten or loosen RRC admission. Lowering the accept_threshold "
-        "rejects new RRC setup requests early during PRACH storms; "
-        "slice_reservation guarantees a minimum PRB pool per slice." + _ADMISSION_CONNECTIVITY_NOTE,
+        "admits fewer UEs in synthetic replay. Slice reservations are not "
+        "modeled, so slice_reservation must be empty.",
         {
             "cell_id": _CELL_ID_PROP,
             "accept_threshold_pct": {
@@ -215,12 +193,10 @@ TOOLS: list[dict[str, Any]] = [
             },
             "slice_reservation": {
                 "type": "object",
-                "description": "Mapping of slice id (string-keyed integer) → reserved PRBs.",
-                "additionalProperties": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": PRB_MAX,
-                },
+                "description": "Must be empty; synthetic replay does not model slices.",
+                "properties": {},
+                "additionalProperties": False,
+                "maxProperties": 0,
             },
         },
         ["cell_id", "accept_threshold_pct", "slice_reservation"],
@@ -230,7 +206,7 @@ TOOLS: list[dict[str, Any]] = [
         "Adjust the A3-event handover trigger: a3_offset_db is the dB margin "
         "the neighbour must beat the serving cell by, ttt_ms is the dwell time. "
         "Tighter (lower offset, shorter ttt) → more handovers; looser → "
-        "ping-pong protection." + _ACTION_CONNECTIVITY_NOTE,
+        "ping-pong protection.",
         {
             "cell_id": _CELL_ID_PROP,
             "a3_offset_db": {
@@ -252,7 +228,7 @@ TOOLS: list[dict[str, Any]] = [
         "Configure uplink fractional path-loss compensation: p0_dbm is the "
         "target receive power in dBm, alpha (0..1) is the path-loss compensation "
         "fraction. Lowering p0 reduces UE Tx power (good for inter-cell "
-        "interference), raising alpha hurts cell-edge UEs less." + _ACTION_CONNECTIVITY_NOTE,
+        "interference), raising alpha hurts cell-edge UEs less.",
         {
             "cell_id": _CELL_ID_PROP,
             "p0_dbm": {

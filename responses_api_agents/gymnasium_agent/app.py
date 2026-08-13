@@ -15,8 +15,8 @@
 
 """Agent for GymnasiumServer resources servers (resources_servers.gymnasium) which implements the Gymnasium API."""
 
-import copy
 import logging
+import uuid
 
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field
@@ -39,110 +39,6 @@ from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _validate_tightening_patch(
-    *,
-    tool_name: str,
-    property_name: str,
-    original: dict,
-    patch: dict,
-) -> None:
-    """Reject environment patches that add or loosen a task-row schema."""
-
-    supported = {"minimum", "maximum", "enum", "const"}
-    unsupported = set(patch) - supported
-    if unsupported:
-        raise ValueError(
-            f"tool_contract override {tool_name}.{property_name} uses unsupported keys: {sorted(unsupported)}"
-        )
-    if "minimum" in patch:
-        value = patch["minimum"]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"tool_contract override {tool_name}.{property_name}.minimum must be numeric")
-        if "minimum" in original and value < original["minimum"]:
-            raise ValueError(f"tool_contract may not loosen {tool_name}.{property_name}.minimum")
-    if "maximum" in patch:
-        value = patch["maximum"]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"tool_contract override {tool_name}.{property_name}.maximum must be numeric")
-        if "maximum" in original and value > original["maximum"]:
-            raise ValueError(f"tool_contract may not loosen {tool_name}.{property_name}.maximum")
-    if "enum" in patch:
-        values = patch["enum"]
-        if not isinstance(values, list) or not values:
-            raise ValueError(f"tool_contract override {tool_name}.{property_name}.enum must be a non-empty list")
-        if "enum" in original and not set(values).issubset(set(original["enum"])):
-            raise ValueError(f"tool_contract may not loosen {tool_name}.{property_name}.enum")
-    if "const" in patch:
-        value = patch["const"]
-        if "const" in original and value != original["const"]:
-            raise ValueError(f"tool_contract may not change {tool_name}.{property_name}.const")
-        if "enum" in original and value not in original["enum"]:
-            raise ValueError(f"tool_contract may not loosen {tool_name}.{property_name}.const")
-
-
-def _apply_tool_contract(
-    body: NeMoGymResponseCreateParamsNonStreaming,
-    contract: object,
-) -> NeMoGymResponseCreateParamsNonStreaming:
-    """Apply an optional resource-server tool contract to one rollout body.
-
-    Gymnasium task rows normally own their Responses API tool schemas. A
-    stateful environment can narrow that surface after reset when the
-    episode's tier/topology is known. The contract is intentionally limited
-    to filtering function names and tightening existing property schemas; it
-    cannot add tools or loosen a task-row bound.
-    """
-
-    if contract is None:
-        return body
-    if not isinstance(contract, dict):
-        raise ValueError("tool_contract must be an object")
-    allowed_names = contract.get("allowed_names")
-    overrides = contract.get("parameter_overrides", {})
-    if (
-        not isinstance(allowed_names, list)
-        or not allowed_names
-        or any(not isinstance(name, str) or not name for name in allowed_names)
-        or len(set(allowed_names)) != len(allowed_names)
-    ):
-        raise ValueError("tool_contract.allowed_names must be a non-empty unique string list")
-    if not isinstance(overrides, dict):
-        raise ValueError("tool_contract.parameter_overrides must be an object")
-
-    allowed = set(allowed_names)
-    filtered: list[dict] = []
-    for original in body.tools:
-        if not isinstance(original, dict):
-            raise ValueError("tool_contract can only constrain dictionary function tools")
-        name = original.get("name")
-        if original.get("type") != "function" or name not in allowed:
-            continue
-        tool = copy.deepcopy(original)
-        per_tool = overrides.get(name, {})
-        if not isinstance(per_tool, dict):
-            raise ValueError(f"tool_contract override for {name!r} must be an object")
-        properties = tool.get("parameters", {}).get("properties", {})
-        for property_name, patch in per_tool.items():
-            if property_name not in properties or not isinstance(patch, dict):
-                raise ValueError(f"tool_contract override {name}.{property_name} must target an existing property")
-            _validate_tightening_patch(
-                tool_name=name,
-                property_name=property_name,
-                original=properties[property_name],
-                patch=patch,
-            )
-            # Overrides are produced by the environment and may only tighten
-            # the checked-in schema. The resource server remains the final
-            # authority and still validates every call.
-            properties[property_name].update(copy.deepcopy(patch))
-        filtered.append(tool)
-
-    missing = allowed - {tool["name"] for tool in filtered}
-    if missing:
-        raise ValueError(f"task row is missing tool(s) required by tool_contract: {sorted(missing)}")
-    return body.model_copy(update={"tools": filtered})
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -184,10 +80,9 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         return result
 
     async def run(self, request: Request, body: GymnasiumAgentRunRequest) -> GymnasiumRunResponse:
-        # A rollout starts a fresh resource-server session. Do not forward
-        # caller or reverse-proxy cookies across the internal service boundary;
-        # retain only cookies issued by the resource server itself.
-        env_cookies = {}
+        # Preserve auth/routing cookies and then merge in any session cookies
+        # issued by the resource server during the rollout.
+        env_cookies = dict(request.cookies)
         model_url_path = self.url_path_for_run("/v1/responses", body)
 
         reset_resp = await self.server_client.post(
@@ -200,37 +95,29 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         if reset_resp.cookies:
             env_cookies.update(reset_resp.cookies)
 
+        supports_explicit_close = False
         try:
             # A successful reset owns a stateful server slot even if response
             # decoding or schema validation fails, so validation belongs
             # inside the same cleanup boundary as the rollout itself.
-            reset_data = EnvResetResponse.model_validate(await get_response_json(reset_resp))
+            reset_payload = await get_response_json(reset_resp)
+            if isinstance(reset_payload, dict) and isinstance(reset_payload.get("info"), dict):
+                supports_explicit_close = reset_payload["info"].get("supports_explicit_close") is True
+            reset_data = EnvResetResponse.model_validate(reset_payload)
             result = await self._run_open_episode(body, model_url_path, reset_data, env_cookies)
         except BaseException:
-            # Preserve the original model/transport/cancellation failure.  A
-            # failed best-effort close is logged here; the
-            # resource server's own budget and orphan reaper remain the final
-            # safety net.
-            try:
-                close_resp = await self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path="/close",
-                    json={},
-                    cookies=env_cookies,
-                )
-                await raise_for_status(close_resp)
-            except Exception:
-                _LOGGER.exception("Failed to close Gymnasium environment after rollout error")
+            if supports_explicit_close:
+                # Preserve the original model/transport/cancellation failure.
+                try:
+                    await self._close_environment(env_cookies)
+                except Exception:
+                    _LOGGER.exception("Failed to close Gymnasium environment after rollout error")
             raise
 
+        if not supports_explicit_close:
+            return result
         try:
-            close_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/close",
-                json={},
-                cookies=env_cookies,
-            )
-            await raise_for_status(close_resp)
+            await self._close_environment(env_cookies)
         except Exception as exc:
             _LOGGER.exception("Completed Gymnasium rollout, but environment cleanup failed")
             result = result.model_copy(
@@ -247,6 +134,17 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             )
         return result
 
+    async def _close_environment(self, env_cookies) -> None:
+        """Close an environment that advertised the optional endpoint."""
+
+        close_resp = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/close",
+            json={},
+            cookies=env_cookies,
+        )
+        await raise_for_status(close_resp)
+
     async def _run_open_episode(
         self,
         body: GymnasiumAgentRunRequest,
@@ -257,10 +155,6 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         """Drive an already-reset episode; :meth:`run` owns its cleanup."""
 
         base_body = body.responses_create_params.model_copy(deep=True)
-        base_body = _apply_tool_contract(
-            base_body,
-            (reset_data.info or {}).get("tool_contract"),
-        )
         if isinstance(base_body.input, str):
             base_body.input = [NeMoGymEasyInputMessage(role="user", content=base_body.input)]
         if reset_data.observation:
@@ -294,10 +188,13 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
 
             usage = accumulate_response_usage(usage, model_response.usage)
 
+            step_body = body.model_dump() | {"response": model_response.model_dump()}
+            if (reset_data.info or {}).get("supports_step_idempotency") is True:
+                step_body["_ng_step_request_id"] = uuid.uuid4().hex
             step_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/step",
-                json=body.model_dump() | {"response": model_response.model_dump()},
+                json=step_body,
                 cookies=env_cookies,
             )
             await raise_for_status(step_resp)

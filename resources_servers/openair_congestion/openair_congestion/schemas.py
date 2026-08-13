@@ -2,10 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pydantic schemas for ``openair_congestion_v1``.
 
-Mirrors the contract documented in ``docs/PLAN.md`` §4.2 (REST endpoints), §4.3
-(action space), §4.4 (observation space) and §4.6 (episode lifecycle). All
-models are frozen against ``schema_version="1.0.0"`` — bump that string
-(and the env name suffix) on any breaking change.
+Models are frozen against ``schema_version="1.0.0"``. Bump that string and the
+environment name suffix for any breaking contract change.
 
 Highlights:
 
@@ -13,10 +11,9 @@ Highlights:
   and the chat-completions shape (``{"id": ..., "type": "function", "function":
   {"name": ..., "arguments": "..."}}``). The latter is what vLLM emits when the
   policy uses chat-completions; we normalise to the simple shape internally.
-- ``UEObservation.qos_5qi`` is exposed under the JSON alias ``5qi`` to honour
-  the shape in §4.4 while remaining a valid Python identifier.
-- All numeric fields carry explicit bounds so a malformed observation from a
-  flaky kpi-exporter scrape fails fast at parse time.
+- ``UEObservation.qos_5qi`` uses the JSON alias ``5qi`` while remaining a valid
+  Python identifier.
+- Numeric fields carry explicit bounds so malformed observations fail fast.
 """
 
 from __future__ import annotations
@@ -36,7 +33,7 @@ from pydantic import (
     model_validator,
 )
 
-from . import ENV_NAME, SCHEMA_VERSION
+from . import SCHEMA_VERSION
 from .tools import MAX_CELLS, MAX_UES, TOOL_NAMES
 
 
@@ -49,13 +46,13 @@ SUPPORTED_REGIMES: tuple[str, ...] = (
     "qos_competition",
 )
 
-# Observation KPI provenance. The current live exporter exposes five raw metric
-# families; the env derives the remaining fields for a stable training shape.
+# Observation KPI provenance. Synthetic replay and recorded datasets share one
+# stable shape; source-mode stamping distinguishes generated from supplied KPIs.
 KPI_PROVENANCE_V1: dict[str, dict[str, str]] = {
     "cells[].prb_util_dl_p50": {
         "kind": "raw_exporter",
-        "source": "openair_prb_util{cell}",
-        "notes": "DL PRB utilization gauge from kpi-exporter; replay uses a synthesized snapshot.",
+        "source": "source observation or synthetic replay snapshot",
+        "notes": "DL PRB utilization supplied by the selected backend.",
     },
     "cells[].prb_util_dl_p99": {
         "kind": "derived",
@@ -74,8 +71,8 @@ KPI_PROVENANCE_V1: dict[str, dict[str, str]] = {
     },
     "cells[].rrc_connected_ues": {
         "kind": "raw_exporter",
-        "source": "openair_active_ue_count{cell}",
-        "notes": "Exporter active UE count; env falls back to scenario UE rows if the gauge is absent.",
+        "source": "source observation or synthetic replay snapshot",
+        "notes": "Active UE count supplied by the selected backend.",
     },
     "cells[].prach_collision_rate": {
         "kind": "derived",
@@ -94,33 +91,18 @@ KPI_PROVENANCE_V1: dict[str, dict[str, str]] = {
     },
     "cells[].ues[].offered_mbps": {
         "kind": "scenario",
-        "source": "congestion_gen ScenarioSpec fingerprint",
+        "source": "task scenario or recorded dataset",
         "notes": "Requested traffic load sampled at reset; not a measured KPI.",
-    },
-    "cells[].ues[].requested_mbps": {
-        "kind": "scenario",
-        "source": "immutable congestion_gen ScenarioSpec fingerprint",
-        "notes": "Uncapped modeled service request; T2 policy telemetry only.",
-    },
-    "cells[].ues[].admitted_mbps": {
-        "kind": "estimate",
-        "source": "runner_snapshot traffic-side cap ledger",
-        "notes": "Modeled request admitted after a T2 traffic-side cap.",
-    },
-    "cells[].ues[].prb_cap_max_prb": {
-        "kind": "estimate",
-        "source": "runner_snapshot traffic-side cap ledger",
-        "notes": "Active modeled T2 cap setpoint; 273 means fully released.",
     },
     "cells[].ues[].delivered_mbps": {
         "kind": "raw_exporter",
-        "source": "openair_throughput_mbps{cell,ue}",
-        "notes": "Delivered DL throughput gauge from kpi-exporter; replay uses a synthesized snapshot.",
+        "source": "source observation or synthetic replay snapshot",
+        "notes": "Delivered DL throughput supplied by the selected backend.",
     },
     "cells[].ues[].bler": {
         "kind": "raw_exporter",
-        "source": "openair_bler{cell,ue}",
-        "notes": "Block error rate gauge from kpi-exporter; replay uses a synthesized snapshot.",
+        "source": "source observation or synthetic replay snapshot",
+        "notes": "Block error rate supplied by the selected backend.",
     },
     "cells[].ues[].mcs_mean": {
         "kind": "derived",
@@ -129,8 +111,8 @@ KPI_PROVENANCE_V1: dict[str, dict[str, str]] = {
     },
     "cells[].ues[].sinr_db": {
         "kind": "raw_exporter",
-        "source": "openair_sinr_db{cell,ue}",
-        "notes": "DL SINR gauge from kpi-exporter; replay uses a synthesized snapshot.",
+        "source": "source observation or synthetic replay snapshot",
+        "notes": "DL SINR supplied by the selected backend.",
     },
     "cells[].ues[].buffer_occupancy_kb": {
         "kind": "derived",
@@ -144,7 +126,7 @@ KPI_PROVENANCE_V1: dict[str, dict[str, str]] = {
     },
     "cells[].ues[].5qi": {
         "kind": "scenario",
-        "source": "congestion_gen ScenarioSpec fingerprint",
+        "source": "task scenario or recorded dataset",
         "notes": "QoS class sampled at reset; not a measured KPI.",
     },
 }
@@ -159,11 +141,8 @@ def default_kpi_provenance() -> dict[str, dict[str, str]]:
 def kpi_provenance_for_source_mode(source_mode: str) -> dict[str, dict[str, str]]:
     """Return source-mode-aware provenance for the observation contract.
 
-    ``raw_exporter`` means the field came from a first-party exporter gauge.
-    It does not imply that every exporter source mode is a radio measurement.
-    This helper narrows the machine-readable kind for replay/synthetic and
-    runner-backed modes so trainers can distinguish measured, estimated, and
-    placeholder values without reverse-engineering ``kpi_source_mode``.
+    This helper marks synthetic replay fields explicitly and treats unknown
+    dataset source labels conservatively as estimates/placeholders.
     """
 
     provenance = default_kpi_provenance()
@@ -185,7 +164,7 @@ def kpi_provenance_for_source_mode(source_mode: str) -> dict[str, dict[str, str]
             )
         return provenance
 
-    if mode in {"unknown", ""} or mode not in {"flexric", "telnet", "runner_snapshot"}:
+    if mode in {"unknown", ""} or mode not in {"measured", "recorded"}:
         for field in (
             "cells[].prb_util_dl_p50",
             "cells[].rrc_connected_ues",
@@ -204,43 +183,6 @@ def kpi_provenance_for_source_mode(source_mode: str) -> dict[str, dict[str, str]
                 "recognized; do not treat this as a measured radio KPI."
             )
         return provenance
-
-    if mode == "runner_snapshot":
-        for field in (
-            "cells[].prb_util_dl_p50",
-            "cells[].rrc_connected_ues",
-            "cells[].ues[].delivered_mbps",
-        ):
-            provenance[field]["kind"] = "estimate"
-        provenance["cells[].prb_util_dl_p50"]["source"] = (
-            "congestion_gen.runner snapshot prb_util_est_per_cell -> openair_prb_util{cell}"
-        )
-        provenance["cells[].prb_util_dl_p50"]["notes"] = (
-            "PRB utilization estimate computed from active offered Mbps divided "
-            "by configured cell capacity in the runner snapshot; not FlexRIC "
-            "KPM or OAI telnet PRB usage."
-        )
-        provenance["cells[].rrc_connected_ues"]["source"] = (
-            "congestion_gen.runner snapshot active_ues_per_cell -> openair_active_ue_count{cell}"
-        )
-        provenance["cells[].rrc_connected_ues"]["notes"] = (
-            "Active generated traffic streams per cell in the runner snapshot; not an RRC measurement."
-        )
-        provenance["cells[].ues[].delivered_mbps"]["source"] = (
-            "congestion_gen.runner snapshot delivered_mbps_est -> openair_throughput_mbps{cell,ue}"
-        )
-        provenance["cells[].ues[].delivered_mbps"]["notes"] = (
-            "Traffic-side throughput estimate from active runner streams; "
-            "final iperf harvest and radio KPIs are separate future signals."
-        )
-        for field in ("cells[].ues[].bler", "cells[].ues[].sinr_db"):
-            provenance[field]["kind"] = "placeholder"
-        provenance["cells[].ues[].bler"]["notes"] = (
-            "Bounded placeholder published by runner_snapshot mode until radio BLER/KPM ingestion is wired."
-        )
-        provenance["cells[].ues[].sinr_db"]["notes"] = (
-            "Bounded placeholder published by runner_snapshot mode until radio SINR/KPM ingestion is wired."
-        )
 
     return provenance
 
@@ -277,9 +219,6 @@ class KPIProvenanceEntry(_Base):
 class UEObservation(_Base):
     ue_id: NonNegativeInt = Field(..., le=MAX_UES - 1)
     offered_mbps: NonNegativeFloat
-    requested_mbps: NonNegativeFloat | None = None
-    admitted_mbps: NonNegativeFloat | None = None
-    prb_cap_max_prb: int | None = Field(default=None, ge=0, le=273)
     delivered_mbps: NonNegativeFloat
     bler: float = Field(..., ge=0.0, le=1.0)
     mcs_mean: float = Field(..., ge=0.0, le=27.0)
@@ -349,7 +288,7 @@ class GlobalObservation(_Base):
     n_ues_total: NonNegativeInt = Field(..., le=MAX_UES)
     difficulty: float = Field(..., ge=0.0, le=1.0)
     regime_mix: dict[str, float] = Field(default_factory=dict)
-    tier: Literal["T1", "T2", "T3", "replay"] = "T1"
+    tier: Literal["replay"] = "replay"
 
     @field_validator("regime_mix")
     @classmethod
@@ -498,7 +437,7 @@ class ToolCall(_Base):
         return data
 
 
-# --- Episode + REST request/response shapes --------------------------------
+# --- Episode metadata -------------------------------------------------------
 
 
 class EpisodeMeta(_Base):
@@ -506,69 +445,10 @@ class EpisodeMeta(_Base):
     seed: int
     difficulty: float = Field(..., ge=0.0, le=1.0)
     regime_mix: dict[str, float] = Field(default_factory=dict)
-    tier: Literal["T1", "T2", "T3", "replay"] = "T1"
+    tier: Literal["replay"] = "replay"
     scenario_id: Optional[str] = None
     created_at: float = Field(default_factory=lambda: time.time())
     max_steps: NonNegativeInt = 60
-
-
-class ResetRequest(_Base):
-    seed: int = 0
-    difficulty: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    regime_mix: Optional[dict[str, float]] = None
-    scenario_id: Optional[str] = None
-    tier: Literal["T1", "T2", "T3", "replay"] = "T1"
-    max_steps: Optional[int] = Field(default=None, ge=1, le=10_000)
-
-    @field_validator("regime_mix")
-    @classmethod
-    def _request_mix_sums_to_one(cls, v: Optional[dict[str, float]]) -> Optional[dict[str, float]]:
-        if v is None:
-            return v
-        return _validate_regime_mix(v)
-
-
-class ResetResponse(_Base):
-    episode_id: str
-    observation: Observation
-    meta: EpisodeMeta
-
-
-class StepRequest(_Base):
-    episode_id: str = Field(..., min_length=1, max_length=64)
-    action: ToolCall
-
-
-class StepResponse(_Base):
-    observation: Observation
-    reward: float = Field(..., allow_inf_nan=False)
-    done: bool
-    info: dict[str, Any] = Field(default_factory=dict)
-
-
-class CloseRequest(_Base):
-    episode_id: str = Field(..., min_length=1, max_length=64)
-
-
-class CloseResponse(_Base):
-    ok: bool = True
-    summary: dict[str, Any] = Field(default_factory=dict)
-
-
-class RenderResponse(_Base):
-    episode_id: str
-    format: Literal["ascii", "json"]
-    payload: Any
-
-
-class HealthResponse(_Base):
-    ok: bool = True
-    env_name: str = ENV_NAME
-    schema_version: str = SCHEMA_VERSION
-    n_episodes_live: NonNegativeInt = 0
-    gpu_status: dict[str, Any] = Field(default_factory=dict)
-    build_revision: Optional[str] = None
-    scenario_mode: str = "off"
 
 
 __all__ = [
@@ -580,12 +460,4 @@ __all__ = [
     "Observation",
     "ToolCall",
     "EpisodeMeta",
-    "ResetRequest",
-    "ResetResponse",
-    "StepRequest",
-    "StepResponse",
-    "CloseRequest",
-    "CloseResponse",
-    "RenderResponse",
-    "HealthResponse",
 ]

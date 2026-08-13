@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Central reward-profile selection for live and replay OpenAir episodes."""
+"""The single reward contract used by supported OpenAir replay episodes."""
 
 from __future__ import annotations
 
@@ -15,22 +15,11 @@ class RewardProfile:
 
 def select_reward_profile(
     tier: str,
-    *,
-    connected_t1_runner: bool = False,
 ) -> RewardProfile:
-    """Select the versioned reward contract for an episode."""
+    """Return the V1 contract for a supported synthetic tier."""
 
-    normalized = tier.upper()
-    if normalized == "T2":
-        return RewardProfile(
-            version="openair_t2_v3",
-            prb_pressure_threshold=0.85,
-        )
-    if normalized == "T1" and connected_t1_runner:
-        return RewardProfile(
-            version="openair_v1",
-            prb_pressure_threshold=0.08,
-        )
+    if tier != "replay":
+        raise ValueError(f"tier {tier!r} is not supported by this contribution")
     return RewardProfile(
         version="openair_v1",
         prb_pressure_threshold=0.85,

@@ -28,8 +28,8 @@ Two drivers implement the contract:
   Wraps the colocated ``openair_congestion.replay_env.ReplayEnv``; no 5G
   lab, no GPU, no KPI exporter, no wall-clock sleeps.
 - ``DatasetReplayBackend`` ('dataset_replay', in ``dataset_backend.py``):
-  offline replay of a recorded dataset (KPI snapshots or GRPO rollout
-  traces) instead of seed-synthesized trajectories.
+  offline replay of recorded KPI snapshots instead of seed-synthesized
+  trajectories.
 The unfinished live OAI collector is deliberately not selectable. Live
 control belongs in a later contribution with its own lab evidence.
 
@@ -141,12 +141,10 @@ class ReplayBackend(Backend):
     def __init__(
         self,
         *,
-        replay_root: str = "data/replay",
         pool_size: int = 32,
         max_steps_default: int = 60,
     ) -> None:
         self._env = ReplayEnv(
-            replay_root=replay_root,
             pool_size=pool_size,
             max_steps_default=max_steps_default,
         )
@@ -227,7 +225,6 @@ def select_backend(config: Any) -> Backend:
     name = name.strip().lower()
     if name == "replay":
         return ReplayBackend(
-            replay_root=getattr(config, "replay_root", "data/replay"),
             pool_size=getattr(config, "pool_size", 32),
             max_steps_default=getattr(config, "max_steps_default", 60),
         )
