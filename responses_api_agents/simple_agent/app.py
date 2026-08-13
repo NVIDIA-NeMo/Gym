@@ -77,14 +77,6 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
-    _num_requests_total: int = 0
-    _num_requests_running: int = 0
-    _num_response_requests_total: int = 0
-    _num_response_requests_running: int = 0
-
-    _seed_session_time_taken: int = 0
-    _num_response_requests_running: int = 0
-
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -95,13 +87,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
-        self._num_response_requests_total += 1
-        self._num_response_requests_running += 1
-        if self._num_response_requests_total % 100 == 0:
-            print(
-                f"Hit in {self.config.name} /responses: Total requests: {self._num_response_requests_total} Running requests: {self._num_response_requests_running}"
-            )
-
         invocation_id = "root"
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
@@ -262,7 +247,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 tool_calls=tool_records,
                 gaps=trajectory_gaps,
             )
-        self._num_response_requests_running -= 1
         return model_response, trajectory, model_server_cookies, resources_server_cookies
 
     async def responses(
@@ -293,13 +277,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def run(
         self, request: Request, response: Response, body: SimpleAgentRunRequest
     ) -> SimpleAgentVerifyResponse:
-        self._num_requests_total += 1
-        self._num_requests_running += 1
-        if self._num_requests_total % 100 == 0:
-            print(
-                f"Hit in {self.config.name} /run: Total requests: {self._num_requests_total} Running requests: {self._num_requests_running}"
-            )
-
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
@@ -373,7 +350,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             else:
                 trajectory.gaps.append(ObservationGap(code="resolution_unavailable", invocation_id="root"))
             result["ng_trajectory"] = trajectory.model_dump(mode="json")
-        self._num_requests_running -= 1
         return SimpleAgentVerifyResponse.model_validate(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
