@@ -1,27 +1,189 @@
 ---
 title: "Add a benchmark"
-description: ""
-position: 3
+description: "Reuse an existing resources server or add a new scorer, then prepare data, wire the CLI, and reward-profile."
+position: 2
 ---
-The most important principle when adding benchmarks into NeMo Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
+
+A **benchmark** is a versioned evaluation protocol on top of a resources server: a canonical dataset split, prompt configuration, `prepare_script`, and documented repeats so models and harnesses can be compared fairly. It is not automatically a new environment or a new resources server.
+
+<Tip>
+Start with the [onboarding decision tree](/contribute/environments/onboarding-decision-tree). Most new benchmarks only add `benchmarks/<name>/`.
+</Tip>
+
+The most important principle is **fidelity**: reproduce upstream numbers first when wrapping a public bench, then reproduce them again after the Gym integration. Reward profiling (below) is required before maintainers set `verified: true`.
+
+## When you need a new environment or resources server
+
+| Situation | Create |
+| --- | --- |
+| Same verifier, new dataset, prompt, or repeats (GSM8K on `math_with_judge`) | `benchmarks/<name>/` overlay only |
+| New training mixture using an existing scorer | `environments/<name>/` overlay — see [New Environment](/contribute/environments/new-environment) |
+| New `verify()`, tools, or session state | `resources_servers/<name>/`, then an overlay |
+| External harness owns the episode | Agent-server adapter — [Integrate external libraries](/environment-tutorials/integrate-external-environments) |
+
+You do **not** always create a new environment. Create a new resources server only when you cannot reuse one.
+
+```bash
+gym search "math word problems"
+gym list resources-servers
+```
+
+Reusable scorers (non-exhaustive): `math_with_judge`, `mcqa`, `code_gen`, `asr_with_pc`, `instruction_following`, `swebench`.
+
+## Reuse an existing resources server
+
+Copy a thin overlay. Canonical example: [`benchmarks/gsm8k`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/gsm8k).
+
+```yaml
+# benchmarks/my_bench/config.yaml
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+my_bench_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+
+my_bench_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: my_bench_math_with_judge_resources_server
+      datasets:
+      - name: my_bench
+        type: benchmark
+        jsonl_fpath: benchmarks/my_bench/data/my_bench_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/math.yaml
+        prepare_script: benchmarks/my_bench/prepare.py
+```
+
+Do **not** add `app.py` or duplicate `verify()`. Isolate the overlay with `_inherit_from` so the generic parent config is not the instance you run.
+
+<Warning>
+`gym env init --benchmark --reuse-verifier` is experimental. It requires the reused server to export `VERIFIER_FIXTURE`, which in-tree scorers do not. Use `config_paths` and `_inherit_from` for catalog contributions.
+</Warning>
+
+### Files for an overlay-only benchmark
+
+| File | Role |
+| --- | --- |
+| `benchmarks/my_bench/config.yaml` | Chain, inherit, and declare a `type: benchmark` dataset |
+| `benchmarks/my_bench/prepare.py` | Fetch and convert upstream data to Gym JSONL |
+| `benchmarks/my_bench/README.md` | License plus `gym eval prepare` / `gym eval run` |
+| `benchmarks/my_bench/data/` | Generated JSONL; gitignore large splits |
+
+### CLI
+
+```bash
+gym eval prepare --benchmark my_bench
+gym env start --benchmark my_bench --model-type openai_model
+gym eval run --no-serve \
+  --agent my_bench_math_with_judge_simple_agent \
+  --input benchmarks/my_bench/data/my_bench_benchmark.jsonl \
+  --output results/my_bench_rollouts.jsonl
+```
+
+`gym env test --resources-server` is not required for overlay-only PRs. Scorer tests already live with the reused server. Pull requests that touch only `benchmarks/**` skip the server unit-test suite.
+
+Public datasets should use Hugging Face `source:` (or committed `example.jsonl`). The GitLab dataset registry is optional and NVIDIA-internal. See [Prepare Data](/data).
+
+## New scorer
+
+If no existing server can score the task, follow [New Environment](/contribute/environments/new-environment) and [Single-Step Environment](/environment-tutorials/single-step-environment):
+
+```bash
+gym env init --resources-server my_scorer
+```
+
+Then add `benchmarks/my_bench/` that chains to `resources_servers/my_scorer/configs/my_scorer.yaml`.
+
+### Example data and `example_rollouts`
+
+CI and `CONTRIBUTING.md` require these artifacts for a **new resources server**. Overlay-only benchmarks do not add them under `benchmarks/`.
+
+| Artifact | Rule |
+| --- | --- |
+| `data/example.jsonl` | Exactly **5** rows |
+| `data/example_metrics.json` | `"Number of examples": 5` from `gym dataset collate` with `+mode=example_validation` |
+| `data/example_rollouts.jsonl` | Exactly **5** rollouts |
+
+A local `gym env test --resources-server my_scorer` runs pytest only. Data validation runs when you pass `+should_validate_data=true`, and CI always sets that flag. Generate rollouts with servers running:
+
+```bash
+gym eval run --no-serve \
+  --agent my_scorer_simple_agent \
+  --input resources_servers/my_scorer/data/example.jsonl \
+  --output resources_servers/my_scorer/data/example_rollouts.jsonl \
+  --limit null
+```
+
+Worked example: [`resources_servers/example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step). Some servers regenerate synthetic five-row rollouts without a live policy — see `resources_servers/rolemrc/generate_example_rollouts.py`.
+
+<Note>
+`gym env test` (all servers) only discovers directories that contain a `README.md`.
+</Note>
+
+## Harness compatibility checklist
+
+- Default: inherit the reused server's `simple_agent` pairing.
+- Hold the harness fixed if the goal is **model** comparison. See [model vs agent evaluation](/about/concepts/evaluation#how-to-evaluate-agents-and-models).
+- Coding in a repo: reuse `swebench` plus Mini-SWE or OpenCode sandboxed agents. OpenHands lives under `responses_api_agents/swe_agents/`.
+- Desktop GUI: `benchmarks/osworld` plus `osworld_agent` — not `simple_agent`.
+- Search or browse: compose `browsecomp` or `tavily_search` rather than a one-off HTTP client.
+- External orchestration: wrap in the agent `/run` endpoint and map back to `BaseVerifyResponse`.
+- Agent YAML `resources_server.name` must match the **inherited instance name**, not only the directory name.
+
+## Complex benchmarks
+
+| Need | Reuse | In-tree exemplar | Notes |
+| --- | --- | --- | --- |
+| Math / short answer | `math_with_judge` | `benchmarks/gsm8k`, `benchmarks/aime24` | Overlay only |
+| Multiple choice | `mcqa` | `benchmarks/gpqa`, `benchmarks/mmlu` | Overlay only |
+| Unit-test code exec | `code_gen` | `benchmarks/livecodebench`, `environments/code_gen` | Overlay or environment datasets |
+| Repo patch in a sandbox | `resources_servers/swebench` plus a sandboxed agent | `benchmarks/swebench/verified/opencode.yaml` | Nested flavors; no single top-level SWE config |
+| Desktop GUI / VM | Gym Docker sandbox plus OSWorld | `benchmarks/osworld`, `osworld_agent` | Linux, Docker, `/dev/kvm`, qcow2 |
+| GUI pointing | `gui_coordinate` | `resources_servers/gui_coordinate` | Standalone resources server |
+| Search / browse | Tavily or Exa tools | `benchmarks/browsecomp`, `tavily_search` | BrowseComp inlines its harness; `tavily_search` is bundled, not a catalog benchmark |
+| Stateful tool user-sim | `toolsandbox` plus `toolsandbox_agent` | `benchmarks/toolsandbox` | Inherit pattern; see the resources-server README for the Responses vs Chat Completions score caveat |
+| Terminal Bench (Harbor) | Harbor / Daytona via the agent | `responses_api_agents/harbor_agent` | Not under `benchmarks/`. Do not confuse with `terminal_multi_harness` |
+| Multi-harness next-action | `terminal_multi_harness` | Server `docs/` rulebooks | Codex / OpenCode / Agent006; not Harbor Terminal Bench |
+
+**GUI / VM.** Follow [`benchmarks/osworld/README.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/osworld/README.md). Three roles: model host, agent/control host, environment host. Gym Docker Sandbox owns VM lifecycle; do not fork a second VM manager.
+
+**Search / browser.** Prefer composing `browsecomp` or `tavily_search`. The supported CLI is `gym eval prepare --benchmark browsecomp` and `gym eval run --benchmark browsecomp`. For smoke tests, a Tavily key plus an empty exclude-domains JSON is enough; NVIDIA-internal legal files are not required for public contributions.
+
+**SWE-style.** Do not copy an upstream runner into a new resources server if `swebench` plus an existing sandboxed agent already fits. A new harness is a new **agent** server when verification is still "tests in the repo."
 
 ## Reward profiling
 
-In order to ensure the rough software correctness of your benchmark, baseline against publicly available models including a mixture of open-source and closed-source models. This process is also known as reward profiling.
+Baseline against a mixture of open-source and closed-source models so you catch software bugs before `verified: true`. How to run the commands: [CLI: gym eval profile](/reference/cli-commands#gym-eval-profile).
 
-1. Typically any open-source model, even smaller ones such as [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), will suffice as long as the resulting performance of running that model on the benchmark is in a meaningful range such as 30% or higher. Otherwise you should run a larger model that attains a meaningful score. If no open model is able to achieve meaningful performance, this may indicate that you have a software bug or indeed your benchmark is quite difficult.  
-2. For closed-source models, as of February 11, 2026, it is typically fine to run just OpenAI models (rather than Anthropic or Gemini models) for a variety of reasons.  
-   1. Typically OpenAI models are the most affordable and have good robustness over various benchmarks, while the same cannot be currently said for Anthropic or Gemini models.  
-   2. These closed-source models should reach at least the same scores as open-source models, if not significantly better. It is rare that open-source models outperform closed-source models. If this is not the case, your benchmark may have a software bug.
+1. Typically any open-source model, even smaller ones such as [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), will suffice as long as the resulting performance is in a meaningful range such as 30% or higher. Otherwise run a larger model that attains a meaningful score. If no open model achieves meaningful performance, you may have a software bug, or the benchmark is genuinely hard.
+2. For closed-source models, as of February 11, 2026, it is typically fine to run OpenAI models rather than Anthropic or Gemini models: they are usually the most affordable and robust across benchmarks. Closed-source models should reach at least the same scores as open-source models, if not significantly better. If they do not, your benchmark may have a software bug.
 
-As of February 11, 2026, an example suite of models to reward profile on your benchmark is: your policy model of interest, GPT 5 Nano, GPT 5, [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), and [Qwen 3 30B A3B Thinking2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507). If the 30B-level Qwen models are not strong enough, consider [Qwen 3 235B A22B Instruct 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) and [Qwen 3 235B A22B Thinking 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507). If those models are also not enough, consider models such as [Kimi K2 Instruct](https://huggingface.co/moonshotai/Kimi-K2-Instruct) or [GLM-4.7](https://huggingface.co/zai-org/GLM-4.7). 
+As of February 11, 2026, an example suite is: your policy model of interest, GPT 5 Nano, GPT 5, [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), and [Qwen 3 30B A3B Thinking 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507). If the 30B-level Qwen models are not strong enough, consider [Qwen 3 235B A22B Instruct 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) and [Qwen 3 235B A22B Thinking 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507). If those are also not enough, consider [Kimi K2 Instruct](https://huggingface.co/moonshotai/Kimi-K2-Instruct) or [GLM-4.7](https://huggingface.co/zai-org/GLM-4.7).
 
-## Best practices
+### Best practices
 
-After running on a variety of models, you should do a quick analysis of some of each model's failure cases. It is critical to look at the actual results and rollouts produced by your benchmark because it will help catch many software bugs and issues that may lead to unexpectedly low or high scores.
+After running on a variety of models, inspect some of each model's failure cases. Looking at actual rollouts catches many software bugs that aggregate scores hide.
 
-In order to ensure infra robustness, also run your benchmark on a mixture of instruct and thinking models. We want to make our benchmark code model-agnostic, and leave the model-specific logic to things like Responses API Model servers in Gym. It should be as simple as tweaking the config of the model server you are using to switch between instruct and thinking models and achieve reasonable and expected scores for both types.
+Also run a mixture of instruct and thinking models. Benchmark code should be model-agnostic; leave model-specific logic to Responses API model servers. Switching between instruct and thinking should be a model-server config change.
 
-For integrating existing benchmarks into Gym, you must first use the original repository to reproduce the publicly reported numbers first and achieve reproduction success there. In case we run into reproduction issues down the line, this helps decouple the possible causes of our issues. Then, you can integrate the existing benchmark into Gym and rerun against those same models and reproduce the same scores again.
+When integrating an existing public benchmark, first reproduce the published numbers with the original repository. Then integrate into Gym and reproduce those scores again. That split isolates Gym integration bugs from upstream issues.
 
-Once you have a stable setup to run your benchmark, run it a few times on the highest scoring open source model to understand the variance. We want to increase the number of repeats of the benchmark (that is, average @ k, where k is the number of repeats) so that the variance is less than 1%.
+Once the setup is stable, run the highest-scoring open-source model a few times and increase repeats (average @ k) until variance is less than 1%.
+
+## Definition of done
+
+**Benchmark-complete (overlay):** `prepare.py` reproduces the data; `--benchmark` starts and collects rollouts; README and license; upstream numbers reproduced when wrapping a public bench; reward profile attached before `verified: true`.
+
+**Resources-server complete:** `verify()` (and tools or state), unit tests, 5/5/5 example artifacts, `domain`, README, license, SPDX headers, DCO (`git commit -s`).
+
+**Environment-complete:** that scorer composed with an agent, a model, and datasets (`environments/` or a colocated server YAML).
+
+## Related Topics
+
+- [Onboarding decision tree](/contribute/environments/onboarding-decision-tree)
+- [New Environment](/contribute/environments/new-environment)
+- [How Benchmarks Relate to Environments](/evaluation/benchmarks)
+- [Agent Skills](/contribute/agent-skills) — the `add-benchmark` skill should follow this overlay-first path
+- [FAQ](/reference/faq#how-do-i-choose-an-onboarding-path)

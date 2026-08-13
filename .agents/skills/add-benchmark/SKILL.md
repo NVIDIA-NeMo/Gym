@@ -16,10 +16,13 @@ description: >
 
 Before starting, determine which type of benchmark you're adding:
 
-**Native benchmark** — verification logic implemented directly in a Gym resources server:
+**Native overlay** — reuse an existing resources server. Do this first. Add `benchmarks/<name>/config.yaml` with `config_paths` and `_inherit_from` (copy `benchmarks/gsm8k`). Do **not** run `gym env init --resources-server` unless no scorer exists. Human docs: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`.
+
+**Native new scorer** — verification logic implemented directly in a Gym resources server:
 - Resources server implements `verify()` with reward logic
 - Agent server orchestrates model calls (use `simple_agent` for single-turn, or custom agent for multi-turn)
 - Example: `code_gen`, `instruction_following`, `math_with_judge`
+- CI requires `data/example.jsonl` (5), `data/example_metrics.json`, `data/example_rollouts.jsonl` (5); local `gym env test --resources-server` skips data checks unless `+should_validate_data=true`
 
 **External benchmark** — wrapping a 3rd-party library that has its own orchestration:
 - Integrate at the agent server level (not resources server)
@@ -29,6 +32,8 @@ Before starting, determine which type of benchmark you're adding:
 - Add the dependency in `requirements.txt`
 
 ## Workflow
+
+If this is an overlay on `math_with_judge`, `mcqa`, `code_gen`, or similar, skip scaffolding a new server. Copy `benchmarks/gsm8k/` and stop after prepare + CLI wiring. Only do Step 1 when no existing scorer fits.
 
 ### Step 1: Scaffold the server
 
@@ -253,7 +258,7 @@ git checkout -- resources_servers/other_server/
 - Code must run on Linux
 - `/run` endpoint must be async
 - Errors from tool execution or bad model output must return error responses, not crash
-- All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
+- All commits require DCO sign-off (`-s`). Cryptographic signing (`-S`) is optional.
 
 ## Reference
 

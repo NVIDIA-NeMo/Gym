@@ -1,13 +1,18 @@
 ---
 title: "New Environment"
-description: ""
+description: "Scaffold a resources server, implement verify(), and satisfy local tests and example artifacts."
+position: 3
 ---
 An environment defines the tasks, verification, and interaction surface being measured. A Gym config composes that environment with an agent server and model server and supplies the runtime wiring. Those execution components are not the environment itself, although an integration profile can make specific agent behavior part of the measurement.
 
-The onboarding flow below covers a complete environment or benchmark. A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. Manifest-backed onboarding currently writes canonical workloads under `environments/` and `benchmarks/`; runnable configs still colocated under `resources_servers/` remain visible as `no-manifest` migration entries.
+<Tip>
+If you are adding a named eval on top of an existing scorer, stop here and follow [Add a benchmark](/contribute/environments/adding-a-benchmark). Use the [onboarding decision tree](/contribute/environments/onboarding-decision-tree) when you are unsure.
+</Tip>
+
+A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. **Catalog contributions today** live as YAML under `environments/` and `resources_servers/` (and as `no-manifest` catalog entries). The manifest commands later on this page are implemented but **experimental**: in-tree workloads do not yet ship `manifest.yaml`.
 
 <Tip>
-For a guide to building your first resources server, refer to [Single Step Environment](/environment-tutorials/single-step-environment).
+For a hands-on guide to building your first resources server, refer to [Single Step Environment](/environment-tutorials/single-step-environment).
 
 </Tip>
 
@@ -60,10 +65,29 @@ It does not import components, start services, execute preparation code, call a 
 
 ## Onboarding Commands
 
-Search the local catalog before creating a workload. The onboarding journey then uses four commands to scaffold, validate, test, and publish it:
+Search the local catalog before creating a workload:
 
 ```bash
 gym search "task description"
+gym list resources-servers
+```
+
+### Catalog path (default for this repository)
+
+Scaffold a resources server, then compose it from `environments/` or `benchmarks/` with `config_paths` and `_inherit_from`:
+
+```bash
+gym env init --resources-server my_server
+gym env test --resources-server my_server +should_validate_data=true
+```
+
+To reuse an existing scorer without copying it, add a YAML overlay. See [Add a benchmark](/contribute/environments/adding-a-benchmark#reuse-an-existing-resources-server). Do not use `--reuse-verifier` against in-tree servers: they do not export `VERIFIER_FIXTURE`.
+
+### Manifest path (experimental)
+
+The commands below write `manifest.yaml` and a verifier fixture. Use them only if you are adopting that contract. In-tree environments and benchmarks do not have manifests yet.
+
+```bash
 gym env init --environment my_eval --profile custom-gym-verifier
 gym env validate my_eval
 gym env test my_eval
@@ -72,7 +96,7 @@ gym env publish my_eval
 
 The scaffold creates a manifest, Gym config, sample data, and README. Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. For an external agent loop, replace `run()` with the framework adapter and make `responses()` raise `NotImplementedError`.
 
-To reuse a scorer that already exports the verifier-fixture contract, declare its reward contract instead of copying its implementation:
+When a resources server **does** export `VERIFIER_FIXTURE`, you can declare its reward contract instead of copying its implementation:
 
 ```bash
 gym env init --benchmark my_benchmark --profile custom-gym-verifier \
@@ -89,7 +113,7 @@ Publication currently records readiness as `experimental`. CODEOWNERS updates, i
 
 ## Verifier Fixture Contract
 
-The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:
+On the experimental manifest path, the resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. In-tree resources servers do **not** yet export this fixture; catalog reuse uses YAML `_inherit_from` instead. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:
 
 - a full-reward case that reaches the better endpoint declared by `higher_is_better`;
 - a zero-reward case that reaches the opposite endpoint;
@@ -100,7 +124,9 @@ Fixture execution runs directly in the resources server's dependency environment
 
 ## Guiding Principles
 
-Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
+A new **resources server** must pass unit tests and the example-data gate described below. A named **benchmark** overlay has additional fidelity requirements in [Add a benchmark](/contribute/environments/adding-a-benchmark): reproduce upstream numbers when wrapping a public bench, then reward-profile before `verified: true`.
+
+On the experimental manifest path, the local correctness bar is: the manifest validates and the verifier fixture passes. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is not a merge compute gate for training environments.
 
 When compute is available, a useful training experiment isolates the environment's effect on the targeted capability. GRPO with NeMo RL, 64 prompts per step, and 16 rollouts per prompt is one starting point; adjust it to the environment and available compute.
 
@@ -115,11 +141,11 @@ Your resources server must include these files:
 | `app.py` | Main server implementation with `verify` function |
 | `configs/*.yaml` | Configuration with valid `domain` field |
 | `tests/test_app.py` | At least one unit test |
-| Example data | At least one representative input at a path referenced by the workload config |
+| `data/example.jsonl` | Exactly **5** representative rows (CI) |
+| `data/example_metrics.json` | `"Number of examples": 5` from `gym dataset collate` `example_validation` |
+| `data/example_rollouts.jsonl` | Exactly **5** rollouts (CI; see below) |
 | `requirements.txt` | Python dependencies |
-| `README.md` | Documentation with licensing information |
-
-Optional rollout evidence may be saved in `data/example_rollouts.jsonl`.
+| `README.md` | Documentation with licensing information (`gym env test` all-servers discovery requires this file) |
 
 ## Contribution Workflow
 
@@ -130,7 +156,7 @@ Contributing a resources server follows this sequence:
 | 1 | Curate Tasks | Collect or generate training tasks and create example data |
 | 2 | Implementation | Build resources server with verification logic |
 | 3 | Testing | Write and run unit tests |
-| 4 | Example Rollouts | Optionally capture runtime evidence |
+| 4 | Example Rollouts | Capture five example rollouts for CI data validation |
 | 5 | Reward Profiling | Optionally inspect reward distribution |
 | 6 | Training Validation | Optionally test training utility |
 | 7 | Submit PR | Submit pull request with all required information |
@@ -143,7 +169,7 @@ Contributing a resources server follows this sequence:
 Prepare the dataset for your environment:
 
 - Collect or generate prompts/tasks for your environment
-- Create `data/example.jsonl` with at least one representative task example
+- Create `data/example.jsonl` with exactly five representative tasks (typically the first five rows of your train split)
 
 ### 2. Resources Server Implementation
 
@@ -162,14 +188,20 @@ Write and run tests for your resources server:
 - At least one test per server is required for PR approval
 - You are responsible for ensuring your tests adequately cover your server's functionality
 
-### 4. Generate Example Rollouts (Optional)
+### 4. Generate Example Rollouts
 
-When a policy endpoint and compute are available, generate example rollouts as additional runtime evidence:
+CI requires `data/example_rollouts.jsonl` with exactly five rows for a new resources server. A local `gym env test --resources-server my_server` does **not** check this file unless you pass `+should_validate_data=true`. CI always sets that flag.
 
-- Document the command used to start your server, for example, `gym env start --resources-server my_server`
-- If useful for review, save representative outputs to `data/example_rollouts.jsonl`
+```bash
+gym env start --resources-server my_server --model-type openai_model
+gym eval run --no-serve \
+  --agent my_server_simple_agent \
+  --input resources_servers/my_server/data/example.jsonl \
+  --output resources_servers/my_server/data/example_rollouts.jsonl \
+  --limit null
+```
 
-This evidence is not required to publish or merge the environment.
+See [`resources_servers/example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step). Extra rollout evidence beyond the five-row gate is optional.
 
 ### 5. Reward Profiling (Optional)
 
@@ -202,7 +234,7 @@ Include the following in your pull request description:
 
 After submitting your PR:
 
-1. A team member reviews the manifest, composition, fixture, and licensing information
+1. A team member reviews the config (and manifest if present), tests or fixture, example artifacts, and licensing information
 2. Address any feedback from reviewers
 3. After approval, maintainers merge the contribution
 
@@ -282,5 +314,7 @@ For multi-step scenarios, the model returns training information on response mes
 
 ## Reference
 
+- [Onboarding decision tree](/contribute/environments/onboarding-decision-tree)
+- [Add a benchmark](/contribute/environments/adding-a-benchmark)
 - [Single Step Environment](/environment-tutorials/single-step-environment) - Introductory tutorial for creating your first resources server
 - [Environment Components](/about/architecture) - Environment component architecture
