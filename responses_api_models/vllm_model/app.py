@@ -39,6 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    TokenIDLogProbMixin,
 )
 from nemo_gym.responses_converter import (
     VLLMConverter,
@@ -228,6 +229,19 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
+    _REQUIRED_TOKEN_METADATA_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"prompt_token_ids", "generation_token_ids", "generation_log_probs"}
+    )
+    _TOKEN_METADATA_FIELDS: ClassVar[frozenset[str]] = _REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
+    _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
+        "model",
+        "messages",
+        "tools",
+        "chat_template_kwargs",
+        "mm_processor_kwargs",
+        "required_prefix_token_ids",
+    )
+
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
 
@@ -267,6 +281,127 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
             self._chat_template_tokenizer = self._load_chat_template_tokenizer()
+
+    @staticmethod
+    def _coerce_token_ids(value: Any, field_name: str) -> List[int]:
+        if not isinstance(value, list) or any(
+            not isinstance(token_id, int) or isinstance(token_id, bool) for token_id in value
+        ):
+            raise RuntimeError(f"`{field_name}` must be a list of integer token IDs.")
+        return list(value)
+
+    @staticmethod
+    def _coerce_log_probs(value: Any, field_name: str) -> List[float]:
+        if not isinstance(value, list) or any(
+            not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool) for log_prob in value
+        ):
+            raise RuntimeError(f"`{field_name}` must be a list of numeric log probabilities.")
+        return [float(log_prob) for log_prob in value]
+
+    @classmethod
+    def _validate_token_bundle(cls, bundle: Dict[str, Any], source: str) -> Dict[str, Any]:
+        present_fields = cls._TOKEN_METADATA_FIELDS.intersection(bundle)
+        missing_fields = cls._REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
+        if missing_fields:
+            missing = ", ".join(sorted(missing_fields))
+            raise RuntimeError(f"{source} returned partial token metadata; missing: {missing}.")
+
+        normalized = {
+            "prompt_token_ids": cls._coerce_token_ids(bundle["prompt_token_ids"], f"{source}.prompt_token_ids"),
+            "generation_token_ids": cls._coerce_token_ids(
+                bundle["generation_token_ids"], f"{source}.generation_token_ids"
+            ),
+            "generation_log_probs": cls._coerce_log_probs(
+                bundle["generation_log_probs"], f"{source}.generation_log_probs"
+            ),
+        }
+        if "routed_experts" in bundle:
+            normalized["routed_experts"] = bundle["routed_experts"]
+
+        if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
+            raise RuntimeError(
+                f"{source} returned mismatched generation token IDs and log probabilities: "
+                f"{len(normalized['generation_token_ids'])} token IDs and "
+                f"{len(normalized['generation_log_probs'])} log probabilities."
+            )
+
+        return TokenIDLogProbMixin.model_validate(normalized).model_dump(exclude_none=True)
+
+    @classmethod
+    def _extract_message_token_bundle(cls, message_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        required_fields = cls._REQUIRED_TOKEN_METADATA_FIELDS.intersection(message_dict)
+        if not required_fields:
+            return None
+        present_fields = cls._TOKEN_METADATA_FIELDS.intersection(message_dict)
+        return cls._validate_token_bundle(
+            {field: message_dict[field] for field in present_fields},
+            "choice.message",
+        )
+
+    @classmethod
+    def _extract_standard_vllm_ids(
+        cls,
+        chat_completion_dict: Dict[str, Any],
+        choice_dict: Dict[str, Any],
+    ) -> Optional[tuple[List[int], List[int]]]:
+        prompt_value = chat_completion_dict.get("prompt_token_ids")
+        generation_value = choice_dict.get("token_ids")
+        prompt_present = prompt_value is not None
+        generation_present = generation_value is not None
+
+        if prompt_present != generation_present:
+            missing = "choice.token_ids" if prompt_present else "prompt_token_ids"
+            raise RuntimeError(f"Standard vLLM returned partial token metadata; missing: {missing}.")
+        if not prompt_present:
+            return None
+
+        return (
+            cls._coerce_token_ids(prompt_value, "prompt_token_ids"),
+            cls._coerce_token_ids(generation_value, "choice.token_ids"),
+        )
+
+    def _extract_choice_logprobs(self, choice_dict: Dict[str, Any]) -> tuple[List[int], List[float]]:
+        logprobs_block = choice_dict.get("logprobs")
+        if not isinstance(logprobs_block, dict) or not isinstance(logprobs_block.get("content"), list):
+            raise RuntimeError(
+                f"`{self.config.name}` requested per-token logprobs from vLLM "
+                "(return_token_id_information=True, logprobs=True, top_logprobs=0), "
+                f"but the response had none (choice.logprobs={logprobs_block!r}). "
+                "Cannot extract token ids or logprobs."
+            )
+
+        generation_token_ids: List[int] = []
+        generation_log_probs: List[float] = []
+        for index, entry in enumerate(logprobs_block["content"]):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"choice.logprobs.content[{index}] must be an object.")
+            token = entry.get("token")
+            if not isinstance(token, str) or not token.startswith("token_id:"):
+                raise RuntimeError(f"choice.logprobs.content[{index}].token must use the `token_id:<int>` format.")
+            try:
+                token_id = int(token.removeprefix("token_id:"))
+            except ValueError as e:
+                raise RuntimeError(
+                    f"choice.logprobs.content[{index}].token must use the `token_id:<int>` format."
+                ) from e
+            log_prob = entry.get("logprob")
+            if not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool):
+                raise RuntimeError(f"choice.logprobs.content[{index}].logprob must be numeric.")
+            generation_token_ids.append(token_id)
+            generation_log_probs.append(float(log_prob))
+
+        return generation_token_ids, generation_log_probs
+
+    @classmethod
+    def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep every known prompt-affecting field aligned with generation."""
+        return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
+
+    def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
+        if self.config.return_token_id_information and body_dict.get("n") not in (None, 1):
+            raise ValueError(
+                f"NeMo Gym server `{self.config.name}` requires n=1 when return_token_id_information=true."
+            )
 
     def _load_chat_template_tokenizer(self):
         """Load an HF AutoTokenizer for client-side chat-template rendering.
@@ -470,11 +605,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 top_logprobs=0,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
-                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                # For prompt and generation token IDs
-                # return_token_ids=True,
-                # For prompt token IDs
-                # prompt_logprobs=0,
+                # Standard vLLM returns exact prompt and generation IDs in the
+                # same response when this extension is enabled.
+                return_token_ids=True,
             )
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
@@ -590,7 +723,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
-        return self._apply_sampling_overrides(body_dict)
+        self._apply_sampling_overrides(body_dict)
+        self._validate_single_choice_token_request(body_dict)
+        return body_dict
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -729,63 +864,58 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
-        if self.config.return_token_id_information and "prompt_token_ids" not in choice_dict["message"]:
-            # Check vLLM honored the logprobs request.
-            # It returns choice.logprobs=None when it computed none.
-            # That happens when a null top_logprobs reached it, or the contract changed across versions.
-            # Without this check the code below raises a TypeError or emits empty token ids that zero the loss mask.
-            # An empty content list is a valid zero-token generation and passes through.
-            logprobs_block = choice_dict.get("logprobs")
-            if not logprobs_block or logprobs_block.get("content") is None:
-                raise RuntimeError(
-                    f"`{self.config.name}` requested per-token logprobs from vLLM "
-                    f"(return_token_id_information=True, logprobs=True, top_logprobs=0), but the response "
-                    f"had none (choice.logprobs={logprobs_block!r}). Cannot extract token ids or logprobs."
-                )
-            log_probs = logprobs_block["content"]
-            generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
-
-            """
-            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            """
-            # Looks like `"token_id:151667"`
-            generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
-
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            #
-            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
-            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
-            # `prompt_str`) can be built with different chat template settings than
-            # the actual generation request.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
-
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-            """
-            END
-            """
-
+        if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
-            message_dict.update(
-                dict(
-                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
-                    generation_token_ids=generation_token_ids,
-                    generation_log_probs=generation_log_probs,
-                )
-            )
+            message_bundle = self._extract_message_token_bundle(message_dict)
+            standard_ids = self._extract_standard_vllm_ids(chat_completion_dict, choice_dict)
 
-            # Clean the duplicated information
-            choice_dict.pop("logprobs")
-            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            # chat_completion_dict.pop("prompt_token_ids")
-            # choice_dict.pop("token_ids")
+            if message_bundle is not None:
+                if standard_ids is not None:
+                    standard_prompt_ids, standard_generation_ids = standard_ids
+                    if (
+                        message_bundle["prompt_token_ids"] != standard_prompt_ids
+                        or message_bundle["generation_token_ids"] != standard_generation_ids
+                    ):
+                        raise RuntimeError("Message-level token metadata disagrees with standard vLLM token IDs.")
+                message_dict.update(message_bundle)
+            else:
+                logprob_token_ids, generation_log_probs = self._extract_choice_logprobs(choice_dict)
+                if standard_ids is not None:
+                    prompt_token_ids, generation_token_ids = standard_ids
+                    if generation_token_ids != logprob_token_ids:
+                        raise RuntimeError(
+                            "Standard vLLM generation token IDs disagree with choice logprob token IDs."
+                        )
+                else:
+                    tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
+                    prompt_token_ids = self._coerce_token_ids(
+                        tokenize_response.get("tokens"),
+                        "tokenize.tokens",
+                    )
+                    generation_token_ids = logprob_token_ids
+
+                message_dict.update(
+                    self._validate_token_bundle(
+                        {
+                            "prompt_token_ids": prompt_token_ids,
+                            "generation_token_ids": generation_token_ids,
+                            "generation_log_probs": generation_log_probs,
+                            **(
+                                {"routed_experts": message_dict["routed_experts"]}
+                                if message_dict.get("routed_experts") is not None
+                                else {}
+                            ),
+                        },
+                        "vLLM token transport",
+                    )
+                )
+
+                # The adapter consumed this compatibility payload.
+                choice_dict.pop("logprobs", None)
+
+            # Standard token-ID fields are transport details.
+            chat_completion_dict.pop("prompt_token_ids", None)
+            choice_dict.pop("token_ids", None)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
@@ -841,6 +971,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             prompt = self._render_messages_to_prompt(messages)
 
         completion_body = self._build_completion_body_from_chat_body(body_dict, prompt)
+        self._validate_single_choice_token_request(completion_body)
 
         client = self._resolve_client(request)
 
