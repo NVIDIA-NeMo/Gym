@@ -14,7 +14,7 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -162,6 +162,33 @@ class SandboxExecResult:
 ExecResult = SandboxExecResult
 
 
+@dataclass(frozen=True)
+class SandboxPtySpec:
+    """Interactive PTY session request.
+
+    ``command`` runs under the backend's interactive shell; ``None`` spawns the
+    shell itself. Backends without native env/user support may rewrite the
+    command (mirroring ``exec()``'s user rewrite) and must raise ``ValueError``
+    for values they cannot honor. ``pty=False`` selects pipe mode: no TTY,
+    stdout and stderr delivered as separate streams, ``rows``/``cols`` ignored.
+    Backends that cannot size a terminal at spawn apply ``rows``/``cols`` as
+    soon as it connects, so a ``command`` reading the size immediately may
+    observe the backend default.
+    """
+
+    command: str | None = None
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    rows: int = 24
+    cols: int = 80
+    user: str | int | None = None
+    pty: bool = True
+
+
+class SandboxPtyError(RuntimeError):
+    """Raised when a PTY session fails outside normal process exit."""
+
+
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
@@ -225,6 +252,109 @@ class SupportsSandboxEndpoint(Protocol):
 
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint."""
+        ...
+
+
+@runtime_checkable
+class SandboxPtySession(Protocol):
+    """One live interactive terminal. Async context manager; exit closes it."""
+
+    session_id: str
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` has run; a closed session cannot run commands."""
+        ...
+
+    mode: str | None
+    """``"pty"`` or ``"pipe"`` once connected, ``None`` before that. Only pipe
+    mode splits stderr; in PTY mode all output arrives through ``read()``."""
+
+    async def read(self, *, timeout_s: float | None = None) -> bytes:
+        """Return the next output chunk (all terminal output in PTY mode;
+        stdout only in pipe mode). ``b""`` means the process exited and the
+        stream is drained. Raises ``TimeoutError`` on timeout and
+        ``SandboxPtyError`` if the session died without exiting.
+        """
+        ...
+
+    async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
+        """Return the next stderr chunk. Only pipe mode (``pty=False``)
+        carries stderr separately; in PTY mode this stream is empty and
+        returns ``b""`` once the process exits. Same timeout/error semantics
+        as ``read()``.
+        """
+        ...
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield output chunks until EOF."""
+        ...
+
+    async def write(self, data: bytes) -> None:
+        """Send raw bytes to the terminal's stdin."""
+        ...
+
+    async def resize(self, rows: int, cols: int) -> None:
+        """Resize the terminal."""
+        ...
+
+    async def send_signal(self, signal: str) -> None:
+        """Deliver a named signal, e.g. ``"SIGTERM"``, to the session's process
+        group. Interactive shells run foreground jobs in their own group, so
+        signals reliably reach the process only for command sessions; whether
+        ``SIGINT`` interrupts at all also depends on the sandbox runtime's
+        inherited signal dispositions.
+        """
+        ...
+
+    async def wait_exit(self, *, timeout_s: float | None = None) -> int:
+        """Block until the process exits and return its exit code."""
+        ...
+
+    async def close(self) -> None:
+        """Idempotent: release local resources; a session this client created
+        is also ended, while an attached one is merely detached and lives on
+        for its owner."""
+        ...
+
+    async def __aenter__(self) -> "SandboxPtySession": ...
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxPty(Protocol):
+    """Optional provider capability: interactive PTY sessions."""
+
+    async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
+        """Open an interactive terminal inside a sandbox."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxPtyAttach(Protocol):
+    """Optional provider capability: re-attach to a PTY session by id.
+
+    Separate from ``SupportsSandboxPty`` because it requires sessions that live
+    in the sandbox rather than in the client, so a provider may offer terminals
+    without offering re-attach.
+    """
+
+    async def attach_pty(
+        self,
+        handle: SandboxHandle,
+        session_id: str,
+        *,
+        takeover: bool = True,
+        since: int | None = None,
+    ) -> SandboxPtySession:
+        """Re-attach to an existing session by id.
+
+        ``takeover`` evicts the current holder, whose session then fails with
+        ``SandboxPtyError``; without it, attaching to a held session fails.
+        ``since`` is a byte offset into the session's retained output to replay
+        before live output (``0`` replays everything still retained).
+        """
         ...
 
 
