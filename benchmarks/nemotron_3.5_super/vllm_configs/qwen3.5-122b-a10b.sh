@@ -13,15 +13,18 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser qwen3
     --mm-encoder-tp-mode data
     --enable-chunked-prefill
-    --enable-prefix-caching
+    --no-enable-prefix-caching
     --kv-cache-dtype fp8
+    --enable-expert-parallel
     --no-disable-hybrid-kv-cache-manager
     --no-async-scheduling
+    # Isolate compiled/CUDA-graph execution while retaining the required MoE weight layout.
+    --enforce-eager
     --block-size 128
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
-    --enable-expert-parallel
     --max-num-batched-tokens 33920
-    --max-num-seqs 512
+    --max-num-seqs 256
+    --max-cudagraph-capture-size 256
 )
