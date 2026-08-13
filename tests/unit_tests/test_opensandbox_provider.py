@@ -515,6 +515,7 @@ def test_connection_config_and_image_policy(
         "protocol": "https",
         "request_timeout": timedelta(seconds=10),
         "use_server_proxy": True,
+        "headers": {"OPEN-SANDBOX-API-KEY": "key"},  # pragma: allowlist secret
     }
     assert config.headers == {"OPEN-SANDBOX-API-KEY": "key"}  # pragma: allowlist secret
     short_timeout_config = provider._connection_config(request_timeout_s=3)

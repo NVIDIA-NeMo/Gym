@@ -652,6 +652,8 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+            if self._connection.api_key is not None:
+                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
         if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
             kwargs["transport"] = self._get_transport()
         config = ConnectionConfig(**kwargs)
@@ -1159,44 +1161,6 @@ class OpenSandboxProvider:
         )
         raw_status = getattr(info, "status", None)
         return _to_sandbox_status(getattr(raw_status, "state", None) if raw_status is not None else None)
-
-    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
-        """Resolve an HTTP(S) endpoint for a declared sandbox port.
-
-        The SDK returns the server-proxy route (`{domain}/v1/sandboxes/{id}/proxy/{port}`)
-        when the connection uses the server proxy, along with any headers the server
-        requires on every request to that endpoint (e.g. the API key header).
-        """
-        get_endpoint = getattr(handle.raw, "get_endpoint", None)
-        if get_endpoint is None:
-            raise NotImplementedError(
-                "The installed opensandbox SDK does not expose Sandbox.get_endpoint; "
-                "sandbox service endpoints require opensandbox>=0.1.15"
-            )
-        resolved = await self._await_sdk_operation(
-            lambda: get_endpoint(port),
-            operation="get_endpoint",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=float(self._connection.request_timeout_s)
-            if self._connection.request_timeout_s is not None
-            else None,
-        )
-        endpoint_url = str(getattr(resolved, "endpoint", "") or "")
-        if not endpoint_url:
-            raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id} port {port}")
-        connection = handle.raw.connection_config
-        if "://" not in endpoint_url:
-            # Use the handle's SDK-resolved config so protocol and environment
-            # defaults match the connection that produced this endpoint.
-            scheme = connection.get_base_url().split("://", 1)[0]
-            endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
-        headers = dict(getattr(resolved, "headers", None) or {})
-        api_key = connection.headers.get("OPEN-SANDBOX-API-KEY")
-        if connection.use_server_proxy and api_key:
-            # Direct endpoints terminate at untrusted sandbox code; only proxy
-            # endpoints may receive server credentials.
-            headers.setdefault("OPEN-SANDBOX-API-KEY", api_key)
-        return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     def _command_retry_count(self) -> int:
         return self._operations.command_retries
