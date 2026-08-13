@@ -174,6 +174,9 @@ class GlobalConfigDictParserConfig(BaseModel):
     skip_load_from_dotenv: bool = False
 
     hide_secrets: bool = False
+    # Static inspection avoids network and process side effects. Assigned ports are placeholders,
+    # not evidence that a runtime is ready.
+    offline: bool = False
 
     # This is a shorthand we use for config resolution use cases that shouldn't require a model
     # e.g. data loading, etc
@@ -331,6 +334,7 @@ Duplicate config paths:
         port_range_low: int,
         port_range_high: int,
         initial_disallowed_ports: Optional[List[int]] = None,
+        probe_ports: bool = True,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
 
@@ -363,13 +367,18 @@ Duplicate config paths:
                 if not run_server_config_dict.get("host"):
                     run_server_config_dict["host"] = default_host
                 if not run_server_config_dict.get("port"):
-                    port = _find_open_port_using_range(
-                        disallowed_ports=disallowed_ports,
-                        port_range_low=port_range_low,
-                        port_range_high=port_range_high,
-                    )
+                    if probe_ports:
+                        port = _find_open_port_using_range(
+                            disallowed_ports=disallowed_ports,
+                            port_range_low=port_range_low,
+                            port_range_high=port_range_high,
+                        )
+                    else:
+                        # Offline resolution must not imply that a runnable port was allocated.
+                        port = -1
                     run_server_config_dict["port"] = port
-                    disallowed_ports.append(port)  # Disallow newly allocated port.
+                    if probe_ports:
+                        disallowed_ports.append(port)  # Disallow newly allocated port.
                 else:
                     # Port already exists, add it to the disallowed list.
                     disallowed_ports.append(run_server_config_dict["port"])
@@ -662,7 +671,7 @@ Found global config dict yaml:
 
         with open_dict(global_config_dict):
             use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
-        if use_absolute_ip:
+        if use_absolute_ip and not parse_config.offline:
             default_host = gethostbyname(gethostname())
         else:
             # Do one pass through all the configs validate and populate various configs for our servers.
@@ -683,6 +692,7 @@ Found global config dict yaml:
             initial_disallowed_ports=initial_disallowed_ports,
             port_range_low=port_range_low,
             port_range_high=port_range_high,
+            probe_ports=not parse_config.offline,
         )
 
         with open_dict(global_config_dict):
@@ -720,8 +730,9 @@ Found global config dict yaml:
             # UV related configuration
             # UV caching directory overrides to local folders.
             global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
-            # Set the appropriate environment variable here, and matche the config
-            environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # Runtime subprocesses inherit the configured cache directory.
+            if not parse_config.offline:
+                environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
@@ -731,7 +742,7 @@ Found global config dict yaml:
 
         # Set up W&B and log config. This must happen at the very last step.
         wandb_config = WANDBConfig.model_validate(global_config_dict)
-        if wandb_config.is_available:  # pragma: no cover
+        if wandb_config.is_available and not parse_config.offline:  # pragma: no cover
             environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
 
             global _WANDB_RUN

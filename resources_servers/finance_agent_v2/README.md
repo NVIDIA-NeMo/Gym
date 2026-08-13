@@ -51,21 +51,12 @@ Run this environment with **two configs**: this environment config
 (`responses_api_models/openai_model/configs/openai_model.yaml`, or
 `vllm_model.yaml` for a self-hosted endpoint).
 
-Every credential resolves as config key → shell environment → null-safe default,
-so `gym env resolve` works on a clean checkout with none of it set. Secrets live in
-`env.yaml` at the repo root (gitignored). Only the model endpoints need to go
-there; tool API keys are easiest to export in your shell, and one left unset simply
-registers its tool as unavailable:
-
-```bash
-export OPENAI_API_KEY=...        # policy + judge (OpenAI)
-export SEC_API_KEY=...           # edgar_search (sec-api.io)
-export TAVILY_API_KEY=...        # web_search (Tavily)
-export TIINGO_API_KEY=...        # price_history (Tiingo)
-```
+Endpoints and tool API keys all go in `env.yaml` at the repo root, which is
+gitignored. Only the policy endpoint is required: a tool key left unset simply
+registers its tool as unavailable instead of failing startup.
 
 ```yaml
-# env.yaml — model endpoints only (tool keys come from the shell, above)
+# env.yaml
 policy_base_url: https://api.openai.com/v1
 policy_api_key: ${oc.env:OPENAI_API_KEY}
 policy_model_name: gpt-5-mini
@@ -75,7 +66,22 @@ policy_model_name: gpt-5-mini
 search_judge_model_base_url: https://api.openai.com/v1
 search_judge_model_api_key: ${oc.env:OPENAI_API_KEY}
 search_judge_model_name: gpt-5-mini
+
+sec_api_key: ${oc.env:SEC_API_KEY}                 # edgar_search (sec-api.io)
+tavily_api_key: ${oc.env:TAVILY_API_KEY}           # web_search (Tavily)
+pricing_data_api_key: ${oc.env:TIINGO_API_KEY}     # price_history (Tiingo)
+
+# Persistent, shared cache root (survives across jobs; served on cache hits):
+finance_agent_v2_cache_dir: /shared/cache/finance_agent_v2
 ```
+
+`${oc.env:VAR}` reads the value at resolve time, so no secret is written to disk;
+replace it with a literal if you prefer. Every key above except the `policy_*` ones
+resolves as config key → environment variable → null-safe default, so exporting
+`SEC_API_KEY`, `TAVILY_API_KEY`, `TIINGO_API_KEY` or `FINANCE_AGENT_V2_CACHE_DIR`
+works without naming them here — useful in CI and batch jobs where secrets already
+arrive in the environment. The `policy_*` keys have no default and must come from
+`env.yaml` or a CLI override.
 
 Grading works without network egress, but the tools do not: they call Tavily,
 sec-api.io and Tiingo at rollout time.
