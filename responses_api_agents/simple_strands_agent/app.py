@@ -144,6 +144,7 @@ class SimpleStrandsAgentConfig(BaseResponsesAPIAgentConfig):
     max_turns: int = 30
     max_output_tokens: int = 4096
     temperature: Optional[float] = None
+    reasoning_effort: Optional[str] = None
     timeout: int = 900
     model_timeout: int = 600
     shell_timeout: int = 120
@@ -236,6 +237,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         rollout_id = request.path_params.get("rollout_id") if request is not None else None
         work_dir = self._workspace()
         model_name = self.config.model or str(body.model or self.config.model_server.name)
+        reasoning_effort = (body.reasoning or {}).get("effort") or self.config.reasoning_effort
         payload = {
             "instruction": instruction,
             "system_prompt": system_prompt,
@@ -247,6 +249,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             "max_turns": self.config.max_turns,
             "max_output_tokens": body.max_output_tokens or self.config.max_output_tokens,
             "temperature": body.temperature if body.temperature is not None else self.config.temperature,
+            "reasoning_effort": reasoning_effort,
             "model_timeout": self.config.model_timeout,
             "shell_timeout": self.config.shell_timeout,
             "conversation_window": self.config.conversation_window,

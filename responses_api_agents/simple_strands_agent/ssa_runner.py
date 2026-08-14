@@ -91,6 +91,8 @@ def _build_config(payload: dict[str, Any], output_dir: Path):
     params: dict[str, Any] = {"max_tokens": payload["max_output_tokens"]}
     if payload.get("temperature") is not None:
         params["temperature"] = payload["temperature"]
+    if payload.get("reasoning_effort") is not None:
+        params["reasoning_effort"] = payload["reasoning_effort"]
     cfg.agent.invoker_params = OmegaConf.create(
         {
             **params,

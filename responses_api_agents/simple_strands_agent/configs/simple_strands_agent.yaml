@@ -13,6 +13,7 @@ simple_strands_agent:
       max_turns: 30
       max_output_tokens: 4096
       temperature: null
+      reasoning_effort: null
       timeout: 900
       model_timeout: 600
       shell_timeout: 120

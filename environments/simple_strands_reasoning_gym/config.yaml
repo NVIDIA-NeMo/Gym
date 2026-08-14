@@ -20,6 +20,7 @@ simple_strands_reasoning_gym_agent:
       concurrency: 8
       max_turns: 30
       max_output_tokens: 4096
+      reasoning_effort: high
       timeout: 900
       tools: [bash]
       native_user_prompt: false
