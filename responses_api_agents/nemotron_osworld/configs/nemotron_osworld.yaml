@@ -20,6 +20,7 @@ nemotron_osworld:
       temperature: 0.6
       top_p: 0.95
       max_tokens: 4096
+      max_parallel_rollouts: ${oc.decode:${oc.env:OSWORLD_MAX_PARALLEL_ROLLOUTS,4}}
       max_image_history_length: 3
       thinking: true
       coordinate_type: relative

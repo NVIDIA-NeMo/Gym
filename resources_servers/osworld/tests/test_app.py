@@ -200,6 +200,42 @@ class TestApp:
         server = OSWorldResourcesServer(config=_make_config(), server_client=MagicMock(spec=ServerClient))
         assert server.session_id_to_sandbox == {}
 
+    def test_screenshot_rejects_non_png_guest_response(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(app_module, "gym_request", fake_gym_request)
+        server = OSWorldResourcesServer(
+            config=_make_config(request_retries=2),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        _patch_task_phase(monkeypatch, server)
+        client = _client(server)
+        seed = client.post(
+            "/seed_session",
+            json={
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": SPOTIFY_TASK["instruction"]}]
+                },
+                "verifier_metadata": SPOTIFY_TASK,
+            },
+        )
+        assert seed.status_code == 200
+
+        screenshot_calls = 0
+
+        async def invalid_screenshot(method, url, json=None, headers=None):
+            nonlocal screenshot_calls
+            del method, json, headers
+            assert url.endswith("/screenshot")
+            screenshot_calls += 1
+            return _FakeResp(404, b'{"error":"guest unavailable"}', "application/json")
+
+        monkeypatch.setattr(app_module, "gym_request", invalid_screenshot)
+        shot = client.post("/screenshot", cookies=seed.cookies)
+
+        assert shot.status_code == 500
+        assert screenshot_calls == 2
+
     def test_seed_screenshot_execute_verify(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(app_module, "gym_request", fake_gym_request)
         server = OSWorldResourcesServer(config=_make_config(), server_client=MagicMock(spec=ServerClient))

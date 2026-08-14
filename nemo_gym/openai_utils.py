@@ -160,6 +160,9 @@ from nemo_gym.server_utils import (
 # (e.g. NeMo-RL's "nrlre1:<dtype>:<SxLxK>:<base64>"). Gym never inspects the value; the
 # string form keeps multi-MB payloads cheap to validate and re-serialize at every hop.
 RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
+# JSON-serializable multimodal inputs used to reconstruct the policy forward
+# pass during training (for example, OSWorld's screenshot window).
+MultimodalInputs: TypeAlias = Dict[str, Any]
 
 
 class TokenIDLogProbMixin(BaseModel):
@@ -167,6 +170,7 @@ class TokenIDLogProbMixin(BaseModel):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: Optional[RoutedExperts] = None
+    multimodal_inputs: Optional[MultimodalInputs] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
@@ -174,6 +178,7 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: NotRequired[RoutedExperts]
+    multimodal_inputs: NotRequired[MultimodalInputs]
 
 
 REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
@@ -859,6 +864,8 @@ NeMoGymChatCompletionMessageToolCallUnion = Annotated[
 
 class NeMoGymChatCompletionMessage(ChatCompletionMessage):
     tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnion]] = None
+    reasoning_content: Optional[str] = None
+    reasoning: Optional[str] = None
 
 
 class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, TokenIDLogProbMixin):

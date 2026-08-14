@@ -200,6 +200,31 @@ class TestResponsesLoop:
         assert len(resp.json()["output"]) == 3
         assert len(exec_log) == 3
 
+    def test_training_fields_and_screenshot_context_survive_response_validation(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = NemotronOSWorldAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
+        server.server_client = FakeServerClient(_resources_routes([]))
+        training_message = {
+            "content": "## Action: terminate",
+            "prompt_token_ids": [1, 2, 3],
+            "generation_token_ids": [4, 5],
+            "generation_log_probs": [-0.1, -0.2],
+        }
+        scripted = ScriptedReferenceAgent([(training_message, ["DONE"])])
+        monkeypatch.setattr(server, "_make_reference_agent", lambda: scripted)
+        monkeypatch.setattr(server, "_ensure_reference_llm_endpoint", lambda: None)
+
+        client = _client(server)
+        resp = client.post("/v1/responses", json={"input": [{"role": "user", "content": "do the task"}]})
+
+        assert resp.status_code == 200
+        output_item = resp.json()["output"][0]
+        assert output_item["prompt_token_ids"] == [1, 2, 3]
+        assert output_item["generation_token_ids"] == [4, 5]
+        assert output_item["generation_log_probs"] == [-0.1, -0.2]
+        assert output_item["multimodal_inputs"] == {"images_base64": [_SHOT_B64]}
+
 
 class TestRun:
     def test_run_threads_action_history_to_verify(self) -> None:
@@ -261,6 +286,7 @@ class TestRun:
         payload = resp.json()
         assert payload["reward"] == 0.0
         assert payload["verify_error"].startswith("rollout_infra_failure")
+        assert payload["instance_config"]["mask_sample"] is True
 
     def test_run_releases_sandbox_when_rollout_fails_after_seed(self) -> None:
         """A failure after a successful seed must still hit /verify (with the seed's
@@ -298,6 +324,7 @@ class TestRun:
         payload = resp.json()
         assert payload["reward"] == 0.0
         assert payload["verify_error"].startswith("rollout_infra_failure")
+        assert payload["instance_config"]["mask_sample"] is True
 
         release_call = next(c for c in fake_client.calls if c["path"] == "/verify")
         assert release_call["cookies"] == {"session": "resources-session-1"}
