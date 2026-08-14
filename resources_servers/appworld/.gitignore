@@ -1,0 +1,5 @@
+# Default APPWORLD_ROOT: the downloaded task corpus (~193 MB), per-episode
+# scratch databases, and worker logs. Recreated by setup_appworld.py on startup.
+.appworld_root/
+# Isolated venv holding the `appworld` package (see requirements.txt).
+.appworld_venv/

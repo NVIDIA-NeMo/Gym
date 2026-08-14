@@ -1,0 +1,81 @@
+# Standalone gym config for the AppWorld environment.
+#
+# Brings up the AppWorld resources server (which owns a pool of
+# `appworld serve environment` worker processes, one per live episode, and does
+# the database-state scoring in /verify) together with the appworld_agent
+# harness that drives the code-as-action loop with the policy model under test.
+#
+# Run alongside a model server that provides `policy_model`, e.g.:
+#
+#   gym env start \
+#     --config resources_servers/appworld/configs/appworld.yaml \
+#     --model-type openai_model
+#
+# then collect rollouts:
+#
+#   gym eval run --no-serve --agent appworld_agent \
+#     --input resources_servers/appworld/data/example.jsonl \
+#     --output results/appworld_rollouts.jsonl --num-repeats 1
+#
+# The dataset JSONLs hold only task ids (AppWorld task text is never
+# redistributed — see README § Licensing). Generate them with:
+#
+#   python resources_servers/appworld/prepare_appworld.py
+appworld:
+  resources_servers:
+    appworld:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: AppWorld interactive coding agent benchmark; the agent writes Python against 457 APIs across 9 simulated apps and is scored by database-state tests (binary Task Goal Completion).
+      value: Improve long-horizon, multi-app tool use and code-as-action agency.
+      # Concurrent episodes. One worker process hosts at most one live AppWorld
+      # environment (an upstream constraint), so this caps parallel rollouts;
+      # extra /seed_session calls queue for a free worker. Each worker is ~1 idle
+      # python process and switching tasks costs ~0.1-0.4s.
+      num_env_workers: 8
+      # worker_port_start: 21000        # above gym's 10001-20000 range; falls back to an ephemeral port if taken
+      # appworld_root: null             # default: resources_servers/appworld/.appworld_root
+      # Interaction budget per episode (also enforced inside AppWorld).
+      max_interactions: 40
+      execution_timeout_secs: 100
+      # AppWorld's static-analysis guard on destructive stdlib usage. Keep on:
+      # the agent's Python runs in the worker process, not a container.
+      raise_on_unsafe_syntax: true
+      # false => binary Task Goal Completion (the leaderboard metric).
+      # true  => fraction of passing tests, as a shaped RL signal. `partial_credit`
+      #          is reported either way, so this only changes `reward`.
+      dense_reward: false
+
+appworld_agent:
+  responses_api_agents:
+    appworld_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: appworld
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Guard against a model that burns turns without acting; the resources
+      # server's max_interactions budget normally ends the episode first.
+      max_steps: 50
+      datasets:
+      # Trainable by default: upstream designates `train` for teaching the model
+      # (demonstrations, RL) — full ground truth (gold solutions, gold API call
+      # sequences, answers) ships for these 90 tasks.
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/appworld/data/train_appworld.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+      # Report-only per upstream's policy: no tuning or error analysis on it.
+      - name: test_normal
+        type: validation
+        jsonl_fpath: resources_servers/appworld/data/test_normal_appworld.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/appworld/data/example.jsonl
+        num_repeats: 1

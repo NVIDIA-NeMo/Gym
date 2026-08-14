@@ -1,0 +1,13 @@
+# Note the absence of `appworld` here, which is deliberate.
+#
+# `appworld` pins python-multipart>=0.0.9,<0.0.10 while nemo-gym requires
+# >=0.0.22, so the two cannot resolve into one venv. They do not have to:
+# nothing in this server imports appworld — episodes run in
+# `appworld serve environment` subprocesses (worker_pool.py). setup_appworld.py
+# therefore builds an isolated venv (.appworld_venv/) for the package on first
+# startup, which also insulates gym from future pin drift in a benchmark that
+# depends on the same FastAPI stack gym does.
+-e nemo-gym[dev] @ ../../
+
+# Used by setup_appworld.py to serialize concurrent first-time setups.
+filelock>=3.1.0          # Unlicense
