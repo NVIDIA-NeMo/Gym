@@ -104,6 +104,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
+        self._num_commands_hit = 0
+
     async def _start_sandbox(self, sandbox_id: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
@@ -307,6 +309,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
+
+        # TODO @bxyu-nvidia: remove
+        self._num_commands_hit += 1
+        print(f"Hit {self._num_commands_hit} OpenCode commands", file=sys.stderr)
 
         try:
             result = await sandbox.exec(

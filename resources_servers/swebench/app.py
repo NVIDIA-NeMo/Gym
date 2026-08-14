@@ -225,6 +225,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
         self._num_sandboxes_created += 1
+        # TODO @bxyu-nvidia: Remove
         print(f"SWE Bench resources server created {self._num_sandboxes_created} sandboxes", file=sys.stderr)
 
         if MAP_REPO_TO_EXT.get(test_spec.repo) == "java":
