@@ -22,8 +22,10 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from copy import deepcopy
+from datetime import timedelta
 from itertools import repeat
 from pathlib import Path
+from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
@@ -800,6 +802,7 @@ class RolloutCollectionHelper(BaseModel):
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        start_time = time()
 
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
@@ -862,10 +865,14 @@ class RolloutCollectionHelper(BaseModel):
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 pcts_to_print.pop(0)
 
-                print_str = ""
+                time_taken_s = time() - start_time
+                time_taken = timedelta(seconds=int(time_taken_s))
+                rollouts_per_s = len(results) / time_taken_s
+                print_str = f"Finished {len(results)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_s:.2f} rollouts/s). "
+
                 top_left = counts_left.most_common()
                 top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                print_str += f"""Finished {len(results)}samples ({int(current_pct)}%). Examples left:
+                print_str += f"""Examples left:
 {top_left_str}
 """
                 for agent_name in agent_name_to_metrics:
