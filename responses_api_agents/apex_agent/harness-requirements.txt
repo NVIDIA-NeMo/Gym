@@ -1,0 +1,3 @@
+# The Gym adapter replaces the harness's httpx request path with one pooled
+# aiohttp session inside the sandbox.
+aiohttp>=3.12.0

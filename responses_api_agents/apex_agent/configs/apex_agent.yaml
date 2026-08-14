@@ -1,0 +1,63 @@
+apex_agent:
+  responses_api_agents:
+    apex_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: apex_agents
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: ${oc.select:apex_agent_concurrency,4}
+      timeout: ${oc.select:apex_agent_timeout,3600}
+      # Existing SIF, OCI reference, or the target for a one-time automatic
+      # build from Archipelago's pinned upstream Dockerfile.
+      image: ${oc.select:apex_agents_image,responses_api_agents/apex_agent/images/archipelago.sif}
+      # Used only when `image` is a local path that does not exist. Existing
+      # SIFs and OCI/registry references skip this build entirely.
+      image_build:
+        enabled: ${oc.select:apex_agents_auto_build,true}
+        source_repo: ${oc.select:apex_archipelago_repo,https://github.com/Mercor-Intelligence/archipelago.git}
+        source_revision: ${oc.select:apex_archipelago_revision,0cb5c476c219a9df637e0bd37fb86b2361f4ab89}
+        # Optional developer override. By default Gym fetches and caches the
+        # pinned commit using the trusted host's normal Git authentication.
+        source_root: ${oc.select:apex_archipelago_root,null}
+        source_github_token: ${oc.select:apex_archipelago_github_token,${oc.select:apex_harness_github_token,null}}
+        dockerfile: ${oc.select:apex_archipelago_dockerfile,environment/Dockerfile}
+        docker_tag: ${oc.select:apex_archipelago_docker_tag,nemo-gym-archipelago:0cb5c476c219}
+        timeout: ${oc.select:apex_archipelago_build_timeout,7200}
+      harness_repo: ${oc.select:apex_harness_repo,https://github.com/Mercor-Intelligence/apex-agent-harness.git}
+      harness_root: ${oc.select:apex_harness_root,null}
+      harness_github_token: ${oc.select:apex_harness_github_token,null}
+      sandbox_provider:
+        apptainer:
+          create:
+            # Hide host mounts/env and give the upstream image a writable
+            # ephemeral layer for per-task world state.
+            extra_start_args: ${oc.select:apex_agent_apptainer_extra_start_args,[--containall,--cleanenv,--writable-tmpfs,--fakeroot]}
+      sandbox_spec:
+        resources: ${oc.select:apex_agent_sandbox_resources,{}}
+      # Archipelago's public Apex example uses
+      # "Mercor APEX-Agents apex@mercor.com". Keep it overridable, but do not
+      # replace it with a Gym/NVIDIA identity.
+      edgar_user_agent: ${oc.select:apex_edgar_user_agent,"Mercor APEX-Agents apex@mercor.com"}
+      max_turns: ${oc.select:apex_agent_max_turns,100}
+      max_output_tokens: ${oc.select:apex_agent_max_output_tokens,4096}
+      max_tool_calls_per_turn: ${oc.select:apex_agent_max_tool_calls_per_turn,3}
+      temperature: ${oc.select:apex_agent_temperature,1.0}
+      top_p: ${oc.select:apex_agent_top_p,1.0}
+      max_snapshot_bytes: ${oc.select:apex_agent_max_snapshot_bytes,null}
+      max_world_bytes: ${oc.select:apex_agent_max_world_bytes,null}
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/apex_agents/data/example.jsonl
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/apex_agents/data/apex_agents_validation.jsonl
+        gitlab_identifier:
+          dataset_name: apex_agents
+          version: 0.0.1
+          artifact_fpath: apex_agents_validation.jsonl
+        license: Creative Commons Attribution 4.0 International
+        num_repeats: 1

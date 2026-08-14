@@ -1,0 +1,36 @@
+apex_agents:
+  resources_servers:
+    apex_agents:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      primary_service: direct
+      description: Apex Agents professional file and workplace benchmark
+      value: Evaluate agents on long-horizon professional tasks
+      judge_model_server:
+        type: responses_api_models
+        name: apex_judge_model
+      judge_model: ${oc.select:judge_model_name,judge}
+      judge_create_params_overrides: ${oc.select:apex_judge_create_params_overrides,{}}
+      judge_context_window_size: ${oc.select:apex_judge_context_window_size,32768}
+      num_processes: ${oc.select:apex_verifier_concurrency,8}
+      capture_judge_traces: ${oc.select:apex_capture_judge_traces,true}
+      max_snapshot_bytes: ${oc.select:apex_verifier_max_snapshot_bytes,${oc.select:apex_agent_max_snapshot_bytes,null}}
+      max_uncompressed_bytes: ${oc.select:apex_verifier_max_uncompressed_bytes,536870912}
+      max_artifact_files: ${oc.select:apex_verifier_max_artifact_files,2000}
+      dataset_repo: ${oc.select:apex_dataset_repo,mercor/apex-agents}
+      # Populated by `gym eval prepare --benchmark apex_agents`; rollout
+      # execution reads this cache offline and never contacts Hugging Face.
+      world_cache_dir: ${oc.select:apex_world_cache_dir,benchmarks/apex_agents/data/world_cache}
+      # Trusted-host export of both snapshots, safely extracted changed files,
+      # rubric-free submission metadata, and the upstream grading result.
+      artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
+
+apex_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+      openai_default_headers: {}
