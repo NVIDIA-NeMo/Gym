@@ -311,6 +311,17 @@ class SandboxPtySession(Protocol):
         """Block until the process exits and return its exit code."""
         ...
 
+    async def detach(self) -> None:
+        """Drop the transport while the server-side session keeps running; a
+        detached session refuses reads and writes until ``reattach()``. The
+        server retains a bounded window of output produced in the meantime."""
+        ...
+
+    async def reattach(self) -> None:
+        """Restore a ``detach()``-ed session's transport, replaying output
+        produced while detached."""
+        ...
+
     async def close(self) -> None:
         """Idempotent: release local resources; a session this client created
         is also ended, while an attached one is merely detached and lives on

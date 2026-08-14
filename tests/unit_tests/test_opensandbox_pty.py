@@ -956,3 +956,57 @@ async def test_replay_offset_is_exposed() -> None:
     assert await session.read() == b"tail"
     assert session.replay_offset == 4096, "callers compare this to `since` to detect evicted output"
     await session.close()
+
+
+async def test_detach_keeps_session_alive_and_reattach_resumes() -> None:
+    ws1 = FakeWs([CONNECTED, _binary(b"\x01before")])
+    ws2 = FakeWs([CONNECTED, _binary(b"\x01after")])
+    client = FakeHttpClient(ws=[ws2])  # ws1 goes straight to the constructor
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws1,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={"OPEN-SANDBOX-API-KEY": "k"},
+        request_timeout_s=5.0,
+    )
+    assert await session.read() == b"before"
+    await session.detach()
+    assert ws1.closed
+    assert not session.closed, "a detached session must not look prunable"
+    assert client.delete_calls == [], "detach must not end the server-side session"
+    with pytest.raises(SandboxPtyError, match="detached"):
+        await session.write(b"x")
+    await session.reattach()
+    url, _ = client.ws_calls[-1]
+    assert "since=6" in url and "takeover=1" in url
+    assert await session.read() == b"after"
+    await session.close()
+    assert len(client.delete_calls) == 1, "an owned close still ends the session"
+
+
+async def test_close_while_detached_releases_and_unblocks_readers() -> None:
+    ws = FakeWs([CONNECTED])
+    client = FakeHttpClient(ws=ws)
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    await session._wait_connected(1.0)
+    await session.detach()
+    await session.close()
+    assert session.closed
+    assert len(client.delete_calls) == 1
+    with pytest.raises(SandboxPtyError):
+        await session.read()
+
+
+async def test_detach_after_close_raises() -> None:
+    session, ws, _ = await _session_over([CONNECTED])
+    await session.close()
+    with pytest.raises(SandboxPtyError, match="closed"):
+        await session.detach()
