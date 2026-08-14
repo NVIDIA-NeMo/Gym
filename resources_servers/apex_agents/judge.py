@@ -127,14 +127,14 @@ def _build_prompt(
     if file_type == _FINAL_ANSWER_ONLY:
         scope = EVAL_SCOPE_TEXT_ONLY
         artifact_structure = ""
-        agent_output = response
+        agent_output = f"<TEXT_RESPONSE>\n{response}\n</TEXT_RESPONSE>"
     else:
         scope = EVAL_SCOPE_BOTH if file_type == _ALL_OUTPUT else EVAL_SCOPE_FILES_ONLY
         artifact_structure = ARTIFACT_STRUCTURE
         fixed_prompt_chars = len(GRADING_SYSTEM_PROMPT) + len(instruction) + len(response) + len(criteria) + 2_000
         artifact_budget = max(4_000, int(context_window_size * 4 * 0.8) - fixed_prompt_chars)
         artifacts = _artifact_xml(changes, character_budget=artifact_budget)
-        final_answer = f"<FINAL_ANSWER>\n{response}\n</FINAL_ANSWER>\n" if scope == EVAL_SCOPE_BOTH else ""
+        final_answer = f"<TEXT_RESPONSE>\n{response}\n</TEXT_RESPONSE>\n" if scope == EVAL_SCOPE_BOTH else ""
         agent_output = f"{final_answer}{artifacts}".strip()
 
     return GRADING_USER_PROMPT.format(
