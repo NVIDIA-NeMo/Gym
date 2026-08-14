@@ -150,6 +150,7 @@ def test_cleanup_uses_one_pool_and_deletes_only_exact_run_and_user(monkeypatch: 
             has_next_page=True,
         ),
         page([sandbox("sandbox/b")]),
+        page([]),  # the confirming re-list after a successful sweep
         delete_responses=delete_responses,
     )
     connector_calls, session_calls, connector = install_session(monkeypatch, session)
@@ -210,7 +211,7 @@ async def test_reap_limits_concurrent_deletes(monkeypatch: pytest.MonkeyPatch) -
         )
         for index in range(total)
     }
-    install_session(monkeypatch, Session(page(matches), delete_responses=delete_responses))
+    install_session(monkeypatch, Session(page(matches), page([]), delete_responses=delete_responses))
     task = asyncio.create_task(
         cleanup_sandboxes.cleanup_sandboxes(
             domain="https://sandbox.example",
@@ -244,17 +245,18 @@ def test_cleanup_normalizes_scope_like_the_provider(monkeypatch: pytest.MonkeyPa
     url = "https://sandbox.example/v1/sandboxes/sandbox-a"
     session = Session(
         page([sandbox("sandbox-a", run_id=normalized_run, user="alice_team")]),
+        page([]),
         delete_responses={url: Response(status=204)},
     )
     install_session(monkeypatch, session)
 
     assert run_cleanup(run_id=f" run 7{'x' * 70} ", user="alice team") == 0
-    assert [method for method, _url, _kwargs in session.requests] == ["GET", "DELETE"]
+    assert [method for method, _url, _kwargs in session.requests] == ["GET", "DELETE", "GET"]
 
 
 def test_delete_404_is_idempotent(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     url = "https://sandbox.example/v1/sandboxes/gone"
-    session = Session(page([sandbox("gone")]), delete_responses={url: Response(status=404)})
+    session = Session(page([sandbox("gone")]), page([]), delete_responses={url: Response(status=404)})
     install_session(monkeypatch, session)
 
     assert run_cleanup() == 0
@@ -290,6 +292,7 @@ def test_delete_continues_after_failures(
     base = "https://sandbox.example/v1/sandboxes"
     session = Session(
         page([sandbox("failed"), sandbox("deleted"), sandbox("disconnected")]),
+        page([sandbox("failed"), sandbox("disconnected")]),  # survivors re-listed
         delete_responses={
             f"{base}/failed": Response(status=500),
             f"{base}/deleted": Response(status=204),
@@ -299,11 +302,48 @@ def test_delete_continues_after_failures(
     install_session(monkeypatch, session)
 
     assert run_cleanup() == 1
-    assert [method for method, _url, _kwargs in session.requests].count("DELETE") == 3
+    # first sweep deletes all three; the retry sweep re-attempts the two failures
+    assert [method for method, _url, _kwargs in session.requests].count("DELETE") == 5
     output = capsys.readouterr()
     assert "Failed to delete failed -> HTTP 500" in output.err
     assert "Failed to delete disconnected -> disconnected" in output.err
     assert TEST_ACCESS_KEY not in output.out + output.err
+
+
+def test_reap_sweeps_catch_list_stragglers(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A list taken while the cancelled workload still mutates the set can skip
+    # entries across page boundaries; the re-list sweep must catch them.
+    base = "https://sandbox.example/v1/sandboxes"
+    session = Session(
+        page([sandbox("first")]),
+        page([sandbox("straggler")]),
+        page([]),
+        delete_responses={
+            f"{base}/first": Response(status=204),
+            f"{base}/straggler": Response(status=204),
+        },
+    )
+    install_session(monkeypatch, session)
+
+    assert run_cleanup() == 0
+    deletes = [url for method, url, _kwargs in session.requests if method == "DELETE"]
+    assert deletes == [f"{base}/first", f"{base}/straggler"]
+
+
+def test_reap_gives_up_after_bounded_sweeps(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = "https://sandbox.example/v1/sandboxes"
+    lists = [page([sandbox(f"s{index}")]) for index in range(cleanup_sandboxes.REAP_SWEEPS)]
+    lists.append(page([sandbox("left-behind")]))
+    session = Session(
+        *lists,
+        delete_responses={f"{base}/s{index}": Response(status=204) for index in range(cleanup_sandboxes.REAP_SWEEPS)},
+    )
+    install_session(monkeypatch, session)
+
+    assert run_cleanup() == 1
+    assert "1 OpenSandbox sandbox(es) were not reaped" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

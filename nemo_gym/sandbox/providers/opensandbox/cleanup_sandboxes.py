@@ -19,6 +19,7 @@ RUN_METADATA_KEY = "nemo-gym.nvidia.com/run"
 USER_METADATA_KEY = "nemo-gym.nvidia.com/user"
 REQUEST_TIMEOUT_SECONDS = 30
 REAP_CONCURRENCY = 32
+REAP_SWEEPS = 3
 
 
 async def cleanup_sandboxes(
@@ -50,43 +51,46 @@ async def cleanup_sandboxes(
         headers={"OPEN-SANDBOX-API-KEY": access_key},
         timeout=timeout,
     ) as session:
-        matches: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            async with session.get(
-                f"{base_url}/v1/sandboxes",
-                allow_redirects=False,
-                params={"page": page, "pageSize": 100},
-            ) as response:
-                if not 200 <= response.status < 300:
-                    raise ValueError(f"OpenSandbox list request failed -> HTTP {response.status}")
-                payload = await response.json(content_type=None)
 
-            if not isinstance(payload, dict):
-                raise ValueError("OpenSandbox list response must be an object")
-            items = payload.get("items")
-            pagination = payload.get("pagination")
-            if not isinstance(items, list) or not isinstance(pagination, dict):
-                raise ValueError("OpenSandbox list response is missing items or pagination")
-            has_next_page = pagination.get("hasNextPage")
-            if not isinstance(has_next_page, bool):
-                raise ValueError("OpenSandbox list response is missing pagination.hasNextPage")
+        async def list_matches() -> list[dict[str, Any]]:
+            matches: list[dict[str, Any]] = []
+            page = 1
+            while True:
+                async with session.get(
+                    f"{base_url}/v1/sandboxes",
+                    allow_redirects=False,
+                    params={"page": page, "pageSize": 100},
+                ) as response:
+                    if not 200 <= response.status < 300:
+                        raise ValueError(f"OpenSandbox list request failed -> HTTP {response.status}")
+                    payload = await response.json(content_type=None)
 
-            for item in items:
-                if not isinstance(item, dict):
-                    raise ValueError("OpenSandbox list response contains an invalid sandbox")
-                metadata = item.get("metadata") or {}
-                if not isinstance(metadata, dict):
-                    raise ValueError("OpenSandbox sandbox metadata must be an object")
-                if all(metadata.get(key) == value for key, value in scope.items()):
-                    if not isinstance(item.get("id"), str) or not item["id"]:
-                        raise ValueError("OpenSandbox list response contains a sandbox without an id")
-                    matches.append(item)
+                if not isinstance(payload, dict):
+                    raise ValueError("OpenSandbox list response must be an object")
+                items = payload.get("items")
+                pagination = payload.get("pagination")
+                if not isinstance(items, list) or not isinstance(pagination, dict):
+                    raise ValueError("OpenSandbox list response is missing items or pagination")
+                has_next_page = pagination.get("hasNextPage")
+                if not isinstance(has_next_page, bool):
+                    raise ValueError("OpenSandbox list response is missing pagination.hasNextPage")
 
-            if not has_next_page:
-                break
-            page += 1
+                for item in items:
+                    if not isinstance(item, dict):
+                        raise ValueError("OpenSandbox list response contains an invalid sandbox")
+                    metadata = item.get("metadata") or {}
+                    if not isinstance(metadata, dict):
+                        raise ValueError("OpenSandbox sandbox metadata must be an object")
+                    if all(metadata.get(key) == value for key, value in scope.items()):
+                        if not isinstance(item.get("id"), str) or not item["id"]:
+                            raise ValueError("OpenSandbox list response contains a sandbox without an id")
+                        matches.append(item)
 
+                if not has_next_page:
+                    return matches
+                page += 1
+
+        matches = await list_matches()
         action = "Deleting" if reap else "Would delete"
         print(
             f"{action} {len(matches)} OpenSandbox sandbox(es) "
@@ -116,8 +120,18 @@ async def cleanup_sandboxes(
                     print(f"Failed to delete {sandbox_id} -> {error}", file=sys.stderr)
                     return 1
 
-        failures = sum(await asyncio.gather(*(delete(item) for item in matches)))
-        return int(failures > 0)
+        # Deletes race the cancelled workload's own teardown, and a list taken
+        # while the set mutates can skip entries across page boundaries; sweep
+        # until a fresh list comes back empty, or a sweep stops progressing.
+        for _ in range(REAP_SWEEPS):
+            if not matches:
+                return 0
+            failures = sum(await asyncio.gather(*(delete(item) for item in matches)))
+            if failures == len(matches):
+                break
+            matches = await list_matches()
+        print(f"{len(matches)} OpenSandbox sandbox(es) were not reaped", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
