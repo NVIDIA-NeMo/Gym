@@ -65,3 +65,8 @@ directly comparable. GLM-5.2 is published there at 26.17% against 14.83% here.
 
 Needs `verifiers>=0.3.0`. Published under the `zapier` hub namespace, not
 `primeintellect`.
+
+## License
+
+AutomationBench and its task data are provided by Zapier under the MIT License.
+See [LICENSE](LICENSE) for the copyright and license notice.

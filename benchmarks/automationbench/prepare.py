@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from subprocess import run
@@ -19,6 +20,12 @@ VERIFIERS_AGENT_DIR = REPO_ROOT / "responses_api_agents" / "verifiers_agent"
 CREATE_DATASET = VERIFIERS_AGENT_DIR / "scripts" / "create_dataset.py"
 
 VF_ENV_ID = "AutomationBench"
+VF_ENV_ARGS = {
+    "domains": "all",
+    "toolset": "api",
+    "max_steps": 50,
+    "num_examples": -1,
+}
 
 AGENT_NAME = "automationbench_benchmark_agent"
 
@@ -43,6 +50,8 @@ def prepare(force: bool = False) -> Path:
             str(CREATE_DATASET),
             "--env-id",
             VF_ENV_ID,
+            "--env-args",
+            json.dumps(VF_ENV_ARGS),
             "--agent-name",
             AGENT_NAME,
             "--output",

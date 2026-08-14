@@ -3,10 +3,10 @@
     "type": "example",
     "jsonl_fpath": "benchmarks/automationbench/data/example.jsonl",
     "num_repeats": 1,
-    "source": null,
+    "source": "https://github.com/zapier/AutomationBench",
     "gitlab_identifier": null,
     "huggingface_identifier": null,
-    "license": null,
+    "license": "MIT",
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,
