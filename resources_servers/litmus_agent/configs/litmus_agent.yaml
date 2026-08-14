@@ -30,9 +30,9 @@ litmus_agent:
             use_server_proxy: true
           create:
             request_timeout_s: 1200
-            timeout_s: 1200
-            # Wait for the SDK health check before Gym's bounded exec probe.
-            # This prevents the first tool call from racing the sandbox backend.
+            # Must exceed ready_timeout_s below: this bounds the whole create
+            # call, which includes the readiness wait.
+            timeout_s: 1500
             skip_health_check: false
             retries: 10
             retry_delay_s: 5.0

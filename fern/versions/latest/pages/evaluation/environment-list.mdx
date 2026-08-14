@@ -4,14 +4,14 @@ description: "Browse built-in benchmark and training environments."
 position: 3
 ---
 
-NeMo Gym includes 100+ environments covering math, coding, reasoning, knowledge, agentic tool use, instruction following, and safety. Each environment is a resources server that defines a dataset, verification logic, and optional tools. Environments marked ✓ have a corresponding benchmark config with a fixed evaluation split and `prepare_script`.
+NeMo Gym includes 100+ environments covering math, coding, reasoning, knowledge, agentic tool use, instruction following, and safety. An environment combines tasks, verification, and an interaction surface. Some resources servers include agent composition and datasets and are runnable environments themselves; others are reusable scoring, tool, or state components and are not separate environment entries. Environments marked ✓ have a corresponding benchmark config with a canonical evaluation split and `prepare_script`.
 
 Use the CLI to discover what's available before running:
 
 ```bash
 gym list benchmarks          # all benchmarks with domain and repeat count
-gym list environments        # all environments with domain and description
-gym search math              # filter benchmarks by capability area
+gym list environments        # unified environment and benchmark catalog
+gym search math              # search environments and benchmarks by capability area
 gym list benchmarks --json   # machine-readable output for scripting or CI
 ```
 
@@ -76,7 +76,7 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 
 | Environment | Description | Verification | Benchmark |
 |---|---|---|---|
-| [workplace_assistant](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) | Workplace tasks: 26 tools, 5 databases, 690 tasks | Rule-based (task completion) | ✓ |
+| [workplace_assistant](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) | Workplace tasks: 27 tools, 5 databases, 690 tasks | Rule-based (task completion) | ✓ |
 | [aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) | Multi-hop QA with Wikipedia search + GSM8k with calculator | LLM judge + execution | ✓ |
 | [tavily_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search) | Web search tool use (Tavily API) | Execution + optional LLM judge | ✓ |
 | [calendar](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/calendar) | Multi-turn calendar scheduling with constraint satisfaction | Rule-based (constraints) | ✓ |

@@ -27,10 +27,10 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.20 has a resolver regression that silently drops pinned deps from
-  # `uv pip install -r requirements.txt` (e.g. matplotlib/scipy/Pillow), breaking
-  # per-server test venvs. 0.11.19 is the latest known-good version.
-  UV_INSTALL_URL: "https://astral.sh/uv/0.11.19/install.sh"
+  # Pin uv: 0.11.21+ supports Python 3.13.14; 0.11.29 is the latest stable.
+  # 0.11.20 had a regression dropping pinned deps (fixed in 0.11.21).
+  # 
+  UV_INSTALL_URL: "https://astral.sh/uv/0.11.29/install.sh"
 
 jobs:
   full-test-suite:
@@ -41,6 +41,9 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
+
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
 
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -57,9 +60,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
           curl -LsSf "$UV_INSTALL_URL" | sh
-          uv venv --python 3.12
+          uv venv
           source .venv/bin/activate
-          uv sync --extra dev --extra sandbox
+          uv sync --extra dev --extra sandbox --extra openshell
 
       - name: Test
         run: |
@@ -80,6 +83,9 @@ jobs:
         with:
           submodules: 'recursive'
 
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
+
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -95,7 +101,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
           curl -LsSf "$UV_INSTALL_URL" | sh
-          uv venv --python 3.12
+          uv venv
           source .venv/bin/activate
           uv sync --extra dev
 
@@ -162,7 +168,7 @@ jobs:
       - name: Install wheel in fresh venv
         run: |
           cd /tmp && mkdir -p myproject && cd myproject
-          uv venv --python 3.12 .venv
+          uv venv .venv
           source .venv/bin/activate
           uv pip install $GITHUB_WORKSPACE/dist/*.whl
           python -c "import nemo_gym; print(f'nemo-gym {nemo_gym.__version__}')"
@@ -225,7 +231,7 @@ jobs:
           test -f resources_servers/hello_world/configs/hello_world.yaml
           test -d resources_servers/hello_world/tests
           grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
-          echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"verifier_metadata":{}}' \
+          echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"expected_answer":"Mock response.","verifier_metadata":{}}' \
             > resources_servers/hello_world/data/example.jsonl
 
       - name: Test ng_run + ng_collect_rollouts with built-in server
