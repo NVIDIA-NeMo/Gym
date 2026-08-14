@@ -46,6 +46,15 @@ cd /opt/Gym
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
+# The cleanup epilogue needs aiohttp in this python; surface that at job
+# start instead of discovering it during cancellation.
+python -c "import aiohttp" 2>/dev/null \
+    || echo "WARNING: aiohttp missing; the OpenSandbox cleanup epilogue will fail" >&2
+
+# These traps only fire if Slurm signals this shell directly, which holds
+# here because the eval runs as its own srun task. Do not move them into a
+# command wrapped by ray symmetric-run (or any supervisor that hard-kills
+# its children): cancellation tears such shells down before traps run.
 cleanup_sandboxes() {
     eval_status=\$?
     trap - EXIT INT TERM
