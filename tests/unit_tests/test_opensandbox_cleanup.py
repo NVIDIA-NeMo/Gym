@@ -1,15 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import io
-import json
+import asyncio
 import os
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
+from typing import Any
 
+import aiohttp
 import pytest
 
 from nemo_gym.sandbox.providers.opensandbox import cleanup_sandboxes
@@ -20,32 +19,65 @@ SBATCH_SCRIPT = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh")
 TEST_ACCESS_KEY = "fixture-access-key"  # pragma: allowlist secret
 
 
-class Response(io.BytesIO):
-    def __init__(self, payload: object = "", status: int = 200) -> None:
-        body = payload if isinstance(payload, str) else json.dumps(payload)
-        super().__init__(body.encode())
+class Response:
+    def __init__(
+        self,
+        payload: object = "",
+        status: int = 200,
+        *,
+        enter: Any = None,
+        exit: Any = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.payload = payload
         self.status = status
+        self.enter = enter
+        self.exit = exit
+        self.error = error
 
-    def __enter__(self) -> "Response":
+    async def __aenter__(self) -> "Response":
+        if self.error:
+            raise self.error
+        if self.enter:
+            await self.enter()
         return self
 
-    def __exit__(self, *_args: object) -> None:
-        self.close()
+    async def __aexit__(self, *_args: object) -> None:
+        if self.exit:
+            await self.exit()
+
+    async def json(self, *, content_type: None) -> object:
+        assert content_type is None
+        return self.payload
+
+    async def read(self) -> bytes:
+        return b""
 
 
-class RequestSequence:
-    def __init__(self, *responses: object) -> None:
-        self.responses = iter(responses)
-        self.requests: list[tuple[urllib.request.Request, int]] = []
+class Session:
+    def __init__(
+        self,
+        *get_responses: Response,
+        delete_responses: dict[str, Response] | None = None,
+    ) -> None:
+        self.get_responses = iter(get_responses)
+        self.delete_responses = delete_responses or {}
+        self.requests: list[tuple[str, str, dict[str, object]]] = []
+        self.closed = False
 
-    def __call__(self, request: urllib.request.Request, timeout: int) -> Response:
-        self.requests.append((request, timeout))
-        response = next(self.responses)
-        if isinstance(response, BaseException):
-            raise response
-        if not isinstance(response, Response):
-            raise TypeError(f"invalid test response: {response!r}")
-        return response
+    async def __aenter__(self) -> "Session":
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        self.closed = True
+
+    def get(self, url: str, **kwargs: object) -> Response:
+        self.requests.append(("GET", url, kwargs))
+        return next(self.get_responses)
+
+    def delete(self, url: str, **kwargs: object) -> Response:
+        self.requests.append(("DELETE", url, kwargs))
+        return self.delete_responses[url]
 
 
 def sandbox(sandbox_id: str, *, run_id: str = "job-7", user: str = "alice") -> dict[str, object]:
@@ -62,8 +94,24 @@ def page(items: list[object], *, has_next_page: bool = False) -> Response:
     return Response({"items": items, "pagination": {"hasNextPage": has_next_page}})
 
 
-def http_error(url: str, status: int) -> urllib.error.HTTPError:
-    return urllib.error.HTTPError(url, status, "failure", {}, io.BytesIO())
+def install_session(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> tuple[list[dict[str, int]], list[dict[str, object]], object]:
+    connector_calls: list[dict[str, int]] = []
+    session_calls: list[dict[str, object]] = []
+    connector = object()
+
+    def make_connector(**kwargs: int) -> object:
+        connector_calls.append(kwargs)
+        return connector
+
+    def make_session(**kwargs: object) -> Session:
+        session_calls.append(kwargs)
+        return session
+
+    monkeypatch.setattr(cleanup_sandboxes.aiohttp, "TCPConnector", make_connector)
+    monkeypatch.setattr(cleanup_sandboxes.aiohttp, "ClientSession", make_session)
+    return connector_calls, session_calls, connector
 
 
 def run_cleanup(
@@ -74,18 +122,24 @@ def run_cleanup(
     user: str = "alice",
     reap: bool = True,
 ) -> int:
-    return cleanup_sandboxes.cleanup_sandboxes(
-        domain=domain,
-        protocol=protocol,
-        access_key=TEST_ACCESS_KEY,
-        run_id=run_id,
-        user=user,
-        reap=reap,
+    return asyncio.run(
+        cleanup_sandboxes.cleanup_sandboxes(
+            domain=domain,
+            protocol=protocol,
+            access_key=TEST_ACCESS_KEY,
+            run_id=run_id,
+            user=user,
+            reap=reap,
+        )
     )
 
 
-def test_cleanup_paginates_then_deletes_only_exact_run_and_user(monkeypatch: pytest.MonkeyPatch) -> None:
-    opener = RequestSequence(
+def test_cleanup_uses_one_pool_and_deletes_only_exact_run_and_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    delete_responses = {
+        "https://sandbox.example/v1/sandboxes/sandbox-a": Response(status=204),
+        "https://sandbox.example/v1/sandboxes/sandbox%2Fb": Response(status=204),
+    }
+    session = Session(
         page(
             [
                 sandbox("sandbox-a"),
@@ -96,78 +150,159 @@ def test_cleanup_paginates_then_deletes_only_exact_run_and_user(monkeypatch: pyt
             has_next_page=True,
         ),
         page([sandbox("sandbox/b")]),
-        Response(status=204),
-        Response(status=204),
+        delete_responses=delete_responses,
     )
-    monkeypatch.setattr(cleanup_sandboxes.urllib.request, "urlopen", opener)
+    connector_calls, session_calls, connector = install_session(monkeypatch, session)
 
     assert run_cleanup(domain="sandbox.example/", protocol="https") == 0
-    requests = [request for request, _timeout in opener.requests]
-    assert [request.get_method() for request in requests] == ["GET", "GET", "DELETE", "DELETE"]
-    assert [request.full_url for request in requests] == [
-        "https://sandbox.example/v1/sandboxes?page=1&pageSize=100",
-        "https://sandbox.example/v1/sandboxes?page=2&pageSize=100",
-        "https://sandbox.example/v1/sandboxes/sandbox-a",
-        "https://sandbox.example/v1/sandboxes/sandbox%2Fb",
+    assert session.closed
+    assert connector_calls == [
+        {
+            "limit": cleanup_sandboxes.REAP_CONCURRENCY,
+            "limit_per_host": cleanup_sandboxes.REAP_CONCURRENCY,
+        }
     ]
-    assert all(timeout == cleanup_sandboxes.REQUEST_TIMEOUT_SECONDS for _request, timeout in opener.requests)
-    assert all(dict(request.header_items())["Open-sandbox-api-key"] == TEST_ACCESS_KEY for request in requests)
+    assert len(session_calls) == 1
+    assert session_calls[0]["connector"] is connector
+    assert session_calls[0]["headers"] == {"OPEN-SANDBOX-API-KEY": TEST_ACCESS_KEY}
+    assert session_calls[0]["timeout"].total == cleanup_sandboxes.REQUEST_TIMEOUT_SECONDS
+    assert session.requests[:2] == [
+        (
+            "GET",
+            "https://sandbox.example/v1/sandboxes",
+            {"allow_redirects": False, "params": {"page": 1, "pageSize": 100}},
+        ),
+        (
+            "GET",
+            "https://sandbox.example/v1/sandboxes",
+            {"allow_redirects": False, "params": {"page": 2, "pageSize": 100}},
+        ),
+    ]
+    assert {url for method, url, _kwargs in session.requests if method == "DELETE"} == set(delete_responses)
+    assert all(kwargs == {"allow_redirects": False} for method, _url, kwargs in session.requests if method == "DELETE")
+
+
+async def test_reap_limits_concurrent_deletes(monkeypatch: pytest.MonkeyPatch) -> None:
+    active = 0
+    maximum = 0
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def enter() -> None:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        if active == cleanup_sandboxes.REAP_CONCURRENCY:
+            all_started.set()
+        await release.wait()
+
+    async def exit() -> None:
+        nonlocal active
+        active -= 1
+
+    total = cleanup_sandboxes.REAP_CONCURRENCY + 1
+    matches = [sandbox(f"sandbox-{index}") for index in range(total)]
+    delete_responses = {
+        f"https://sandbox.example/v1/sandboxes/sandbox-{index}": Response(
+            status=204,
+            enter=enter,
+            exit=exit,
+        )
+        for index in range(total)
+    }
+    install_session(monkeypatch, Session(page(matches), delete_responses=delete_responses))
+    task = asyncio.create_task(
+        cleanup_sandboxes.cleanup_sandboxes(
+            domain="https://sandbox.example",
+            protocol="http",
+            access_key=TEST_ACCESS_KEY,
+            run_id="job-7",
+            user="alice",
+            reap=True,
+        )
+    )
+    try:
+        await asyncio.wait_for(all_started.wait(), timeout=1)
+        assert maximum == cleanup_sandboxes.REAP_CONCURRENCY
+    finally:
+        release.set()
+        result = await task
+    assert result == 0
 
 
 def test_audit_does_not_delete_matches(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    opener = RequestSequence(page([sandbox("sandbox-a")]))
-    monkeypatch.setattr(cleanup_sandboxes.urllib.request, "urlopen", opener)
+    session = Session(page([sandbox("sandbox-a")]))
+    install_session(monkeypatch, session)
 
     assert run_cleanup(reap=False) == 0
-    assert len(opener.requests) == 1
+    assert [method for method, _url, _kwargs in session.requests] == ["GET"]
     assert "Would delete 1 OpenSandbox sandbox" in capsys.readouterr().out
 
 
 def test_cleanup_normalizes_scope_like_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     normalized_run = "run_7" + "x" * 58
-    opener = RequestSequence(
+    url = "https://sandbox.example/v1/sandboxes/sandbox-a"
+    session = Session(
         page([sandbox("sandbox-a", run_id=normalized_run, user="alice_team")]),
-        Response(status=204),
+        delete_responses={url: Response(status=204)},
     )
-    monkeypatch.setattr(cleanup_sandboxes.urllib.request, "urlopen", opener)
+    install_session(monkeypatch, session)
 
     assert run_cleanup(run_id=f" run 7{'x' * 70} ", user="alice team") == 0
-    assert [request.get_method() for request, _timeout in opener.requests] == ["GET", "DELETE"]
+    assert [method for method, _url, _kwargs in session.requests] == ["GET", "DELETE"]
 
 
 def test_delete_404_is_idempotent(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    opener = RequestSequence(
-        page([sandbox("gone")]),
-        http_error("https://sandbox.example/v1/sandboxes/gone", 404),
-    )
-    monkeypatch.setattr(cleanup_sandboxes.urllib.request, "urlopen", opener)
+    url = "https://sandbox.example/v1/sandboxes/gone"
+    session = Session(page([sandbox("gone")]), delete_responses={url: Response(status=404)})
+    install_session(monkeypatch, session)
 
     assert run_cleanup() == 0
     assert "Sandbox gone was already gone" in capsys.readouterr().out
+
+
+def test_redirects_are_not_followed(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    url = "https://sandbox.example/v1/sandboxes/redirected"
+    session = Session(page([sandbox("redirected")]), delete_responses={url: Response(status=302)})
+    install_session(monkeypatch, session)
+
+    assert run_cleanup() == 1
+    assert session.requests[-1] == ("DELETE", url, {"allow_redirects": False})
+    assert "Failed to delete redirected -> HTTP 302" in capsys.readouterr().err
+
+    session = Session(Response(status=302))
+    install_session(monkeypatch, session)
+    with pytest.raises(ValueError, match="list request failed -> HTTP 302"):
+        run_cleanup(reap=False)
+    assert session.requests == [
+        (
+            "GET",
+            "https://sandbox.example/v1/sandboxes",
+            {"allow_redirects": False, "params": {"page": 1, "pageSize": 100}},
+        )
+    ]
 
 
 def test_delete_continues_after_failures(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    opener = RequestSequence(
+    base = "https://sandbox.example/v1/sandboxes"
+    session = Session(
         page([sandbox("failed"), sandbox("deleted"), sandbox("disconnected")]),
-        http_error("https://sandbox.example/v1/sandboxes/failed", 500),
-        Response(status=204),
-        urllib.error.URLError("disconnected"),
+        delete_responses={
+            f"{base}/failed": Response(status=500),
+            f"{base}/deleted": Response(status=204),
+            f"{base}/disconnected": Response(error=aiohttp.ClientConnectionError("disconnected")),
+        },
     )
-    monkeypatch.setattr(cleanup_sandboxes.urllib.request, "urlopen", opener)
+    install_session(monkeypatch, session)
 
     assert run_cleanup() == 1
-    assert [request.get_method() for request, _timeout in opener.requests] == [
-        "GET",
-        "DELETE",
-        "DELETE",
-        "DELETE",
-    ]
+    assert [method for method, _url, _kwargs in session.requests].count("DELETE") == 3
     output = capsys.readouterr()
     assert "Failed to delete failed -> HTTP 500" in output.err
-    assert "Failed to delete disconnected" in output.err
+    assert "Failed to delete disconnected -> disconnected" in output.err
     assert TEST_ACCESS_KEY not in output.out + output.err
 
 
@@ -190,7 +325,7 @@ def test_cleanup_rejects_malformed_list_responses(
     payload: object,
     message: str,
 ) -> None:
-    monkeypatch.setattr(cleanup_sandboxes.urllib.request, "urlopen", RequestSequence(Response(payload)))
+    install_session(monkeypatch, Session(Response(payload)))
 
     with pytest.raises(ValueError, match=message):
         run_cleanup(reap=False)
@@ -213,12 +348,11 @@ def test_cli_requires_credentials_and_exact_scope_before_network(
     monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     monkeypatch.delenv("SLURM_JOB_USER", raising=False)
     monkeypatch.delenv("USER", raising=False)
-    monkeypatch.setattr(
-        cleanup_sandboxes.urllib.request,
-        "urlopen",
-        lambda *_args, **_kwargs: pytest.fail("network request must not be made"),
-    )
 
+    async def fail_cleanup(**_kwargs: object) -> int:
+        pytest.fail("network request must not be made")
+
+    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", fail_cleanup)
     with pytest.raises(SystemExit, match="2"):
         cleanup_sandboxes.main(["--domain", "sandbox.example"])
 
@@ -233,7 +367,7 @@ def test_cli_forwards_environment_and_return_codes(
     monkeypatch.setenv("NEMO_GYM_USER", "alice")
     calls = []
 
-    def record_cleanup(**kwargs: object) -> int:
+    async def record_cleanup(**kwargs: object) -> int:
         calls.append(kwargs)
         return 0
 
@@ -250,10 +384,13 @@ def test_cli_forwards_environment_and_return_codes(
         }
     ]
 
-    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", lambda **_kwargs: 1)
+    async def failed_cleanup(**_kwargs: object) -> int:
+        return 1
+
+    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", failed_cleanup)
     assert cleanup_sandboxes.main([]) == 1
 
-    def raise_cleanup_error(**_kwargs: object) -> int:
+    async def raise_cleanup_error(**_kwargs: object) -> int:
         raise OSError("down")
 
     monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", raise_cleanup_error)
@@ -261,9 +398,9 @@ def test_cli_forwards_environment_and_return_codes(
     assert "OpenSandbox cleanup failed: down" in capsys.readouterr().err
 
 
-def test_script_help_uses_only_standard_library() -> None:
+def test_script_help_runs_by_direct_path() -> None:
     result = subprocess.run(
-        [sys.executable, "-I", "-S", str(SCRIPT), "--help"],
+        [sys.executable, "-I", str(SCRIPT), "--help"],
         check=False,
         capture_output=True,
         text=True,
@@ -276,7 +413,8 @@ def test_slurm_batch_command_wires_cleanup_epilogue() -> None:
         [
             "bash",
             "-c",
-            'sbatch() { printf "%s\\n" "$VLLM_PD_BATCH_COMMAND"; }; source "$1" --config benchmark.yaml',
+            'sbatch() { printf "%s\\n%s\\n" "$EVAL_COMMAND" "$VLLM_PD_BATCH_COMMAND"; }; '
+            'source "$1" --config benchmark.yaml',
             "bash",
             str(SBATCH_SCRIPT),
         ],
@@ -297,10 +435,12 @@ def test_slurm_batch_command_wires_cleanup_epilogue() -> None:
     )
     assert render.returncode == 0, render.stderr
     assert "trap cleanup_job EXIT" in render.stdout
-    assert "cleanup_server" in render.stdout
+    assert "trap cleanup_sandboxes EXIT" in render.stdout
     assert "cleanup_sandboxes.py" in render.stdout
+    assert "source /opt/Gym_venv/bin/activate" in render.stdout
     assert '--run-id "$SLURM_JOB_ID"' in render.stdout
-    assert '--user "${NEMO_GYM_USER:-$SLURM_JOB_USER}"' in render.stdout
+    assert '--user "$NEMO_GYM_USER"' in render.stdout
+    assert render.stdout.index("trap cleanup_sandboxes EXIT") < render.stdout.index("gym eval prepare")
 
     syntax = subprocess.run(["bash", "-n"], input=render.stdout, check=False, capture_output=True, text=True)
     assert syntax.returncode == 0, syntax.stderr
