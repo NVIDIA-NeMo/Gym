@@ -863,17 +863,16 @@ class RolloutCollectionHelper(BaseModel):
                 pcts_to_print.pop(0)
 
                 print_str = ""
+                top_left = counts_left.most_common()
+                top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                print_str += f"""Finished {len(results)}samples ({int(current_pct)}%). Examples left:
+{top_left_str}
+"""
                 for agent_name in agent_name_to_metrics:
                     metrics = agent_name_to_metrics[agent_name]
                     avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
                     print_str += f"""Found {agent_name_to_counts[agent_name]} rollouts for `{agent_name}`.
 {json.dumps(avg_metrics, indent=4)}
-"""
-
-                top_left = counts_left.most_common()
-                top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                print_str += f"""Examples left:
-{top_left_str}
 """
                 # Use tqdm.write here so we can print properly with tqdm being used.
                 tqdm.write(print_str)
