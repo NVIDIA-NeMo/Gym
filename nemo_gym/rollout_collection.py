@@ -19,7 +19,7 @@ import logging
 import os
 import warnings
 from asyncio import Future, Semaphore
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import nullcontext
 from copy import deepcopy
 from itertools import repeat
@@ -795,8 +795,12 @@ class RolloutCollectionHelper(BaseModel):
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
 
-        pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
+        # Intermediate status printing
+        pcts_to_print = list(range(1, 100)) + [99.5]
+        agent_name_to_metrics = defaultdict(Counter)
+        agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
@@ -849,16 +853,30 @@ class RolloutCollectionHelper(BaseModel):
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
+            agent_name = result["agent_ref"]["name"]
+            metrics = agent_name_to_metrics[agent_name]
+            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
+            agent_name_to_counts[agent_name] += 1
+
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
-                while pcts_to_print and current_pct >= pcts_to_print[0]:
-                    pcts_to_print.pop(0)
+                pcts_to_print.pop(0)
 
-                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
-                if top_left:
-                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    # Use tqdm.write here so we can print properly with tqdm being used.
-                    tqdm.write(f"Examples left:\n{top_left_str}")
+                print_str = ""
+                for agent_name in agent_name_to_metrics:
+                    metrics = agent_name_to_metrics[agent_name]
+                    avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+                    print_str += f"""Found {agent_name_to_counts[agent_name]} rollouts for `{agent_name}`.
+{json.dumps(avg_metrics, indent=4)}
+"""
+
+                top_left = counts_left.most_common()
+                top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                print_str += f"""Examples left:
+{top_left_str}
+"""
+                # Use tqdm.write here so we can print properly with tqdm being used.
+                tqdm.write(print_str)
 
         results_file.close()
         failures_file.close()
