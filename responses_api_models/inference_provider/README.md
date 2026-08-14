@@ -9,6 +9,7 @@ A model server for any inference provider that exposes an OpenAI-compatible `/v1
 | Fireworks | `configs/fireworks.yaml` |
 | Together.ai | `configs/together.yaml` |
 | OpenRouter | `configs/openrouter.yaml` |
+| OrcaRouter | `configs/orcarouter.yaml` |
 | DeepInfra | `configs/deepinfra.yaml` |
 | Nebius | `configs/nebius.yaml` |
 | Friendli | `configs/friendli.yaml` |
