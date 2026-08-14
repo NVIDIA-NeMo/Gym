@@ -110,7 +110,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         if sandbox_id and pty_session_id:
             sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
-            pty_session = await sandbox.pty.attach(session_id=pty_session_id, takeover=True)
+            # TODO @bxyu-nvidia: Uncomment this after PTY concurrency is solid
+            # pty_session = await sandbox.pty.attach(session_id=pty_session_id, takeover=True)
+            pty_session = None
             return sandbox, pty_session
 
         if self.config.debug:
@@ -137,7 +139,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
-        pty_session = await sandbox.pty.create()
+        # TODO @bxyu-nvidia: Uncomment this after PTY concurrency is solid
+        # pty_session = await sandbox.pty.create()
+        pty_session = None
 
         return sandbox, pty_session
 
@@ -272,6 +276,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             opencode_debug_str = "--print-logs --log-level DEBUG"
 
+        # TODO @bxyu-nvidia: We need to manually activate the conda env here for SWE Verified
+        # Eventually this will only be present on the SWE Bench resources server side
+        # For now, the activation is put on the harness side.
+        # TODO @bxyu-nvidia: Comment this after PTY concurrency is solid
+        conda_activate_command_str = "{ source /opt/miniconda3/bin/activate && conda activate testbed || true; }"
+
         opencode_thinking_str = "--thinking"
 
         if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
@@ -290,6 +300,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # --auto is to approve not explicitly denied requests.
         command = f"""
         echo "Shell: $SHELL" \
+        && {conda_activate_command_str} \
         && echo "Optionally activated Conda env" \
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
@@ -304,9 +315,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
         try:
-            result = await sandbox.pty.exec(
+            # TODO @bxyu-nvidia: Uncomment this after PTY concurrency is solid
+            # result = await sandbox.pty.exec(
+            result = await sandbox.exec(
                 command=command,
-                session=pty_session,
+                # session=pty_session,
                 timeout_s=self.config.sandbox_timeout,
             )
         except:
