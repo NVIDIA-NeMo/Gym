@@ -68,6 +68,25 @@ The full data-preparation, Slurm launch, and independent checkpoint-evaluation
 commands are documented in the NeMo RL
 [Context Compaction guide](https://github.com/jinglinglingling/RL/blob/feature/osworld-grpo-training-eval-signed/docs/guides/context-compaction.md#run-osworld-grpo).
 
+## Validation evidence
+
+All checkpoints in this Tiny32 sweep were trained with a maximum trajectory
+length of 15 turns. `T15` and `T30` below refer only to the maximum trajectory
+length used during independent evaluation; there was no separate T30 training
+run.
+
+| T15-trained checkpoint | T15 evaluation | T30 evaluation |
+|---|---:|---:|
+| Base model | 59.38% | 65.62% |
+| Step 5 | 59.38% | 68.75% |
+| Step 10 | 62.50% | 75.00% |
+| Step 15 | 68.75% | 81.25% |
+
+This is a fixed-seed, 32-task development sweep intended to demonstrate an
+end-to-end learning signal. It is not a generalization benchmark or a
+confidence interval. Larger Stable251 training and held-out evaluation are
+still in progress.
+
 ## OSWorld dependency
 
 The benchmark harness is a **referenced dependency**, not vendored: `requirements.txt` pins
