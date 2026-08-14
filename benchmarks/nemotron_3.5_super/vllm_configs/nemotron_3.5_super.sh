@@ -1,6 +1,7 @@
 #!/bin/bash
 
 VLLM_COMMON_ARGS=(
+    --disable-uvicorn-access-log
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
     --data-parallel-backend mp
