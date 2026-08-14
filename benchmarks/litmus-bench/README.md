@@ -101,3 +101,61 @@ gym eval profile \
 ```
 
 Use multiple repeats for meaningful per-task reward variance.
+
+## Paired Tier 1/2 example
+
+`config_tier12.yaml` provides a small tool-vs-no-tool benchmark derived from the
+Litmus paired evaluation under `chemLLM_setup/tool_vs_no_tool_eval`. It contains
+ten unique questions: five Tier 1 and five Tier 2. Every question appears once
+as `direct` and once as `mcp-python`; the prompt, expected answer, extraction
+contract, and pair identifier are identical between arms. Only the tool arm
+advertises `stateful_python_code_exec`.
+
+Prepare the committed example through Gym:
+
+```bash
+gym eval prepare --config benchmarks/litmus-bench/config_tier12.yaml
+```
+
+The tool arm uses the Litmus agent's OpenSandbox provider and an RDKit-capable
+image. Keep the OpenSandbox and policy-model credentials in environment
+variables so they are not exposed in the process command line. The tested
+policy setup uses GPT-5.5 through NVIDIA's internal inference gateway and Gym's
+`vllm_model` Chat Completions bridge:
+
+```bash
+export OPENSANDBOX_DOMAIN="<opensandbox-domain>"
+export OPENSANDBOX_API_KEY="<opensandbox-key>"
+export POLICY_API_KEY="<policy-model-key>"
+
+: "${OPENSANDBOX_DOMAIN:?Set OPENSANDBOX_DOMAIN}"
+: "${OPENSANDBOX_API_KEY:?Set OPENSANDBOX_API_KEY}"
+: "${POLICY_API_KEY:?Set POLICY_API_KEY}"
+
+gym eval run \
+  --config benchmarks/litmus-bench/config_tier12.yaml \
+  --model-type vllm_model \
+  --model azure/openai/gpt-5.5 \
+  --model-url https://inference-api.nvidia.com \
+  --split benchmark \
+  --output results/litmus-tier12-paired/rollouts.jsonl \
+  --num-repeats "${NUM_REPEATS:-1}" \
+  --concurrency "${CONCURRENCY:-1}" \
+  --temperature 1 \
+  --max-output-tokens 4096 \
+  '++policy_api_key=${oc.env:POLICY_API_KEY}' \
+  ++policy_model.responses_api_models.vllm_model.extra_body.reasoning_effort=medium
+```
+
+Increase `--num-repeats` to collect multiple rollouts per paired row for reward profiling.
+The OpenSandbox key is separate from the policy-model key. Direct rows never
+create a sandbox; tool sandboxes are created lazily when the model calls the
+advertised function.
+
+Profile the paired results using the materialized inputs written by the run:
+
+```bash
+gym eval profile \
+  --inputs results/litmus-tier12-paired/rollouts_materialized_inputs.jsonl \
+  --rollouts results/litmus-tier12-paired/rollouts.jsonl
+```
