@@ -867,8 +867,8 @@ class RolloutCollectionHelper(BaseModel):
 
                 time_taken_s = time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
-                rollouts_per_s = len(results) / time_taken_s
-                print_str = f"Finished {len(results)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_s:.2f} rollouts/s). "
+                rollouts_per_min = len(results) / time_taken_s / 60
+                print_str = f"Finished {len(results)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
 
                 top_left = counts_left.most_common()
                 top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
