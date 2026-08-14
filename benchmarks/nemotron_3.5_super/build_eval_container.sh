@@ -24,8 +24,7 @@ set -xeuo pipefail
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-ray_dependency="ray[default]==2.55.1"
-uv pip install --system "\$ray_dependency" fastokens vllm-router
+uv pip install --system vllm-router
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -33,8 +32,8 @@ apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 
 cd /opt
-# Reuse the vLLM container's python3 so we strongly align the Python versions across vLLM and Gym.
-uv venv --python \$(which python3) Gym_venv
+# Python 3.13.14 is Gym main's Python version.
+uv venv --python 3.13.14 Gym_venv
 source Gym_venv/bin/activate
 
 # We use this flow to support use cases where env.yaml, etc config files are mounted
@@ -45,10 +44,6 @@ git init
 git remote add origin $NEMO_GYM_GIT_URL
 git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
-
-# See the script for more information.
-python benchmarks/nemotron_3.5_super/downgrade_python.py
-
 
 uv sync --active
 # gym eval prepare imports nemo_gym.profiling at startup. In this Python 3.12 build,

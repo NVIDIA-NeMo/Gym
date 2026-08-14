@@ -10,10 +10,15 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
+GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
+IS_RETRYABLE_FULL_SUITE_FAILURE = REPO_ROOT / "scripts" / "ci" / "is_retryable_full_suite_failure.sh"
+RECLAIM_RUNNER_DISK = REPO_ROOT / "scripts" / "ci" / "reclaim_runner_disk.sh"
+RETRY_FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "retry-full-test-suite.yml"
 SANITIZER = REPO_ROOT / "scripts" / "ci" / "sanitize_env.sh"
 SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
 SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
-GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
+UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 
 BEHAVIOR_CHANGING_ENV = {
     "GYM_CI_DEV_VENV_DIR": "/tmp/injected-driver-venv",
@@ -108,6 +113,96 @@ def test_gitlab_adapter_selects_current_contract_version() -> None:
 
 def test_gitlab_adapter_selects_cpu_short_partition() -> None:
     assert 'GYM_SLURM_PARTITION: "cpu_short"' in GITLAB_PIPELINE.read_text()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "fatal: server certificate verification failed. CAfile: none CRLfile: none",
+        "fatal: unable to access repository: Could not resolve host: github.com",
+        "error: No space left on device (os error 28)",
+        "Insufficient runner disk space: 1024 KiB available; 10485760 KiB required",
+        "The hosted runner lost communication with the server",
+    ],
+)
+def test_full_suite_failure_classifier_accepts_infrastructure_failures(tmp_path: Path, failure: str) -> None:
+    log_path = tmp_path / "failed.log"
+    log_path.write_text(failure)
+
+    result = subprocess.run([str(IS_RETRYABLE_FULL_SUITE_FAILURE), str(log_path)], capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert "recognized runner or transport failure" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "FAILED tests/unit_tests/test_cli.py::test_command - AssertionError",
+        "No matching distribution found for deterministic-package==1.2.3",
+        "ruff check failed: unused import",
+    ],
+)
+def test_full_suite_failure_classifier_rejects_deterministic_failures(tmp_path: Path, failure: str) -> None:
+    log_path = tmp_path / "failed.log"
+    log_path.write_text(failure)
+
+    result = subprocess.run([str(IS_RETRYABLE_FULL_SUITE_FAILURE), str(log_path)], capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert "do not contain a recognized" in result.stdout
+
+
+def test_full_suite_retry_is_bounded_and_reruns_only_failed_jobs() -> None:
+    workflow = RETRY_FULL_TEST_WORKFLOW.read_text()
+
+    assert "github.event.workflow_run.run_attempt == 1" in workflow
+    assert "head_repository.full_name == github.repository" in workflow
+    assert "head_branch == github.event.repository.default_branch" in workflow
+    assert "is_retryable_full_suite_failure.sh" in workflow
+    assert "rerun-failed-jobs" in workflow
+    assert 'select(.conclusion == "failure" and .name != "Server suite")' in workflow
+    assert "At least one failed job was deterministic" in workflow
+    assert "actions: write" in workflow
+
+
+def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
+    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 2)]:
+        workflow = workflow_path.read_text()
+        assert workflow.count("run: ./scripts/ci/reclaim_runner_disk.sh") == expected_jobs
+        assert workflow.count("Reclaim runner disk") == expected_jobs
+        sections = workflow.split("- name: Reclaim runner disk")
+        for section in sections[1:]:
+            assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
+
+
+def test_runner_disk_reclamation_fails_fast_when_space_is_still_low(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "sudo", "#!/usr/bin/env bash\nexit 0\n")
+    _write_executable(
+        bin_dir / "df",
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1" == "-Pk" ]]; then\n'
+        "  printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/root 1000 901 99 91%% /\\n'\n"
+        "else\n"
+        "  printf 'Filesystem Size Used Avail Use%% Mounted on\\n/dev/root 1G 901M 99M 91%% /\\n'\n"
+        "fi\n",
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "RUNNER_ENVIRONMENT": "github-hosted",
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "GYM_CI_MIN_FREE_DISK_KB": "100",
+        }
+    )
+
+    result = subprocess.run([str(RECLAIM_RUNNER_DISK)], capture_output=True, text=True, env=env)
+
+    assert result.returncode == 1
+    assert "Insufficient runner disk space: 99 KiB available; 100 KiB required" in result.stderr
 
 
 def _write_executable(path: Path, contents: str) -> None:

@@ -166,9 +166,9 @@ dependencies = [
     "aiohttp>=3.14.1",
 
     # yappi: profiling tool
-    # Updated Mon Sep 22, 2025 with yappi==1.6.10
+    # Updated Wed Aug 12, 2026 with yappi==1.7.6 for CPython 3.14 support
     # License: MIT https://github.com/sumerc/yappi/blob/1d3f7501701e1f050b6dcd6a86fd36aec08185c7/LICENSE
-    "yappi",
+    "yappi>=1.7.6",
 
     # Ray: Used for distributed processing
     # Updated Tue Jul 29, 2026 with ray[default]>=2.56.1
@@ -226,11 +226,7 @@ dependencies = [
     # License: BSD 2-Clause https://pyasn1.readthedocs.io/en/latest/license.html
     "pyasn1>=0.6.4",
 
-    # gprof2dot and pydot: Used for outputting dot graphs for profiling.
-    # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14 and pydot==4.0.1
-    # gprof2dot License: GNU Lesser General Public License v3.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     # pydot License: MIT https://github.com/pydot/pydot/blob/a2bee1e770698867332516fb2878fac262b4ffc5/LICENSES/MIT.txt
-    "gprof2dot",
     "pydot",
 ]
 
@@ -261,14 +257,13 @@ sandbox = [
     # License: Apache 2.0
     "opensandbox>=0.1.15",
 
-    # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
-    # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
-    # lifecycle calls. Upper bound <0.1: the SDK is alpha 0.0.x and the provider also relies on
-    # its generated protos (openshell._proto), so minor bumps can break call shapes; the
-    # SDK-conformance unit test guards the raise of this ceiling.
-    # Updated: Tue Jul 14, 2026 with openshell>=0.0.92,<0.1
-    # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
-    "openshell>=0.0.92,<0.1",
+    # httpx-aiohttp: aiohttp-backed httpx transport used by the OpenSandbox
+    # provider's `connection.transport_backend: aiohttp`; without it the
+    # provider silently falls back to the httpx transport with only a warning.
+    # Pulls in aiohttp (aiohttp<4,>=3.10).
+    # Updated: Tue Aug 11, 2026 with httpx-aiohttp>=0.2.0
+    # License: BSD 3-Clause https://github.com/karpetrosyan/httpx-aiohttp/blob/master/LICENSE
+    "httpx-aiohttp>=0.2.0",
 
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
@@ -281,8 +276,25 @@ sandbox = [
     "boto3>=1.34",
 ]
 
+# Keep OpenShell opt-in so its platform-specific SDK wheel cannot block installs for other providers.
+openshell = [
+    # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
+    # Lower bound 0.0.92: the version that made `workspace` a required argument on sandbox
+    # lifecycle calls. Upper bound <0.1: the SDK is alpha 0.0.x and the provider also relies on
+    # its generated protos (openshell._proto), so minor bumps can break call shapes; the
+    # SDK-conformance unit test guards the raise of this ceiling.
+    # Updated: Tue Jul 14, 2026 with openshell>=0.0.92,<0.1
+    # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
+    "openshell>=0.0.92,<0.1",
+]
+
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
+    # gprof2dot: Used for outputting dot graphs for profiling.
+    # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14
+    # License: LGPLv3+ https://github.com/jrfonseca/gprof2dot/blob/master/COPYING.LESSER
+    "gprof2dot",
+
     # Pre-commit: Used for pre-commit hooks.
     # Updated: Thu Sep 04, 2025 with pre-commit==4.3.0
     # License: MIT https://github.com/pre-commit/pre-commit/blob/e70b313c8017b2b6d7844e91795c9d41b9ceb9fb/LICENSE
@@ -364,6 +376,7 @@ override-dependencies = [
     "opencv-python-headless; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Servers that need a

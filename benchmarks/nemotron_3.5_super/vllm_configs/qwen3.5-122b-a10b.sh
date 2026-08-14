@@ -28,3 +28,10 @@ VLLM_COMMON_ARGS=(
     --max-cudagraph-capture-size 256
     --limit-mm-per-prompt '{"image":4,"video":1}'
 )
+VLLM_PREFILL_ARGS=(
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+)
+VLLM_DECODE_ARGS=(
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+)

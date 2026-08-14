@@ -43,6 +43,7 @@ service endpoints, status, and cleanup.
 | `adapter_agents.py` | Gym-owned model scaffolds, including `NemotronV3NanoOmniAgent` |
 | `action_parser.py` | Gym pyautogui/control-action parsing and validation |
 | `proxy.py` | Explicit proxy-task configuration validation and non-secret provenance |
+| `runtime_dependencies.py` | Version/import readiness check and explicit-install remediation for excluded packages |
 | `sandbox_desktop_env.py` | Scoped `DesktopEnv` compatibility wiring for the Gym Sandbox backend |
 | `sandbox_provider.py` | OSWorld provider contract backed by Gym Sandbox lifecycle and endpoints |
 
@@ -160,12 +161,26 @@ python3 prepare.py \
   --execution-backend gym_sandbox \
   --vm-path /absolute/path/to/Ubuntu.qcow2
 
+# Explicitly opt in to packages excluded from Gym's shipped environments.
+# prepare.py prints these commands with the exact configured venv path.
+gym env prefetch
+bash ../../responses_api_agents/osworld_agent/install_optional_runtime_deps.sh \
+  ../../responses_api_agents/osworld_agent/.venv
+
 # Terminal 1: start configured servers.
 gym env start
 
 # Terminal 2: collect against those running servers.
 gym eval run --no-serve
 ```
+
+The installer targets only the managed OSWorld agent venv. It does not modify
+the system Python, Gym's root venv, the model server, or the OSWorld VM. The
+public `benchmarks/osworld/tools/start_control.sh` wrapper checks that the
+required package versions are importable and fails with the exact setup
+commands when this explicit step has been omitted. The agent entrypoint repeats
+that non-mutating check so a direct `gym env start` also fails early and
+actionably; neither path installs packages automatically.
 
 Choose a model-specific agent composition during preparation. For example:
 

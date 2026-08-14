@@ -121,6 +121,7 @@ DECODE_SERVER_PORT=8002
 PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
 
+
 EVAL_COMMAND=$(cat <<EOF
 set -euo pipefail
 
@@ -130,15 +131,19 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME-\$(date +%Y%m%d_%H%M%S)
+experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
+# ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
+# ++upload_rollouts_to_wandb=false: Rollouts file is massive. We leave on the cluster.
+# global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
+# port_range_low, port_range_high: Move into ephemeral ports
 gym eval run \
     $@ \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
-    +nemo_gym_log_dir=results/\$experiment_name-logs \
+    +nemo_gym_log_dir=results/\$experiment_name/logs \
     +skip_venv_if_present=true \
     ++output_jsonl_fpath=results/\$experiment_name.jsonl \
     ++overwrite_metrics_conflicts=true \
@@ -220,15 +225,13 @@ if (( SLURM_PROCID == 0 )); then
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $PREFILL_SERVER_PORT \
         --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-address \$this_node_hostname \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --api-server-count 1 \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}' \
         &
     prefill_pid=\$!
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
@@ -254,8 +257,9 @@ if (( SLURM_PROCID == 0 )); then
         decode_policy_args+=(--decode-policy "$VLLM_DECODE_POLICY")
     fi
 
-    # --intra-node-data-parallel-size must match the data-parallel-size-local above.
+    # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
+    # Don't manually wait as vllm-router will wait for the URLs to come up
     vllm-router \
         --policy consistent_hash \
         --vllm-pd-disaggregation \
@@ -271,58 +275,47 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --headless \
         --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-start-rank \$SLURM_PROCID \
         --data-parallel-address \$PREFILL_HEAD \
-        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
 elif [[ "$VLLM_DECODE_MODE" == independent ]]; then
     # Each decode node is a complete TP/EP replica. This prevents expert-parallel
     # collectives from crossing nodes while still letting the router use every replica.
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $DECODE_SERVER_PORT \
         --data-parallel-size 1 \
         --data-parallel-address \$this_node_hostname \
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-        --api-server-count 1 \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --api-server-count 1
 elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
     # Decode head
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $DECODE_SERVER_PORT \
         --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-address \$DECODE_HEAD \
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-        --api-server-count 1 \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --api-server-count 1
 else
     # Decode worker
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --headless \
         --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
         --data-parallel-address \$DECODE_HEAD \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-        --kv-transfer-config \
-            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        --data-parallel-rpc-port $DECODE_DP_RPC_PORT
 fi
 EOF
 )
@@ -380,16 +373,12 @@ cleanup_server() {
 trap cleanup_server EXIT INT TERM
 
 if (( $should_run_eval )); then
-    until curl -fs "http://\$PREFILL_HEAD:$ROUTER_SERVER_PORT/health" >/dev/null; do
-        if ! kill -0 "\$server_step" 2>/dev/null; then
-            wait "\$server_step"
-        fi
-        sleep 5
-    done
+    # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
 
+    # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     eval_status=0
     PREFILL_HEAD="\$PREFILL_HEAD" \
-    srun --overlap --exact --nodes=1 --ntasks=1 --nodelist="\$PREFILL_HEAD" --gpus=0 \
+    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$PREFILL_HEAD" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
         --container-mounts=$MOUNTS \

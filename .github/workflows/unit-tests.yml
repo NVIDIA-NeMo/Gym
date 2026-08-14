@@ -133,6 +133,9 @@ jobs:
         with:
           submodules: 'recursive'
 
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
+
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -154,7 +157,7 @@ jobs:
         if: needs.detect.outputs.run_full == 'true'
         run: |
           source ./scripts/ci/setup_dev.sh
-          uv sync --extra dev --extra sandbox
+          uv sync --extra dev --extra sandbox --extra openshell
 
       # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v3.
       - name: Sandbox unit tests
@@ -212,6 +215,9 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
+
+      - name: Reclaim runner disk
+        run: ./scripts/ci/reclaim_runner_disk.sh
 
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

@@ -185,6 +185,7 @@ class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest
 
 class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    pty_session_id: str
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
@@ -252,13 +253,18 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(test_spec)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
-        # This may be overfit and needs to be config'd or detected.
-        # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
-        # For now, the activation is put on the harness side.
-        # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
+        pty_session = await eval_sandbox.pty.create()
 
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
+        if MAP_REPO_TO_EXT.get(test_spec.repo) == "py":
+            await eval_sandbox.pty.exec(
+                "source /opt/miniconda3/bin/activate && conda activate testbed", session=pty_session
+            )
+
+        return SWEBenchSeedSessionResponse(
+            sandbox_handle=eval_sandbox._handle.sandbox_id,
+            pty_session_id=pty_session.session_id,
+        )
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
