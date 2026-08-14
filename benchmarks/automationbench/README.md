@@ -69,4 +69,4 @@ Needs `verifiers>=0.3.0`. Published under the `zapier` hub namespace, not
 ## License
 
 AutomationBench and its task data are provided by Zapier under the MIT License.
-See [LICENSE](LICENSE) for the copyright and license notice.
+See the upstream [copyright and license notice](https://github.com/zapier/AutomationBench/blob/main/LICENSE).

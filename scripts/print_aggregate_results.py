@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 
+import orjson
 from pydantic import BaseModel
+from tqdm.auto import tqdm
 
 from nemo_gym.global_config import get_global_config_dict
 
@@ -29,14 +31,20 @@ if __name__ == "__main__":
     global_config_dict = get_global_config_dict()
     config = PrintAggregateResultsConfig.model_validate(global_config_dict)
 
-    metrics = Counter()
-    num_rows = 0
+    agent_name_to_metrics = defaultdict(Counter)
+    agent_name_to_counts = defaultdict(int)
     with open(config.jsonl_fpath) as f:
-        for row in f:
-            result = json.loads(row)
-            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
-            num_rows += 1
+        for row in tqdm(f, "Reading rows"):
+            result = orjson.loads(row)
 
-    avg_metrics = {k: v / num_rows for k, v in metrics.items()}
+            agent_name = result["agent_ref"]["name"]
+            metrics = agent_name_to_metrics[agent_name]
+            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
 
-    print(json.dumps(avg_metrics, indent=4))
+            agent_name_to_counts[agent_name] += 1
+
+    for agent_name in agent_name_to_metrics:
+        metrics = agent_name_to_metrics[agent_name]
+        avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+        print(f"Found {agent_name_to_counts[agent_name]} rollouts for `{agent_name}`.")
+        print(json.dumps(avg_metrics, indent=4))

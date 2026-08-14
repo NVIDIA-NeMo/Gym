@@ -1,0 +1,22 @@
+# Keep the managed OSWorld agent compatible with Python 3.13 without changing
+# repository-wide dependency policy or the independently maintained OSWorld
+# package metadata.
+
+# OSWorld pins torch 2.5.x, which has no CPython 3.13 wheels. Match the
+# repository's tested Python 3.13 line instead of floating to a newer release.
+torch==2.11.0
+
+# OSWorld pins matplotlib 3.7.x, which also predates CPython 3.13 wheels and
+# falls back to a fragile source build. Use the version already exercised by
+# another Gym server on the repository's Python 3.13 line.
+matplotlib==3.10.6
+
+# SurferH is not loaded by this Gym adapter, and agp-client is not published on
+# the configured package indexes.
+agp-client; sys_platform == 'never'
+
+# Codec-bearing wheels remain excluded from the default managed environment.
+# Install the explicitly documented opt-in runtime dependencies before an
+# OSWorld run that needs them.
+opencv-python; sys_platform == 'never'
+opencv-contrib-python; sys_platform == 'never'

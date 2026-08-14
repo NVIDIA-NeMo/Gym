@@ -21,7 +21,7 @@ Two compositions matter:
 
 | | Built from | Notes |
 | --- | --- | --- |
-| **Agent** | **Model** + **Agent harness** | The harness owns the loop, tools, context, and stop conditions. |
+| **Agent** | **Model** + **Agent harness** | The harness owns the loop, context, and stop conditions, and routes calls to environment-owned tools. |
 | **Environment** | **Dataset** + **Verifier** + **State** (+ env tools) | The task world the agent acts on and is scored against. The **model is outside** the environment. |
 
 The **agent harness** belongs to the agent, not the environment. In Gym packaging, an environment *config* still names which agent server to run — that is a wiring reference, not ownership of the harness.
@@ -59,6 +59,8 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server. Also called scorer or grader. See [Build Verifiers](/build-verifiers). |
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
+| **Environment surface** | The tools and per-task state the agent acts on. |
+| **Environment runtime** | Where and how the environment surface executes, such as a local process, Kubernetes service, or sandbox pool. |
 
 ### Agent & model
 
@@ -67,6 +69,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Model / policy model** | The model being trained or evaluated — local weights or a remote endpoint, usually via the Model server. See [Model Server](/model-server). |
 | **Agent harness** | How the model interacts with the environment: loops model calls, routes tools, manages context, and decides when the task is done. See [Agent Server](/agent-server). |
 | **Agent** | Model + agent harness. |
+| **Rollout driver** | Coordinates an episode and records its trajectory. |
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
 | **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
 | **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
@@ -76,7 +79,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | Term | Definition |
 | --- | --- |
 | **Evaluation** | Run an agent on tasks, score results, and measure performance. See [Evaluation](/about/concepts/evaluation) and the [Evaluate](/evaluation) workflow. |
-| **Benchmark** | Repeatable evaluation built on an environment: fixed dataset, metrics, and comparison protocol. Not every environment is used as a benchmark. See [Benchmarks](/evaluation/benchmarks). |
+| **Benchmark** | Repeatable, versioned evaluation built on an environment: canonical dataset split, prompt configuration, metrics, and comparison protocol. Not every environment is used as a benchmark. See [Benchmarks](/evaluation/benchmarks). |
 | **pass@k** | Fraction of tasks with at least one success among *k* rollouts. See [Aggregate Metrics](/evaluation/aggregate-metrics). |
 
 ### Training

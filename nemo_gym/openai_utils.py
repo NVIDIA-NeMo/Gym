@@ -15,6 +15,7 @@
 import json
 from asyncio import sleep
 from typing import (
+    Annotated,
     Any,
     Dict,
     List,
@@ -30,6 +31,7 @@ from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
     ChatCompletionMessage,
@@ -44,6 +46,10 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_assistant_message_param import (
     ContentArrayOfContentPart,
 )
+from openai.types.chat.chat_completion_content_part_param import File as ChatCompletionContentPartFileParam
+from openai.types.chat.chat_completion_custom_tool_param import ChatCompletionCustomToolParam
+from openai.types.chat.chat_completion_message_custom_tool_call import ChatCompletionMessageCustomToolCall
+from openai.types.chat.chat_completion_message_custom_tool_call_param import ChatCompletionMessageCustomToolCallParam
 from openai.types.chat.completion_create_params import (
     ChatCompletionAudioParam,
     ChatCompletionPredictionContentParam,
@@ -56,6 +62,11 @@ from openai.types.chat.completion_create_params import (
 from openai.types.responses import (
     FunctionToolParam,
     Response,
+    ResponseCodeInterpreterToolCall,
+    ResponseComputerToolCall,
+    ResponseCustomToolCall,
+    ResponseFileSearchToolCall,
+    ResponseFunctionWebSearch,
     ResponseInputTextParam,
 )
 from openai.types.responses.response_create_params import (
@@ -68,15 +79,29 @@ from openai.types.responses.response_create_params import (
     ToolChoice,
     ToolParam,
 )
+from openai.types.responses.response_function_call_output_item_list_param import (
+    ResponseFunctionCallOutputItemListParam,
+)
+from openai.types.responses.response_input_item import (
+    ComputerCallOutput,
+    LocalShellCallOutput,
+    McpApprovalResponse,
+    ResponseCustomToolCallOutput,
+)
 from openai.types.responses.response_input_param import (
     ResponseInputMessageContentListParam,
 )
 from openai.types.responses.response_output_item import (
+    ImageGenerationCall,
+    LocalShellCall,
     McpApprovalRequest,
     McpCall,
     McpListTools,
 )
 from openai.types.responses.response_output_text_param import Annotation, Logprob
+from openai.types.responses.response_reasoning_item import (
+    Content as ReasoningContent,
+)
 from openai.types.responses.response_reasoning_item import (
     Summary,
 )
@@ -85,7 +110,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -123,6 +148,34 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     routed_experts: NotRequired[RoutedExperts]
 
 
+_REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
+    {
+        "prompt_token_ids",
+        "generation_token_ids",
+        "generation_log_probs",
+    }
+)
+_TOKEN_METADATA_FIELDS = _REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
+
+
+def _validate_atomic_token_metadata(value: Any) -> Any:
+    """Require complete token metadata when any token field is present."""
+    if not isinstance(value, dict):
+        return value
+
+    present_fields = _TOKEN_METADATA_FIELDS.intersection(value)
+    if not present_fields:
+        return value
+
+    missing_fields = _REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
+    if missing_fields:
+        missing = ", ".join(sorted(missing_fields))
+        raise ValueError(f"Token metadata must include all required fields; missing: {missing}")
+
+    TokenIDLogProbMixin.model_validate({field: value[field] for field in present_fields})
+    return value
+
+
 ########################################
 # Responses API inputs
 ########################################
@@ -138,6 +191,7 @@ class NeMoGymResponseReasoningItem(BaseModel):
     summary: List[NeMoGymSummary]
     type: Literal["reasoning"] = "reasoning"
     encrypted_content: Optional[str] = None
+    content: Optional[List[ReasoningContent]] = None
 
     # As of Wed Sep 17, 2025, the OpenAI API with GPT-5 returns None for this status rather than a valid value here.
     # On subsequent calls to the OpenAI endpoints within a rollout, the status parameter is not accepted i.e. the OpenAI API returns a bad request when the status parameter is populated.
@@ -190,7 +244,7 @@ class NeMoGymFunctionCallOutput(BaseModel):
     """
 
     call_id: str
-    output: str
+    output: Union[str, ResponseFunctionCallOutputItemListParam]
     type: Literal["function_call_output"] = "function_call_output"
     id: Optional[str] = None
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
@@ -252,6 +306,56 @@ class NeMoGymResponseMcpApprovalRequest(McpApprovalRequest):
     server_label: Optional[str] = None
 
 
+class NeMoGymResponseFileSearchToolCall(ResponseFileSearchToolCall):
+    """A hosted file-search call (OpenAI Responses ``file_search_call`` output item).
+
+    The provider executes the search and returns the call in ``response.output``.
+    Inherits the upstream typing unchanged.
+    """
+
+
+class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
+    """A hosted web-search call (OpenAI Responses ``web_search_call`` output item)."""
+
+
+class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
+    """A computer-use action for the client to execute (``computer_call`` output item)."""
+
+
+class NeMoGymImageGenerationCall(ImageGenerationCall):
+    """A hosted image-generation call (OpenAI Responses ``image_generation_call`` output item)."""
+
+
+class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
+    """A hosted code-interpreter call (OpenAI Responses ``code_interpreter_call`` output item)."""
+
+
+class NeMoGymLocalShellCall(LocalShellCall):
+    """A local-shell command for the client to execute (``local_shell_call`` output item)."""
+
+
+class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
+    """A client-executed custom tool call (OpenAI Responses ``custom_tool_call`` output item)."""
+
+
+# These models represent client-supplied results for the calls above.
+# The installed SDK defines them in ``response_input_item``.
+class NeMoGymComputerCallOutput(ComputerCallOutput):
+    """The client's result of a computer-use action (``computer_call_output`` item)."""
+
+
+class NeMoGymResponseCustomToolCallOutput(ResponseCustomToolCallOutput):
+    """The client's result of a custom tool call (``custom_tool_call_output`` item)."""
+
+
+class NeMoGymLocalShellCallOutput(LocalShellCallOutput):
+    """The client's result of a local shell command (``local_shell_call_output`` item)."""
+
+
+class NeMoGymMcpApprovalResponse(McpApprovalResponse):
+    """The client's answer to a hosted-MCP approval request (``mcp_approval_response`` item)."""
+
+
 class NeMoGymResponseInputText(ResponseInputTextParam):
     pass
 
@@ -284,23 +388,73 @@ RESPONSES_TO_TRAIN = {
     NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
 }
 
+# The hosted-tool and client-executed call types have no variant here:
+#   web_search_call, file_search_call, code_interpreter_call, image_generation_call,
+#   mcp_call, computer_call, custom_tool_call, local_shell_call.
+#
+# training_variant_of() is reached only from ResponsesConverter.postprocess_assistant_message_dict,
+# which passes response_output[-1].
+# That list is local to the function.
+# It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage
+# or NeMoGymResponseFunctionToolCall, all registered above.
+#
+# Each variant is also another member of NeMoGymResponseInputItem.
+# That union is validated in smart mode, so an unrecognised item reports the errors of every member.
+# Variants that nothing can emit only make those errors harder to read.
+#
+# The upstream models permit extra fields.
+# An item carrying token IDs without a declared variant still round-trips through its base class.
+# Add a variant when a converter emits that type with sampled token IDs.
 
-NeMoGymResponseInputItem = Union[
-    NeMoGymEasyInputMessage,
-    NeMoGymMessage,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymFunctionCallOutput,
-    NeMoGymResponseReasoningItem,
-    NeMoGymResponseMcpCall,
-    NeMoGymResponseMcpListTools,
-    NeMoGymResponseMcpApprovalRequest,
-    # For training:
-    NeMoGymEasyInputMessageForTraining,
-    NeMoGymMessageForTraining,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseReasoningItemForTraining,
+
+def training_variant_of(item_cls: type) -> type:
+    """Return the ForTraining subclass that carries token IDs for ``item_cls``.
+
+    Raises NotImplementedError rather than KeyError, so the message can name the class and the fix.
+    Either register the pair in RESPONSES_TO_TRAIN, or stop attaching token IDs to that item.
+    """
+    try:
+        return RESPONSES_TO_TRAIN[item_cls]
+    except KeyError:
+        raise NotImplementedError(
+            f"{item_cls.__name__} has no ForTraining variant, so token IDs and logprobs cannot be "
+            f"attached to it. Add it to RESPONSES_TO_TRAIN in nemo_gym/openai_utils.py if the policy "
+            f"samples this item's tokens; provider-executed hosted calls should not reach this path."
+        ) from None
+
+
+NeMoGymResponseInputItem = Annotated[
+    Union[
+        NeMoGymEasyInputMessage,
+        NeMoGymMessage,
+        NeMoGymResponseOutputMessage,
+        NeMoGymResponseFunctionToolCall,
+        NeMoGymFunctionCallOutput,
+        NeMoGymResponseReasoningItem,
+        NeMoGymResponseMcpCall,
+        NeMoGymResponseMcpListTools,
+        NeMoGymResponseMcpApprovalRequest,
+        # The SDK includes these items in both response output and request input.
+        # Outputs are replayed as input on subsequent turns.
+        NeMoGymResponseFileSearchToolCall,
+        NeMoGymResponseFunctionWebSearch,
+        NeMoGymResponseComputerToolCall,
+        NeMoGymImageGenerationCall,
+        NeMoGymResponseCodeInterpreterToolCall,
+        NeMoGymLocalShellCall,
+        NeMoGymResponseCustomToolCall,
+        NeMoGymComputerCallOutput,
+        NeMoGymResponseCustomToolCallOutput,
+        NeMoGymLocalShellCallOutput,
+        NeMoGymMcpApprovalResponse,
+        # Training variants.
+        NeMoGymEasyInputMessageForTraining,
+        NeMoGymMessageForTraining,
+        NeMoGymResponseOutputMessageForTraining,
+        NeMoGymResponseFunctionToolCallForTraining,
+        NeMoGymResponseReasoningItemForTraining,
+    ],
+    BeforeValidator(_validate_atomic_token_metadata),
 ]
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
@@ -345,7 +499,17 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 ########################################
 
 
-NeMoGymResponseOutputItem = NeMoGymResponseInputItem
+def _require_response_output_item_type(value: Any) -> Any:
+    """Prevent an untagged output item from being coerced into the wrong union member."""
+    if isinstance(value, dict) and "type" not in value:
+        raise ValueError("Responses API output items must include a type discriminator")
+    return value
+
+
+NeMoGymResponseOutputItem = Annotated[
+    NeMoGymResponseInputItem,
+    BeforeValidator(_require_response_output_item_type),
+]
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
@@ -418,16 +582,35 @@ class NeMoGymChatCompletionMessageToolCall(ChatCompletionMessageToolCall):
     function: NeMoGymFunction
 
 
+class NeMoGymChatCompletionMessageCustomToolCall(ChatCompletionMessageCustomToolCall):
+    pass
+
+
+NeMoGymChatCompletionMessageToolCallUnion = Annotated[
+    Union[
+        NeMoGymChatCompletionMessageToolCall,
+        NeMoGymChatCompletionMessageCustomToolCall,
+    ],
+    Field(discriminator="type"),
+]
+
+
 class NeMoGymChatCompletionMessage(ChatCompletionMessage):
-    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCall]] = None
+    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnion]] = None
 
 
 class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, TokenIDLogProbMixin):
     pass
 
 
+NeMoGymChatCompletionOutputMessage: TypeAlias = Annotated[
+    Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining],
+    BeforeValidator(_validate_atomic_token_metadata),
+]
+
+
 class NeMoGymChoice(Choice):
-    message: Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining]
+    message: NeMoGymChatCompletionOutputMessage
 
 
 class NeMoGymChatCompletion(ChatCompletion):
@@ -447,6 +630,19 @@ class NeMoGymChatCompletionToolParam(ChatCompletionToolParam):
     function: Required[NeMoGymFunctionDefinition]
 
 
+class NeMoGymChatCompletionCustomToolParam(ChatCompletionCustomToolParam):
+    pass
+
+
+NeMoGymChatCompletionToolUnionParam = Annotated[
+    Union[
+        NeMoGymChatCompletionToolParam,
+        NeMoGymChatCompletionCustomToolParam,
+    ],
+    Field(discriminator="type"),
+]
+
+
 class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextParam):
     pass
 
@@ -455,9 +651,19 @@ class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageP
     pass
 
 
+class NeMoGymChatCompletionContentPartInputAudioParam(ChatCompletionContentPartInputAudioParam):
+    pass
+
+
+class NeMoGymChatCompletionContentPartFileParam(ChatCompletionContentPartFileParam):
+    pass
+
+
 NeMoGymChatCompletionContentPartParam = Union[
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionContentPartImageParam,
+    NeMoGymChatCompletionContentPartInputAudioParam,
+    NeMoGymChatCompletionContentPartFileParam,
 ]
 
 
@@ -485,10 +691,23 @@ class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallPar
     function: NeMoGymChatCompletionMessageToolCallFunctionParam
 
 
+class NeMoGymChatCompletionMessageCustomToolCallParam(ChatCompletionMessageCustomToolCallParam):
+    pass
+
+
+NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
+    Union[
+        NeMoGymChatCompletionMessageToolCallParam,
+        NeMoGymChatCompletionMessageCustomToolCallParam,
+    ],
+    Field(discriminator="type"),
+]
+
+
 class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam, total=False):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
-    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallParam]] = None
+    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnionParam]] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -506,16 +725,19 @@ class NeMoGymFunctionToolParam(FunctionToolParam):
     pass
 
 
-NeMoGymChatCompletionMessageParam: TypeAlias = Union[
-    NeMoGymChatCompletionDeveloperMessageParam,
-    NeMoGymChatCompletionSystemMessageParam,
-    NeMoGymChatCompletionUserMessageParam,
-    NeMoGymChatCompletionAssistantMessageParam,
-    NeMoGymChatCompletionToolMessageParam,
-    # Don't add deprecated.
-    # NeMoGymChatCompletionFunctionMessageParam,
-    # Training:
-    NeMoGymChatCompletionAssistantMessageForTrainingParam,
+NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
+    Union[
+        NeMoGymChatCompletionDeveloperMessageParam,
+        NeMoGymChatCompletionSystemMessageParam,
+        NeMoGymChatCompletionUserMessageParam,
+        NeMoGymChatCompletionAssistantMessageParam,
+        NeMoGymChatCompletionToolMessageParam,
+        # Keep deprecated function messages out of this union.
+        # NeMoGymChatCompletionFunctionMessageParam,
+        # Training variants.
+        NeMoGymChatCompletionAssistantMessageForTrainingParam,
+    ],
+    BeforeValidator(_validate_atomic_token_metadata),
 ]
 
 
@@ -543,7 +765,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     stream_options: Optional[ChatCompletionStreamOptionsParam] = None
     temperature: Optional[float] = None
     tool_choice: Optional[ChatCompletionToolChoiceOptionParam] = None
-    tools: Optional[List[NeMoGymChatCompletionToolParam]] = None
+    tools: Optional[List[NeMoGymChatCompletionToolUnionParam]] = None
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
     user: Optional[str] = None

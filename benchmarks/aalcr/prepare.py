@@ -25,6 +25,8 @@ from zipfile import ZipFile
 import requests
 from datasets import load_dataset
 
+from nemo_gym.global_config import get_hf_token
+
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
@@ -52,7 +54,7 @@ def _dirty_filename(fname: str) -> str:
 def prepare() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    data = load_dataset("ArtificialAnalysis/AA-LCR", split="test")
+    data = load_dataset("ArtificialAnalysis/AA-LCR", split="test", token=get_hf_token())
 
     documents_url = "https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR/resolve/main/extracted_text/AA-LCR_extracted-text.zip"
     response = requests.get(documents_url)

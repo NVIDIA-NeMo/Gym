@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 from pathlib import Path
 from time import time
+from traceback import format_exc
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
@@ -169,7 +171,10 @@ fi
         await self._inner_container.upload(local_path=src, remote_path=str(dest))
 
     async def cleanup(self) -> None:
-        await self._inner_container.stop()
+        try:
+            await self._inner_container.stop()
+        except:
+            print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
 
 # TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
@@ -180,6 +185,7 @@ class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest
 
 class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    pty_session_id: str
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
@@ -247,13 +253,18 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(test_spec)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
-        # This may be overfit and needs to be config'd or detected.
-        # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
-        # For now, the activation is put on the harness side.
-        # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
+        pty_session = await eval_sandbox.pty.create()
 
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
+        if MAP_REPO_TO_EXT.get(test_spec.repo) == "py":
+            await eval_sandbox.pty.exec(
+                "source /opt/miniconda3/bin/activate && conda activate testbed", session=pty_session
+            )
+
+        return SWEBenchSeedSessionResponse(
+            sandbox_handle=eval_sandbox._handle.sandbox_id,
+            pty_session_id=pty_session.session_id,
+        )
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -288,13 +299,16 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             model_patch = body.patch
         else:
             original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
-            original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
             try:
+                original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
                 model_patch = model_patch_result.stdout
             except:
-                pass
-            await original_sandbox.stop()
+                print("Failed to extract patch from container", format_exc(), file=sys.stderr)
+            try:
+                await original_sandbox.stop()
+            except:
+                print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
 
         run_id = request.session[SESSION_ID_KEY]
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
