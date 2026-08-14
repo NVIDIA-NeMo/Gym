@@ -1744,91 +1744,50 @@ async def test_pty_exec_marker_edges() -> None:
     await sandbox.stop()
 
 
-class _DetachShellSession:
-    """Detachable live-session fake: the detached command "finishes" after
-    ``polls_needed`` reattaches; ``cat`` collection then serves the capture
-    files. Mirrors _LiveShellSession's marker convention."""
+class _DetachRunnerSession:
+    """Facade-level fake: records the detached run and returns a canned result."""
 
-    def __init__(self, *, polls_needed: int = 1, rc: int = 7) -> None:
-        self.written: list[bytes] = []
-        self.detaches = 0
-        self.reattaches = 0
+    def __init__(self, *, hang: bool = False, exit_code: int | None = 7) -> None:
+        self.commands: list[str] = []
         self.closed = False
-        self.attached = True
-        self._rc = rc
-        self._polls_needed = polls_needed
-        self._pending: list[bytes] = []
-        self._marker: bytes | None = None
+        self.reattaches = 0
+        self.mode = "pipe"
+        self._hang = hang
+        self._exit_code = exit_code
 
-    def _token(self, typed: str) -> str:
-        quoted = typed.splitlines()[-1].split("'")
-        return quoted[3] + quoted[5]
-
-    async def write(self, data: bytes) -> None:
-        assert self.attached, "write reached a detached session"
-        self.written.append(data)
-        typed = data.decode()
-        token = self._token(typed)
-        if "cat " in typed:
-            cat_target = typed.splitlines()[0].split(";")[0]
-            content = b"file-out" if ".out" in cat_target else b"file-err"
-            self._pending = [content, f"{token}:0\r\n".encode()]
-        else:
-            self._marker = f"{token}:{self._rc}\r\n".encode()
-            if self._polls_needed == 0:
-                self._pending = [self._marker]
-
-    async def read(self, *, timeout_s: float | None = None) -> bytes:
-        assert self.attached, "read reached a detached session"
-        if self._pending:
-            return self._pending.pop(0)
-        raise TimeoutError
-
-    async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
-        raise TimeoutError
-
-    async def detach(self) -> None:
-        assert self.attached
-        self.attached = False
-        self.detaches += 1
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        self.commands.append(command)
+        if self._hang:
+            await asyncio.sleep(3600)
+        return b"merged-output", self._exit_code
 
     async def reattach(self) -> None:
-        assert not self.attached
-        self.attached = True
         self.reattaches += 1
-        if self.reattaches >= self._polls_needed and self._marker is not None:
-            self._pending = [self._marker]
-            self._marker = None
 
     async def close(self) -> None:
         self.closed = True
 
 
-async def test_pty_exec_detach_polls_and_collects() -> None:
+async def test_pty_exec_detach_returns_merged_output() -> None:
     sandbox = AsyncSandbox(PlainSandboxProvider())
     await sandbox.start(SandboxSpec(image="image:tag"))
-    session = _DetachShellSession(polls_needed=2, rc=7)
+    session = _DetachRunnerSession()
 
-    result = await sandbox.pty.exec("make", session=session, detach=True, poll_interval_s=0.01, timeout_s=5)
+    result = await sandbox.pty.exec("make", session=session, detach=True, timeout_s=5)
 
-    assert (result.stdout, result.stderr, result.return_code) == ("file-out", "file-err", 7)
-    launch = session.written[0].decode()
-    assert "</dev/null >" in launch and ".out 2>" in launch, "output must be captured to files"
-    assert session.detaches == 2 and session.reattaches == 2
-    assert session.attached, "an explicit session must come back attached and reusable"
-    assert not session.closed
+    assert (result.stdout, result.stderr, result.return_code) == ("merged-output", None, 7)
+    assert session.commands == ["make"]
+    assert not session.closed, "an explicit session stays the caller's"
     await sandbox.stop()
 
 
-async def test_pty_exec_detach_fast_command_never_detaches() -> None:
+async def test_pty_exec_detach_mangled_exit_maps_to_pty_error() -> None:
     sandbox = AsyncSandbox(PlainSandboxProvider())
     await sandbox.start(SandboxSpec(image="image:tag"))
-    session = _DetachShellSession(polls_needed=0, rc=0)
 
-    result = await sandbox.pty.exec("true", session=session, detach=True, poll_interval_s=30, timeout_s=5)
+    result = await sandbox.pty.exec("make", session=_DetachRunnerSession(exit_code=None), detach=True, timeout_s=5)
 
-    assert result.return_code == 0
-    assert session.detaches == 0, "a command that finishes immediately must skip the detach cycle"
+    assert (result.return_code, result.error_type) == (125, "pty")
     await sandbox.stop()
 
 
@@ -1838,11 +1797,11 @@ async def test_pty_exec_detach_private_session_is_closed_and_not_default() -> No
     class DetachProvider(PlainSandboxProvider):
         def __init__(self) -> None:
             super().__init__()
-            self.sessions: list[_DetachShellSession] = []
+            self.sessions: list[_DetachRunnerSession] = []
 
-        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _DetachShellSession:
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _DetachRunnerSession:
             assert spec.env == {"A": "1"}
-            session = _DetachShellSession(polls_needed=1, rc=0)
+            session = _DetachRunnerSession(exit_code=0)
             self.sessions.append(session)
             return session
 
@@ -1850,7 +1809,7 @@ async def test_pty_exec_detach_private_session_is_closed_and_not_default() -> No
     sandbox = AsyncSandbox(provider)
     await sandbox.start(SandboxSpec(image="image:tag"))
 
-    result = await sandbox.pty.exec("make", detach=True, env={"A": "1"}, poll_interval_s=0.01, timeout_s=5)
+    result = await sandbox.pty.exec("make", detach=True, env={"A": "1"}, timeout_s=5)
 
     assert result.return_code == 0
     assert len(provider.sessions) == 1 and provider.sessions[0].closed
@@ -1858,13 +1817,22 @@ async def test_pty_exec_detach_private_session_is_closed_and_not_default() -> No
     await sandbox.stop()
 
 
-async def test_pty_exec_detach_timeout_mirrors_exec() -> None:
+async def test_pty_exec_detach_timeout_mirrors_exec_and_repairs_session() -> None:
     sandbox = AsyncSandbox(PlainSandboxProvider())
     await sandbox.start(SandboxSpec(image="image:tag"))
-    session = _DetachShellSession(polls_needed=10_000)
+    session = _DetachRunnerSession(hang=True)
 
-    result = await sandbox.pty.exec("stuck", session=session, detach=True, poll_interval_s=0.01, timeout_s=0.1)
+    result = await sandbox.pty.exec("stuck", session=session, detach=True, timeout_s=0.05)
 
     assert (result.return_code, result.error_type) == (125, "timeout")
     assert not session.closed, "an explicit session is the caller's to discard"
+    assert session.reattaches == 1, "a timeout must leave the session attached"
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_requires_a_capable_session() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    with pytest.raises(NotImplementedError, match="detached execution"):
+        await sandbox.pty.exec("make", session=_LiveShellSession(), detach=True)
     await sandbox.stop()

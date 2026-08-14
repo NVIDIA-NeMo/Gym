@@ -311,15 +311,11 @@ class SandboxPtySession(Protocol):
         """Block until the process exits and return its exit code."""
         ...
 
-    async def detach(self) -> None:
-        """Drop the transport while the server-side session keeps running; a
-        detached session refuses reads and writes until ``reattach()``. The
-        server retains a bounded window of output produced in the meantime."""
-        ...
-
-    async def reattach(self) -> None:
-        """Restore a ``detach()``-ed session's transport, replaying output
-        produced while detached."""
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        """Run one command holding the transport only for brief completion
+        polls; returns ``(merged output, exit code or None)``. The server
+        retains a bounded window of output between polls, and exceeding it
+        raises rather than returning truncated output."""
         ...
 
     async def close(self) -> None:

@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import shlex
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlencode
@@ -112,6 +113,7 @@ class OpenSandboxPtySession:
         self._closed = False
         self._detached = False
         self._received = 0  # bytes of the session's retained stream seen so far
+        self._replay_gap = 0  # bytes the server evicted before we could replay them
         self._pump_task = asyncio.create_task(self._pump())
 
     @property
@@ -142,9 +144,11 @@ class OpenSandboxPtySession:
                     await self._stderr.put(data[1:])
                 elif channel == CHAN_REPLAY and len(data) > REPLAY_HEADER_BYTES:
                     # Replay is one merged stream regardless of mode. The
-                    # server clamps a `since` older than its 1 MiB buffer,
-                    # so a higher offset here means output was evicted.
+                    # server clamps a `since` older than its retained window,
+                    # so a frame starting past what we saw means eviction.
                     self.replay_offset = int.from_bytes(data[1:REPLAY_HEADER_BYTES], "big")
+                    if self.replay_offset > self._received:
+                        self._replay_gap += self.replay_offset - self._received
                     self._received = self.replay_offset + len(data) - REPLAY_HEADER_BYTES
                     await self._output.put(data[REPLAY_HEADER_BYTES:])
             elif message.type == aiohttp.WSMsgType.TEXT:
@@ -237,6 +241,8 @@ class OpenSandboxPtySession:
         await asyncio.wait_for(asyncio.shield(self._connected), timeout=timeout_s)
 
     async def _read_stream(self, queue: asyncio.Queue[bytes | None], timeout_s: float | None) -> bytes:
+        if self._detached and not self._closed:
+            raise SandboxPtyError("PTY session is detached; reattach() first")
         chunk = await asyncio.wait_for(queue.get(), timeout=timeout_s)
         if chunk is None:
             # Keep the EOF observable by subsequent reads and iterators.
@@ -295,10 +301,13 @@ class OpenSandboxPtySession:
         last byte this object saw. A detached session refuses reads and
         writes; ``close()`` still releases it (and ends it when owned).
         """
-        if self._closed:
-            raise SandboxPtyError("PTY session is closed")
         if self._detached:
             return
+        if self.closed:
+            # Covers close() and a pump that already ended (process exit,
+            # takeover, connection loss): a dead session must not be
+            # resurrected into a not-closed, prune-evading detached state.
+            raise SandboxPtyError("PTY session is closed")
         self._detached = True
         self._pump_task.cancel()
         # Let the pump observe the detach before the socket goes away.
@@ -321,6 +330,70 @@ class OpenSandboxPtySession:
         )
         self._detached = False
         self._pump_task = asyncio.create_task(self._pump())
+
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        """Run one command holding the socket only for brief polls.
+
+        The command is written with the same marker discipline as session
+        exec, the socket is dropped, and every ``poll_interval_s`` the session
+        re-attaches and drains output produced in the meantime from the
+        server's retained window. Nothing is written to the sandbox
+        filesystem; if the command produced more output between polls than
+        the server retains, the loss is detected and raised rather than
+        returned truncated. Returns ``(output, exit_code)`` — output is one
+        merged stream (replayed bytes carry no stdout/stderr split) and
+        ``exit_code`` is ``None`` when the marker line came back mangled.
+        The session ends attached. Callers serialize: one command per
+        session at a time, as with session exec.
+        """
+        token = f"NGPTY{uuid.uuid4().hex[:12]}"
+        needle = f"{token}:".encode()
+        # Marker from two literals so the echo cannot match it; brace group
+        # keeps shell state while putting stdin at EOF (see _run_in_pty_session
+        # in the api module for the same discipline).
+        await self.write(
+            f"{{ {command}\n}} </dev/null\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
+        )
+        buffer = bytearray()
+        while True:
+            while needle not in buffer:
+                try:
+                    chunk = await self.read(timeout_s=1.0)
+                except (TimeoutError, asyncio.TimeoutError):
+                    break  # stream is quiet; wait detached
+                if not chunk:
+                    raise SandboxPtyError("PTY session ended before the command finished")
+                buffer.extend(chunk)
+            # Checked after draining (replay frames land asynchronously), and
+            # before accepting the marker: a mid-stream hole must not come
+            # back as silently truncated output.
+            if self._replay_gap:
+                raise SandboxPtyError(
+                    "PTY output exceeded the server's retained window while detached; "
+                    "run bulk-output commands attached or through the exec API instead"
+                )
+            if needle in buffer:
+                break
+            await self.detach()
+            await asyncio.sleep(poll_interval_s)
+            await self.reattach()
+        output, _, trailing = bytes(buffer).partition(needle)
+        while b"\n" not in trailing:
+            # The status digits can straddle the chunk that carried the marker.
+            chunk = await self.read(timeout_s=5.0)
+            if not chunk:
+                break
+            trailing += chunk
+        exit_text = trailing.split(b"\n", 1)[0].strip()
+        # Pipe mode splits live (attached) stderr onto its own queue; fold any
+        # of it into the merged result, ordering best-effort.
+        stderr = bytearray()
+        try:
+            while chunk := await self.read_stderr(timeout_s=0.05):
+                stderr.extend(chunk)
+        except (TimeoutError, asyncio.TimeoutError):
+            pass
+        return bytes(output + stderr), int(exit_text) if exit_text.isdigit() else None
 
     async def close(self) -> None:
         if self._closed:

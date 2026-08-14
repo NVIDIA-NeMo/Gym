@@ -1010,3 +1010,72 @@ async def test_detach_after_close_raises() -> None:
     await session.close()
     with pytest.raises(SandboxPtyError, match="closed"):
         await session.detach()
+
+
+class _LaunchWs(FakeWs):
+    """Captures the marker token from the launched command into shared state."""
+
+    def __init__(self, messages: list[SimpleNamespace], state: dict[str, Any]) -> None:
+        super().__init__(messages)
+        self._state = state
+
+    async def send_bytes(self, data: bytes) -> None:
+        await super().send_bytes(data)
+        self._state["launch"] = data
+        quoted = data.decode().splitlines()[-1].split("'")
+        self._state["marker"] = f"{quoted[3]}{quoted[5]}:0\r\n".encode()
+
+
+class _ReplayWs(FakeWs):
+    """Serves one replay frame built from the captured marker."""
+
+    def __init__(self, state: dict[str, Any], *, offset: int) -> None:
+        super().__init__([CONNECTED])
+        self._state = state
+        self._offset = offset
+
+    async def __anext__(self) -> SimpleNamespace:
+        if not self._messages and not self._state.get("served"):
+            self._state["served"] = True
+            payload = b"work-output\n" + self._state["marker"]
+            return _binary(b"\x03" + struct.pack(">Q", self._offset) + payload)
+        return await super().__anext__()
+
+
+async def _detached_session_over(reply_offset: int) -> tuple[OpenSandboxPtySession, dict[str, Any], FakeHttpClient]:
+    state: dict[str, Any] = {}
+    ws1 = _LaunchWs([CONNECTED], state)
+    client = FakeHttpClient(ws=[_ReplayWs(state, offset=reply_offset)])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws1,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    return session, state, client
+
+
+async def test_run_detached_polls_and_returns_marker_delimited_output() -> None:
+    session, state, client = await _detached_session_over(reply_offset=0)
+    output, exit_code = await session.run_detached("work", poll_interval_s=0.01)
+    assert (output, exit_code) == (b"work-output\n", 0)
+    assert "since=0" in client.ws_calls[-1][0] and "takeover=1" in client.ws_calls[-1][0]
+    await session.close()
+
+
+async def test_run_detached_raises_on_evicted_output() -> None:
+    # The replay frame starts past everything we received: bytes were evicted
+    # from the server's retained window while detached.
+    session, _, _ = await _detached_session_over(reply_offset=4096)
+    with pytest.raises(SandboxPtyError, match="retained window"):
+        await session.run_detached("chatty", poll_interval_s=0.01)
+    await session.close()
+
+
+async def test_run_detached_launch_uses_stdin_at_eof() -> None:
+    session, state, _ = await _detached_session_over(reply_offset=0)
+    await session.run_detached("work", poll_interval_s=0.01)
+    assert b"</dev/null" in state["launch"], "detached commands must not inherit the session's endless stdin"
+    await session.close()

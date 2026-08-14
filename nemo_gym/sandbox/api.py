@@ -59,20 +59,6 @@ def _pty_timeout_result(command: str, timeout_s: float | int | None, *, reusable
     )
 
 
-async def _scan_for_marker(session: SandboxPtySession, needle: bytes, buffer: bytearray, quiet_s: float) -> bool:
-    """Drain whatever the session has buffered into ``buffer``; True once
-    ``needle`` is present, False when the stream goes quiet without it."""
-    while needle not in buffer:
-        try:
-            chunk = await session.read(timeout_s=quiet_s)
-        except (TimeoutError, asyncio.TimeoutError):
-            return False
-        if not chunk:
-            raise SandboxPtyError("PTY session ended before the command finished")
-        buffer.extend(chunk)
-    return True
-
-
 async def _run_in_pty_session(session: SandboxPtySession, command: str) -> SandboxExecResult:
     """Run ``command`` in a live session, delimited by a unique marker."""
     token = f"NGPTY{uuid.uuid4().hex[:12]}"
@@ -232,17 +218,19 @@ class SandboxPty:
 
         With ``detach=True`` the command runs without holding a connection
         while it works: it starts in a session, the socket is dropped, and the
-        session is briefly re-attached every ``poll_interval_s`` to check for
-        completion, so a long command occupies a connection for milliseconds
-        per poll instead of its whole runtime (completion latency is bounded
-        by ``poll_interval_s``). Output is captured to files inside the
-        sandbox — the server retains only ~1 MiB of terminal output across a
-        detach — and collected when the command finishes, so stdout and
-        stderr come back separated in both modes. A detached exec never
-        reuses the default-shell session implicitly: without ``session`` it
-        opens a private one. With ``session``, the session is detached while
-        the command works, must not be used concurrently, and is attached and
-        reusable again when this returns.
+        session is briefly re-attached every ``poll_interval_s`` to drain
+        output and check for completion, so a long command occupies a
+        connection for milliseconds per poll instead of its whole runtime
+        (completion latency is bounded by ``poll_interval_s``). Nothing is
+        written to the sandbox filesystem; output rides the server's retained
+        window (~1 MiB) between polls, comes back as one merged stream
+        (``stderr`` is ``None``), and exceeding the window raises rather than
+        returning truncated output — run bulk-output commands attached or via
+        the exec API instead. A detached exec never reuses the default-shell
+        session implicitly: without ``session`` it opens a private one. With
+        ``session``, the session is detached while the command works, must
+        not be used concurrently, and is attached and reusable again when
+        this returns.
 
         PTY mode returns all output on ``stdout`` and ``None`` stderr; pipe mode
         splits the two. A command that outlives ``timeout_s`` returns
@@ -331,7 +319,8 @@ class SandboxPty:
         timeout_s: int | float | None,
         poll_interval_s: float,
     ) -> SandboxExecResult:
-        """``exec(detach=True)``: start, drop the socket, poll by re-attach."""
+        """``exec(detach=True)``: hand the command to the session's detached
+        runner, which holds the socket only for brief completion polls."""
         private = session is None
         if private:
             session = await self.create(cwd=cwd, env=env, user=user, rows=rows, cols=cols, pty=pty)
@@ -344,51 +333,29 @@ class SandboxPty:
                 "cwd/env/user apply only when a detached exec opens its own session; "
                 "for an existing session they are fixed at pty.create() time"
             )
-        token = f"NGPTY{uuid.uuid4().hex[:12]}"
-        capture = f"/tmp/.ng_{token}"
-        needle = f"{token}:".encode()
-        buffer = bytearray()
+        if not hasattr(session, "run_detached"):
+            raise NotImplementedError(f"{type(session).__name__} does not support detached execution")
         try:
             async with asyncio.timeout(timeout_s):
+                # Same serialization as attached session execs: one command per
+                # sandbox at a time, for the command's whole duration.
                 async with self._session_exec_lock:
-                    # Same marker discipline as _run_in_pty_session, plus file
-                    # capture: the replay ring cannot carry a chatty command's
-                    # output across a detach, the files can.
-                    await session.write(
-                        f"{{ {command}\n}} </dev/null >{capture}.out 2>{capture}.err\n"
-                        f"printf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
-                    )
-                    found = await _scan_for_marker(session, needle, buffer, quiet_s=1.0)
-                while not found:
-                    await session.detach()
-                    await asyncio.sleep(poll_interval_s)
-                    async with self._session_exec_lock:
-                        await session.reattach()
-                        found = await _scan_for_marker(session, needle, buffer, quiet_s=1.0)
-                async with self._session_exec_lock:
-                    trailing = bytes(buffer).partition(needle)[2]
-                    while b"\n" not in trailing:
-                        # The status digits can straddle the chunk with the marker.
-                        chunk = await session.read()
-                        if not chunk:
-                            break
-                        trailing += chunk
-                    exit_text = trailing.split(b"\n", 1)[0].strip()
-                    stdout_res = await _run_in_pty_session(session, f"cat {capture}.out")
-                    stderr_res = await _run_in_pty_session(
-                        session, f"cat {capture}.err; rm -f {capture}.out {capture}.err"
-                    )
+                    output, exit_code = await session.run_detached(command, poll_interval_s=poll_interval_s)
         except (TimeoutError, asyncio.TimeoutError):
             return _pty_timeout_result(command, timeout_s, reusable=False)
         finally:
             if private:
                 await session.close()
-        parsed = exit_text.isdigit()
+            else:
+                try:
+                    await session.reattach()  # no-op unless a timeout left it detached
+                except Exception:
+                    pass
         return SandboxExecResult(
-            stdout=stdout_res.stdout,
-            stderr=stderr_res.stdout or None,
-            return_code=int(exit_text) if parsed else SANDBOX_PTY_RUNTIME_RETURN_CODE,
-            error_type=None if parsed else "pty",
+            stdout=output.decode(errors="replace"),
+            stderr=None,
+            return_code=exit_code if exit_code is not None else SANDBOX_PTY_RUNTIME_RETURN_CODE,
+            error_type=None if exit_code is not None else "pty",
         )
 
 
