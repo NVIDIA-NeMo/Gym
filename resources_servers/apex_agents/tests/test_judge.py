@@ -39,7 +39,7 @@ def test_console_prompt_excludes_file_artifacts() -> None:
         changes=[],
         context_window_size=32768,
     )
-    assert "The answer" in prompt
+    assert "<AGENT_OUTPUT>\n<TEXT_RESPONSE>\nThe answer\n</TEXT_RESPONSE>\n</AGENT_OUTPUT>" in prompt
     assert "This criterion evaluates the agent's final text response only" in prompt
     assert "<ARTIFACT_STRUCTURE>" not in prompt
 
@@ -109,6 +109,7 @@ async def test_apex_grading_extracts_output_and_returns_binary_score(monkeypatch
     assert request["json"]["model"] == "judge-model"
     assert request["json"]["reasoning_effort"] == "low"
     assert request["json"]["response_format"] == {"type": "json_object"}
+    assert "<TEXT_RESPONSE>\nDone\n</TEXT_RESPONSE>" in request["json"]["messages"][1]["content"]
 
 
 @pytest.mark.asyncio
