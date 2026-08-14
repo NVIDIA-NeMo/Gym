@@ -38,6 +38,9 @@ set -euo pipefail
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
+export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
+export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
+
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
@@ -188,7 +191,31 @@ cleanup_server() {
     kill "\$server_step" 2>/dev/null || true
     wait "\$server_step" 2>/dev/null || true
 }
-trap cleanup_server EXIT INT TERM
+
+cleanup_job() {
+    job_status=\$?
+    trap - EXIT INT TERM
+    set +e
+    cleanup_server
+
+    if (( $should_run_eval )); then
+        OPENSANDBOX_DOMAIN="\${OPENSANDBOX_DOMAIN:-\$(awk '/^sandbox:/{s=1} s && /domain:/{print \$2; exit}' "\$SLURM_SUBMIT_DIR/env.yaml")}" \
+        OPENSANDBOX_PROTOCOL="\${OPENSANDBOX_PROTOCOL:-\$(awk '/^sandbox:/{s=1} s && /protocol:/{print \$2; exit}' "\$SLURM_SUBMIT_DIR/env.yaml")}" \
+        OPENSANDBOX_API_KEY="\${OPENSANDBOX_API_KEY:-\$(awk '/^sandbox:/{s=1} s && /api_key:/{print \$2; exit}' "\$SLURM_SUBMIT_DIR/env.yaml")}" \
+        python3 "\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            --run-id "\$SLURM_JOB_ID" \
+            --user "\${NEMO_GYM_USER:-\$SLURM_JOB_USER}" \
+            --reap
+        cleanup_status=\$?
+        if (( cleanup_status != 0 )); then
+            echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
+        fi
+    fi
+    exit "\$job_status"
+}
+trap cleanup_job EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
@@ -231,8 +258,6 @@ if (( $should_run_eval )); then
         exit "\$completed_status"
     fi
 
-    cleanup_server
-    trap - EXIT INT TERM
     exit "\$completed_status"
 fi
 
