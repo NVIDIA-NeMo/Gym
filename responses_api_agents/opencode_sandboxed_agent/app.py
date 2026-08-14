@@ -410,18 +410,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # Propagating the sandbox handle
         cookies["sandbox_id"] = request.session[SESSION_ID_KEY]
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = cookies | response.cookies
+        request._cookies = cookies
+        response = await self.responses(request, body.responses_create_params)
 
-        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
-        )
+        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
