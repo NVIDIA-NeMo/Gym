@@ -14,6 +14,8 @@ VLLM_COMMON_ARGS=(
     --mm-encoder-tp-mode data
     --enable-chunked-prefill
     --no-enable-prefix-caching
+    --kv-cache-dtype fp8
+    --no-calculate-kv-scales
     --enable-expert-parallel
     --no-disable-hybrid-kv-cache-manager
     --no-async-scheduling
