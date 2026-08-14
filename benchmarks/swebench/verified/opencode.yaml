@@ -9,6 +9,8 @@ opencode_sandboxed_agent_swebench_verified:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
+      num_workers: 4
+
       resources_server:
         type: resources_servers
         name: opencode_swebench_verified_resources_server
