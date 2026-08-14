@@ -96,6 +96,11 @@ class BaseVerifyRequest(BaseRunRequest):
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
+    # Elaborates on why `reward` may not be fully genuine, allowing the upstream
+    # training loop to decide on how to treat the response.
+    # For example, timeouts may result in reward=0, and we should be honest about the reason.
+    failure_reason: Optional[str] = None
+
 
 class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
     """Base verify response for environments with multiple reward objectives.
