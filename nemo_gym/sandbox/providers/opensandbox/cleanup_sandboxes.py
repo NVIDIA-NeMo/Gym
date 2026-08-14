@@ -5,22 +5,23 @@
 """Audit or delete OpenSandbox sandboxes owned by one exact run and user."""
 
 import argparse
-import json
+import asyncio
 import os
 import re
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any
+
+import aiohttp
 
 
 RUN_METADATA_KEY = "nemo-gym.nvidia.com/run"
 USER_METADATA_KEY = "nemo-gym.nvidia.com/user"
 REQUEST_TIMEOUT_SECONDS = 30
+REAP_CONCURRENCY = 32
 
 
-def cleanup_sandboxes(
+async def cleanup_sandboxes(
     *,
     domain: str,
     protocol: str,
@@ -42,67 +43,81 @@ def cleanup_sandboxes(
         normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
         scope[key] = normalized[:63].strip("._-") or "metadata"
 
-    headers = {"OPEN-SANDBOX-API-KEY": access_key}
-    matches: list[dict[str, Any]] = []
-    page = 1
-    while True:
-        query = urllib.parse.urlencode({"page": page, "pageSize": 100})
-        request = urllib.request.Request(f"{base_url}/v1/sandboxes?{query}", headers=headers)
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            payload = json.load(response)
+    connector = aiohttp.TCPConnector(limit=REAP_CONCURRENCY, limit_per_host=REAP_CONCURRENCY)
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+    async with aiohttp.ClientSession(
+        connector=connector,
+        headers={"OPEN-SANDBOX-API-KEY": access_key},
+        timeout=timeout,
+    ) as session:
+        matches: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            async with session.get(
+                f"{base_url}/v1/sandboxes",
+                allow_redirects=False,
+                params={"page": page, "pageSize": 100},
+            ) as response:
+                if not 200 <= response.status < 300:
+                    raise ValueError(f"OpenSandbox list request failed -> HTTP {response.status}")
+                payload = await response.json(content_type=None)
 
-        if not isinstance(payload, dict):
-            raise ValueError("OpenSandbox list response must be an object")
-        items = payload.get("items")
-        pagination = payload.get("pagination")
-        if not isinstance(items, list) or not isinstance(pagination, dict):
-            raise ValueError("OpenSandbox list response is missing items or pagination")
-        has_next_page = pagination.get("hasNextPage")
-        if not isinstance(has_next_page, bool):
-            raise ValueError("OpenSandbox list response is missing pagination.hasNextPage")
+            if not isinstance(payload, dict):
+                raise ValueError("OpenSandbox list response must be an object")
+            items = payload.get("items")
+            pagination = payload.get("pagination")
+            if not isinstance(items, list) or not isinstance(pagination, dict):
+                raise ValueError("OpenSandbox list response is missing items or pagination")
+            has_next_page = pagination.get("hasNextPage")
+            if not isinstance(has_next_page, bool):
+                raise ValueError("OpenSandbox list response is missing pagination.hasNextPage")
 
-        for item in items:
-            if not isinstance(item, dict):
-                raise ValueError("OpenSandbox list response contains an invalid sandbox")
-            metadata = item.get("metadata") or {}
-            if not isinstance(metadata, dict):
-                raise ValueError("OpenSandbox sandbox metadata must be an object")
-            if all(metadata.get(key) == value for key, value in scope.items()):
-                if not isinstance(item.get("id"), str) or not item["id"]:
-                    raise ValueError("OpenSandbox list response contains a sandbox without an id")
-                matches.append(item)
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError("OpenSandbox list response contains an invalid sandbox")
+                metadata = item.get("metadata") or {}
+                if not isinstance(metadata, dict):
+                    raise ValueError("OpenSandbox sandbox metadata must be an object")
+                if all(metadata.get(key) == value for key, value in scope.items()):
+                    if not isinstance(item.get("id"), str) or not item["id"]:
+                        raise ValueError("OpenSandbox list response contains a sandbox without an id")
+                    matches.append(item)
 
-        if not has_next_page:
-            break
-        page += 1
+            if not has_next_page:
+                break
+            page += 1
 
-    action = "Deleting" if reap else "Would delete"
-    print(
-        f"{action} {len(matches)} OpenSandbox sandbox(es) "
-        f"for run {scope[RUN_METADATA_KEY]!r} and user {scope[USER_METADATA_KEY]!r}"
-    )
-    if not reap:
-        return 0
+        action = "Deleting" if reap else "Would delete"
+        print(
+            f"{action} {len(matches)} OpenSandbox sandbox(es) "
+            f"for run {scope[RUN_METADATA_KEY]!r} and user {scope[USER_METADATA_KEY]!r}"
+        )
+        if not reap:
+            return 0
 
-    failures = 0
-    for item in matches:
-        sandbox_id = item["id"]
-        url = f"{base_url}/v1/sandboxes/{urllib.parse.quote(sandbox_id, safe='')}"
-        request = urllib.request.Request(url, headers=headers, method="DELETE")
-        try:
-            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                print(f"Deleted {sandbox_id} -> HTTP {response.status}")
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                print(f"Sandbox {sandbox_id} was already gone")
-                continue
-            failures += 1
-            print(f"Failed to delete {sandbox_id} -> HTTP {error.code}", file=sys.stderr)
-        except OSError as error:
-            failures += 1
-            print(f"Failed to delete {sandbox_id} -> {error}", file=sys.stderr)
+        semaphore = asyncio.Semaphore(REAP_CONCURRENCY)
 
-    return int(failures > 0)
+        async def delete(item: dict[str, Any]) -> int:
+            sandbox_id = item["id"]
+            url = f"{base_url}/v1/sandboxes/{urllib.parse.quote(sandbox_id, safe='')}"
+            async with semaphore:
+                try:
+                    async with session.delete(url, allow_redirects=False) as response:
+                        await response.read()
+                        if response.status == 404:
+                            print(f"Sandbox {sandbox_id} was already gone")
+                            return 0
+                        if not 200 <= response.status < 300:
+                            print(f"Failed to delete {sandbox_id} -> HTTP {response.status}", file=sys.stderr)
+                            return 1
+                        print(f"Deleted {sandbox_id} -> HTTP {response.status}")
+                        return 0
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
+                    print(f"Failed to delete {sandbox_id} -> {error}", file=sys.stderr)
+                    return 1
+
+        failures = sum(await asyncio.gather(*(delete(item) for item in matches)))
+        return int(failures > 0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,15 +144,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("OPENSANDBOX_API_KEY is required")
 
     try:
-        return cleanup_sandboxes(
-            domain=args.domain,
-            protocol=args.protocol,
-            access_key=access_key,
-            run_id=args.run_id,
-            user=args.user,
-            reap=args.reap,
+        return asyncio.run(
+            cleanup_sandboxes(
+                domain=args.domain,
+                protocol=args.protocol,
+                access_key=access_key,
+                run_id=args.run_id,
+                user=args.user,
+                reap=args.reap,
+            )
         )
-    except (OSError, ValueError) as error:
+    except (aiohttp.ClientError, OSError, ValueError) as error:
         print(f"OpenSandbox cleanup failed: {error}", file=sys.stderr)
         return 1
 

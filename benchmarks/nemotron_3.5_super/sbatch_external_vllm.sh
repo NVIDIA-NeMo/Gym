@@ -46,6 +46,29 @@ cd /opt/Gym
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
+cleanup_sandboxes() {
+    eval_status=\$?
+    trap - EXIT INT TERM
+    set +e
+
+    export OPENSANDBOX_DOMAIN="\${OPENSANDBOX_DOMAIN:-\$(awk '/^sandbox:/{s=1} s && /domain:/{print \$2; exit}' env.yaml)}"
+    export OPENSANDBOX_PROTOCOL="\${OPENSANDBOX_PROTOCOL:-\$(awk '/^sandbox:/{s=1} s && /protocol:/{print \$2; exit}' env.yaml)}"
+    export OPENSANDBOX_API_KEY="\${OPENSANDBOX_API_KEY:-\$(awk '/^sandbox:/{s=1} s && /api_key:/{print \$2; exit}' env.yaml)}"
+
+    python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py \
+        --run-id "\$SLURM_JOB_ID" \
+        --user "\$NEMO_GYM_USER" \
+        --reap
+    cleanup_status=\$?
+    if (( cleanup_status != 0 )); then
+        echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
+    fi
+    exit "\$eval_status"
+}
+trap cleanup_sandboxes EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
@@ -207,30 +230,12 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     ' bash bash -lc "\$VLLM_PD_WORKLOAD" &
 server_step=\$!
 
-cleanup_server() {
-    kill "\$server_step" 2>/dev/null || true
-    wait "\$server_step" 2>/dev/null || true
-}
-
 cleanup_job() {
     job_status=\$?
     trap - EXIT INT TERM
     set +e
-    cleanup_server
-
-    if (( $should_run_eval )); then
-        OPENSANDBOX_DOMAIN="\${OPENSANDBOX_DOMAIN:-\$(awk '/^sandbox:/{s=1} s && /domain:/{print \$2; exit}' "\$SLURM_SUBMIT_DIR/env.yaml")}" \
-        OPENSANDBOX_PROTOCOL="\${OPENSANDBOX_PROTOCOL:-\$(awk '/^sandbox:/{s=1} s && /protocol:/{print \$2; exit}' "\$SLURM_SUBMIT_DIR/env.yaml")}" \
-        OPENSANDBOX_API_KEY="\${OPENSANDBOX_API_KEY:-\$(awk '/^sandbox:/{s=1} s && /api_key:/{print \$2; exit}' "\$SLURM_SUBMIT_DIR/env.yaml")}" \
-        python3 "\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            --run-id "\$SLURM_JOB_ID" \
-            --user "\${NEMO_GYM_USER:-\$SLURM_JOB_USER}" \
-            --reap
-        cleanup_status=\$?
-        if (( cleanup_status != 0 )); then
-            echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
-        fi
-    fi
+    kill "\$server_step" 2>/dev/null || true
+    wait "\$server_step" 2>/dev/null || true
     exit "\$job_status"
 }
 trap cleanup_job EXIT
