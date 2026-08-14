@@ -198,8 +198,6 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
 
-        self._num_sandboxes_created = 0
-
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
@@ -224,9 +222,6 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         )
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
-        self._num_sandboxes_created += 1
-        # TODO @bxyu-nvidia: Remove
-        print(f"SWE Bench resources server created {self._num_sandboxes_created} sandboxes", file=sys.stderr)
 
         if MAP_REPO_TO_EXT.get(test_spec.repo) == "java":
             await self._apply_sandbox_patches(eval_sandbox)
