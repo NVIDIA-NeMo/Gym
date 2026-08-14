@@ -10,11 +10,11 @@ apex_agents:
       judge_model_server:
         type: responses_api_models
         name: apex_judge_model
-      judge_model: ${oc.select:judge_model_name,judge}
-      judge_create_params_overrides: ${oc.select:apex_judge_create_params_overrides,{}}
+      judge_model: ${oc.select:judge_model_name,gemini-3-flash}
+      judge_create_params_overrides:
+        reasoning_effort: low
       judge_context_window_size: ${oc.select:apex_judge_context_window_size,32768}
       num_processes: ${oc.select:apex_verifier_concurrency,8}
-      capture_judge_traces: ${oc.select:apex_capture_judge_traces,true}
       max_snapshot_bytes: ${oc.select:apex_verifier_max_snapshot_bytes,${oc.select:apex_agent_max_snapshot_bytes,null}}
       max_uncompressed_bytes: ${oc.select:apex_verifier_max_uncompressed_bytes,536870912}
       max_artifact_files: ${oc.select:apex_verifier_max_artifact_files,2000}
@@ -32,5 +32,5 @@ apex_judge_model:
       entrypoint: app.py
       openai_base_url: ${judge_base_url}
       openai_api_key: ${judge_api_key}
-      openai_model: ${judge_model_name}
+      openai_model: ${oc.select:judge_model_name,gemini-3-flash}
       openai_default_headers: {}

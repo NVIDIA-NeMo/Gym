@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gym agent that runs the upstream Apex harness in a per-task sandbox."""
+"""Gym agent that runs Stirrup in a pinned Archipelago task sandbox."""
 
 from __future__ import annotations
 
@@ -37,20 +37,19 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, resolv
 from nemo_gym.sandbox.config import resolve_provider_metadata
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.apex_agent.runtime_setup import (
-    HARNESS_REVISION,
     ApexImageBuildConfig,
-    harness_cache_path,
-    prepare_harness_source_archive,
     resolve_image,
+    stirrup_cache_path,
 )
 
 
 LOG = logging.getLogger(__name__)
 _RUNNER_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
-_HARNESS_SETUP_PATH = Path(__file__).with_name("setup_harness.sh")
-_HARNESS_REQUIREMENTS_PATH = Path(__file__).with_name("harness-requirements.txt")
+_STIRRUP_RUNTIME_PATH = Path(__file__).with_name("stirrup_runtime.py")
+_STIRRUP_SETUP_PATH = Path(__file__).with_name("setup_stirrup.sh")
+_STIRRUP_REQUIREMENTS_PATH = Path(__file__).with_name("stirrup-requirements.txt")
 _GUEST_ROOT = "/app/apex-gym"
-_HARNESS_ROOT = "/app/apex-harness-runtime"
+_STIRRUP_ROOT = "/app/stirrup-runtime"
 
 
 class ApexAgentConfig(BaseResponsesAPIAgentConfig):
@@ -61,21 +60,18 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = Field(gt=0)
     image: str
     image_build: ApexImageBuildConfig
-    harness_repo: str
-    harness_root: Optional[str]
-    harness_github_token: Optional[str]
     sandbox_provider: str | Dict[str, Any]
     sandbox_spec: Dict[str, Any]
 
     edgar_user_agent: Optional[str]
-    max_turns: int = Field(gt=0)
+    max_turns: int = Field(gt=0, le=200)
     max_output_tokens: int = Field(gt=0)
-    max_tool_calls_per_turn: int = Field(gt=0)
     temperature: float = Field(ge=0.0)
     top_p: float = Field(gt=0.0, le=1.0)
 
     max_snapshot_bytes: Optional[int] = Field(default=None, gt=0)
     max_world_bytes: Optional[int] = Field(default=None, gt=0)
+    artifact_output_dir: Optional[str] = None
 
 
 class ApexAgentRunRequest(BaseRunRequest):
@@ -129,8 +125,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
     _sandbox_metadata: Any = None
     _setup_lock: Any = None
     _image: Any = None
-    _harness_source_archive: Any = None
-    _harness_archive: Any = None
+    _stirrup_archive: Any = None
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -140,13 +135,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         self._sandbox_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
         self._setup_lock = asyncio.Lock()
         self._image = None
-        self._harness_source_archive = None
-        self._harness_archive = None
-
-    def setup_webserver(self):
-        app = super().setup_webserver()
-        app.router.on_startup.append(self._preflight_harness_source)
-        return app
+        self._stirrup_archive = None
 
     async def responses(
         self,
@@ -175,34 +164,20 @@ class ApexAgent(SimpleResponsesAPIAgent):
             resources = SandboxResources.from_mapping(resources)
         return extra, provider_options, metadata, resources
 
-    async def _preflight_harness_source(self) -> None:
-        """Fetch the pinned harness before the agent server accepts rollouts."""
-        async with self._setup_lock:
-            if self._harness_source_archive is None:
-                LOG.info("Checking access to pinned Apex harness commit %s", HARNESS_REVISION)
-                self._harness_source_archive = await asyncio.to_thread(
-                    prepare_harness_source_archive,
-                    agent_dir=Path(__file__).parent,
-                    repo=self.config.harness_repo,
-                    source_root=self.config.harness_root,
-                    github_token=self.config.harness_github_token,
-                )
-
-    async def _build_harness_archive(self, image: str, source_archive: Path) -> Path:
-        """Build the pinned upstream harness once inside the Archipelago base image."""
-        archive = harness_cache_path(
+    async def _build_stirrup_archive(self, image: str) -> Path:
+        """Build the small pinned Stirrup runtime once inside the Archipelago image."""
+        archive = stirrup_cache_path(
             agent_dir=Path(__file__).parent,
-            setup_path=_HARNESS_SETUP_PATH,
-            requirements_path=_HARNESS_REQUIREMENTS_PATH,
+            setup_path=_STIRRUP_SETUP_PATH,
+            requirements_path=_STIRRUP_REQUIREMENTS_PATH,
             image=image,
-            source_archive=source_archive,
         )
         if archive.exists():
             return archive
 
         extra, provider_options, metadata, resources = self._sandbox_parts()
-        build_root = "/app/apex-harness-build"
-        remote_archive = f"{build_root}/apex-harness.tar.gz"
+        build_root = "/app/stirrup-build"
+        remote_archive = f"{build_root}/stirrup-runtime.tar.gz"
         spec = SandboxSpec(
             image=image,
             workdir="/app",
@@ -217,31 +192,29 @@ class ApexAgent(SimpleResponsesAPIAgent):
             await sandbox.start()
             created = await sandbox.exec(f"mkdir -p {shlex.quote(build_root)}", timeout_s=30)
             if created.return_code != 0:
-                raise RuntimeError(f"could not create harness build directory: {(created.stderr or '')[-1000:]}")
-            await sandbox.upload(_HARNESS_SETUP_PATH, f"{build_root}/setup_harness.sh")
-            await sandbox.upload(_HARNESS_REQUIREMENTS_PATH, f"{build_root}/harness-requirements.txt")
-            await sandbox.upload(source_archive, f"{build_root}/apex-harness-source.tar.gz")
+                raise RuntimeError(f"could not create Stirrup build directory: {(created.stderr or '')[-1000:]}")
+            await sandbox.upload(_STIRRUP_SETUP_PATH, f"{build_root}/setup_stirrup.sh")
+            await sandbox.upload(_STIRRUP_REQUIREMENTS_PATH, f"{build_root}/stirrup-requirements.txt")
             install = await sandbox.exec(
-                f"bash {shlex.quote(build_root + '/setup_harness.sh')}",
+                f"bash {shlex.quote(build_root + '/setup_stirrup.sh')}",
                 timeout_s=max(self.config.timeout, 1800),
             )
             if install.return_code != 0:
                 details = (install.stderr or install.stdout or "")[-4000:]
-                raise RuntimeError(f"pinned Apex harness installation failed: {details}")
+                raise RuntimeError(f"pinned Stirrup installation failed: {details}")
             packed = await sandbox.exec(
-                f"tar -czf {shlex.quote(remote_archive)} -C {shlex.quote(_HARNESS_ROOT)} .",
+                f"tar -czf {shlex.quote(remote_archive)} -C {shlex.quote(_STIRRUP_ROOT)} .",
                 timeout_s=600,
             )
             if packed.return_code != 0:
                 details = (packed.stderr or packed.stdout or "")[-2000:]
-                raise RuntimeError(f"Apex harness archive creation failed: {details}")
+                raise RuntimeError(f"Stirrup runtime archive creation failed: {details}")
             await sandbox.download(remote_archive, temporary)
         temporary.replace(archive)
         return archive
 
     async def _ensure_runtime_setup(self) -> None:
-        """Validate harness access before any expensive image setup or task seeding."""
-        await self._preflight_harness_source()
+        """Resolve the Archipelago image and cached Stirrup runtime."""
         async with self._setup_lock:
             if self._image is None:
                 self._image = await asyncio.to_thread(
@@ -252,10 +225,8 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     image_build=self.config.image_build,
                     sandbox_provider=self.config.sandbox_provider,
                 )
-            if self._harness_archive is None:
-                if self._harness_source_archive is None:
-                    raise RuntimeError("Apex harness source archive was not prepared")
-                self._harness_archive = await self._build_harness_archive(self._image, self._harness_source_archive)
+            if self._stirrup_archive is None:
+                self._stirrup_archive = await self._build_stirrup_archive(self._image)
 
     async def _download_world(self, cookies: Any, target: Path) -> None:
         response = await self.server_client.get(
@@ -289,7 +260,6 @@ class ApexAgent(SimpleResponsesAPIAgent):
                 if body.responses_create_params.max_output_tokens is not None
                 else self.config.max_output_tokens
             ),
-            "max_tool_calls_per_turn": self.config.max_tool_calls_per_turn,
             "temperature": (
                 body.responses_create_params.temperature
                 if body.responses_create_params.temperature is not None
@@ -307,13 +277,13 @@ class ApexAgent(SimpleResponsesAPIAgent):
             image=self._image or self.config.image,
             workdir=_GUEST_ROOT,
             env={
-                "FOUNDRY_LOCAL_ROOT": f"{_HARNESS_ROOT}/.apex",
                 "HF_HUB_OFFLINE": "1",
                 "LOGURU_LEVEL": "WARNING",
                 "NO_PROXY": "127.0.0.1,localhost",
             },
             files={
                 f"{_GUEST_ROOT}/sandbox_entrypoint.py": load_runner_source(),
+                f"{_GUEST_ROOT}/stirrup_runtime.py": _STIRRUP_RUNTIME_PATH.read_text(encoding="utf-8"),
                 f"{_GUEST_ROOT}/runner_config.json": json.dumps(runner_config),
             },
             metadata=metadata,
@@ -327,6 +297,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         answer = str(result.get("final_answer") or "")
         input_tokens = int(result.get("n_input_tokens") or 0)
         output_tokens = int(result.get("n_output_tokens") or 0)
+        reasoning_tokens = int(result.get("n_reasoning_tokens") or 0)
         response = NeMoGymResponse(
             id=f"resp_{uuid.uuid4().hex}",
             created_at=time.time(),
@@ -348,12 +319,13 @@ class ApexAgent(SimpleResponsesAPIAgent):
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
                 total_tokens=input_tokens + output_tokens,
             ),
         )
         response.apex_trajectory = result.get("trajectory") or []
         response.apex_agent_mode = result.get("agent_mode")
+        response.apex_completion_status = result.get("completion_status")
         return response
 
     def _failure(
@@ -372,6 +344,34 @@ class ApexAgent(SimpleResponsesAPIAgent):
             apex_error=error,
             container_exit_code=return_code,
         )
+
+    def _persist_ungraded_snapshots(
+        self,
+        body: ApexAgentRunRequest,
+        result: dict[str, Any],
+        initial_snapshot: bytes,
+        final_snapshot: bytes,
+    ) -> Path | None:
+        """Keep max-turn/incomplete snapshots locally without invoking grading."""
+        if not self.config.artifact_output_dir:
+            return None
+        root = Path(self.config.artifact_output_dir).expanduser()
+        if not root.is_absolute():
+            root = PARENT_DIR / root
+        extra = body.__pydantic_extra__ or {}
+        run_name = (
+            f"rollout_{extra.get('_ng_rollout_index', 0)}_"
+            f"attempt_{extra.get('_ng_attempt_index', 0)}_ungraded_{uuid.uuid4().hex[:8]}"
+        )
+        output_dir = root.resolve() / _safe_id(body.task_id) / run_name
+        output_dir.mkdir(parents=True)
+        (output_dir / "initial_snapshot.zip").write_bytes(initial_snapshot)
+        (output_dir / "final_snapshot.zip").write_bytes(final_snapshot)
+        (output_dir / "rollout.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        return output_dir
 
     async def run(self, request: Request, body: ApexAgentRunRequest) -> ApexAgentVerifyResponse:
         instruction = instruction_from_input(body.responses_create_params)
@@ -401,19 +401,19 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
                         await sandbox.start()
                         await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
-                        await sandbox.upload(self._harness_archive, f"{_GUEST_ROOT}/apex-harness.tar.gz")
+                        await sandbox.upload(self._stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
                         unpack = await sandbox.exec(
-                            f"mkdir -p {shlex.quote(_HARNESS_ROOT)} && "
-                            f"tar -xzf {shlex.quote(_GUEST_ROOT + '/apex-harness.tar.gz')} "
-                            f"-C {shlex.quote(_HARNESS_ROOT)}",
+                            f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
+                            f"tar -xzf {shlex.quote(_GUEST_ROOT + '/stirrup-runtime.tar.gz')} "
+                            f"-C {shlex.quote(_STIRRUP_ROOT)}",
                             user="root",
                             timeout_s=600,
                         )
                         if unpack.return_code != 0:
                             detail = (unpack.stderr or unpack.stdout or "")[-4000:]
-                            return self._failure(body, f"could not install sandbox harness runtime: {detail}")
+                            return self._failure(body, f"could not install sandbox Stirrup runtime: {detail}")
                         protect = await sandbox.exec(
-                            f"chmod -R go-rwx {shlex.quote(_HARNESS_ROOT)} {shlex.quote(_GUEST_ROOT)} && "
+                            f"chmod -R go-rwx {shlex.quote(_STIRRUP_ROOT)} {shlex.quote(_GUEST_ROOT)} && "
                             f"mkdir -p {shlex.quote(_GUEST_ROOT + '/output')} && "
                             f"chmod 700 {shlex.quote(_GUEST_ROOT + '/output')}",
                             user="root",
@@ -422,13 +422,15 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             detail = (protect.stderr or protect.stdout or "")[-4000:]
                             return self._failure(body, f"could not protect sandbox inputs: {detail}")
                         process = await sandbox.exec(
-                            f"{shlex.quote(_HARNESS_ROOT + '/bin/python')} "
+                            f"{shlex.quote(_STIRRUP_ROOT + '/bin/python')} "
                             f"{shlex.quote(_GUEST_ROOT + '/sandbox_entrypoint.py')}",
                             timeout_s=self.config.timeout,
                         )
                         if process.return_code != 0:
                             detail = (process.stderr or process.stdout or "")[-4000:]
-                            return self._failure(body, f"sandbox harness exited: {detail}", process.return_code)
+                            return self._failure(
+                                body, f"sandbox Stirrup rollout exited: {detail}", process.return_code
+                            )
                         await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)
                         await sandbox.download(f"{_GUEST_ROOT}/output/initial.zip", initial_snapshot_path)
                         await sandbox.download(f"{_GUEST_ROOT}/output/final.zip", snapshot_path)
@@ -444,6 +446,17 @@ class ApexAgent(SimpleResponsesAPIAgent):
                                     f"{name} artifact snapshot is {len(data)} bytes; "
                                     f"limit is {self.config.max_snapshot_bytes}",
                                 )
+                    if not result.get("completed"):
+                        output_dir = self._persist_ungraded_snapshots(body, result, initial_snapshot, snapshot)
+                        failure = self._failure(
+                            body,
+                            f"Stirrup did not submit a completed Finish call (status={result.get('completion_status')})",
+                        )
+                        if output_dir is not None:
+                            failure.artifact_output_dir = str(output_dir)
+                            failure.initial_snapshot_path = str(output_dir / "initial_snapshot.zip")
+                            failure.final_snapshot_path = str(output_dir / "final_snapshot.zip")
+                        return failure
                     response = self._response_from_result(result, policy_model)
                     payload = body.model_dump() | {
                         "response": response.model_dump(),

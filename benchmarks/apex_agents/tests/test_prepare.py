@@ -36,8 +36,8 @@ def test_convert_task_keeps_gold_in_verifier_metadata() -> None:
     assert row["verifier_metadata"]["gold_response"] == "secret gold"
     assert row["verifier_metadata"]["rubric"][0]["grading_target"] == {
         "scope": "files",
-        "expected_file_type": "Spreadsheets (.xlsx, .xls, .xlsm)",
-        "extensions": [".csv", ".xls", ".xlsm", ".xlsx"],
+        "expected_file_type": "Spreadsheets (.xlsx, .xls, .xlsm, .ods)",
+        "extensions": [".xls", ".xlsm", ".xlsx", ".ods"],
     }
 
 

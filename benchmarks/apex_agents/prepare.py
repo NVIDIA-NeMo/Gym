@@ -29,33 +29,33 @@ GRADING_TARGETS = {
     },
     "make_new_doc": {
         "scope": "files",
-        "expected_file_type": "Word Documents (.docx, .doc)",
-        "extensions": [".doc", ".docx"],
+        "expected_file_type": "Word Documents (.docx, .doc, .odt)",
+        "extensions": [".doc", ".docx", ".odt"],
     },
     "edit_existing_doc": {
         "scope": "files",
-        "expected_file_type": "Word Documents (.docx, .doc)",
-        "extensions": [".doc", ".docx"],
+        "expected_file_type": "Word Documents (.docx, .doc, .odt)",
+        "extensions": [".doc", ".docx", ".odt"],
     },
     "make_new_sheet": {
         "scope": "files",
-        "expected_file_type": "Spreadsheets (.xlsx, .xls, .xlsm)",
-        "extensions": [".csv", ".xls", ".xlsm", ".xlsx"],
+        "expected_file_type": "Spreadsheets (.xlsx, .xls, .xlsm, .ods)",
+        "extensions": [".xls", ".xlsm", ".xlsx", ".ods"],
     },
     "edit_existing_sheet": {
         "scope": "files",
-        "expected_file_type": "Spreadsheets (.xlsx, .xls, .xlsm)",
-        "extensions": [".csv", ".xls", ".xlsm", ".xlsx"],
+        "expected_file_type": "Spreadsheets (.xlsx, .xls, .xlsm, .ods)",
+        "extensions": [".xls", ".xlsm", ".xlsx", ".ods"],
     },
     "make_new_slide_deck": {
         "scope": "files",
-        "expected_file_type": "Presentations (.pptx, .ppt)",
-        "extensions": [".ppt", ".pptx"],
+        "expected_file_type": "Presentations (.pptx, .ppt, .odp)",
+        "extensions": [".odp", ".ppt", ".pptx"],
     },
     "edit_existing_slide_deck": {
         "scope": "files",
-        "expected_file_type": "Presentations (.pptx, .ppt)",
-        "extensions": [".ppt", ".pptx"],
+        "expected_file_type": "Presentations (.pptx, .ppt, .odp)",
+        "extensions": [".odp", ".ppt", ".pptx"],
     },
 }
 

@@ -60,8 +60,8 @@ Set `apex_world_cache_dir` to the same path when workers should use a shared cac
 
 `verify()` compares the safely extracted initial and final snapshots, renders the changed deliverables, and grades
 each held-out APEX criterion with Gym's configured judge model. The grading system prompt and
-`is_criteria_true` response schema follow the output grader pinned by Apex harness commit
-`1fd94befbb570eb6effe76b1895e5d599e820227`. The implementation is intentionally Apex-specific: there is no generic
+`is_criteria_true` JSON response follow raw Archipelago commit `b581241ed67deed520f8d7854d20e39569e259f5`,
+without the Apex harness's compatibility patches. The implementation is intentionally Apex-specific: there is no generic
 Archipelago runner, evaluator registry, metrics layer, LiteLLM dependency, external document API, or Reducto call.
 
 Text is extracted locally from common documents, spreadsheets, presentations, PDFs, text files, and application
@@ -72,12 +72,12 @@ No judge receives the agent trajectory.
 
 The verify response follows the same three-part contract as the upstream wrapper:
 
-- `reward`: the fraction of rubric criteria that passed.
+- `reward`: `1` only when every rubric criterion passed; otherwise `0`.
 - `rubric_scores`: the criterion-level score/status/message/value mapping keyed by verifier ID.
 - `judge_response`: grading metadata including `ok`, `grading_run_id`, `status`, `scoring`, `verifier_count`, and
   `document_extraction`.
 
-Final Pass@1 conversion, if required, is deliberately outside this judging adapter.
+The fractional criterion pass rate is retained in grading metadata for analysis.
 
 The snapshot is excluded from the verify response so large Office artifacts are not embedded in rollout
 JSONL files. Consequently this initial integration declares re-verification unsupported.
