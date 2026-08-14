@@ -26,6 +26,34 @@ CDP `:9222` and VLC `:8080` used by some evaluators — are reachable without fo
 
 The paired agent is `responses_api_agents/nemotron_osworld` (Nemotron-Omni host-side loop).
 
+## Use from NeMo RL GRPO
+
+The end-to-end training entry point lives in the companion
+[NeMo RL draft](https://github.com/NVIDIA-NeMo/RL/pull/3642):
+
+```text
+examples/nemo_gym/run_grpo_nemo_gym.py
+```
+
+Use this recipe:
+
+```text
+examples/nemo_gym/grpo_nemotron_omni_30ba3b_osworld_cc.yaml
+```
+
+It composes these Gym configs from the pinned submodule:
+
+```text
+responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+responses_api_agents/nemotron_osworld/configs/nemotron_osworld_cc.yaml
+resources_servers/osworld/configs/osworld.yaml
+resources_servers/osworld/configs/opensandbox_osworld.yaml
+```
+
+The full data-preparation, Slurm launch, and independent checkpoint-evaluation
+commands are documented in the NeMo RL
+[Context Compaction guide](https://github.com/jinglinglingling/RL/blob/feature/osworld-grpo-training-eval-signed/docs/guides/context-compaction.md#run-osworld-grpo).
+
 ## OSWorld dependency
 
 The benchmark harness is a **referenced dependency**, not vendored: `requirements.txt` pins
@@ -38,8 +66,8 @@ evaluation on Linux.
 ## Configuration
 
 - `sandbox_provider: sandbox` — resolved from the merged global config; compose with
-  `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`
-  (`OPENSANDBOX_DOMAIN` / `OPENSANDBOX_API_KEY` env vars).
+  `resources_servers/osworld/configs/opensandbox_osworld.yaml` for the validated
+  Cell 2 setup (`OPENSANDBOX_DOMAIN` / `OPENSANDBOX_API_KEY` env vars).
 - `OSWORLD_POOL_REF` (optional, default `osworld-kvm`) — the warm VM pool.
 - `OSWORLD_CACHE_DIR` (optional) — setup download cache.
 
