@@ -32,16 +32,17 @@ sandbox:
       # 0 disables connection reuse.
       max_keepalive_connections: 20
       # null for no cap.
-      max_connections: 100
+      max_connections: null
       connect_retries: 2
       # "aiohttp" routes through the optional httpx-aiohttp bridge, falling
       # back to httpx with a warning when it is not installed.
-      transport_backend: httpx
+      transport_backend: aiohttp
     create:
       request_timeout_s: 1200
       # Must exceed the spec's ready_timeout_s (1200 for mini_swe_agent_2): this
       # bounds the whole create call, which now includes the readiness wait.
       timeout_s: 1500
+      connect_attempt_timeout_s: 1500
       # Skipping the check lets the first command race a pod whose exec daemon
       # is not listening yet, which returns a 502 and kills the rollout.
       skip_health_check: false
@@ -63,7 +64,7 @@ sandbox:
       close_timeout_s: 30
       # Short status/log polls instead of one long-lived SSE stream, for load
       # balancers that cap stream duration. Costs extra round trips.
-      background_exec: false
+      background_exec: true
       # Poll interval backs off from initial to interval.
       background_poll_initial_s: 0.25
       background_poll_interval_s: 2.0

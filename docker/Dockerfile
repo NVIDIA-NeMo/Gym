@@ -24,19 +24,43 @@ FROM ${BASE_IMAGE} AS base
 ENV NEMO_GYM_CONTAINER=1
 USER root
 
+ARG ENROOT_VERSION=3.5.0
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TZ=America/Los_Angeles
 
 apt-get update
 apt-get install -y --no-install-recommends \
+    bash \
     jq \
     curl \
     git \
-    rsync \
     wget \
     less \
     vim
+
+apt-get purge -y \
+    ffmpeg \
+    libavcodec* \
+    libavformat* \
+    libavutil* \
+    libswscale* \
+    libswresample* \
+    libx264* \
+    libx265* \
+    libfdk-aac* \
+    libmp3lame* \
+    2>/dev/null || true
+
+apt-get autoremove -y
+
+# Install enroot for the EnrootProvider sandbox backend.
+# GitHub releases provide signed .debs for amd64 and arm64.
+arch=$(dpkg --print-architecture)
+curl -fSsL -o /tmp/enroot.deb \
+    "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot_${ENROOT_VERSION}-1_${arch}.deb"
+apt-get install -y /tmp/enroot.deb
+rm /tmp/enroot.deb
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
