@@ -26,6 +26,20 @@ CDP `:9222` and VLC `:8080` used by some evaluators — are reachable without fo
 
 The paired agent is `responses_api_agents/nemotron_osworld` (Nemotron-Omni host-side loop).
 
+## Provenance
+
+- The generic Context Compaction implementation is Ali Roshan Ghias's work,
+  originally published in his
+  [NeMo RL branch](https://gitlab-master.nvidia.com/aroshanghias/nemo-rl/-/tree/aroshanghias/context-compaction-v2-clean)
+  and [matching NeMo Gym branch](https://gitlab-master.nvidia.com/aroshanghias/Gym/-/tree/aroshanghias/context-compaction-v2-clean-gym).
+  The corresponding Gym implementation is preserved in
+  [commit `f881d8fc`](https://github.com/NVIDIA-NeMo/Gym/commit/f881d8fc3897f0e42c10fd80298430f43c509c67).
+- The initial OSWorld environment and Cell 2 OpenSandbox integration was
+  developed by Terry Kong in
+  [commit `275f0ae9`](https://github.com/NVIDIA-NeMo/Gym/commit/275f0ae94c98c1a484658a5c995b97dce1bb1b4b).
+- This draft adds the context-compacted OSWorld agent path, training-specific
+  reliability work, and end-to-end validation with NeMo RL.
+
 ## Use from NeMo RL GRPO
 
 The end-to-end training entry point lives in the companion
