@@ -285,8 +285,6 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
     ) -> tuple[float, dict[str, Any]]:
         if not self.config.zero_reward_incorrect_groups:
             return reward, details
-        if not problem:
-            raise ValueError("problem must be set when zero_reward_incorrect_groups is enabled")
 
         verifier_reward = float(details["r_y"]) if "r_y" in details else 0.0
         coordinator = self._incorrect_group_coordinators[problem]
