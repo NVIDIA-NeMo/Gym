@@ -15,6 +15,12 @@ SBATCH_TIME=${SBATCH_TIME:-04:00:00}
 # When unset, preserve Gym's existing configured/default behavior.
 NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-}
 NUM_SAMPLES_IN_PARALLEL_ARG=""
+# coupled preserves the existing multi-node DP/EP deployment. independent runs one
+# TP/EP replica per decode node and registers every replica with the router.
+VLLM_DECODE_MODE=${VLLM_DECODE_MODE:-coupled}
+# Optional PD-router override for decode replicas. When unset, the main
+# consistent-hash policy remains in effect for both prefill and decode.
+VLLM_DECODE_POLICY=${VLLM_DECODE_POLICY:-}
 # auto uses NUM_NODES when sbatch advertises --segment; none omits it; a positive integer overrides it.
 VLLM_SLURM_SEGMENT=${VLLM_SLURM_SEGMENT:-auto}
 export UCX_NET_DEVICES="${UCX_NET_DEVICES:-mlx5_0:1}"
@@ -26,6 +32,24 @@ if [[ -n "$NUM_SAMPLES_IN_PARALLEL" ]]; then
     fi
     NUM_SAMPLES_IN_PARALLEL_ARG="++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL"
 fi
+
+case "$VLLM_DECODE_MODE" in
+    coupled|independent)
+        ;;
+    *)
+        echo "ERROR: VLLM_DECODE_MODE must be coupled or independent; got '$VLLM_DECODE_MODE'." >&2
+        exit 1
+        ;;
+esac
+
+case "$VLLM_DECODE_POLICY" in
+    ""|random|round_robin|cache_aware|power_of_two|consistent_hash)
+        ;;
+    *)
+        echo "ERROR: VLLM_DECODE_POLICY must be random, round_robin, cache_aware, power_of_two, consistent_hash, or empty; got '$VLLM_DECODE_POLICY'." >&2
+        exit 1
+        ;;
+esac
 
 SBATCH_EXCLUDE_ARGS=()
 if [[ -n "$SBATCH_EXCLUDE" ]]; then
@@ -151,6 +175,8 @@ set -euo pipefail
 # Input arguments and validation
 PREFILL_HEAD=\$PREFILL_HEAD
 DECODE_HEAD=\$DECODE_HEAD
+DECODE_HOSTS_CSV=\$DECODE_HOSTS_CSV
+IFS=, read -r -a DECODE_HOSTS <<< "\$DECODE_HOSTS_CSV"
 
 # Nemotron's three-read Mamba SSM state must use the dimension-sequence layout when KV transfer is enabled.
 # Not used when the model has no Mamba layers.
@@ -208,7 +234,25 @@ if (( SLURM_PROCID == 0 )); then
     trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
     wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
-    wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid"
+
+    decode_router_args=()
+    if [[ "$VLLM_DECODE_MODE" == independent ]]; then
+        for decode_host in "\${DECODE_HOSTS[@]}"; do
+            wait_for_vllm_health \
+                "decode replica \$decode_host" \
+                "http://\$decode_host:$DECODE_SERVER_PORT/health" \
+                "\$prefill_pid"
+            decode_router_args+=(--decode "http://\$decode_host:$DECODE_SERVER_PORT")
+        done
+    else
+        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid"
+        decode_router_args+=(--decode "http://\$DECODE_HEAD:$DECODE_SERVER_PORT")
+    fi
+
+    decode_policy_args=()
+    if [[ -n "$VLLM_DECODE_POLICY" ]]; then
+        decode_policy_args+=(--decode-policy "$VLLM_DECODE_POLICY")
+    fi
 
     # --intra-node-data-parallel-size must match the data-parallel-size-local above.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
@@ -216,7 +260,8 @@ if (( SLURM_PROCID == 0 )); then
         --policy consistent_hash \
         --vllm-pd-disaggregation \
         --prefill http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
-        --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
+        "\${decode_router_args[@]}" \
+        "\${decode_policy_args[@]}" \
         --host \$PREFILL_HEAD \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
@@ -234,6 +279,21 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --kv-transfer-config \
             '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+elif [[ "$VLLM_DECODE_MODE" == independent ]]; then
+    # Each decode node is a complete TP/EP replica. This prevents expert-parallel
+    # collectives from crossing nodes while still letting the router use every replica.
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" \
+        --host \$this_node_hostname \
+        --port $DECODE_SERVER_PORT \
+        --data-parallel-size 1 \
+        --data-parallel-address \$this_node_hostname \
+        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
+        --api-server-count 1 \
+        --kv-transfer-config \
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
     # Decode head
 
@@ -293,9 +353,12 @@ set -euo pipefail
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 PREFILL_HEAD="\${nodes[0]}"
 DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}"
+decode_nodes=("\${nodes[@]:$NUM_PREFILL_NODES:$NUM_DECODE_NODES}")
+DECODE_HOSTS_CSV=\$(IFS=,; echo "\${decode_nodes[*]}")
 
 PREFILL_HEAD="\$PREFILL_HEAD" \
 DECODE_HEAD="\$DECODE_HEAD" \
+DECODE_HOSTS_CSV="\$DECODE_HOSTS_CSV" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
