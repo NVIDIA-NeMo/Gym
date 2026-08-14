@@ -12,34 +12,48 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 from haystack import Pipeline
 from haystack.components.agents import Agent
-from haystack.dataclasses import ChatMessage
+from haystack.dataclasses import ChatMessage, ChatRole
 from haystack.tools import create_tool_from_function
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo
+from httpx import ASGITransport, AsyncClient
 from pytest import MonkeyPatch
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config_types import AggregateMetricsRequest
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.haystack_agent import chat_generator as chat_generator_module
 from responses_api_agents.haystack_agent.app import (
     HaystackAgent,
     HaystackAgentConfig,
+    HaystackAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
 )
 from responses_api_agents.haystack_agent.chat_generator import (
     NeMoGymResponsesChatGenerator,
+    _content_to_text,
+    _current_run_state,
+    _GenRunState,
+    _stringify,
     chat_messages_to_responses,
     response_to_chat_messages,
     responses_input_to_messages,
 )
-from responses_api_agents.haystack_agent.example_tools import get_weather
 from responses_api_agents.haystack_agent.http_tool import HTTPTool
 from responses_api_agents.haystack_agent.mcp_toolset import (
     ContextAwareMCPToolset,
@@ -47,6 +61,11 @@ from responses_api_agents.haystack_agent.mcp_toolset import (
 
 
 SYSTEM_PROMPT = "You are a helpful assistant. Use get_weather when asked about weather, then answer."
+
+
+async def get_weather(city: str) -> str:
+    """Return deterministic weather data for agent tests."""
+    return f"The weather in {city} is sunny and 22 degrees."
 
 
 def _make_response(payload: dict) -> AsyncMock:
@@ -134,18 +153,41 @@ def _http_response(body: str, cookies: dict | None = None) -> MagicMock:
     return response
 
 
-def _pipeline_yaml(raise_on_tool_invocation_failure: bool = False, generation_kwargs: dict | None = None) -> str:
-    agent = Agent(
+async def _post_responses(app, body: dict, *, cookies: dict | None = None):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.post("/v1/responses", json=body, cookies=cookies)
+
+
+def _pipeline_yaml(
+    raise_on_tool_invocation_failure: bool = False,
+    generation_kwargs: dict | None = None,
+    system_prompt: str | None = SYSTEM_PROMPT,
+) -> str:
+    agent_kwargs = dict(
         chat_generator=NeMoGymResponsesChatGenerator(server_name="policy_model", generation_kwargs=generation_kwargs),
         tools=[_weather_tool()],
-        system_prompt=SYSTEM_PROMPT,
         exit_conditions=["text"],
         max_agent_steps=6,
         raise_on_tool_invocation_failure=raise_on_tool_invocation_failure,
     )
+    if system_prompt is not None:
+        agent_kwargs["system_prompt"] = system_prompt
+    agent = Agent(**agent_kwargs)
     pipe = Pipeline()
     pipe.add_component("agent", agent)
     return pipe.dumps()
+
+
+def _config(pipeline_path) -> HaystackAgentConfig:
+    return HaystackAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="haystack_agent",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="res"),
+        pipeline_yaml=str(pipeline_path),
+    )
 
 
 def _build_agent(
@@ -155,27 +197,23 @@ def _build_agent(
     *,
     raise_on_fail: bool = False,
     generation_kwargs: dict | None = None,
+    system_prompt: str | None = SYSTEM_PROMPT,
 ):
     """Create a HaystackAgent whose loaded pipeline's generator uses a mocked model server."""
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
-        _pipeline_yaml(raise_on_tool_invocation_failure=raise_on_fail, generation_kwargs=generation_kwargs)
+        _pipeline_yaml(
+            raise_on_tool_invocation_failure=raise_on_fail,
+            generation_kwargs=generation_kwargs,
+            system_prompt=system_prompt,
+        )
     )
 
     client = MagicMock()
     client.post = AsyncMock(side_effect=[_make_response(p) for p in model_responses])
     monkeypatch.setattr(chat_generator_module, "_server_client", client)
 
-    config = HaystackAgentConfig(
-        host="0.0.0.0",
-        port=8080,
-        entrypoint="",
-        name="haystack_agent",
-        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-        resources_server=ResourcesServerRef(type="resources_servers", name="res"),
-        pipeline_yaml=str(pipeline_path),
-    )
-    return HaystackAgent(config=config, server_client=MagicMock(spec=ServerClient)), client
+    return HaystackAgent(config=_config(pipeline_path), server_client=MagicMock(spec=ServerClient)), client
 
 
 class TestChatGenerator:
@@ -473,10 +511,10 @@ class TestApp:
                 _envelope([_text_item()], _USAGE),
             ],
         )
-        app = server.setup_webserver()
-        http = TestClient(app)
-
-        res = http.post("/v1/responses", json={"input": [{"role": "user", "content": "weather in SF?"}]})
+        res = await _post_responses(
+            server.setup_webserver(),
+            {"input": [{"role": "user", "content": "weather in SF?"}]},
+        )
         assert res.status_code == 200
 
         # The model was called twice (Haystack Agent looped).
@@ -530,10 +568,10 @@ class TestApp:
             ],
             raise_on_fail=False,
         )
-        app = server.setup_webserver()
-        http = TestClient(app)
-
-        res = http.post("/v1/responses", json={"input": [{"role": "user", "content": "weather?"}]})
+        res = await _post_responses(
+            server.setup_webserver(),
+            {"input": [{"role": "user", "content": "weather?"}]},
+        )
         assert res.status_code == 200
         assert client.post.call_count == 2
         output_types = [item["type"] for item in res.json()["output"]]
@@ -543,11 +581,9 @@ class TestApp:
     async def test_responses_forwards_sampling_params(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         # The row's sampling params reach the model call; request tools are runtime Haystack tools.
         server, client = _build_agent(tmp_path, monkeypatch, model_responses=[_envelope([_text_item()])])
-        http = TestClient(server.setup_webserver())
-
-        res = http.post(
-            "/v1/responses",
-            json={
+        res = await _post_responses(
+            server.setup_webserver(),
+            {
                 "input": [{"role": "user", "content": "weather in SF?"}],
                 "temperature": 0.9,
                 "max_output_tokens": 123,
@@ -659,11 +695,281 @@ class TestApp:
             model_responses=[_envelope([_text_item()])],
             generation_kwargs={"temperature": 0.1},
         )
-        http = TestClient(server.setup_webserver())
-
-        res = http.post(
-            "/v1/responses",
-            json={"input": [{"role": "user", "content": "hi"}], "temperature": 0.9},
+        res = await _post_responses(
+            server.setup_webserver(),
+            {"input": [{"role": "user", "content": "hi"}], "temperature": 0.9},
         )
         assert res.status_code == 200
         assert client.post.call_args_list[0].kwargs["json"].temperature == 0.9
+
+
+def test_responses_input_to_messages_multiturn() -> None:
+    items = [
+        NeMoGymEasyInputMessage(type="message", role="developer", content="be terse"),
+        NeMoGymEasyInputMessage(type="message", role="user", content="weather in SF?"),
+        NeMoGymResponseFunctionToolCall(
+            type="function_call",
+            call_id="call_1",
+            name="get_weather",
+            arguments='{"city": "SF"}',
+        ),
+        NeMoGymFunctionCallOutput(type="function_call_output", call_id="call_1", output="sunny"),
+        NeMoGymEasyInputMessage(type="message", role="assistant", content="It is sunny."),
+        NeMoGymResponseReasoningItem(
+            type="reasoning",
+            id="rs_1",
+            summary=[NeMoGymSummary(type="summary_text", text="think")],
+            encrypted_content="enc",
+        ),
+    ]
+
+    messages = responses_input_to_messages(items)
+
+    assert messages[0].is_from(ChatRole.SYSTEM)
+    assert messages[0].meta["__ng_role__"] == "developer"
+    assert messages[1].is_from(ChatRole.USER)
+    assert messages[1].text == "weather in SF?"
+    assert messages[2].tool_call.tool_name == "get_weather"
+    assert messages[2].tool_call.arguments == {"city": "SF"}
+    assert messages[2].tool_call.id == "call_1"
+    assert messages[3].is_from(ChatRole.TOOL)
+    assert messages[3].tool_call_result.result == "sunny"
+    assert messages[3].tool_call_result.origin.id == "call_1"
+    assert messages[4].is_from(ChatRole.ASSISTANT)
+    assert messages[4].text == "It is sunny."
+    assert messages[5].reasoning.reasoning_text == "think"
+    assert messages[5].meta["__ng_reasoning_id__"] == "rs_1"
+    assert messages[5].meta["__ng_reasoning_encrypted__"] == "enc"
+
+
+def test_function_call_output_without_prior_call_synthesizes_origin() -> None:
+    items = [NeMoGymFunctionCallOutput(type="function_call_output", call_id="orphan", output="x")]
+
+    messages = responses_input_to_messages(items)
+
+    assert messages[0].tool_call_result.origin.id == "orphan"
+    assert messages[0].tool_call_result.origin.tool_name == ""
+
+
+def test_function_call_empty_arguments() -> None:
+    items = [NeMoGymResponseFunctionToolCall(type="function_call", call_id="c", name="f", arguments="")]
+
+    messages = responses_input_to_messages(items)
+
+    assert messages[0].tool_call.arguments == {}
+
+
+def test_chat_messages_to_responses_output_and_reasoning() -> None:
+    message = ChatMessage.from_assistant(text="hello", reasoning="because")
+
+    output_items = chat_messages_to_responses([message], output=True)
+    assert [item.type for item in output_items] == ["reasoning", "message"]
+    assert output_items[1].content[0].text == "hello"
+    assert output_items[1].content[0].type == "output_text"
+
+    input_items = chat_messages_to_responses([message], output=False)
+    assistant_message = next(item for item in input_items if item.type == "message")
+    assert isinstance(assistant_message, NeMoGymEasyInputMessage)
+    assert assistant_message.role == "assistant"
+    assert assistant_message.content == "hello"
+
+
+async def test_responses_without_system_prompt(tmp_path, monkeypatch: MonkeyPatch) -> None:
+    server, _ = _build_agent(
+        tmp_path,
+        monkeypatch,
+        [_envelope([_text_item("hi there")], _USAGE)],
+        system_prompt=None,
+    )
+    response = await _post_responses(
+        server.setup_webserver(),
+        {"input": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert [item["type"] for item in response.json()["output"]] == ["message"]
+
+
+async def test_responses_string_input_and_cookie_propagation(tmp_path, monkeypatch: MonkeyPatch) -> None:
+    model_response = _make_response(_envelope([_text_item("hi")], _USAGE))
+    model_response.cookies = {"model_cookie": "mv"}
+    server, _ = _build_agent(tmp_path, monkeypatch, [])
+    client = MagicMock()
+    client.post = AsyncMock(return_value=model_response)
+    monkeypatch.setattr(chat_generator_module, "_server_client", client)
+    response = await _post_responses(
+        server.setup_webserver(),
+        {"input": "just say hi"},
+        cookies={"session_cookie": "sv"},
+    )
+
+    assert response.status_code == 200
+    assert response.cookies.get("session_cookie") == "sv"
+    assert response.cookies.get("model_cookie") == "mv"
+
+
+def test_generator_sync_run(monkeypatch: MonkeyPatch) -> None:
+    client = MagicMock()
+    client.post = AsyncMock(return_value=_make_response(_envelope([_text_item("done")], _USAGE)))
+    monkeypatch.setattr(chat_generator_module, "_server_client", client)
+    generator = NeMoGymResponsesChatGenerator(server_name="policy_model")
+
+    result = generator.run(messages=[ChatMessage.from_user("hi")])
+
+    assert result["replies"][0].text == "done"
+
+
+async def test_run_seeds_session_and_verifies(tmp_path) -> None:
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(_pipeline_yaml())
+    server = HaystackAgent(config=_config(pipeline_path), server_client=MagicMock(spec=ServerClient))
+
+    responses_create_params = {"input": [{"role": "user", "content": "hi"}]}
+    model_response = _envelope([_text_item("done")], _USAGE)
+    verify_payload = {
+        "responses_create_params": responses_create_params,
+        "response": model_response,
+        "reward": 1.0,
+    }
+    server.server_client.post = AsyncMock(
+        side_effect=[
+            _make_response({}),
+            _make_response(model_response),
+            _make_response(verify_payload),
+        ]
+    )
+    request = MagicMock()
+    request.cookies = {}
+
+    result = await server.run(
+        request,
+        HaystackAgentRunRequest(responses_create_params=responses_create_params),
+    )
+
+    assert result.reward == 1.0
+    assert server.server_client.post.call_count == 3
+    assert [call.kwargs["url_path"] for call in server.server_client.post.call_args_list] == [
+        "/seed_session",
+        "/v1/responses",
+        "/verify",
+    ]
+
+
+async def test_aggregate_metrics_proxied(tmp_path) -> None:
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(_pipeline_yaml())
+    server = HaystackAgent(config=_config(pipeline_path), server_client=MagicMock(spec=ServerClient))
+    server.server_client.post = AsyncMock(return_value=_make_response({"key_metrics": {"reward": 0.5}}))
+
+    result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+
+    assert result.key_metrics == {"reward": 0.5}
+    assert server.server_client.post.call_args.kwargs["url_path"] == "/aggregate_metrics"
+
+
+async def test_run_async_reasoning_reply(monkeypatch: MonkeyPatch) -> None:
+    reasoning_item = {
+        "type": "reasoning",
+        "id": "rs_9",
+        "summary": [{"type": "summary_text", "text": "let me think"}],
+        "encrypted_content": None,
+    }
+    client = MagicMock()
+    client.post = AsyncMock(return_value=_make_response(_envelope([reasoning_item, _text_item("answer")], _USAGE)))
+    monkeypatch.setattr(chat_generator_module, "_server_client", client)
+    generator = NeMoGymResponsesChatGenerator(server_name="policy_model")
+
+    result = await generator.run_async(messages=[ChatMessage.from_user("q")])
+
+    reply = result["replies"][0]
+    assert reply.reasoning.reasoning_text == "let me think"
+    assert reply.text == "answer"
+    assert reply.meta["__ng_reasoning_id__"] == "rs_9"
+
+
+def test_response_to_chat_messages_reasoning_only() -> None:
+    response = NeMoGymResponse.model_validate(
+        _envelope(
+            [
+                {
+                    "type": "reasoning",
+                    "id": "r",
+                    "summary": [{"type": "summary_text", "text": "x"}],
+                    "encrypted_content": None,
+                }
+            ]
+        )
+    )
+
+    messages = response_to_chat_messages(response)
+
+    assert messages[0].reasoning.reasoning_text == "x"
+
+
+def test_stringify_and_content_to_text_helpers() -> None:
+    parts = [
+        {"type": "text", "text": "hello "},
+        {"type": "output_text", "text": "world"},
+    ]
+    assert _stringify(parts) == "hello world"
+    assert _stringify("plain") == "plain"
+    assert _stringify(42) == "42"
+
+    assert (
+        _content_to_text(
+            [
+                {"type": "output_text", "text": "A"},
+                {"type": "input_text", "text": "B"},
+            ]
+        )
+        == "AB"
+    )
+    assert _content_to_text("str") == "str"
+    with pytest.raises(ValueError, match="text-only"):
+        _content_to_text(123)
+
+
+def test_relative_pipeline_path(tmp_path, monkeypatch: MonkeyPatch) -> None:
+    import responses_api_agents.haystack_agent.app as app_module
+
+    pipeline_path = tmp_path / "relative_pipeline.yaml"
+    pipeline_path.write_text(_pipeline_yaml())
+    monkeypatch.setattr(app_module, "__file__", str(tmp_path / "app.py"))
+
+    HaystackAgent(config=_config(pipeline_path.name), server_client=MagicMock(spec=ServerClient))
+
+
+async def test_concurrent_rollouts_do_not_clobber_state(monkeypatch: MonkeyPatch) -> None:
+    gate = asyncio.Event()
+
+    async def fake_post(*args, **kwargs):
+        await gate.wait()
+        response = _make_response(_envelope([_text_item("ok")], _USAGE))
+        response.cookies = {"who": kwargs["cookies"]["who"]}
+        return response
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=fake_post)
+    monkeypatch.setattr(chat_generator_module, "_server_client", client)
+    generator = NeMoGymResponsesChatGenerator(server_name="policy_model")
+
+    async def rollout(tag: str) -> _GenRunState:
+        state = _GenRunState(model_server_cookies={"who": tag})
+        token = _current_run_state.set(state)
+        try:
+            await generator.run_async(messages=[ChatMessage.from_user(tag)])
+        finally:
+            _current_run_state.reset(token)
+        return state
+
+    first_task = asyncio.create_task(rollout("a"))
+    second_task = asyncio.create_task(rollout("b"))
+    await asyncio.sleep(0)
+    gate.set()
+    first_state, second_state = await asyncio.gather(first_task, second_task)
+
+    assert first_state.usage.total_tokens == 15
+    assert second_state.usage.total_tokens == 15
+    assert first_state.model_server_cookies == {"who": "a"}
+    assert second_state.model_server_cookies == {"who": "b"}
+    assert first_state.last_response is not second_state.last_response
