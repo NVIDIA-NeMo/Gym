@@ -41,7 +41,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -67,6 +67,11 @@ logger = logging.getLogger("nemo_gym.osworld.nemotron_agent")
 # actions run as `python -c "<prefix + action>"` with shell=False in the guest.
 _PYAUTOGUI_PKGS_PREFIX = "import pyautogui; import time; pyautogui.FAILSAFE = False; {command}"
 _SPECIAL_ACTIONS = ("WAIT", "FAIL", "DONE")
+_REQUIRED_TRAINING_FIELDS = (
+    "prompt_token_ids",
+    "generation_token_ids",
+    "generation_log_probs",
+)
 
 
 class NemotronOSWorldAgentConfig(BaseResponsesAPIAgentConfig):
@@ -82,6 +87,9 @@ class NemotronOSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     top_p: float = 0.95
     max_tokens: int = 4096
     max_image_history_length: int = 3
+    # Keep the number of samples per GRPO group independent from live VM pressure.
+    # Deployments can raise this to match the available OpenSandbox VM pool.
+    max_parallel_rollouts: int = 4
     thinking: bool = True
     coordinate_type: str = "relative"
     client_password: str = "password"
@@ -139,6 +147,28 @@ def _message_to_text(message: Any) -> str:
     return str(message)
 
 
+def _extract_training_fields(message: Any, image_history_base64: List[str]) -> Dict[str, Any]:
+    """Preserve the exact sampled-token contract and visual context for NeMo-RL.
+
+    The training VLLM proxy adds token IDs/logprobs to the chat-completion
+    message. The reference Nemotron agent returns that message after parsing,
+    so evaluation calls (which lack those fields) remain unchanged while
+    training calls carry enough data to reconstruct each independent turn.
+    """
+    if hasattr(message, "model_dump"):
+        message = message.model_dump()
+    if not isinstance(message, dict) or not all(field in message for field in _REQUIRED_TRAINING_FIELDS):
+        return {}
+
+    training_fields = {field: message[field] for field in _REQUIRED_TRAINING_FIELDS}
+    if message.get("routed_experts") is not None:
+        training_fields["routed_experts"] = message["routed_experts"]
+    training_fields["multimodal_inputs"] = {
+        "images_base64": list(image_history_base64),
+    }
+    return training_fields
+
+
 class NemotronOSWorldAgent(SimpleResponsesAPIAgent):
     config: NemotronOSWorldAgentConfig
     # Faithful OSWorld action history per rollout session; run() forwards it to /verify
@@ -146,6 +176,7 @@ class NemotronOSWorldAgent(SimpleResponsesAPIAgent):
     # the session id as seen INSIDE the cookie-threaded requests, so run() retrieves it
     # through the cookie-scoped /action_history endpoint rather than its own session.
     session_id_to_action_history: Dict[str, List[str]] = Field(default_factory=dict)
+    _rollout_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
 
     def setup_webserver(self):
         app = super().setup_webserver()
@@ -205,6 +236,7 @@ class NemotronOSWorldAgent(SimpleResponsesAPIAgent):
 
         action_history: List[str] = []
         output_items: List[dict] = []
+        image_history_base64: List[str] = []
         terminal = False
 
         debug_dir = None
@@ -221,6 +253,8 @@ class NemotronOSWorldAgent(SimpleResponsesAPIAgent):
             resources_cookies = shot_resp.cookies
             shot_json = await get_response_json(shot_resp)
             obs = {"screenshot": base64.b64decode(shot_json["image_base64"])}
+            image_history_base64.append(shot_json["image_base64"])
+            image_history_base64 = image_history_base64[-self.config.max_image_history_length :]
 
             # THINK — the reference agent builds messages, calls the model server's
             # chat-completions endpoint (its own sync client, in a worker thread), and
@@ -232,15 +266,15 @@ class NemotronOSWorldAgent(SimpleResponsesAPIAgent):
                     f.write(obs["screenshot"])
                 with open(os.path.join(debug_dir, "trace.jsonl"), "a") as f:
                     f.write(json.dumps({"step": step_idx, "actions": actions, "message": _message_to_text(message)[:4000]}) + "\n")
-            output_items.append(
-                {
-                    "id": f"msg_{step_idx + 1}",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": _message_to_text(message), "annotations": []}],
-                }
-            )
+            output_item = {
+                "id": f"msg_{step_idx + 1}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": _message_to_text(message), "annotations": []}],
+            }
+            output_item.update(_extract_training_fields(message, image_history_base64))
+            output_items.append(output_item)
 
             # ACT — execute each returned action with the reference runner's semantics.
             for action in actions:
@@ -288,46 +322,54 @@ class NemotronOSWorldAgent(SimpleResponsesAPIAgent):
         starvation crashed a 24-task gate). Infrastructure failures instead return a
         zero-reward row marked with ``verify_error`` so a post-run pass can strip and
         re-run exactly those tasks."""
-        resources_cookie_holder: Dict[str, str] = {}
-        try:
-            return await self._run_rollout(request, body, resources_cookie_holder)
-        except Exception as e:  # noqa: BLE001 - one bad rollout must not kill the run
-            logger.warning("OSWorld rollout failed (%r); emitting marked zero-reward row", e)
-            # BaseVerifyRequest requires a `response`; the rollout died before producing one.
-            placeholder_response = {
-                "id": "resp_rollout_infra_failure",
-                "created_at": time.time(),
-                "model": self.config.model_name,
-                "object": "response",
-                "output": [],
-                "parallel_tool_calls": False,
-                "tool_choice": "none",
-                "tools": [],
-            }
-            if resources_cookie_holder:
-                # Best-effort verify so the resources server releases the session's sandbox
-                # (otherwise it leaks until process exit / record TTL). Its score is NOT
-                # used: the rollout is incomplete, and the marked row gets re-run anyway.
-                try:
-                    release_request = NemotronOSWorldVerifyRequest.model_validate(
-                        body.model_dump() | {"response": placeholder_response, "action_history": []}
-                    )
-                    await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path="/verify",
-                        json=release_request.model_dump(),
-                        cookies=dict(resources_cookie_holder),
-                    )
-                except Exception as release_error:  # noqa: BLE001 - release is best-effort
-                    logger.warning("post-failure sandbox release also failed: %r", release_error)
-            return NemotronOSWorldVerifyResponse.model_validate(
-                body.model_dump()
-                | {
-                    "response": placeholder_response,
-                    "reward": 0.0,
-                    "verify_error": f"rollout_infra_failure: {e!r}"[:400],
+        if self._rollout_semaphore is None:
+            self._rollout_semaphore = asyncio.Semaphore(max(1, self.config.max_parallel_rollouts))
+
+        async with self._rollout_semaphore:
+            resources_cookie_holder: Dict[str, str] = {}
+            try:
+                return await self._run_rollout(request, body, resources_cookie_holder)
+            except Exception as e:  # noqa: BLE001 - one bad rollout must not kill the run
+                logger.warning("OSWorld rollout failed (%r); emitting marked zero-reward row", e)
+                body_dict = body.model_dump()
+                instance_config = dict(body_dict.get("instance_config") or {})
+                instance_config["mask_sample"] = True
+                # BaseVerifyRequest requires a `response`; the rollout died before producing one.
+                placeholder_response = {
+                    "id": "resp_rollout_infra_failure",
+                    "created_at": time.time(),
+                    "model": self.config.model_name,
+                    "object": "response",
+                    "output": [],
+                    "parallel_tool_calls": False,
+                    "tool_choice": "none",
+                    "tools": [],
                 }
-            )
+                if resources_cookie_holder:
+                    # Best-effort verify so the resources server releases the session's sandbox
+                    # (otherwise it leaks until process exit / record TTL). Its score is NOT
+                    # used: the rollout is incomplete, and the marked row gets re-run anyway.
+                    try:
+                        release_request = NemotronOSWorldVerifyRequest.model_validate(
+                            body.model_dump() | {"response": placeholder_response, "action_history": []}
+                        )
+                        await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/verify",
+                            json=release_request.model_dump(),
+                            cookies=dict(resources_cookie_holder),
+                        )
+                    except Exception as release_error:  # noqa: BLE001 - release is best-effort
+                        logger.warning("post-failure sandbox release also failed: %r", release_error)
+                return NemotronOSWorldVerifyResponse.model_validate(
+                    body_dict
+                    | {
+                        "response": placeholder_response,
+                        "reward": 0.0,
+                        "verify_error": f"rollout_infra_failure: {e!r}"[:400],
+                        "instance_config": instance_config,
+                    }
+                )
 
     async def _run_rollout(
         self, request: Request, body: NemotronOSWorldRunRequest, resources_cookie_holder: Dict[str, str]

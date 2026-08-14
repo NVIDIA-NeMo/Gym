@@ -1,0 +1,45 @@
+nemotron_osworld:
+  responses_api_agents:
+    nemotron_osworld:
+      entrypoint: cc_app.py
+      resources_server:
+        type: resources_servers
+        name: osworld_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${oc.env:OSWORLD_MODEL_NAME,vllm_local}
+      debug_trajectory_dir: ${oc.env:OSWORLD_DEBUG_TRAJ_DIR,}
+      max_steps: ${oc.decode:${oc.env:OSWORLD_MAX_STEPS,100}}
+      temperature: ${oc.decode:${oc.env:OSWORLD_TEMPERATURE,1.0}}
+      top_p: ${oc.decode:${oc.env:OSWORLD_TOP_P,1.0}}
+      max_tokens: 4096
+      max_parallel_rollouts: ${oc.decode:${oc.env:OSWORLD_MAX_PARALLEL_ROLLOUTS,4}}
+      max_image_history_length: 3
+      thinking: true
+      coordinate_type: relative
+      client_password: password
+      screen_width: 1920
+      screen_height: 1080
+      sleep_after_execution_s: 5.0
+      visual_history:
+        enabled: true
+        shadow_only: false
+        policy:
+          type: recency
+          config:
+            protect_initial_context: true
+            keep_last_image_groups: ${oc.decode:${oc.env:OSWORLD_CC_KEEP_LAST_IMAGE_GROUPS,3}}
+            keep_all_text: true
+            image_omission_marker: "[Earlier image omitted]"
+        schedule:
+          type: turn_chunked_recency
+          actions_per_chunk: ${oc.decode:${oc.env:OSWORLD_CC_ACTIONS_PER_CHUNK,2}}
+        guards:
+          max_total_tokens: ${oc.decode:${oc.env:OSWORLD_CC_MAX_TOTAL_TOKENS,16384}}
+          reserved_generation_tokens: ${oc.decode:${oc.env:OSWORLD_CC_RESERVED_GENERATION_TOKENS,1}}
+      datasets:
+      - name: os_domain
+        type: validation
+        jsonl_fpath: resources_servers/osworld/data/os_domain.jsonl
+        license: Apache 2.0

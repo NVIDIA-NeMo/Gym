@@ -464,6 +464,9 @@ def initialize_ray() -> None:
         ray_init_kwargs["address"] = ray_head_node_address
     else:
         print("NeMo Gym is starting a new Ray cluster...")
+        # Force a fresh local cluster. With address=None, Ray may reuse a stale
+        # /tmp/ray address left by an earlier Slurm job on the same compute node.
+        ray_init_kwargs["address"] = "local"
         global _NEMO_GYM_STARTED_RAY_CLUSTER
         _NEMO_GYM_STARTED_RAY_CLUSTER = True
 

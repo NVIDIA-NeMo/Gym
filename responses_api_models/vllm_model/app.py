@@ -53,6 +53,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Some external agent harnesses consume the native parsed reasoning field
+    # from Chat Completions instead of Gym's <think> serialization.
+    preserve_reasoning_content: bool = False
     replace_developer_role_with_system: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
@@ -456,20 +459,34 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise e
 
         choice_dict = chat_completion_dict["choices"][0]
+        message_content = choice_dict["message"].get("content")
+        if isinstance(message_content, list):
+            # Some multimodal vLLM backends return OpenAI content parts even
+            # for assistant text. ChatCompletionMessage.content is a string;
+            # letting Pydantic coerce the list produces a Python repr that
+            # downstream agent parsers cannot consume.
+            choice_dict["message"]["content"] = "".join(
+                part.get("text", "") if isinstance(part, dict) and part.get("type") == "text" else str(part)
+                for part in message_content
+            )
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above
             reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
                 "reasoning"
             )
             if reasoning_content:
-                choice_dict["message"].pop("reasoning_content", None)
-                # See the TODO wrt reasoning_content above
-                choice_dict["message"].pop("reasoning", None)
+                if self.config.preserve_reasoning_content:
+                    choice_dict["message"]["reasoning_content"] = reasoning_content
+                    choice_dict["message"]["reasoning"] = reasoning_content
+                else:
+                    choice_dict["message"].pop("reasoning_content", None)
+                    # See the TODO wrt reasoning_content above
+                    choice_dict["message"].pop("reasoning", None)
 
-                # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
-                choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
-                    [reasoning_content]
-                ) + (choice_dict["message"].get("content") or "")
+                    # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
+                    choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
+                        [reasoning_content]
+                    ) + (choice_dict["message"].get("content") or "")
         else:
             # See the TODO wrt reasoning_content above
             assert not (choice_dict["message"].get("reasoning_content") or choice_dict["message"].get("reasoning")), (

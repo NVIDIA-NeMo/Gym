@@ -3897,6 +3897,33 @@ class TestTopLogprobsHandling:
         assert message["routed_experts"] == routed_experts
         mock_client.create_tokenize.assert_not_called()
 
+    def test_chat_completion_can_preserve_native_reasoning_content(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=False)
+        model.config.uses_reasoning_parser = True
+        model.config.preserve_reasoning_content = True
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={"reasoning_content": "Inspect the desktop first."},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["content"] == "hi"
+        assert message["reasoning_content"] == "Inspect the desktop first."
+        assert message["reasoning"] == "Inspect the desktop first."
+
     def test_capture_path_raises_when_logprobs_missing(self) -> None:
         """If capture is on but vLLM returns no logprobs, fail loudly with an actionable
         error instead of an opaque TypeError or silently empty training data."""

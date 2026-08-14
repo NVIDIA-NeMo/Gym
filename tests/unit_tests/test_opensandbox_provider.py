@@ -750,14 +750,22 @@ class FakeEndpointRaw:
 
 async def test_get_endpoint_prefixes_scheme_and_flags_proxy() -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"domain": "localhost:18080", "protocol": "http", "use_server_proxy": True},
+        connection={
+            "domain": "localhost:18080",
+            "protocol": "http",
+            "api_key": "key-1",
+            "use_server_proxy": True,
+        },
     )
     raw = FakeEndpointRaw("localhost:18080/sandboxes/s1/proxy/5000", {"X-Route-Token": "t1"})
     handle = opensandbox_provider.SandboxHandle(sandbox_id="s1", provider_name="opensandbox", raw=raw)
 
     endpoint = await provider.get_endpoint(handle, 5000)
     assert endpoint.url == "http://localhost:18080/sandboxes/s1/proxy/5000"
-    assert endpoint.headers == {"X-Route-Token": "t1"}
+    assert endpoint.headers == {
+        "OPEN-SANDBOX-API-KEY": "key-1",
+        "X-Route-Token": "t1",
+    }
     assert endpoint.proxied is True
     assert raw.requested_ports == [5000]
 
@@ -831,7 +839,7 @@ async def test_pooled_create_via_rest(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["metadata"]["run"] == "m1"
     # Every pooled create is stamped with a marker so a lost-response record can be reaped.
     assert body["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY]
-    assert kwargs["headers"] == {"Authorization": "Bearer key-1"}
+    assert kwargs["headers"] == {"OPEN-SANDBOX-API-KEY": "key-1"}
 
 
 async def test_pooled_create_error_paths(monkeypatch: pytest.MonkeyPatch, fake_opensandbox_sdk: None) -> None:

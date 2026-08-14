@@ -622,8 +622,31 @@ class OSWorldResourcesServer(SimpleResourcesServer):
 
     async def screenshot(self, request: Request) -> ScreenshotResponse:
         sandbox_state = self._get_session_sandbox(request)
-        res = await self._guest_request(sandbox_state, "GET", "/screenshot")
-        return ScreenshotResponse(image_base64=base64.b64encode(res.content).decode())
+        retries = max(1, self.config.request_retries)
+        last_error = "unknown screenshot response"
+        for attempt in range(retries):
+            res = await self._guest_request(sandbox_state, "GET", "/screenshot")
+            is_png = res.content.startswith(b"\x89PNG\r\n\x1a\n")
+            if res.status == 200 and is_png:
+                return ScreenshotResponse(
+                    image_base64=base64.b64encode(res.content).decode()
+                )
+            last_error = (
+                f"status={res.status} content_type={res.content_type!r} "
+                f"bytes={len(res.content)} png_signature={is_png}"
+            )
+            logger.warning(
+                "invalid OSWorld screenshot response (attempt %d/%d): %s",
+                attempt + 1,
+                retries,
+                last_error,
+            )
+            if attempt + 1 < retries:
+                await asyncio.sleep(min(2.0 * (attempt + 1), 8.0))
+        raise RuntimeError(
+            f"OSWorld guest returned no valid PNG screenshot after {retries} attempts: "
+            f"{last_error}"
+        )
 
     async def execute(self, request: Request, body: ExecuteToolRequest) -> Dict[str, Any]:
         sandbox_state = self._get_session_sandbox(request)
