@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+from asyncio import sleep
 from pathlib import Path
 from time import time
 from traceback import format_exc
@@ -253,7 +254,15 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(test_spec)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        pty_session = await eval_sandbox.pty.create()
+        # TODO @bxyu-nvidia: Once this is root-caused, remove these retries.
+        tries = 0
+        while True:
+            try:
+                pty_session = await eval_sandbox.pty.create()
+            except:
+                tries += 1
+                print(f"[Try {tries}] Failed to create pty session. Sleeping for 5s", format_exc(), file=sys.stderr)
+                await sleep(5)
 
         # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
         if MAP_REPO_TO_EXT.get(test_spec.repo) == "py":
