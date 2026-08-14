@@ -49,9 +49,9 @@ or agent is needed. `prepare_adme_tier5.py` validates the rows, removes stale
 `agent_ref` values, and materializes one benchmark artifact at a time.
 
 Ten-question examples for each category are committed under `data/examples`.
-Larger splits default to `~/chemLLM_setup/adme_tier5/data`; override their
-source root with `ADME_TIER5_SOURCE_DIR`. Select the source split with
-`ADME_TIER5_SPLIT` (`validation` by default).
+For larger splits, set `ADME_TIER5_SOURCE_DIR` to the directory containing the
+exported JSONL files. Select the source split with `ADME_TIER5_SPLIT`
+(`validation` by default).
 
 Prepare the committed examples through Gym:
 
@@ -104,12 +104,11 @@ Use multiple repeats for meaningful per-task reward variance.
 
 ## Paired Tier 1/2 example
 
-`config_tier12.yaml` provides a small tool-vs-no-tool benchmark derived from the
-Litmus paired evaluation under `chemLLM_setup/tool_vs_no_tool_eval`. It contains
-ten unique questions: five Tier 1 and five Tier 2. Every question appears once
-as `direct` and once as `mcp-python`; the prompt, expected answer, extraction
-contract, and pair identifier are identical between arms. Only the tool arm
-advertises `stateful_python_code_exec`.
+`config_tier12.yaml` provides a small paired tool-vs-no-tool Litmus benchmark
+with ten unique questions: five Tier 1 and five Tier 2. Every question appears
+once as `direct` and once as `mcp-python`; the prompt, expected answer,
+extraction contract, and pair identifier are identical between arms. The tool
+arm advertises `stateful_python_code_exec`.
 
 Prepare the committed example through Gym:
 
@@ -117,20 +116,17 @@ Prepare the committed example through Gym:
 gym eval prepare --config benchmarks/litmus-bench/config_tier12.yaml
 ```
 
-The tool arm uses the Litmus agent's OpenSandbox provider and an RDKit-capable
-image. Keep the OpenSandbox and policy-model credentials in environment
-variables so they are not exposed in the process command line. The tested
-policy setup uses GPT-5.5 through NVIDIA's internal inference gateway and Gym's
-`vllm_model` Chat Completions bridge:
+The tool arm uses OpenSandbox with an RDKit-capable image. Export the
+OpenSandbox and NVIDIA inference credentials before running:
 
 ```bash
 export OPENSANDBOX_DOMAIN="<opensandbox-domain>"
 export OPENSANDBOX_API_KEY="<opensandbox-key>"
-export POLICY_API_KEY="<policy-model-key>"
+export NVIDIA_API_KEY="<NVIDIA-inference-key>"
 
 : "${OPENSANDBOX_DOMAIN:?Set OPENSANDBOX_DOMAIN}"
 : "${OPENSANDBOX_API_KEY:?Set OPENSANDBOX_API_KEY}"
-: "${POLICY_API_KEY:?Set POLICY_API_KEY}"
+: "${NVIDIA_API_KEY:?Set NVIDIA_API_KEY}"
 
 gym eval run \
   --config benchmarks/litmus-bench/config_tier12.yaml \
@@ -143,14 +139,12 @@ gym eval run \
   --concurrency "${CONCURRENCY:-1}" \
   --temperature 1 \
   --max-output-tokens 4096 \
-  '++policy_api_key=${oc.env:POLICY_API_KEY}' \
+  '++policy_api_key=${oc.env:NVIDIA_API_KEY}' \
   ++policy_model.responses_api_models.vllm_model.extra_body.reasoning_effort=medium
 ```
 
-Increase `--num-repeats` to collect multiple rollouts per paired row for reward profiling.
-The OpenSandbox key is separate from the policy-model key. Direct rows never
-create a sandbox; tool sandboxes are created lazily when the model calls the
-advertised function.
+Set `--num-repeats` as needed for profiling. Direct rows do not create a
+sandbox; tool sandboxes are created lazily.
 
 Profile the paired results using the materialized inputs written by the run:
 
