@@ -36,26 +36,25 @@ _MAX_JSON_RETRIES = 10
 
 EXPECTED_FILE_TYPES = {
     "message_in_console": _FINAL_ANSWER_ONLY,
-    "make_new_doc": "Word Documents (.docx, .doc)",
-    "edit_existing_doc": "Word Documents (.docx, .doc)",
-    "make_new_sheet": "Spreadsheets (.xlsx, .xls, .xlsm)",
-    "edit_existing_sheet": "Spreadsheets (.xlsx, .xls, .xlsm)",
-    "make_new_slide_deck": "Presentations (.pptx, .ppt)",
-    "edit_existing_slide_deck": "Presentations (.pptx, .ppt)",
-}
-
-_FILE_TYPE_ALIASES = {
-    "Word document": EXPECTED_FILE_TYPES["make_new_doc"],
-    "Spreadsheet": EXPECTED_FILE_TYPES["make_new_sheet"],
-    "Presentation": EXPECTED_FILE_TYPES["make_new_slide_deck"],
-    "All output": _ALL_OUTPUT,
+    "make_new_doc": "Word Documents (.docx, .doc, .odt)",
+    "edit_existing_doc": "Word Documents (.docx, .doc, .odt)",
+    "make_new_sheet": "Spreadsheets (.xlsx, .xls, .xlsm, .ods)",
+    "edit_existing_sheet": "Spreadsheets (.xlsx, .xls, .xlsm, .ods)",
+    "make_new_slide_deck": "Presentations (.pptx, .ppt, .odp)",
+    "edit_existing_slide_deck": "Presentations (.pptx, .ppt, .odp)",
 }
 
 _FILE_TYPE_EXTENSIONS = {
-    "Word Documents (.docx, .doc)": {".docx", ".doc"},
-    "Text Documents (.docx, .doc, .txt)": {".docx", ".doc", ".txt"},
-    "Spreadsheets (.xlsx, .xls, .xlsm)": {".xlsx", ".xls", ".xlsm"},
-    "Presentations (.pptx, .ppt)": {".pptx", ".ppt"},
+    "Word Documents (.docx, .doc, .odt)": {".docx", ".doc", ".odt"},
+    "Text Files (.txt)": {".txt"},
+    "PDF Documents (.pdf)": {".pdf"},
+    "Spreadsheets (.xlsx, .xls, .xlsm, .ods)": {".xlsx", ".xls", ".xlsm", ".ods"},
+    "Presentations (.pptx, .ppt, .odp)": {".pptx", ".ppt", ".odp"},
+    "Python Files (.py)": {".py"},
+    "JavaScript/TypeScript (.js, .ts, .jsx, .tsx)": {".js", ".ts", ".jsx", ".tsx"},
+    "Markdown (.md)": {".md"},
+    "JSON/YAML (.json, .yaml, .yml)": {".json", ".yaml", ".yml"},
+    "Images (.png, .jpg, .jpeg, .webp)": {".png", ".jpg", ".jpeg", ".webp"},
 }
 
 
@@ -69,21 +68,10 @@ def expected_file_type(expected_output: str | None, criterion: dict[str, Any]) -
     if isinstance(target, dict):
         explicit = str(target.get("expected_file_type") or "").strip()
         if explicit:
-            return _FILE_TYPE_ALIASES.get(explicit, explicit)
+            if explicit in {_FINAL_ANSWER_ONLY, _ALL_OUTPUT, *_FILE_TYPE_EXTENSIONS}:
+                return explicit
+            return _ALL_OUTPUT
     return EXPECTED_FILE_TYPES.get(str(expected_output or ""), _ALL_OUTPUT)
-
-
-def _structured_response_format(response_format: Any) -> Any:
-    if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-        return {
-            "type": "json_schema",
-            "json_schema": {
-                "name": response_format.__name__,
-                "schema": response_format.model_json_schema(),
-                "strict": True,
-            },
-        }
-    return response_format
 
 
 def _display_path(path: str) -> str:
@@ -174,8 +162,7 @@ async def _judge_criterion(
     system_prompt: str,
     user_prompt: str,
     visual_blocks: list[dict[str, Any]],
-    capture_judge_trace: bool,
-) -> tuple[GradingResponse, dict[str, Any] | None]:
+) -> GradingResponse:
     user_content: str | list[dict[str, Any]] = user_prompt
     if visual_blocks:
         user_content = [{"type": "text", "text": user_prompt}, *visual_blocks]
@@ -191,7 +178,7 @@ async def _judge_criterion(
             {
                 "model": judge_model,
                 "messages": messages,
-                "response_format": _structured_response_format(GradingResponse),
+                "response_format": {"type": "json_object"},
             }
         )
         judge_response = await server_client.post(
@@ -219,19 +206,7 @@ async def _judge_criterion(
             continue
     if parsed is None:
         raise ValueError(f"judge returned invalid structured output after {_MAX_JSON_RETRIES} attempts")
-
-    trace = None
-    if capture_judge_trace:
-        trace = {
-            "model": judge_model,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-            "messages": messages,
-            "raw_response": raw_content,
-            "parsed_response": parsed.model_dump(mode="json"),
-            "image_count": len(visual_blocks),
-        }
-    return parsed, trace
+    return parsed
 
 
 async def grade_apex_output(
@@ -249,10 +224,9 @@ async def grade_apex_output(
     judge_model: str,
     judge_create_params_overrides: dict[str, Any] | None,
     judge_context_window_size: int,
-    capture_judge_traces: bool,
     metadata: dict[str, Any] | None = None,
 ) -> tuple[float, dict[str, Any], dict[str, Any]]:
-    """Grade every APEX rubric criterion and return its fractional pass rate."""
+    """Grade every APEX rubric criterion; a rollout passes only when all pass."""
     del world_id, metadata
     overrides = dict(judge_create_params_overrides or {})
 
@@ -272,7 +246,7 @@ async def grade_apex_output(
             context_window_size=judge_context_window_size,
         )
         visuals = _visual_blocks(final_root, selected)
-        parsed, trace = await _judge_criterion(
+        parsed = await _judge_criterion(
             server_client=server_client,
             model_server_name=model_server_name,
             judge_model=judge_model,
@@ -280,7 +254,6 @@ async def grade_apex_output(
             system_prompt=GRADING_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             visual_blocks=visuals,
-            capture_judge_trace=capture_judge_traces,
         )
         score = 1.0 if parsed.is_criteria_true else 0.0
         values: dict[str, Any] = {
@@ -288,8 +261,6 @@ async def grade_apex_output(
             "grade_rationale": parsed.rationale,
             "evaluated_artifacts": ", ".join(_display_path(change.path) for change in selected),
         }
-        if trace is not None:
-            values["judge_trace"] = trace
         return verifier_id, {
             "score": score,
             "status": "completed",
@@ -302,13 +273,15 @@ async def grade_apex_output(
     passed_count = sum(score["score"] >= 0.99 for score in rubric_scores.values())
     total_count = len(rubric_scores)
     failed_count = total_count - passed_count
-    reward = passed_count / total_count if total_count else 0.0
+    criteria_pass_rate = passed_count / total_count if total_count else 0.0
+    reward = 1.0 if total_count and passed_count == total_count else 0.0
     scoring = {
         "final_score": reward,
         "scoring_method_result_values": {
             "passed_count": passed_count,
             "failed_count": failed_count,
             "total_count": total_count,
+            "criteria_pass_rate": criteria_pass_rate,
             "grade_score_percentage": reward * 100,
         },
     }

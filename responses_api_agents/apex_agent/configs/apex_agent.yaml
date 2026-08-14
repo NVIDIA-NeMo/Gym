@@ -22,13 +22,10 @@ apex_agent:
         # Optional developer override. By default Gym fetches and caches the
         # pinned commit using the trusted host's normal Git authentication.
         source_root: ${oc.select:apex_archipelago_root,null}
-        source_github_token: ${oc.select:apex_archipelago_github_token,${oc.select:apex_harness_github_token,null}}
+        source_github_token: ${oc.select:apex_archipelago_github_token,null}
         dockerfile: ${oc.select:apex_archipelago_dockerfile,environment/Dockerfile}
         docker_tag: ${oc.select:apex_archipelago_docker_tag,nemo-gym-archipelago:0cb5c476c219}
         timeout: ${oc.select:apex_archipelago_build_timeout,7200}
-      harness_repo: ${oc.select:apex_harness_repo,https://github.com/Mercor-Intelligence/apex-agent-harness.git}
-      harness_root: ${oc.select:apex_harness_root,null}
-      harness_github_token: ${oc.select:apex_harness_github_token,null}
       sandbox_provider:
         apptainer:
           create:
@@ -41,13 +38,15 @@ apex_agent:
       # "Mercor APEX-Agents apex@mercor.com". Keep it overridable, but do not
       # replace it with a Gym/NVIDIA identity.
       edgar_user_agent: ${oc.select:apex_edgar_user_agent,"Mercor APEX-Agents apex@mercor.com"}
-      max_turns: ${oc.select:apex_agent_max_turns,100}
+      max_turns: ${oc.select:apex_agent_max_turns,200}
       max_output_tokens: ${oc.select:apex_agent_max_output_tokens,4096}
-      max_tool_calls_per_turn: ${oc.select:apex_agent_max_tool_calls_per_turn,3}
       temperature: ${oc.select:apex_agent_temperature,1.0}
       top_p: ${oc.select:apex_agent_top_p,1.0}
       max_snapshot_bytes: ${oc.select:apex_agent_max_snapshot_bytes,null}
       max_world_bytes: ${oc.select:apex_agent_max_world_bytes,null}
+      # Shares the verifier's output root. Incomplete/max-turn runs are saved
+      # here without being sent to the grader.
+      artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
       datasets:
       - name: example
         type: example

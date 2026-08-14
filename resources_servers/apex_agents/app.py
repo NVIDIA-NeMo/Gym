@@ -48,11 +48,10 @@ class ApexResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE = ReverifyMode.UNSUPPORTED
 
     judge_model_server: ModelServerRef
-    judge_model: str = "judge"
-    judge_create_params_overrides: Dict[str, Any] = Field(default_factory=dict)
+    judge_model: str = "gemini-3-flash"
+    judge_create_params_overrides: Dict[str, Any] = Field(default_factory=lambda: {"reasoning_effort": "low"})
     judge_context_window_size: int = Field(default=32768, gt=0)
     num_processes: int = 8
-    capture_judge_traces: bool = True
     max_snapshot_bytes: Optional[int] = Field(default=None, gt=0)
     max_uncompressed_bytes: int = 512 * 1024 * 1024
     max_artifact_files: int = 2000
@@ -347,7 +346,6 @@ class ApexResourcesServer(SimpleResourcesServer):
                         judge_model=self.config.judge_model,
                         judge_create_params_overrides=self.config.judge_create_params_overrides,
                         judge_context_window_size=self.config.judge_context_window_size,
-                        capture_judge_traces=self.config.capture_judge_traces,
                         metadata={
                             "task_id": body.task_id,
                             "execution": {

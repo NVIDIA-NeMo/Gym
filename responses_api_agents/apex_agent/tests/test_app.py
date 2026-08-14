@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from pytest import MonkeyPatch
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -18,6 +17,7 @@ from responses_api_agents.apex_agent.app import (
     instruction_from_input,
     load_runner_source,
 )
+from responses_api_agents.apex_agent.sandbox_entrypoint import _patch_code_mcp_cancellation_race
 
 
 def _body() -> ApexAgentRunRequest:
@@ -45,9 +45,6 @@ def _agent(*, image: str = "registry.example/archipelago@sha256:1234", auto_buil
         concurrency=4,
         timeout=3600,
         image=image,
-        harness_repo="https://github.com/Mercor-Intelligence/apex-agent-harness.git",
-        harness_root=None,
-        harness_github_token=None,
         image_build={
             "enabled": auto_build,
             "source_repo": "https://github.com/Mercor-Intelligence/archipelago.git",
@@ -61,13 +58,13 @@ def _agent(*, image: str = "registry.example/archipelago@sha256:1234", auto_buil
         sandbox_provider={"apptainer": {}},
         sandbox_spec={},
         edgar_user_agent=None,
-        max_turns=100,
+        max_turns=200,
         max_output_tokens=4096,
-        max_tool_calls_per_turn=3,
         temperature=1.0,
         top_p=1.0,
         max_snapshot_bytes=None,
         max_world_bytes=None,
+        artifact_output_dir=None,
     )
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"policy_model_name": "moonshotai/Kimi-K3"}
@@ -89,41 +86,60 @@ def test_sandbox_config_never_contains_verifier_secrets() -> None:
 
     assert runner["instruction"] == "Do the work"
     assert runner["policy_model"] == "moonshotai/Kimi-K3"
+    assert runner["max_turns"] == 200
     assert "tokenizer_path" not in runner
     assert "context_window_size" not in runner
     assert "max_tool_output_tokens" not in runner
     assert "secret rubric" not in serialized
     assert "secret gold" not in serialized
     assert "CODE_EXEC_RUN_AS_USER" not in spec.env
-    assert spec.env["FOUNDRY_LOCAL_ROOT"] == "/app/apex-harness-runtime/.apex"
+    assert "/app/apex-gym/stirrup_runtime.py" in spec.files
+    assert "FOUNDRY_LOCAL_ROOT" not in spec.env
 
 
-def test_sandbox_runner_does_not_load_a_tokenizer() -> None:
+def test_sandbox_runner_uses_archipelago_gateway_and_stirrup() -> None:
     source = load_runner_source()
 
-    assert "client.get_tokenizer()" not in source
-    assert "agent._tokenizer = None" in source
-    assert 'shutil.copy2(snapshot.initial_path, OUTPUT / "initial.zip")' in source
+    assert "_patch_code_mcp_cancellation_race()" in source
+    assert "configure_gateway(" in source
+    assert "run_stirrup_rollout(config)" in source
+    assert 'write_snapshot(OUTPUT / "initial.zip")' in source
+    assert "stdout=gateway_log" in source
+    assert "stderr=asyncio.subprocess.STDOUT" in source
+    assert "stdout=asyncio.subprocess.PIPE" not in source
 
 
-async def test_runtime_setup_checks_harness_before_image(monkeypatch: MonkeyPatch) -> None:
-    agent = _agent()
-    source_archive = Path("/tmp/apex-harness-source.tar.gz")
-    events: list[str] = []
-    monkeypatch.setattr(
-        "responses_api_agents.apex_agent.app.prepare_harness_source_archive",
-        MagicMock(side_effect=lambda **_kwargs: events.append("harness") or source_archive),
+def test_code_mcp_cancellation_patch_is_idempotent(tmp_path: Path) -> None:
+    session_path = tmp_path / "code/.venv/lib/python3.13/site-packages/mcp/shared/session.py"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        "async def respond(self, response):\n"
+        '        assert not self._completed, "Request already responded to"\n'
+        "        await self._send(response)\n",
+        encoding="utf-8",
     )
+
+    _patch_code_mcp_cancellation_race(tmp_path)
+    patched = session_path.read_text(encoding="utf-8")
+    _patch_code_mcp_cancellation_race(tmp_path)
+
+    assert "        if self._completed:\n            return\n" in patched
+    assert session_path.read_text(encoding="utf-8") == patched
+
+
+async def test_runtime_setup_resolves_image_before_stirrup(monkeypatch: MonkeyPatch) -> None:
+    agent = _agent()
+    events: list[str] = []
     monkeypatch.setattr(
         "responses_api_agents.apex_agent.app.resolve_image",
         MagicMock(side_effect=lambda **_kwargs: events.append("image") or "archipelago.sif"),
     )
 
-    async def _build(_image: str, _source: Path) -> Path:
+    async def _build(_image: str) -> Path:
         events.append("runtime")
-        return Path("/tmp/apex-harness-runtime.tar.gz")
+        return Path("/tmp/stirrup-runtime.tar.gz")
 
-    agent._build_harness_archive = AsyncMock(side_effect=_build)
+    agent._build_stirrup_archive = AsyncMock(side_effect=_build)
 
     async def _inline(func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -132,29 +148,22 @@ async def test_runtime_setup_checks_harness_before_image(monkeypatch: MonkeyPatc
 
     await agent._ensure_runtime_setup()
 
-    assert events == ["harness", "image", "runtime"]
+    assert events == ["image", "runtime"]
 
 
-async def test_harness_preflight_failure_stops_startup(monkeypatch: MonkeyPatch) -> None:
+def test_incomplete_rollout_snapshots_are_saved_without_grading(tmp_path: Path) -> None:
     agent = _agent()
-    monkeypatch.setattr(
-        "responses_api_agents.apex_agent.app.prepare_harness_source_archive",
-        MagicMock(side_effect=RuntimeError("could not fetch pinned Apex harness")),
+    agent.config.artifact_output_dir = str(tmp_path / "saved")
+    body = _body()
+
+    output_dir = agent._persist_ungraded_snapshots(
+        body,
+        {"completion_status": "max_turns"},
+        b"initial",
+        b"final",
     )
 
-    async def _inline(func, *args, **kwargs):
-        return func(*args, **kwargs)
-
-    monkeypatch.setattr(asyncio, "to_thread", _inline)
-
-    with pytest.raises(RuntimeError, match="could not fetch pinned Apex harness"):
-        await agent._preflight_harness_source()
-
-    assert agent._harness_source_archive is None
-
-
-def test_webserver_registers_harness_startup_preflight() -> None:
-    agent = _agent()
-    app = agent.setup_webserver()
-
-    assert agent._preflight_harness_source in app.router.on_startup
+    assert output_dir is not None
+    assert (output_dir / "initial_snapshot.zip").read_bytes() == b"initial"
+    assert (output_dir / "final_snapshot.zip").read_bytes() == b"final"
+    assert json.loads((output_dir / "rollout.json").read_text())["completion_status"] == "max_turns"

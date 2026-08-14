@@ -6,12 +6,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import BaseModel
 
 from resources_servers.apex_agents.artifacts import ArtifactChange
 from resources_servers.apex_agents.judge import (
     _build_prompt,
-    _structured_response_format,
     expected_file_type,
     grade_apex_output,
 )
@@ -23,28 +21,13 @@ def _criterion() -> dict:
 
 def test_expected_file_type_uses_apex_labels() -> None:
     assert expected_file_type("message_in_console", _criterion()) == "Final Answer Only (No Files)"
-    assert expected_file_type("make_new_sheet", _criterion()) == "Spreadsheets (.xlsx, .xls, .xlsm)"
-    assert expected_file_type("make_new_slide_deck", _criterion()) == "Presentations (.pptx, .ppt)"
+    assert expected_file_type("make_new_sheet", _criterion()) == "Spreadsheets (.xlsx, .xls, .xlsm, .ods)"
+    assert expected_file_type("make_new_slide_deck", _criterion()) == "Presentations (.pptx, .ppt, .odp)"
 
 
-def test_expected_file_type_normalizes_legacy_preprocessed_rows() -> None:
+def test_expected_file_type_rejects_legacy_preprocessed_rows() -> None:
     criterion = _criterion() | {"grading_target": {"expected_file_type": "Spreadsheet"}}
-    assert expected_file_type(None, criterion) == "Spreadsheets (.xlsx, .xls, .xlsm)"
-
-
-def test_structured_response_uses_pydantic_json_schema() -> None:
-    class Grade(BaseModel):
-        rationale: str
-        is_criteria_true: bool
-
-    assert _structured_response_format(Grade) == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "Grade",
-            "schema": Grade.model_json_schema(),
-            "strict": True,
-        },
-    }
+    assert expected_file_type(None, criterion) == "All output (modified files and final message in console)"
 
 
 def test_console_prompt_excludes_file_artifacts() -> None:
@@ -62,7 +45,7 @@ def test_console_prompt_excludes_file_artifacts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_apex_grading_extracts_output_and_returns_fractional_score(monkeypatch, tmp_path: Path) -> None:
+async def test_apex_grading_extracts_output_and_returns_binary_score(monkeypatch, tmp_path: Path) -> None:
     final_root = tmp_path / "final"
     final_file = final_root / "filesystem" / "final.txt"
     final_file.parent.mkdir(parents=True)
@@ -115,15 +98,56 @@ async def test_apex_grading_extracts_output_and_returns_fractional_score(monkeyp
         judge_model="judge-model",
         judge_create_params_overrides={"reasoning_effort": "low"},
         judge_context_window_size=32768,
-        capture_judge_traces=True,
     )
 
     assert reward == 1.0
     assert scores["v1"]["values"]["evaluated_artifacts"] == "final.txt"
-    assert scores["v1"]["values"]["judge_trace"]["parsed_response"]["is_criteria_true"] is True
+    assert "judge_trace" not in scores["v1"]["values"]
     assert usage["document_extraction"] == "local"
     request = client.post.call_args.kwargs
     assert request["server_name"] == "judge-server"
     assert request["json"]["model"] == "judge-model"
     assert request["json"]["reasoning_effort"] == "low"
-    assert request["json"]["response_format"]["json_schema"]["name"] == "GradingResponse"
+    assert request["json"]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_apex_grading_fails_rollout_when_any_criterion_fails(monkeypatch, tmp_path: Path) -> None:
+    answers = iter([True, False])
+    response = object()
+    client = MagicMock()
+    client.post = AsyncMock(return_value=response)
+
+    async def fake_status(_actual) -> None:
+        return None
+
+    async def fake_json(_actual) -> dict:
+        passed = next(answers)
+        return {"choices": [{"message": {"content": json.dumps({"rationale": "graded", "is_criteria_true": passed})}}]}
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", fake_status)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.get_response_json", fake_json)
+
+    reward, _scores, usage = await grade_apex_output(
+        server_client=client,
+        model_server_name="judge-server",
+        task_id="task-1",
+        world_id="world-1",
+        instruction="Do both things",
+        response="Done",
+        rubric=[
+            {"verifier_id": "v1", "criteria": "First thing"},
+            {"verifier_id": "v2", "criteria": "Second thing"},
+        ],
+        expected_output="message_in_console",
+        artifact_changes=[],
+        final_root=tmp_path,
+        judge_model="gemini-3-flash",
+        judge_create_params_overrides={"reasoning_effort": "low"},
+        judge_context_window_size=32768,
+    )
+
+    assert reward == 0.0
+    values = usage["scoring"]["scoring_method_result_values"]
+    assert values["criteria_pass_rate"] == 0.5
+    assert values["grade_score_percentage"] == 0.0

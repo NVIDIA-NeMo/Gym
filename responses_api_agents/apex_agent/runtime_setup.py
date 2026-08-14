@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Trusted host setup for pinned Apex and Archipelago runtime sources."""
+"""Trusted host setup for the pinned Archipelago image and Stirrup runtime."""
 
 from __future__ import annotations
 
@@ -15,9 +15,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
-
-
-HARNESS_REVISION = "1fd94befbb570eb6effe76b1895e5d599e820227"
 
 
 class ApexImageBuildConfig(BaseModel):
@@ -100,52 +97,6 @@ def _resolve_pinned_source(
     if resolved != revision:
         raise RuntimeError(f"source revision resolved to {resolved}, expected {revision}")
     return root
-
-
-def prepare_harness_source_archive(
-    *,
-    agent_dir: Path,
-    repo: str,
-    source_root: str | None,
-    github_token: str | None,
-) -> Path:
-    """Fetch and export the clean, pinned Apex harness commit."""
-    cache_dir = agent_dir / "deps"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    archive = cache_dir / f"apex-harness-source-{HARNESS_REVISION[:20]}.tar.gz"
-    if archive.exists():
-        return archive
-
-    root = _resolve_pinned_source(
-        cache_dir=cache_dir,
-        cache_name="apex-harness-source",
-        repo=repo,
-        revision=HARNESS_REVISION,
-        source_root=source_root,
-        github_token=github_token,
-    )
-    temporary = archive.with_suffix(".tmp")
-    temporary.unlink(missing_ok=True)
-    try:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(root),
-                "archive",
-                "--format=tar.gz",
-                f"--output={temporary}",
-                HARNESS_REVISION,
-            ],
-            check=True,
-            timeout=60,
-        )
-        temporary.replace(archive)
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"could not export pinned Apex harness revision {HARNESS_REVISION}") from exc
-    finally:
-        temporary.unlink(missing_ok=True)
-    return archive
 
 
 def _prepare_archipelago_context(agent_dir: Path, build: ApexImageBuildConfig) -> Path:
@@ -259,19 +210,16 @@ def resolve_image(
     return image.removeprefix("docker://")
 
 
-def harness_cache_path(
+def stirrup_cache_path(
     *,
     agent_dir: Path,
     setup_path: Path,
     requirements_path: Path,
     image: str,
-    source_archive: Path,
 ) -> Path:
-    with source_archive.open("rb") as stream:
-        source_digest = hashlib.file_digest(stream, "sha256").digest()
     recipe = hashlib.sha256(
-        setup_path.read_bytes() + requirements_path.read_bytes() + image.encode("utf-8") + source_digest
+        setup_path.read_bytes() + requirements_path.read_bytes() + image.encode("utf-8")
     ).hexdigest()
     cache_dir = agent_dir / "deps"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir / f"apex-harness-{recipe[:20]}.tar.gz"
+    return cache_dir / f"stirrup-runtime-{recipe[:20]}.tar.gz"

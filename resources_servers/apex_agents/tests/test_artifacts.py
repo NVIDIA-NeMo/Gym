@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sqlite3
+import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -71,6 +73,20 @@ def test_renders_sqlite_application_state(tmp_path: Path) -> None:
     assert paths == [".apps_data/mail/mail.db"]
     assert "Table: messages" in rendered
     assert "person@example.com | Completed" in rendered
+
+
+def test_extracts_docx_without_gdpval_agent_dependency(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    document_path = root / "filesystem" / "report.docx"
+    document_path.parent.mkdir(parents=True)
+    document_path.write_bytes(b"docx-placeholder")
+    document = SimpleNamespace(paragraphs=[SimpleNamespace(text="APEX-local extraction")])
+    monkeypatch.setitem(sys.modules, "docx", SimpleNamespace(Document=lambda _path: document))
+
+    rendered, paths = artifact_text(root, [document_path], max_total_chars=10_000, max_file_chars=10_000)
+
+    assert paths == ["filesystem/report.docx"]
+    assert "APEX-local extraction" in rendered
 
 
 def test_snapshot_changes_excludes_unchanged_and_renders_before_after(tmp_path: Path) -> None:

@@ -16,10 +16,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from resources_servers.apex_agents.file_extraction import (
+    extract_file_text,
+)
+from resources_servers.apex_agents.file_extraction import (
+    visual_content_blocks as render_visual_content_blocks,
+)
+
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _MAX_SQLITE_BYTES = 64 * 1024 * 1024
-_TEXT_EXTENSIONS = {".log", ".py", ".sh", ".sql", ".yaml", ".yml"}
 
 
 @dataclass(frozen=True)
@@ -115,17 +121,13 @@ def _read_sqlite(path: Path) -> str:
 
 
 def _extract_text(path: Path) -> str:
-    from responses_api_agents.stirrup_agent.file_reader import _extract_text as gdpval_extract_text
-
     extension = path.suffix.lower()
     with path.open("rb") as stream:
         header = stream.read(len(_SQLITE_HEADER))
     if header == _SQLITE_HEADER:
         return _read_sqlite(path)
-    if extension in _TEXT_EXTENSIONS:
-        return path.read_text(encoding="utf-8", errors="replace").strip()
     if extension:
-        return gdpval_extract_text(path, extension)
+        return extract_file_text(path)
     data = path.read_bytes()
     if b"\x00" in data[:4096]:
         return f"[Binary file, {len(data)} bytes]"
@@ -257,12 +259,10 @@ def artifact_text(
 
 
 def visual_content_blocks(root: Path, files: list[Path]) -> list[dict[str, Any]]:
-    """Reuse GDP-Val's rendering pipeline after flattening recursive paths."""
-    from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
-
+    """Render recursively located APEX artifacts after flattening their paths."""
     staging = root / ".visual_staging" / uuid.uuid4().hex
     staging.mkdir(parents=True, exist_ok=True)
     for index, path in enumerate(files):
         rel = path.relative_to(root).as_posix().replace("/", "__")
         shutil.copy2(path, staging / f"{index:04d}__{rel}")
-    return convert_deliverables_to_content_blocks(str(staging))
+    return render_visual_content_blocks(staging)
