@@ -244,12 +244,8 @@ def test_responses_to_chat_completion_no_instructions_adds_no_message(converter:
     assert [m["role"] for m in params.messages] == ["user"]
 
 
-@pytest.mark.parametrize("part_type", ["input_image", "image_url"])
-@pytest.mark.parametrize("image_url", ["http://img", {"url": "http://img"}])
 def test_responses_to_chat_completion_input_image_part(
     converter: ResponsesConverter,
-    part_type: str,
-    image_url: object,
 ):
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
@@ -259,7 +255,7 @@ def test_responses_to_chat_completion_input_image_part(
                     "type": "message",
                     "content": [
                         {"type": "input_text", "text": "what is this?"},
-                        {"type": part_type, "image_url": image_url, "detail": "high"},
+                        {"type": "input_image", "image_url": "http://img", "detail": "high"},
                     ],
                 }
             ]
@@ -270,22 +266,19 @@ def test_responses_to_chat_completion_input_image_part(
     assert {"type": "image_url", "image_url": {"url": "http://img", "detail": "high"}} in parts
 
 
-@pytest.mark.parametrize("part_type", ["input_image", "image_url"])
 def test_responses_to_chat_completion_empty_image_url_raises(
     converter: ResponsesConverter,
-    part_type: str,
 ):
     with pytest.raises(ValueError, match="requires a non-empty image_url"):
         converter._format_message(
             {
                 "role": "user",
-                "content": [{"type": part_type, "image_url": {"url": ""}}],
+                "content": [{"type": "input_image", "image_url": ""}],
             },
             ResponsesConverterState(return_token_id_information=False),
         )
 
 
-@pytest.mark.parametrize("part_type", ["input_video", "video_url"])
 @pytest.mark.parametrize(
     ("video_field", "video_url"),
     [
@@ -296,12 +289,9 @@ def test_responses_to_chat_completion_empty_image_url_raises(
 )
 def test_responses_to_chat_completion_video_part(
     converter: ResponsesConverter,
-    part_type: str,
     video_field: str,
     video_url: object,
 ):
-    if part_type == "video_url" and video_field == "video":
-        pytest.skip("video is an input_video compatibility field")
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
             input=[
@@ -310,7 +300,7 @@ def test_responses_to_chat_completion_video_part(
                     "type": "message",
                     "content": [
                         {"type": "input_text", "text": "what happens?"},
-                        {"type": part_type, video_field: video_url},
+                        {"type": "input_video", video_field: video_url},
                     ],
                 }
             ]
@@ -327,13 +317,87 @@ def test_responses_to_chat_completion_video_part(
 def test_responses_to_chat_completion_empty_video_url_raises(
     converter: ResponsesConverter,
 ):
-    with pytest.raises(ValueError, match="requires a non-empty video_url"):
+    with pytest.raises(ValueError, match="requires a non-empty URL"):
         converter._format_message(
             {
                 "role": "user",
                 "content": [{"type": "input_video", "video_url": ""}],
             },
             ResponsesConverterState(return_token_id_information=False),
+        )
+
+
+def test_responses_video_schema_preserves_mixed_sdk_items_as_dicts():
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "role": "user",
+                "type": "message",
+                "content": [
+                    {"type": "input_file", "file_url": "https://example.com/context.txt"},
+                    {"type": "input_video", "video_url": "https://example.com/video.mp4"},
+                ],
+            }
+        ]
+    )
+
+    content = request.input[0].content
+    assert isinstance(content[0], dict)
+    assert isinstance(content[1], dict)
+    assert content[0]["type"] == "input_file"
+    assert content[1]["type"] == "input_video"
+
+
+@pytest.mark.parametrize(
+    "video_part",
+    [
+        {"type": "input_video"},
+        {"type": "input_video", "video_url": "", "video": "https://example.com/video.mp4"},
+        {
+            "type": "input_video",
+            "video_url": "https://example.com/a.mp4",
+            "video": "https://example.com/b.mp4",
+        },
+        {"type": "input_video", "video_url": {"url": ""}},
+    ],
+)
+def test_responses_video_schema_requires_exactly_one_nonempty_source(video_part: dict):
+    with pytest.raises(ValueError, match="exactly one|non-empty URL"):
+        NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "type": "message", "content": [video_part]}])
+
+
+def test_responses_schema_rejects_chat_style_media_aliases():
+    with pytest.raises(ValueError):
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "user",
+                    "type": "message",
+                    "content": [{"type": "video_url", "video_url": "https://example.com/video.mp4"}],
+                }
+            ]
+        )
+
+
+def test_chat_schema_accepts_only_canonical_video_url():
+    request = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "video_url", "video_url": {"url": "https://example.com/video.mp4"}}],
+            }
+        ]
+    )
+    assert request.messages[0]["content"][0]["type"] == "video_url"
+
+    with pytest.raises(ValueError):
+        NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "input_video", "video_url": "https://example.com/video.mp4"}],
+                }
+            ]
         )
 
 
