@@ -29,15 +29,40 @@ as literal `\n` + mass parse failures).
 Note: the pinned fork's full dependency set installs on Linux only (borb 3.x wheels fail
 to extract on case-insensitive filesystems) — run this server and its tests on Linux.
 
-## Run
+## Run standalone evaluation
 
 ```
 gym env start --agent nemotron_osworld \
   +config_paths="[responses_api_agents/nemotron_osworld/configs/nemotron_osworld.yaml,
                   resources_servers/osworld/configs/osworld.yaml,
-                  nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml,
+                  resources_servers/osworld/configs/opensandbox_osworld.yaml,
                   <your policy_model config>]"
 ```
+
+## Run context-compacted GRPO
+
+NeMo RL training uses the context-compacted agent entry point:
+
+```text
+responses_api_agents/nemotron_osworld/configs/nemotron_osworld_cc.yaml
+```
+
+That config selects `cc_app.py`, emits the exact trace evidence required by
+NeMo RL, and exposes these main controls:
+
+- `OSWORLD_MAX_STEPS`: maximum desktop actions in one logical rollout.
+- `OSWORLD_MAX_PARALLEL_ROLLOUTS`: concurrent agent sessions.
+- `OSWORLD_CC_KEEP_LAST_IMAGE_GROUPS`: number of recent screenshot groups to
+  retain (`N`).
+- `OSWORLD_CC_ACTIONS_PER_CHUNK`: completed actions between compaction
+  boundaries (`K`).
+- `OSWORLD_CC_MAX_TOTAL_TOKENS`: guard that closes a chunk before the next
+  model call.
+
+Do not launch `cc_app.py` by itself for training. Use the companion NeMo RL
+[OSWorld GRPO recipe and quick start](https://github.com/jinglinglingling/RL/blob/feature/osworld-grpo-training-eval-signed/docs/guides/context-compaction.md#run-osworld-grpo),
+which composes the training model server, agent, resources server, and
+OpenSandbox configs in the required order.
 
 # Licensing information
 Code: Apache 2.0
