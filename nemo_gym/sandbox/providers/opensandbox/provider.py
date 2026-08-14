@@ -612,6 +612,9 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
+            if self._connection.api_key is not None:
+                # SDK 0.1.15 does not copy api_key into proxied exec/file requests.
+                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
         if self._connection.keepalive_expiry_s is not None:
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
