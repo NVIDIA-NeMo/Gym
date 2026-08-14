@@ -42,6 +42,7 @@ from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 
 
 LOGGER = logging.getLogger(__name__)
+logging.getLogger("opensandbox").setLevel(logging.WARNING)
 
 
 class OpenSandboxCreateError(SandboxCreateError):
