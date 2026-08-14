@@ -43,8 +43,11 @@ from responses_api_agents.simple_agent.app import (
 
 
 def _make_agent(
-    observability_enabled: bool, agent_type: type[SimpleAgent] = SimpleAgent
+    observability_enabled: bool,
+    agent_type: type[SimpleAgent] = SimpleAgent,
+    max_steps: int | None = None,
 ) -> tuple[SimpleAgent, MagicMock]:
+    config_overrides = {} if max_steps is None else {"max_steps": max_steps}
     config = SimpleAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -52,6 +55,7 @@ def _make_agent(
         name="simple",
         model_server=ModelServerRef(type="responses_api_models", name="model"),
         resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+        **config_overrides,
     )
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {"observability_enabled": observability_enabled}
@@ -66,6 +70,11 @@ def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
 
 
 class TestApp:
+    def test_max_steps_defaults_to_one(self) -> None:
+        agent, _ = _make_agent(observability_enabled=False)
+
+        assert agent.config.max_steps == 1
+
     def test_sanity(self) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -203,7 +212,7 @@ class TestApp:
 
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
-        server, server_client = _make_agent(True)
+        server, server_client = _make_agent(True, max_steps=2)
         response_base = {
             "created_at": 1.0,
             "model": "model",
@@ -408,6 +417,7 @@ class TestApp:
                 type="resources_servers",
                 name="my resources server",
             ),
+            max_steps=2,
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
@@ -510,6 +520,7 @@ class TestApp:
                 type="resources_servers",
                 name="",
             ),
+            max_steps=2,
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
