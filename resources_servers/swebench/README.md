@@ -39,7 +39,7 @@ Resolved: 492 / 500 (98.40%): ... [19:29, 258.00s/it]
 
 SWE Bench Multilingual
 ```bash
-Resolved: 280 / 300 (93.33%): ... [17:18<00:00,  3.46s/it]
+Resolved: 287 / 300 (95.67%): [23:07<00:00,  4.63s/it]
 ```
 
 SWE Bench Pro
