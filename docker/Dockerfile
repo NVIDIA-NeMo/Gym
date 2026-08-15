@@ -74,10 +74,31 @@ EOF
 
 ARG UV_VERSION=0.11.29
 ARG PYTHON_VERSION=3.13.14
+ARG TARGETARCH
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 ENV UV_CACHE_DIR=/opt/uv/cache
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | \
-        env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh && \
+RUN case "${TARGETARCH}" in \
+        amd64) \
+            uv_arch="x86_64"; \
+            uv_sha256="04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829"; \
+            ;; \
+        arm64) \
+            uv_arch="aarch64"; \
+            uv_sha256="94500fb064ae3c971a873cba64d94694c50677e0a4dbf78735c80509e7429919"; \
+            ;; \
+        *) \
+            echo "Unsupported TARGETARCH for uv: ${TARGETARCH}" >&2; \
+            exit 1; \
+            ;; \
+    esac && \
+    uv_archive="uv-${uv_arch}-unknown-linux-gnu.tar.gz" && \
+    curl -fLSs -o "/tmp/${uv_archive}" \
+        "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${uv_archive}" && \
+    echo "${uv_sha256}  /tmp/${uv_archive}" | sha256sum -c - && \
+    tar -xzf "/tmp/${uv_archive}" -C /tmp && \
+    install -m 0755 "/tmp/uv-${uv_arch}-unknown-linux-gnu/uv" /usr/local/bin/uv && \
+    install -m 0755 "/tmp/uv-${uv_arch}-unknown-linux-gnu/uvx" /usr/local/bin/uvx && \
+    rm -rf "/tmp/${uv_archive}" "/tmp/uv-${uv_arch}-unknown-linux-gnu" && \
     /usr/local/bin/uv python install ${PYTHON_VERSION}
 ENV PATH="/usr/local/bin:$PATH"
 
