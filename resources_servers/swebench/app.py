@@ -15,6 +15,7 @@
 
 import sys
 from pathlib import Path
+from shutil import rmtree
 from time import time
 from traceback import format_exc
 from typing import Any, Dict, Optional, Tuple
@@ -50,6 +51,8 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
+
+    clear_swebench_debug_logs: bool = True
 
 
 class SWEBenchInstanceRequest(BaseModel):
@@ -185,7 +188,6 @@ class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest
 
 class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
-    pty_session_id: str
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
@@ -253,18 +255,13 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(test_spec)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        pty_session = await eval_sandbox.pty.create()
-
         # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
-        if MAP_REPO_TO_EXT.get(test_spec.repo) == "py":
-            await eval_sandbox.pty.exec(
-                "source /opt/miniconda3/bin/activate && conda activate testbed", session=pty_session
-            )
+        # This may be overfit and needs to be config'd or detected.
+        # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
+        # For now, the activation is put on the harness side.
+        # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
 
-        return SWEBenchSeedSessionResponse(
-            sandbox_handle=eval_sandbox._handle.sandbox_id,
-            pty_session_id=pty_session.session_id,
-        )
+        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -330,6 +327,12 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             rewrite_reports=False,
         )
         patch_verification_time_taken = time() - start_time
+
+        log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
+        if self.config.clear_swebench_debug_logs:
+            rmtree(str(log_dir), ignore_errors=True)
+            log_dir = ""
+
         return SWEBenchVerifyResponse(
             **body.model_dump(),
             # run_instance returns "completed"; the response field is "evaluation_completed".
@@ -339,7 +342,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,
-            log_dir=str(Path(__file__).parent / "logs/run_evaluation" / run_id),
+            log_dir=str(log_dir),
         )
 
 
