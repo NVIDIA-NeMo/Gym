@@ -10,7 +10,7 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
 
       clear_swebench_debug_logs: true
 
-      evaluation_timeout: 1800
+      evaluation_timeout: 900
 
       sandbox_provider: sandbox
       sandbox_config:
