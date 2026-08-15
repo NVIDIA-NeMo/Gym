@@ -158,18 +158,16 @@ ENV NVIDIA_BUILD_REF=${NVIDIA_BUILD_REF:-<unknown>}
 LABEL com.nvidia.build.id="${NVIDIA_BUILD_ID}"
 LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 
-# Copy full source. Exclude pyproject.toml and uv.lock since they are
-# already present from the hermetic stage.
-COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
-    --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
+# Copy full source as root while the package build introspects the preserved
+# Git checkout. Exclude pyproject.toml and uv.lock since they are already
+# present from the hermetic stage. Runtime ownership is applied after install.
+COPY --from=nemo-gym --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
-# Install the nemo-gym project itself along with the vllm extra. The remote
-# source stage preserves .git, which is owned by the runtime UID after COPY.
-# Scope the ownership exception to this build command instead of persisting it.
-RUN GIT_CONFIG_COUNT=1 \
-        GIT_CONFIG_KEY_0=safe.directory \
-        GIT_CONFIG_VALUE_0=/opt/nemo-gym \
-        UV_LINK_MODE=symlink uv sync --locked --extra vllm
+# Install the nemo-gym project itself along with the vllm extra. The worktree
+# was created for the runtime UID in the base stage, so restore build ownership
+# before setuptools invokes Git.
+RUN chown root:root /opt/nemo-gym && \
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm
 
 # Keep runtime uv and XDG caches separate from the root-owned build cache that
 # backs the symlinked project environment.
