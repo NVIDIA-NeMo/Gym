@@ -64,7 +64,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
-    ++policy_base_url=http://\$(getent hosts "\$EVAL_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
+    ++policy_base_url=http://\$(getent hosts "\$PREFILL_HEAD" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
     ++upload_rollouts_to_wandb=false \
@@ -223,7 +223,7 @@ if (( $should_run_eval )); then
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     eval_status=0
-    EVAL_NODE="\$EVAL_NODE" \
+    PREFILL_HEAD="\$PREFILL_HEAD" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
