@@ -115,6 +115,25 @@ ITEM_FIXTURES: dict[str, dict] = {
         "output": "sunny",
         "status": "completed",
     },
+    "apply_patch_call": {
+        "type": "apply_patch_call",
+        "id": "ap_1",
+        "call_id": "call_ap_1",
+        "operation": {"type": "create_file", "path": "hello.txt", "diff": "+hello\n"},
+        "status": "completed",
+    },
+    "apply_patch_call_output": {
+        "type": "apply_patch_call_output",
+        "id": "apo_1",
+        "call_id": "call_ap_1",
+        "status": "completed",
+        "output": "Done!",
+    },
+    "compaction": {
+        "type": "compaction",
+        "id": "cmp_1",
+        "encrypted_content": "opaque-context",
+    },
     "reasoning": {
         "type": "reasoning",
         "id": "rs_1",
@@ -208,6 +227,25 @@ ITEM_FIXTURES: dict[str, dict] = {
         "id": "lso_1",
         "output": "total 0",
     },
+    "shell_call": {
+        "type": "shell_call",
+        "id": "sh_1",
+        "call_id": "call_sh_1",
+        "status": "completed",
+        "action": {"commands": ["echo hello"]},
+    },
+    "shell_call_output": {
+        "type": "shell_call_output",
+        "id": "sho_1",
+        "call_id": "call_sh_1",
+        "output": [
+            {
+                "stdout": "hello\n",
+                "stderr": "",
+                "outcome": {"type": "exit", "exit_code": 0},
+            }
+        ],
+    },
     "mcp_approval_response": {
         "type": "mcp_approval_response",
         "approval_request_id": "mar_1",
@@ -223,7 +261,10 @@ ITEM_FIXTURES: dict[str, dict] = {
 # ``vllm_model`` and ``inference_provider`` convert requests to Chat Completions.
 CHAT_INCONVERTIBLE_TYPES = frozenset(
     {
+        "apply_patch_call",
+        "apply_patch_call_output",
         "code_interpreter_call",
+        "compaction",
         "computer_call",
         "custom_tool_call",
         "file_search_call",
@@ -232,6 +273,8 @@ CHAT_INCONVERTIBLE_TYPES = frozenset(
         "mcp_approval_request",
         "mcp_call",
         "mcp_list_tools",
+        "shell_call",
+        "shell_call_output",
         "web_search_call",
         "computer_call_output",
         "custom_tool_call_output",
