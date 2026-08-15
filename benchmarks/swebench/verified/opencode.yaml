@@ -17,4 +17,4 @@ opencode_sandboxed_agent_swebench_verified:
           type: benchmark
           jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
           prepare_script: benchmarks/swebench/verified/prepare.py
-          num_repeats: 4
+          num_repeats: 3
