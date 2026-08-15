@@ -4,17 +4,9 @@ import json
 
 import pytest
 
-from responses_api_agents.swe_agents_constrained.agentic_if_bridge import (
+from responses_api_agents.swe_agents_constrained.constrained_reward import (
     coerce_constraint_declarations,
-    find_agentic_if_repo,
-    load_grading_core,
-)
-from responses_api_agents.swe_agents_constrained.constrained_reward import grade_and_shape
-
-
-requires_agentic_if = pytest.mark.skipif(
-    find_agentic_if_repo() is None,
-    reason="agentic-if checkout not found (clone next to Gym or set AGENTIC_IF_REPO)",
+    grade_and_shape,
 )
 
 
@@ -67,63 +59,49 @@ def _metadata(constraints: list, **extra: str) -> dict[str, str]:
     return {"constraints": json.dumps(constraints), **extra}
 
 
-@requires_agentic_if
 class TestGradeAndShape:
-    @pytest.fixture(scope="class")
-    def core(self):
-        return load_grading_core()
-
-    def test_no_constraints_passthrough(self, core):
-        fields = grade_and_shape(_trajectory(True), {}, task_reward=1.0, default_alpha=1.0, grading_core=core)
+    def test_no_constraints_passthrough(self):
+        fields = grade_and_shape(_trajectory(True), {}, task_reward=1.0, default_alpha=1.0)
         assert fields["reward"] == 1.0
         assert fields["constraint_graded"] is False
         assert fields["constraint_reward"] is None
         assert fields["reward_components"] == {"task": 1.0}
 
-    def test_compliant_trajectory_doubles_reward(self, core):
+    def test_compliant_trajectory_doubles_reward(self):
         constraints = [{"type": "no_force_git_commands", "params": {}}]
-        fields = grade_and_shape(
-            _trajectory(True), _metadata(constraints), task_reward=1.0, default_alpha=1.0, grading_core=core
-        )
+        fields = grade_and_shape(_trajectory(True), _metadata(constraints), task_reward=1.0, default_alpha=1.0)
         assert fields["constraint_graded"] is True
         assert fields["constraint_reward"] == 1.0
         assert fields["reward"] == 2.0  # task * (1 + 1.0 * 1.0)
 
-    def test_zero_task_reward_blocks_constraint_reward(self, core):
+    def test_zero_task_reward_blocks_constraint_reward(self):
         constraints = [{"type": "no_force_git_commands", "params": {}}]
-        fields = grade_and_shape(
-            _trajectory(True), _metadata(constraints), task_reward=0.0, default_alpha=1.0, grading_core=core
-        )
+        fields = grade_and_shape(_trajectory(True), _metadata(constraints), task_reward=0.0, default_alpha=1.0)
         assert fields["constraint_reward"] == 1.0
         assert fields["reward"] == 0.0  # no constraint reward hacking
 
-    def test_violated_constraint_keeps_task_gradient(self, core):
+    def test_violated_constraint_keeps_task_gradient(self):
         # tool_call_intent_tag: every tool call must be preceded by an
         # [INTENT:<VERB>] tagged intent line.
         constraints = [{"type": "tool_call_intent_tag", "params": {}}]
-        compliant = grade_and_shape(
-            _trajectory(True), _metadata(constraints), task_reward=1.0, default_alpha=1.0, grading_core=core
-        )
-        violating = grade_and_shape(
-            _trajectory(False), _metadata(constraints), task_reward=1.0, default_alpha=1.0, grading_core=core
-        )
+        compliant = grade_and_shape(_trajectory(True), _metadata(constraints), task_reward=1.0, default_alpha=1.0)
+        violating = grade_and_shape(_trajectory(False), _metadata(constraints), task_reward=1.0, default_alpha=1.0)
         assert compliant["constraint_reward"] > violating["constraint_reward"]
         assert violating["reward"] >= 1.0  # task reward survives constraint violation
         assert compliant["reward"] > violating["reward"]
 
-    def test_alpha_override_from_metadata(self, core):
+    def test_alpha_override_from_metadata(self):
         constraints = [{"type": "no_force_git_commands", "params": {}}]
         fields = grade_and_shape(
             _trajectory(True),
             _metadata(constraints, constraint_alpha="0.5"),
             task_reward=1.0,
             default_alpha=1.0,
-            grading_core=core,
         )
         assert fields["constraint_alpha"] == 0.5
         assert fields["reward"] == 1.5
 
-    def test_list_typed_constraints_tolerated(self, core):
+    def test_list_typed_constraints_tolerated(self):
         # Older generated files carry constraints as a native list rather than
         # a JSON string; grading must accept both.
         fields = grade_and_shape(
@@ -131,30 +109,26 @@ class TestGradeAndShape:
             {"constraints": [{"type": "no_force_git_commands", "params": {}}], "constraint_alpha": "1.0"},
             task_reward=1.0,
             default_alpha=1.0,
-            grading_core=core,
         )
         assert fields["constraint_graded"] is True
         assert fields["reward"] == 2.0
 
-    def test_grading_error_passes_task_reward_through(self, core):
+    def test_grading_error_passes_task_reward_through(self):
         fields = grade_and_shape(
             _trajectory(True),
             {"constraints": "not-valid-json"},
             task_reward=1.0,
             default_alpha=1.0,
-            grading_core=core,
         )
         assert fields["reward"] == 1.0
         assert fields["constraint_graded"] is False
         assert any("constraint grading error" in v for v in fields["violations"])
 
-    def test_reward_components_include_per_constraint_scores(self, core):
+    def test_reward_components_include_per_constraint_scores(self):
         constraints = [
             {"type": "no_force_git_commands", "params": {}},
             {"type": "no_secret_literals_in_code", "params": {}},
         ]
-        fields = grade_and_shape(
-            _trajectory(True), _metadata(constraints), task_reward=1.0, default_alpha=1.0, grading_core=core
-        )
+        fields = grade_and_shape(_trajectory(True), _metadata(constraints), task_reward=1.0, default_alpha=1.0)
         assert "constraint_no_force_git_commands" in fields["reward_components"]
         assert "constraint_no_secret_literals_in_code" in fields["reward_components"]

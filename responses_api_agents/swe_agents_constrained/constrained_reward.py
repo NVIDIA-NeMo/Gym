@@ -15,19 +15,42 @@
 """Constraint grading + reward shaping for the constrained SWE-bench wrapper.
 
 Free of nemo_gym / OpenHands imports so the shaping semantics are unit-testable
-in any venv that can see the agentic-if checkout.
+in any venv (the grading core is stdlib + pydantic only).
 """
 
 import json
 import logging
 from typing import Any
 
-from responses_api_agents.swe_agents_constrained.agentic_if_bridge import coerce_constraint_declarations
+from responses_api_agents.swe_agents_constrained.grading import (
+    InjectionMode,
+    compute_reward,
+    grade_constraints,
+    parse_trajectory,
+)
+from responses_api_agents.swe_agents_constrained.grading.reward import TrainingMode, _DEFAULT_ALPHA
 
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CONSTRAINT_ALPHA = 1.0  # FORMAT mode default (agentic-if reward.py)
+DEFAULT_CONSTRAINT_ALPHA = _DEFAULT_ALPHA[TrainingMode.FORMAT]
+
+
+def coerce_constraint_declarations(raw: list) -> list[dict]:
+    """Normalize metadata constraint declarations to the [{type, params}] schema.
+
+    Accepts the canonical schema ({"type": ..., "params": {...}}) and coerces
+    legacy bare-string entries ("unified_diff") for older datasets.
+    """
+    declarations = []
+    for entry in raw or []:
+        if isinstance(entry, str):
+            declarations.append({"type": entry, "params": {}})
+        elif isinstance(entry, dict) and "type" in entry:
+            declarations.append({"type": entry["type"], "params": entry.get("params") or {}})
+        else:
+            raise ValueError(f"Malformed constraint declaration: {entry!r}")
+    return declarations
 
 
 def grade_and_shape(
@@ -35,7 +58,6 @@ def grade_and_shape(
     metadata: dict[str, str],
     task_reward: float,
     default_alpha: float,
-    grading_core: tuple,
 ) -> dict[str, Any]:
     """Grade a completed trajectory and shape the task reward.
 
@@ -44,7 +66,6 @@ def grade_and_shape(
     rollout: the task reward passes through unshaped and the error is recorded
     in ``violations``.
     """
-    parse_trajectory, grade_constraints, compute_reward, injection_mode_cls = grading_core
     alpha = float(metadata.get("constraint_alpha", default_alpha))
     fields: dict[str, Any] = {
         "reward": task_reward,
@@ -68,7 +89,7 @@ def grade_and_shape(
         grading = grade_constraints(
             steps,
             constraints,
-            injection_mode=injection_mode_cls(metadata.get("injection_mode", injection_mode_cls.SYSTEM_PROMPT)),
+            injection_mode=InjectionMode(metadata.get("injection_mode", InjectionMode.SYSTEM_PROMPT)),
             injection_step=int(metadata.get("injection_step", 0)),
             grading_mode=metadata.get("grading_mode", "fraction"),
             step_aggregation=metadata.get("step_aggregation", "mean"),

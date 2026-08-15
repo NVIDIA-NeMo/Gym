@@ -16,7 +16,7 @@
 
 Extends the OpenHands ``SWEBenchWrapper``: the full agentic rollout and
 SWE-bench harness evaluation are inherited unchanged; on top, the completed
-multi-turn trajectory is graded against agentic-if format constraints and the
+multi-turn trajectory is graded against if_format constraints and the
 task reward is shaped::
 
     reward = task_reward * (1 + alpha * constraint_reward)
@@ -26,11 +26,11 @@ constraint pressure never zeroes the task gradient on hard SWE tasks. When no
 constraint had a gradeable step (any_graded=False), the constraint term is
 dropped — "not measured" is not perfect compliance.
 
-Canonical constraint ids and verifiers live in the agentic-if repo
-(instruction_pool/rubrics/) — imported, not vendored, so constraint semantics
-have a single source of truth. The constraint *instruction text* is expected to
-already be injected into the task prompt by the agentic-if dataset builder;
-this wrapper only grades and shapes.
+Canonical constraint ids, verifiers, and the reward formula live in the
+sibling ``grading`` package — the single source of truth (the agentic-if
+constraint-development repo re-exports it from here). The constraint
+*instruction text* is expected to already be injected into the task prompt by
+the dataset builder; this wrapper only grades and shapes.
 
 Per-task declarations ride in ``responses_create_params.metadata`` (Responses
 metadata values are strings, so structured values are JSON-encoded):
@@ -44,7 +44,7 @@ metadata values are strings, so structured values are JSON-encoded):
   injection_step     optional int (with mid_conversation)
 """
 
-from typing import Any, Optional
+from typing import Optional
 
 from nemo_gym.base_resources_server import BaseMultiRewardVerifyResponse, BaseRunRequest
 from responses_api_agents.swe_agents.app import (
@@ -52,7 +52,6 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapper,
     SWEBenchWrapperConfig,
 )
-from responses_api_agents.swe_agents_constrained.agentic_if_bridge import load_grading_core
 from responses_api_agents.swe_agents_constrained.constrained_reward import (
     DEFAULT_CONSTRAINT_ALPHA,
     grade_and_shape,
@@ -60,9 +59,6 @@ from responses_api_agents.swe_agents_constrained.constrained_reward import (
 
 
 class SWEBenchConstrainedWrapperConfig(SWEBenchWrapperConfig):
-    # Path to the agentic-if checkout (absolute, or relative to the Gym repo
-    # root). AGENTIC_IF_REPO env var takes precedence.
-    agentic_if_repo: Optional[str] = None
     constraint_alpha: float = DEFAULT_CONSTRAINT_ALPHA
 
 
@@ -78,7 +74,7 @@ class SWEBenchConstrainedVerifyResponse(SWEBenchVerifyResponse, BaseMultiRewardV
     constraint_graded: bool = False
     constraint_alpha: float = DEFAULT_CONSTRAINT_ALPHA
     # Per-constraint pass/fail, partial-credit scores, applicability, and
-    # human-readable violations from agentic-if grade_constraints().
+    # human-readable violations from grading.grade_constraints().
     constraint_results: dict[str, bool] = {}
     constraint_scores: dict[str, float] = {}
     constraint_applicable: dict[str, bool] = {}
@@ -88,13 +84,6 @@ class SWEBenchConstrainedVerifyResponse(SWEBenchVerifyResponse, BaseMultiRewardV
 class SWEBenchConstrainedWrapper(SWEBenchWrapper):
     config: SWEBenchConstrainedWrapperConfig
 
-    _grading_core: Optional[tuple] = None
-
-    def model_post_init(self, context: Any) -> None:
-        # Fail fast at startup if the agentic-if checkout is missing.
-        self._grading_core = load_grading_core(self.config.agentic_if_repo)
-        return super().model_post_init(context)
-
     async def run(self, body: BaseRunRequest) -> SWEBenchConstrainedVerifyResponse:
         base = await super().run(body)
         metadata = dict(body.responses_create_params.metadata or {})
@@ -103,7 +92,6 @@ class SWEBenchConstrainedWrapper(SWEBenchWrapper):
             metadata,
             task_reward=base.reward,
             default_alpha=self.config.constraint_alpha,
-            grading_core=self._grading_core,
         )
         return SWEBenchConstrainedVerifyResponse(**(base.model_dump() | fields))
 
