@@ -21,8 +21,6 @@ import sys
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from logging import Filter as LoggingFilter
-from logging import LogRecord, getLogger
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
@@ -726,20 +724,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
-        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
-
-            class No200Filter(LoggingFilter):
-                def filter(self, record: LogRecord) -> bool:
-                    msg = record.getMessage()
-                    return not msg.strip().endswith("200")
-
-            uvicorn_logger = getLogger("uvicorn.access")
-            uvicorn_logger.addFilter(No200Filter())
-
-            if is_main_fastapi_proc:
-                print(
-                    "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-                )
+        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
+            print(
+                "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+            )
 
         uvicorn_kwargs = dict(
             host=server.config.host,
@@ -750,6 +738,7 @@ Full body: {json.dumps(exc.body, indent=4)}
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
+            access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
