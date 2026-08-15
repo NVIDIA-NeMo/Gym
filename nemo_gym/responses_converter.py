@@ -658,6 +658,7 @@ class ResponsesConverter(BaseModel):
 # A user, system or developer message must not open the segment.
 _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
     {
+        "apply_patch_call",
         "code_interpreter_call",
         "computer_call",
         "custom_tool_call",
@@ -669,6 +670,7 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
         "mcp_call",
         "mcp_list_tools",
         "reasoning",
+        "shell_call",
         "web_search_call",
     }
 )
@@ -680,11 +682,14 @@ _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
 # The SDK unions do not distinguish generated items from client-supplied items.
 _RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
     {
+        "apply_patch_call_output",
+        "compaction",
         "computer_call_output",
         "custom_tool_call_output",
         "function_call_output",
         "local_shell_call_output",
         "mcp_approval_response",
+        "shell_call_output",
     }
 )
 
