@@ -54,6 +54,11 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
 
     clear_swebench_debug_logs: bool = True
 
+    def model_post_init(self, context: Any, /) -> None:
+        if self.is_verifying_golden_patch and self.clear_swebench_debug_logs:
+            print("Turning off logs clear since `is_verifying_golden_patch=true`")
+            self.clear_swebench_debug_logs = False
+
 
 class SWEBenchInstanceRequest(BaseModel):
     # See https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified
