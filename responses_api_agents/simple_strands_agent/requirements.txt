@@ -1,1 +1,2 @@
+filelock==3.19.1
 -e nemo-gym[dev] @ ../../

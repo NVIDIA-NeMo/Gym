@@ -6,13 +6,14 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
+import tempfile
 from pathlib import Path
+
+from filelock import FileLock
 
 
 SSA_REPO = "https://github.com/strands-labs/benchmark-harnesses.git"
 SSA_REVISION = "fd9395b672b670ddb6b90de19723327f007b0655"  # pragma: allowlist secret
-_INSTALL_LOCK = threading.Lock()
 
 
 def _package_dir(source_root: Path) -> Path:
@@ -36,6 +37,29 @@ def _workspace_dir(package_dir: Path) -> Path:
     raise RuntimeError(f"Simple Strands Agent lockfile not found for {package_dir}")
 
 
+def _revision(source: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _prepare_source(source: Path) -> None:
+    if source.is_dir() and _revision(source) == SSA_REVISION:
+        return
+    source.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=source.parent) as temp_dir:
+        clone = Path(temp_dir) / "source"
+        subprocess.run(["git", "clone", SSA_REPO, str(clone)], check=True)
+        subprocess.run(["git", "checkout", SSA_REVISION], cwd=clone, check=True)
+        if source.exists():
+            shutil.rmtree(source)
+        clone.rename(source)
+
+
 def ensure_ssa(source_root: str | None = None, python: str | None = None) -> Path:
     if python:
         path = Path(python).expanduser().resolve()
@@ -43,13 +67,12 @@ def ensure_ssa(source_root: str | None = None, python: str | None = None) -> Pat
             raise RuntimeError(f"SSA Python does not exist: {path}")
         return path
 
-    with _INSTALL_LOCK:
-        cache_root = Path(os.environ.get("NEMO_GYM_SSA_CACHE", "~/.cache/nemo-gym/simple-strands-agent")).expanduser()
+    cache_root = Path(os.environ.get("NEMO_GYM_SSA_CACHE", "~/.cache/nemo-gym/simple-strands-agent")).expanduser()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    with FileLock(cache_root / ".install.lock"):
         source = Path(source_root) if source_root else cache_root / SSA_REVISION / "source"
-        if not source_root and not source.is_dir():
-            source.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["git", "clone", SSA_REPO, str(source)], check=True)
-            subprocess.run(["git", "checkout", SSA_REVISION], cwd=source, check=True)
+        if not source_root:
+            _prepare_source(source)
 
         package_dir = _package_dir(source)
         workspace_dir = _workspace_dir(package_dir)

@@ -41,10 +41,6 @@ from responses_api_agents.simple_strands_agent.setup_ssa import ensure_ssa
 LOG = logging.getLogger(__name__)
 
 
-class SimpleStrandsAgentError(RuntimeError):
-    pass
-
-
 def _content_text(content: Any) -> str:
     if content is None:
         return ""
@@ -141,11 +137,11 @@ class SimpleStrandsAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model: Optional[str] = None
     concurrency: int = 8
-    max_turns: int = 30
-    max_output_tokens: int = 4096
+    max_turns: int = 100
+    max_output_tokens: int = 131072
     temperature: Optional[float] = None
     reasoning_effort: Optional[str] = None
-    timeout: int = 900
+    timeout: int = 1800
     model_timeout: int = 600
     shell_timeout: int = 120
     conversation_window: int = 300
@@ -202,26 +198,41 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
+        communication = asyncio.create_task(process.communicate())
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.config.timeout)
-        except asyncio.TimeoutError as error:
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
-            try:
-                await asyncio.wait_for(process.communicate(), timeout=10)
-            except asyncio.TimeoutError:
-                with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                await process.communicate()
-            raise SimpleStrandsAgentError(f"SSA timed out after {self.config.timeout}s") from error
+            stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=self.config.timeout)
+        except asyncio.TimeoutError:
+            await self._terminate_process(process, communication)
+            LOG.warning("SSA timed out after %ds", self.config.timeout)
+            return {}
+        except asyncio.CancelledError:
+            await self._terminate_process(process, communication)
+            raise
 
-        result = json.loads(result_path.read_text()) if result_path.is_file() else {}
+        try:
+            result = json.loads(result_path.read_text()) if result_path.is_file() else {}
+        except (OSError, json.JSONDecodeError) as error:
+            LOG.warning("SSA produced an invalid result: %s", error)
+            return {}
         if process.returncode != 0 or result.get("error"):
             detail = result.get("error") or stderr.decode(errors="replace")[-1000:]
             if stdout:
                 LOG.debug("SSA stdout: %s", stdout.decode(errors="replace")[-1000:])
-            raise SimpleStrandsAgentError(f"SSA failed: {detail}")
+            LOG.warning("SSA failed: %s", detail)
+            return {}
         return result
+
+    @staticmethod
+    async def _terminate_process(process, communication: asyncio.Task) -> None:
+        if process.returncode is None:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(asyncio.shield(communication), timeout=10)
+        except asyncio.TimeoutError:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await communication
 
     async def responses(
         self,
