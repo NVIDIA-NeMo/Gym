@@ -23,13 +23,17 @@ from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtySession,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -38,6 +42,8 @@ from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 
 
 LOGGER = logging.getLogger(__name__)
+logging.getLogger("opensandbox").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class OpenSandboxCreateError(SandboxCreateError):
@@ -605,6 +611,9 @@ class OpenSandboxProvider:
         # create, so the provider owns this one: built once, reused by every
         # ConnectionConfig, closed in aclose().
         self._transport: Any | None = None
+        # Sessions own aiohttp clients that only close() releases: aclose()
+        # sweeps any still open; ended ones are retired on the next create/attach.
+        self._pty_sessions: set[Any] = set()
 
     def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
         """Add the configured default image pull policy to SDK create extensions."""
@@ -629,7 +638,9 @@ class OpenSandboxProvider:
         _, ConnectionConfig, _, _, _ = _require_opensandbox_sdk()
         kwargs: dict[str, Any] = {}
         if self._connection.domain is not None:
-            kwargs["domain"] = self._connection.domain
+            # OpenSandbox SDK 0.1.15 appends ``/v1`` directly. Normalizing here
+            # prevents a configured trailing slash from producing ``//v1``.
+            kwargs["domain"] = self._connection.domain.rstrip("/")
         if self._connection.api_key is not None:
             kwargs["api_key"] = self._connection.api_key
         if self._connection.protocol is not None:
@@ -682,8 +693,36 @@ class OpenSandboxProvider:
                 )
         return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
 
+    async def _retire_closed_pty_sessions(self) -> None:
+        """Release sessions that ended on their own; their aiohttp client is
+        only freed by ``close()``. Called from create/attach so the tracking
+        set cannot grow without bound."""
+        for stale in [s for s in self._pty_sessions if s.closed]:
+            try:
+                # Release only: a pump can end because another client took the
+                # session over, and an owned close() would DELETE the session
+                # that client is still using. Ended-by-exit sessions lose their
+                # server-side record with the sandbox instead.
+                stale._owned = False
+                await stale.close()
+            except Exception:
+                LOGGER.warning(
+                    "Failed to close ended PTY session %r", getattr(stale, "session_id", "?"), exc_info=True
+                )
+            self._pty_sessions.discard(stale)
+
     async def aclose(self) -> None:
         """Close provider-owned resources."""
+        # PTY sessions hold their own aiohttp clients, which the shared httpx
+        # transport below does not cover.
+        for session in list(self._pty_sessions):
+            try:
+                await session.close()
+            except Exception:
+                LOGGER.warning(
+                    "Failed to close PTY session %r during aclose", getattr(session, "session_id", "?"), exc_info=True
+                )
+        self._pty_sessions.clear()
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.aclose()
@@ -947,6 +986,38 @@ class OpenSandboxProvider:
                 sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
+
+    async def endpoint(
+        self,
+        handle: SandboxHandle,
+        port: int,
+    ) -> SandboxEndpoint:
+        """Resolve one client-reachable direct or server-proxied service URL."""
+
+        resolved = await self._await_sdk_operation(
+            lambda: handle.raw.get_endpoint(port),
+            operation="get_endpoint",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=(
+                float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
+            ),
+        )
+        endpoint_url = str(resolved.endpoint or "")
+        if not endpoint_url:
+            raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
+        if "://" not in endpoint_url:
+            # Use the SDK handle's effective configuration so environment-
+            # resolved domains and protocols match the lifecycle request.
+            scheme = urlsplit(handle.raw.connection_config.get_base_url()).scheme or "http"
+            endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
+        headers = dict(handle.raw.connection_config.headers)
+        # Match the SDK's service adapters: connection-wide headers apply to
+        # every request, while endpoint-specific routing or auth headers win.
+        # The upstream proxy-auth fix adds the management API key to
+        # ConnectionConfig.headers only in server-proxy mode, so direct
+        # sandbox endpoints never receive it.
+        headers.update(resolved.headers)
+        return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
@@ -1279,6 +1350,72 @@ class OpenSandboxProvider:
             user=user,
             retries=self._command_retry_count(),
         )
+
+    def _pty_http_client(self) -> Any:
+        import aiohttp
+
+        return aiohttp.ClientSession()
+
+    async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
+        """Resolve the sandbox's execd base URL, headers and request timeout."""
+        from opensandbox.constants import DEFAULT_EXECD_PORT
+
+        # A None connection timeout would also disable aiohttp's own 300s
+        # default, leaving create/attach unbounded against a stalled proxy.
+        request_timeout_s = (
+            float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 300.0
+        )
+        endpoint = await self._await_sdk_call(
+            handle.raw.get_endpoint(DEFAULT_EXECD_PORT),
+            operation="get_pty_endpoint",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=request_timeout_s,
+        )
+        headers = dict(endpoint.headers)
+        if self._connection.api_key:
+            headers["OPEN-SANDBOX-API-KEY"] = self._connection.api_key
+        return f"{self._connection.protocol}://{endpoint.endpoint}", headers, request_timeout_s
+
+    async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
+        """Open an interactive execd PTY session inside a sandbox."""
+        from nemo_gym.sandbox.providers.opensandbox.pty import open_pty_session
+
+        base_url, headers, request_timeout_s = await self._pty_target(handle)
+        session = await open_pty_session(
+            client=self._pty_http_client(),
+            base_url=base_url,
+            headers=headers,
+            spec=spec,
+            request_timeout_s=request_timeout_s,
+        )
+        await self._retire_closed_pty_sessions()
+        self._pty_sessions.add(session)
+        return session
+
+    async def attach_pty(
+        self,
+        handle: SandboxHandle,
+        session_id: str,
+        *,
+        takeover: bool = True,
+        since: int | None = None,
+    ) -> SandboxPtySession:
+        """Re-attach to an existing execd PTY session by id."""
+        from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+
+        base_url, headers, request_timeout_s = await self._pty_target(handle)
+        session = await attach_pty_session(
+            client=self._pty_http_client(),
+            base_url=base_url,
+            headers=headers,
+            session_id=session_id,
+            takeover=takeover,
+            since=since,
+            request_timeout_s=request_timeout_s,
+        )
+        await self._retire_closed_pty_sessions()
+        self._pty_sessions.add(session)
+        return session
 
     async def _write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
         """Write one file into an OpenSandbox sandbox."""

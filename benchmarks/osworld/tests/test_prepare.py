@@ -7,12 +7,16 @@ from pathlib import Path
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 from benchmarks.osworld import assets
 from benchmarks.osworld.assets import asset_specs_from_task, ensure_osworld_assets
 from benchmarks.osworld.prepare import (
+    BASE_AGENT_CONFIG,
     DEFAULT_INPUT,
     NANO_OMNI_AGENT_CONFIG,
+    OPENSANDBOX_CONFIG,
+    OPENSANDBOX_VM_SENTINEL,
     POINTER_AGENT_CONFIG,
     main,
     prepare,
@@ -21,10 +25,63 @@ from benchmarks.osworld.prepare import (
     write_task_shard,
     write_vm_snapshot_manifest,
 )
+from nemo_gym.global_config import GlobalConfigDictParser
 
 
 def test_prepare_validates_committed_example() -> None:
     assert prepare() == DEFAULT_INPUT.resolve()
+
+
+def test_prepare_rejects_chrome_cdp_without_guest_relay(tmp_path: Path) -> None:
+    input_jsonl = tmp_path / "missing-cdp-relay.jsonl"
+    input_jsonl.write_text(
+        json.dumps(
+            {
+                "verifier_metadata": {
+                    "osworld_task": {
+                        "id": "chrome-without-relay",
+                        "config": [
+                            {
+                                "type": "launch",
+                                "parameters": {"command": "google-chrome --remote-debugging-port 1337"},
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        prepare(input_jsonl)
+
+    message = str(exc_info.value)
+    assert "OSWorld row 1" in message
+    assert "chrome-without-relay" in message
+    assert "tcp-listen:9222" in message
+    assert "task-owned process" in message
+
+
+def test_prepare_does_not_require_cdp_relay_without_chrome_cdp(tmp_path: Path) -> None:
+    input_jsonl = tmp_path / "non-chrome.jsonl"
+    input_jsonl.write_text(
+        json.dumps(
+            {
+                "verifier_metadata": {
+                    "osworld_task": {
+                        "id": "non-chrome-task",
+                        "config": [{"type": "launch", "parameters": {"command": ["libreoffice"]}}],
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert prepare(input_jsonl) == input_jsonl.resolve()
 
 
 @pytest.mark.parametrize(
@@ -120,7 +177,19 @@ def test_nano_omni_profile_is_one_complete_benchmark_config() -> None:
     assert paths == (NANO_OMNI_AGENT_CONFIG.resolve(),)
 
 
-def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> None:
+def test_opensandbox_backend_adds_pool_provider_config() -> None:
+    paths = select_config_paths(
+        profile="nano_omni",
+        execution_backend="gym_opensandbox",
+    )
+
+    assert paths == (
+        NANO_OMNI_AGENT_CONFIG.resolve(),
+        OPENSANDBOX_CONFIG.resolve(),
+    )
+
+
+def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path, capsys) -> None:
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2-base")
     env_path = tmp_path / "env.yaml"
@@ -157,6 +226,15 @@ def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> 
     agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
     assert agent["sandbox_provider"] == "osworld_sandbox"
     assert agent["vm_path"] == str(vm_path.resolve())
+
+    output = capsys.readouterr().out
+    managed_venv = tmp_path / "server-venvs/responses_api_agents/osworld_agent/.venv"
+    assert "the OSWorld runtime package install is an explicit opt-in" in output
+    assert "gym env prefetch" in output
+    assert "install_optional_runtime_deps.sh" in output
+    assert str(managed_venv) in output
+    assert output.index("gym env prefetch") < output.index("install_optional_runtime_deps.sh")
+    assert output.index("install_optional_runtime_deps.sh") < output.index("gym env start")
 
 
 def test_write_task_shards_are_disjoint_complete_and_manifested(tmp_path: Path) -> None:
@@ -242,6 +320,88 @@ def test_write_env_rejects_sandbox_without_explicit_vm(tmp_path: Path) -> None:
             policy_api_key="local",  # pragma: allowlist secret
             policy_model_name="model",
             execution_backend="gym_sandbox",
+        )
+
+
+def test_write_env_configures_sdk_compatibility_image_for_opensandbox_pool(tmp_path: Path) -> None:
+    env_path = tmp_path / "run" / "env.yaml"
+
+    assert write_env(
+        env_path,
+        config_paths=(
+            NANO_OMNI_AGENT_CONFIG,
+            OPENSANDBOX_CONFIG,
+        ),
+        input_jsonl=DEFAULT_INPUT,
+        output_jsonl=tmp_path / "rollouts.jsonl",
+        policy_base_url="http://model.test/v1",
+        policy_api_key="local",  # pragma: allowlist secret
+        policy_model_name="model",
+        agent_name="osworld_nano_omni_agent",
+        execution_backend="gym_opensandbox",
+    )
+
+    config = yaml.safe_load(env_path.read_text(encoding="utf-8"))
+    agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
+    assert agent["sandbox_provider"] == "osworld_opensandbox"
+    assert agent["vm_path"] == OPENSANDBOX_VM_SENTINEL
+    assert agent["sandbox_require_kvm"] is False
+    assert agent["sandbox_spec"]["image"] == ("${oc.env:OPENSANDBOX_COMPAT_IMAGE,busybox:1.36}")
+    assert agent["sandbox_spec"]["ttl_s"] == 14400
+    assert agent["sandbox_spec"]["provider_options"]["skip_health_check"] is True
+    assert agent["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == (
+        "${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}"
+    )
+    assert "OPENSANDBOX_API_KEY" not in env_path.read_text(encoding="utf-8")
+
+
+def test_opensandbox_env_composes_with_strict_inherited_sandbox_spec(tmp_path: Path) -> None:
+    env_path = tmp_path / "env.yaml"
+    assert write_env(
+        env_path,
+        config_paths=(
+            NANO_OMNI_AGENT_CONFIG,
+            OPENSANDBOX_CONFIG,
+        ),
+        input_jsonl=DEFAULT_INPUT,
+        output_jsonl=tmp_path / "rollouts.jsonl",
+        policy_base_url="http://model.test/v1",
+        policy_api_key="local",  # pragma: allowlist secret
+        policy_model_name="model",
+        agent_name="osworld_nano_omni_agent",
+        execution_backend="gym_opensandbox",
+    )
+
+    config = OmegaConf.merge(
+        OmegaConf.load(BASE_AGENT_CONFIG),
+        OmegaConf.load(NANO_OMNI_AGENT_CONFIG),
+        OmegaConf.load(OPENSANDBOX_CONFIG),
+        OmegaConf.load(env_path),
+    )
+    OmegaConf.set_struct(config, True)
+    GlobalConfigDictParser()._recursively_swap_keys(config)
+
+    agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
+    assert agent["sandbox_spec"]["image"] == "busybox:1.36"
+    assert agent["sandbox_spec"]["ttl_s"] == 14400
+    assert agent["sandbox_spec"]["provider_options"]["skip_health_check"] is True
+    assert agent["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == "osworld-kvm"
+
+
+def test_write_env_rejects_local_vm_for_opensandbox(tmp_path: Path) -> None:
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"unused")
+    with pytest.raises(ValueError, match="does not accept vm_path"):
+        write_env(
+            tmp_path / "env.yaml",
+            config_path=OPENSANDBOX_CONFIG,
+            input_jsonl=DEFAULT_INPUT,
+            output_jsonl=tmp_path / "rollouts.jsonl",
+            policy_base_url="http://model.test/v1",
+            policy_api_key="local",  # pragma: allowlist secret
+            policy_model_name="model",
+            execution_backend="gym_opensandbox",
+            vm_path=vm_path,
         )
 
 
