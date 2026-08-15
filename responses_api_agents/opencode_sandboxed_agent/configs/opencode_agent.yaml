@@ -2,7 +2,6 @@ opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       entrypoint: app.py
-      num_workers: 16
       resources_server:
         type: resources_servers
         name: swebench_resources_server
