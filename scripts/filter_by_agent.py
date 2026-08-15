@@ -15,6 +15,7 @@
 from argparse import ArgumentParser
 
 import orjson
+from tqdm.auto import tqdm
 
 
 parser = ArgumentParser()
@@ -25,7 +26,7 @@ args = parser.parse_args()
 
 print(f"Writing results to {args.output_jsonl}")
 with open(args.input_jsonl) as f_in, open(args.output_jsonl, "w") as f_out:
-    for line in f_in:
+    for line in tqdm(f_in):
         row = orjson.loads(line)
         if row.get("agent_ref", dict()).get("name") != args.agent:
             continue
