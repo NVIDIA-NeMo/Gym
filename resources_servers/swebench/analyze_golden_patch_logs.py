@@ -54,6 +54,11 @@ for path in glob("resources_servers/swebench/logs/run_evaluation/**/report.json"
     path = Path(path)
     report = json.loads(path.read_text())
     instance_id: str = list(report.keys())[0]
+
+    # Skip instances not part of this benchmark
+    if instance_id not in instance_id_to_row:
+        continue
+
     repo_name = instance_id.rsplit("-", maxsplit=1)[0].replace("__", "/")
     repo_ext = MAP_REPO_TO_EXT[repo_name]
 
