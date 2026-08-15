@@ -190,6 +190,7 @@ class TestSetupScriptsExist:
         scripts = Path(__file__).parent.parent / "setup_scripts"
         assert (scripts / "hermes_agent_deps.sh").exists()
         assert (scripts / "claude_code_agent_deps.sh").exists()
+        assert (scripts / "cline_agent_deps.sh").exists()
         assert (scripts / "opencode_agent_deps.sh").exists()
         assert (scripts / "openclaw_agent_deps.sh").exists()
         assert (scripts / "pi_agent_deps.sh").exists()

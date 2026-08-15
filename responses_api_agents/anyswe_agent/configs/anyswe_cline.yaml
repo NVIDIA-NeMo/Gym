@@ -1,0 +1,37 @@
+anyswe_cline:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by the Cline CLI natively inside the task container.
+      value: Eval software engineering capabilities on SWE-bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.cline_agent.app
+      agent_server_class: ClineAgent
+      agent_config_class: ClineAgentConfig
+      agent_kwargs:
+        model: model
+        cline_version: 3.0.55
+        timeout: 1800
+        setup_timeout: 300
+        # The repo under test is the project dir, so Cline's edits land where the patch is taken
+        # from; the workspace root only holds the ephemeral per-run data dir.
+        repo_dir: /testbed
+        workspace_root: /tmp/cline
+        system_prompt: "You are fixing a bug in the repository at /testbed. Use your tools to inspect and edit the source files. Make the minimal correct code change, run relevant checks if practical, and leave the final fix applied in /testbed."
+
+      container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
+      sandbox_provider: sandbox
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      swebench_agent_timeout: 2100
+      swebench_tests_timeout: 1800
+      concurrency: 2
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl
