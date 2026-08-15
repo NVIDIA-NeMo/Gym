@@ -66,6 +66,8 @@ sandbox:
       # balancers that cap stream duration. Costs extra round trips.
       background_exec: true
       # Poll interval backs off from initial to interval.
+      # @bxyu-nvidia: Too frequent of a poll interval can quickly reduce server performance.
+      # e.g. on SWE Bench Verified 500 samples with 3 repeats = 1500 concurrent samples, we would do polling every `background_poll_interval_s` seconds
       background_poll_initial_s: 1.0
       background_poll_interval_s: 30.0
     # Job attribution merged into every sandbox's metadata. OpenSandbox propagates
