@@ -142,8 +142,13 @@ LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
     --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
-# Install the nemo-gym project itself along with the vllm extra.
-RUN UV_LINK_MODE=symlink uv sync --locked --extra vllm
+# Install the nemo-gym project itself along with the vllm extra. The remote
+# source stage preserves .git, which is owned by the runtime UID after COPY.
+# Scope the ownership exception to this build command instead of persisting it.
+RUN GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0=safe.directory \
+        GIT_CONFIG_VALUE_0=/opt/nemo-gym \
+        UV_LINK_MODE=symlink uv sync --locked --extra vllm
 
 # Keep runtime uv and XDG caches separate from the root-owned build cache that
 # backs the symlinked project environment.
