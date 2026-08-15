@@ -21,6 +21,7 @@ import os
 import shlex
 import shutil
 import signal
+import tempfile
 from asyncio import Semaphore
 from contextlib import suppress
 from pathlib import Path
@@ -48,7 +49,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.prime_agent.setup_prime_agent import ensure_prime_agent
@@ -149,6 +152,21 @@ def parse_prime_agent_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
                     "output_tokens": output_tokens,
                     "cached_tokens": cached_tokens,
                 }
+            reasoning = [
+                block["thinking"]
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == "thinking"
+                and isinstance(block.get("thinking"), str)
+                and block["thinking"].strip()
+            ]
+            if reasoning:
+                output_items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs-{len(output_items)}",
+                        summary=[NeMoGymSummary(type="summary_text", text="\n".join(reasoning))],
+                    )
+                )
             texts = [
                 block["text"] for block in content if isinstance(block, dict) and (block.get("text") or "").strip()
             ]
@@ -268,7 +286,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
         command = self.config.command_parts[0] if self.config.command_parts else ""
-        if command == "prime-agent" and shutil.which(command) is None:
+        if command == "prime-agent":
             ensure_prime_agent(self.config.prime_agent_version)
         if not command or shutil.which(command) is None:
             LOG.warning("Prime Agent command %r is not on PATH", self.config.command)
@@ -312,7 +330,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             "baseUrl": self.resolve_model_base_url(self.config.model_server.name, rollout_id),
             "api": "openai-completions",
             "apiKey": "EMPTY",  # pragma: allowlist secret
-            "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
+            "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": True},
             "models": [
                 {
                     "id": self.config.model,
@@ -352,16 +370,16 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         self, instruction: str, system_prompt: Optional[str], rollout_id: Optional[str]
     ) -> tuple[list[Any], dict[str, int], str, bool]:
         work_dir = self._workspace_root()
-        home = work_dir / ".prime-home"
-        agent_dir = home / ".prime" / "agent"
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        models_config = self._build_models_config(rollout_id)
-        if models_config:
-            (agent_dir / "models.json").write_text(json.dumps(models_config, indent=2))
-        env = self._env(home)
-        cmd = self._build_command(instruction, system_prompt, work_dir / ".pa.sock")
-
+        socket_dir = Path(tempfile.mkdtemp(prefix="pa-", dir="/tmp"))
         try:
+            home = work_dir / ".prime-home"
+            agent_dir = home / ".prime" / "agent"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            models_config = self._build_models_config(rollout_id)
+            if models_config:
+                (agent_dir / "models.json").write_text(json.dumps(models_config, indent=2))
+            env = self._env(home)
+            cmd = self._build_command(instruction, system_prompt, socket_dir / "daemon.sock")
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(work_dir),
@@ -401,6 +419,7 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             return output_items, usage, self.config.model, False
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
+            shutil.rmtree(socket_dir, ignore_errors=True)
 
     async def responses(
         self,

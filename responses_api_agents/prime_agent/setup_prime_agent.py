@@ -73,13 +73,25 @@ def _run_installer(version: str | None) -> None:
         subprocess.run(cmd, check=True, env=env, stdin=subprocess.DEVNULL, start_new_session=True)
 
 
+def _verify_version(command: str, expected: str | None) -> None:
+    if expected is None:
+        return
+    result = subprocess.run([command, "--version"], check=True, capture_output=True, text=True)
+    actual = (result.stdout or result.stderr).strip().removeprefix("v")
+    if actual != expected.removeprefix("v"):
+        raise RuntimeError(f"Prime Agent version {actual!r} does not match configured version {expected!r}")
+
+
 def ensure_prime_agent(version: str | None = None) -> None:
-    if shutil.which("prime-agent"):
+    command = shutil.which("prime-agent")
+    if command:
+        _verify_version(command, version)
         return
 
     local_bin = Path.home() / ".local" / "bin"
     if (local_bin / "prime-agent").is_file():
         os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
+        _verify_version(str(local_bin / "prime-agent"), version)
         return
 
     if shutil.which("npm") is None:
@@ -109,4 +121,7 @@ def ensure_prime_agent(version: str | None = None) -> None:
     if not shutil.which("prime-agent"):
         raise RuntimeError("Prime Agent install appeared to succeed but 'prime-agent' is still not on PATH")
 
-    LOG.info("Prime Agent is ready at %s", shutil.which("prime-agent"))
+    command = shutil.which("prime-agent")
+    assert command is not None
+    _verify_version(command, version)
+    LOG.info("Prime Agent is ready at %s", command)

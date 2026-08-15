@@ -17,8 +17,10 @@ import asyncio
 import json
 import signal
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import pytest
 import yaml
 
 from nemo_gym.config_types import ModelServerRef
@@ -28,6 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseReasoningItem,
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.prime_agent.app import (
@@ -39,6 +42,7 @@ from responses_api_agents.prime_agent.app import (
     _process_groups_with_env,
     parse_prime_agent_events,
 )
+from responses_api_agents.prime_agent.setup_prime_agent import ensure_prime_agent
 
 
 def _config(**kwargs) -> PrimeAgentConfig:
@@ -74,6 +78,16 @@ class TestSanity:
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
+
+    def test_model_post_init_checks_pinned_version(self) -> None:
+        agent = _make_agent(prime_agent_version="0.7.0")
+        with (
+            patch("responses_api_agents.prime_agent.app.ensure_prime_agent") as ensure,
+            patch("responses_api_agents.prime_agent.app.shutil.which", return_value="/bin/prime-agent"),
+        ):
+            agent.model_post_init(None)
+
+        ensure.assert_called_once_with("0.7.0")
 
 
 class TestExtractInstruction:
@@ -152,6 +166,22 @@ class TestParsePrimeAgentEvents:
         items, usage = parse_prime_agent_events(line)
         assert items == []
         assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+
+    def test_reasoning_is_preserved_separately(self) -> None:
+        line = _message_end(
+            "assistant",
+            [
+                {"type": "thinking", "thinking": "check the arithmetic"},
+                {"type": "text", "text": "the answer is 4"},
+            ],
+            usage={"input": 100, "output": 20},
+        )
+        items, _ = parse_prime_agent_events(line)
+        assert len(items) == 2
+        assert isinstance(items[0], NeMoGymResponseReasoningItem)
+        assert items[0].summary[0].text == "check the arithmetic"
+        assert isinstance(items[1], NeMoGymResponseOutputMessage)
+        assert items[1].content[0].text == "the answer is 4"
 
 
 class TestResponses:
@@ -265,6 +295,10 @@ class TestRunPrimeAgent:
         assert proc.communicate.await_count == 1
         kill_processes.assert_called_once_with(proc.pid, tmp_path / "work/.prime-home/.prime/agent")
         assert create_subprocess.await_args.kwargs["start_new_session"] is True
+        command = list(create_subprocess.await_args.args)
+        socket = Path(command[command.index("--daemon-socket") + 1])
+        assert socket.parent.parent == Path("/tmp")
+        assert not socket.parent.exists()
         assert output[0].content[0].text == "partial answer"
         assert usage == {"input_tokens": 7, "output_tokens": 3, "cached_tokens": 0}
         assert model == agent.config.model
@@ -403,6 +437,7 @@ class TestModelServer:
         provider = config["providers"]["nemo"]
         assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
         assert provider["baseUrl"] == "http://model/v1"
+        assert provider["compat"]["supportsReasoningEffort"] is True
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
         assert provider["models"][0]["maxTokens"] == 131072
 
@@ -411,6 +446,27 @@ class TestModelServer:
         agent = _make_agent(models_config=config)
         assert agent._effective_model() == agent.config.model
         assert agent._build_models_config() == config
+
+
+class TestSetup:
+    def test_existing_version_matches_pin(self) -> None:
+        result = CompletedProcess(["prime-agent", "--version"], 0, stdout="0.7.0\n", stderr="")
+        with (
+            patch("responses_api_agents.prime_agent.setup_prime_agent.shutil.which", return_value="/bin/prime-agent"),
+            patch("responses_api_agents.prime_agent.setup_prime_agent.subprocess.run", return_value=result) as run,
+        ):
+            ensure_prime_agent("0.7.0")
+
+        run.assert_called_once_with(["/bin/prime-agent", "--version"], check=True, capture_output=True, text=True)
+
+    def test_existing_version_must_match_pin(self) -> None:
+        result = CompletedProcess(["prime-agent", "--version"], 0, stdout="0.8.0\n", stderr="")
+        with (
+            patch("responses_api_agents.prime_agent.setup_prime_agent.shutil.which", return_value="/bin/prime-agent"),
+            patch("responses_api_agents.prime_agent.setup_prime_agent.subprocess.run", return_value=result),
+            pytest.raises(RuntimeError, match="does not match configured version"),
+        ):
+            ensure_prime_agent("0.7.0")
 
 
 class TestConfigYaml:
@@ -426,6 +482,7 @@ class TestConfigYaml:
         assert inner["concurrency"] == 8
         assert inner["command"] == "prime-agent"
         assert inner["prime_agent_version"] == "0.7.0"
+        assert inner["models_config"]["providers"]["policy"]["compat"]["supportsReasoningEffort"] is True
 
     def test_environment_bundles(self) -> None:
         root = Path(__file__).resolve().parents[3]
