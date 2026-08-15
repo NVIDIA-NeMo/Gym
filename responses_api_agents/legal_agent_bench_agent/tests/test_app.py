@@ -1379,7 +1379,7 @@ def test_direct_policy_key_is_injected_only_into_agent_sandbox(monkeypatch, tmp_
         config=_config(
             sandbox_provider={"opensandbox": {}},
             sandbox_model_base_url="https://model.example/v1",
-            sandbox_model_api_key_env="LAB_DIRECT_POLICY_KEY",
+            sandbox_model_api_key_env="LAB_DIRECT_POLICY_KEY",  # pragma: allowlist secret
         )
     )
     monkeypatch.setattr(runner, "_sandbox_metadata", lambda: {})
@@ -2206,7 +2206,9 @@ def test_model_url_reports_server_lookup_failures_and_routes_docker(monkeypatch)
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
     )
     runner = app.LegalAgentBenchAgent.model_construct(
-        config=_config(),
+        # Bridge networking makes this assertion platform-independent: loopback
+        # must be rewritten for a Docker bridge on Linux and Docker Desktop.
+        config=_config(docker_network="bridge"),
         server_client=SimpleNamespace(global_config_dict={}),
     )
     with pytest.raises(app.LegalAgentBenchConfigurationError, match="Unable to resolve policy model"):
@@ -2218,7 +2220,8 @@ def test_model_url_reports_server_lookup_failures_and_routes_docker(monkeypatch)
     )
     monkeypatch.setattr(app, "get_first_server_config_dict", lambda *_args: {})
     monkeypatch.setattr(app.LegalAgentBenchAgent, "rollout_id_from_run", lambda _self, _body: None)
-    assert runner._model_url(body).startswith("http://host.docker.internal:8000")
+    monkeypatch.setattr(app.sys, "platform", "linux")
+    assert runner._model_url(body) == "http://host.docker.internal:8000"
 
 
 @pytest.mark.asyncio

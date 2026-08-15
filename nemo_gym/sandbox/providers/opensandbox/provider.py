@@ -114,7 +114,7 @@ IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
-SERVER_PROXY_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"
+SERVER_PROXY_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"  # pragma: allowlist secret
 
 
 def _normalize_domain_protocol(domain: str | None, protocol: str | None) -> tuple[str | None, str | None]:
