@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from argparse import ArgumentParser
+from pathlib import Path
 
 import orjson
 from tqdm.auto import tqdm
@@ -24,7 +25,7 @@ parser.add_argument("--output-jsonl", type=str, default="temp.jsonl")
 parser.add_argument("--agent", type=str, required=True)
 args = parser.parse_args()
 
-print(f"Writing results to {args.output_jsonl}")
+print(f"Writing results to `{Path(args.output_jsonl).absolute()}`")
 with open(args.input_jsonl) as f_in, open(args.output_jsonl, "w") as f_out:
     for line in tqdm(f_in):
         row = orjson.loads(line)
