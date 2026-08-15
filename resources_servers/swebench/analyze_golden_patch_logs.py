@@ -82,7 +82,7 @@ for instance_id in instance_id_to_row:
         continue
 
     dirpaths = glob(f"resources_servers/swebench/logs/run_evaluation/**/{instance_id}", recursive=True)
-    assert len(dirpaths) == 1
+    assert len(dirpaths) == 1, dirpaths
     report_path = Path(dirpaths[0]) / "report.json"
     copy_sample(report_path, instance_id)
 
