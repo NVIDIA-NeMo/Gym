@@ -167,11 +167,11 @@ class DockerContainer(BaseModel):
             # are not exposed through the root project's repository handler, so an init script
             # cannot rewrite them before they resolve. Rewrite Maven Central references in all
             # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
-            lucene_mirror_setup = """if [ -d gradle ]; then
-  find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
-fi
-./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
-            data = data.replace("./gradlew test", lucene_mirror_setup)
+            #             lucene_mirror_setup = """if [ -d gradle ]; then
+            #   find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
+            # fi
+            # ./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
+            #             data = data.replace("./gradlew test", lucene_mirror_setup)
             # Run Maven tests without the daemon which causes issues with gson tests.
             data = data.replace("mvnd test", "mvn test")
             src.write_text(data)
@@ -213,7 +213,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
-            env=dict(),
+            env=self.config.sandbox_config.get("env", {}),
             files=dict(),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
