@@ -168,12 +168,32 @@ class DockerContainer(BaseModel):
             # cannot rewrite them before they resolve. Rewrite Maven Central references in all
             # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
             lucene_mirror_setup = """if [ -d gradle ]; then
-  find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
+  find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://plugins.gradle.org/m2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
 fi
 ./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
             data = data.replace("./gradlew test", lucene_mirror_setup)
+
             # Run Maven tests without the daemon which causes issues with gson tests.
             data = data.replace("mvnd test", "mvn test")
+
+            # axios__axios-4738 needs more than 10s for cold dependency and process startup.
+            data = data.replace("timeout 10s", "timeout 120s")
+
+            # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
+            # requires Cargo 1.85 while its image provides Cargo 1.81.
+            if self.instance_id == "tokio-rs__tokio-4384":
+                data = data.replace(
+                    "RUSTFLAGS=-Awarnings cargo test",
+                    "cargo update -p getrandom@0.4.3 --precise 0.4.2 && cargo update -p proptest@1.11.0 --precise 1.5.0 && RUSTFLAGS=-Awarnings cargo test",
+                )
+
+            # Preact's Chrome tests use a 2s Mocha timeout, which is too short
+            # for preactjs__preact-3010 and preactjs__preact-3567 under load.
+            if self.instance_id in {"preactjs__preact-3010", "preactjs__preact-3567"}:
+                data = data.replace(
+                    "npx karma start karma.conf.js", "npx karma start karma.conf.js --client.mocha.timeout=60000"
+                )
+
             src.write_text(data)
 
         await self._inner_container.upload(local_path=src, remote_path=str(dest))
