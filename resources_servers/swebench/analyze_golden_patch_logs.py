@@ -82,8 +82,10 @@ for instance_id in instance_id_to_row:
         continue
 
     dirpaths = glob(f"resources_servers/swebench/logs/run_evaluation/**/{instance_id}", recursive=True)
-    assert len(dirpaths) == 1, dirpaths
-    report_path = Path(dirpaths[0]) / "report.json"
+    dirpaths: list[Path] = list(map(Path, dirpaths))
+    dirpaths.sort(key=lambda p: p.stat().st_birthtime, reverse=True)
+
+    report_path = dirpaths[0] / "report.json"
     copy_sample(report_path, instance_id)
 
     failed_instance_ids.append(instance_id)
