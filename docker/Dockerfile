@@ -80,10 +80,12 @@ ENV UV_CACHE_DIR=/opt/uv/cache
 RUN case "${TARGETARCH}" in \
         amd64) \
             uv_arch="x86_64"; \
+# pragma: allowlist nextline secret
             uv_sha256="04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829"; \
             ;; \
         arm64) \
             uv_arch="aarch64"; \
+# pragma: allowlist nextline secret
             uv_sha256="94500fb064ae3c971a873cba64d94694c50677e0a4dbf78735c80509e7429919"; \
             ;; \
         *) \
