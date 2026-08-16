@@ -16,7 +16,7 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
 from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
