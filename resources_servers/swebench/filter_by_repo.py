@@ -12,31 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from argparse import ArgumentParser
-from collections import Counter
 
 import orjson
-from tqdm.auto import tqdm
 
 
-parser = ArgumentParser()
-parser.add_argument("--rollout-jsonl", type=str, required=True)
-args = parser.parse_args()
+repos = {
+    "preactjs__preact",
+    "axios__axios",
+    "valkey-io__valkey",
+}
 
-rewards = Counter()
-with open(args.rollout_jsonl) as f:
-    for line in tqdm(f):
+with open("benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl") as f_in, open("temp.jsonl", "w") as f_out:
+    for line in f_in:
         row = orjson.loads(line)
 
-        instance_id = row["instance_id"]
-        reward = row["reward"]
+        if not any(r in row["instance_id"] for r in repos):
+            continue
 
-        rewards[instance_id] += reward
-
-
-# Assume 3 repeats
-for instance_id, total_reward in rewards.items():
-    if total_reward == 3:
-        continue
-
-    print(f"{instance_id},{total_reward}")
+        f_out.write(line)
