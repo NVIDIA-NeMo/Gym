@@ -267,19 +267,6 @@ async def run_instance(
 
 
 def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str) -> str:
-    # This init.d is necessary for some Java tests to properly pull from the maven mirror
-    # e.g. apache__lucene and apache__druid
-    #
-    # Lucene's applied Gradle scripts have their own buildscript scopes. Those scopes
-    # are not exposed through the root project's repository handler, so an init script
-    # cannot rewrite them before they resolve. Rewrite Maven Central references in all
-    # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
-    lucene_mirror_setup = """if [ -d gradle ]; then
-find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
-fi
-./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
-    eval_sh = eval_sh.replace("./gradlew test", lucene_mirror_setup)
-
     # Run Maven tests without the daemon which causes issues with gson tests.
     eval_sh = eval_sh.replace("mvnd test", "mvn test")
 
@@ -325,13 +312,16 @@ async def patch_swebench_multilingual_sandbox_upload(repo: str, sandbox: AsyncSa
         settings_xml_path = base_path / "settings.xml"
         init_gradle_path = base_path / "init.gradle"
 
-        await sandbox.exec("""mkdir -p /root/.m2 /root/.gradle/init.d""")
+        await sandbox.exec("""mkdir -p /root/.m2 ~/.gradle/init.d \
+        && if [ -d gradle ]; then
+find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
+fi""")
 
         # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
         await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
+        await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
 
 
 def patch_swebench_multilingual_log_parsing(stdout: str, stderr: str, instance_id: str) -> Optional[str]:
