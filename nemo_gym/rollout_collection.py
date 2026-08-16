@@ -875,7 +875,7 @@ class RolloutCollectionHelper(BaseModel):
                 print_str += f"""Examples left:
 {top_left_str}
 """
-                for agent_name in agent_name_to_metrics:
+                for agent_name in sorted(agent_name_to_metrics):
                     metrics = agent_name_to_metrics[agent_name]
                     avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
                     print_str += f"""Found {agent_name_to_counts[agent_name]} rollouts for `{agent_name}`.
