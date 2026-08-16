@@ -43,7 +43,7 @@ from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_resources_request,
-    patch_swebench_multilingual_sandbox_upload,
+    patch_swebench_multilingual_sandbox,
     run_instance,
 )
 
@@ -217,7 +217,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
-        await patch_swebench_multilingual_sandbox_upload(test_spec.repo, test_spec.instance_id, eval_sandbox)
+        await patch_swebench_multilingual_sandbox(test_spec.repo, test_spec.instance_id, eval_sandbox)
 
         return eval_sandbox
 

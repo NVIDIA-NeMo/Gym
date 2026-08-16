@@ -298,7 +298,7 @@ def patch_swebench_multilingual_resources_request(resources: Dict[str, Any], ins
         resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)
 
 
-async def patch_swebench_multilingual_sandbox_upload(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:
+async def patch_swebench_multilingual_sandbox(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:
     if MAP_REPO_TO_EXT.get(repo) == "java":
         base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
         settings_xml_path = base_path / "settings.xml"
