@@ -310,8 +310,11 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
 
-        test_output_fpath = Path(glob(str(log_dir / "**" / "test_output.txt"), recursive=True)[0])
-        test_output = test_output_fpath.read_text()
+        test_output_fpaths = glob(str(log_dir / "**" / "test_output.txt"), recursive=True)
+        test_output = ""
+        if test_output_fpaths:
+            test_output_fpath = Path(test_output_fpaths[0])
+            test_output = test_output_fpath.read_text()
 
         if self.config.clear_swebench_debug_logs:
             rmtree(str(log_dir), ignore_errors=True)
