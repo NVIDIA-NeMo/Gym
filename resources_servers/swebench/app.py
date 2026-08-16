@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+from glob import glob
 from pathlib import Path
 from shutil import rmtree
 from time import time
@@ -98,6 +99,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     patch_verification_time_taken: float
 
     instance_id: str
+    test_output: str
     model_patch: Optional[str]
 
     log_dir: str
@@ -307,6 +309,10 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         patch_verification_time_taken = time() - start_time
 
         log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
+
+        test_output_fpath = Path(glob(str(log_dir / "**" / "test_output.txt"), recursive=True)[0])
+        test_output = test_output_fpath.read_text()
+
         if self.config.clear_swebench_debug_logs:
             rmtree(str(log_dir), ignore_errors=True)
             log_dir = ""
@@ -320,6 +326,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,
+            test_output=test_output,
             log_dir=str(log_dir),
         )
 
