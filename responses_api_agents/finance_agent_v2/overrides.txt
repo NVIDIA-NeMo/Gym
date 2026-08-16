@@ -6,4 +6,4 @@
 # so this mirrors the cap in the root pyproject.toml instead of merely dropping the
 # floor: `openai<3.0` here would silently install a far newer client. Bump this
 # together with nemo-gym's pin; tests/test_app.py asserts the two stay in sync.
-openai[aiohttp]<=2.7.2
+openai[aiohttp]<=2.9.0

@@ -69,6 +69,9 @@ from openai.types.responses import (
     ResponseFunctionWebSearch,
     ResponseInputTextParam,
 )
+from openai.types.responses.response_apply_patch_tool_call import ResponseApplyPatchToolCall
+from openai.types.responses.response_apply_patch_tool_call_output import ResponseApplyPatchToolCallOutput
+from openai.types.responses.response_compaction_item import ResponseCompactionItem
 from openai.types.responses.response_create_params import (
     Metadata,
     Reasoning,
@@ -82,6 +85,8 @@ from openai.types.responses.response_create_params import (
 from openai.types.responses.response_function_call_output_item_list_param import (
     ResponseFunctionCallOutputItemListParam,
 )
+from openai.types.responses.response_function_shell_tool_call import ResponseFunctionShellToolCall
+from openai.types.responses.response_function_shell_tool_call_output import ResponseFunctionShellToolCallOutput
 from openai.types.responses.response_input_item import (
     ComputerCallOutput,
     LocalShellCallOutput,
@@ -330,6 +335,14 @@ class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
     """A hosted code-interpreter call (OpenAI Responses ``code_interpreter_call`` output item)."""
 
 
+class NeMoGymResponseApplyPatchToolCall(ResponseApplyPatchToolCall):
+    """A patch operation for the client to execute (``apply_patch_call`` output item)."""
+
+
+class NeMoGymResponseShellToolCall(ResponseFunctionShellToolCall):
+    """A shell command for the client to execute (``shell_call`` output item)."""
+
+
 class NeMoGymLocalShellCall(LocalShellCall):
     """A local-shell command for the client to execute (``local_shell_call`` output item)."""
 
@@ -354,6 +367,18 @@ class NeMoGymLocalShellCallOutput(LocalShellCallOutput):
 
 class NeMoGymMcpApprovalResponse(McpApprovalResponse):
     """The client's answer to a hosted-MCP approval request (``mcp_approval_response`` item)."""
+
+
+class NeMoGymResponseApplyPatchToolCallOutput(ResponseApplyPatchToolCallOutput):
+    """The client's result of a patch operation (``apply_patch_call_output`` item)."""
+
+
+class NeMoGymResponseShellToolCallOutput(ResponseFunctionShellToolCallOutput):
+    """The client's result of a shell command (``shell_call_output`` item)."""
+
+
+class NeMoGymResponseCompactionItem(ResponseCompactionItem):
+    """Opaque context-management data emitted by Responses (``compaction`` item)."""
 
 
 class NeMoGymResponseInputText(ResponseInputTextParam):
@@ -441,10 +466,15 @@ NeMoGymResponseInputItem = Annotated[
         NeMoGymResponseComputerToolCall,
         NeMoGymImageGenerationCall,
         NeMoGymResponseCodeInterpreterToolCall,
+        NeMoGymResponseApplyPatchToolCall,
+        NeMoGymResponseShellToolCall,
         NeMoGymLocalShellCall,
         NeMoGymResponseCustomToolCall,
         NeMoGymComputerCallOutput,
         NeMoGymResponseCustomToolCallOutput,
+        NeMoGymResponseApplyPatchToolCallOutput,
+        NeMoGymResponseShellToolCallOutput,
+        NeMoGymResponseCompactionItem,
         NeMoGymLocalShellCallOutput,
         NeMoGymMcpApprovalResponse,
         # Training variants.

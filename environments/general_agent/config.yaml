@@ -1,0 +1,26 @@
+general_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Prime Intellect general-agent, multi-turn tool use over a local task database.
+      value: Improve general multi-turn tool use and agentic problem solving.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: general-agent
+      vf_env_args:
+        backend: local
+        max_turns: 100
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 32768
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/general_agent/data/example.jsonl

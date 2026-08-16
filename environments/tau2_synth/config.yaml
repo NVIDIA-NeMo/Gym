@@ -1,0 +1,29 @@
+tau2_synth:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Prime Intellect tau2-synth, multi-turn tool use against an LLM user simulator.
+      value: Improve multi-turn tool use against a simulated user.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: tau2-synth
+      vf_env_args:
+        domain: library
+        user_model: openai/gpt-4.1
+        user_base_url: https://api.openai.com/v1
+        user_api_key_var: OPENAI_API_KEY  # pragma: allowlist secret
+        max_steps: 50
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 32768
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/tau2_synth/data/example.jsonl

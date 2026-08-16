@@ -1,4 +1,12 @@
 -e nemo-gym[dev] @ ../../
-verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.1.14
+verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.3.0
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
+--extra-index-url https://hub.primeintellect.ai/zapier/simple/
+--extra-index-url https://hub.primeintellect.ai/prime/simple/
 acereason-math
+# 0.1.4 ships no tasks/ data.
+general-agent==0.1.3
+tau2-synth
+# tau2-synth needs this stated directly.
+tau2 @ git+https://github.com/eligotts/tau2-bench.git@4839dd6
+AutomationBench

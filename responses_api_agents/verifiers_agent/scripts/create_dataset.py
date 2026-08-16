@@ -51,10 +51,24 @@ def load_verifiers_dataset(vf_env: vf.Environment, n: int = -1, seed: int | None
             "example_id": dataset["example_id"][i],
             **({"task": dataset["task"][i]} if "task" in dataset.column_names else {}),
             **({"answer": dataset["answer"][i]} if "answer" in dataset.column_names else {}),
-            **({"info": dataset["info"][i]} if "info" in dataset.column_names else {}),
+            **({"info": _as_dict(dataset["info"][i])} if "info" in dataset.column_names else {}),
         }
         for i in range(len(dataset))
     ]
+
+
+def _as_dict(info) -> dict:
+    """Normalize `info` to a dict. HuggingFace datasets serializes
+    heterogeneous columns to JSON strings, which the agent rejects with a 422."""
+    if isinstance(info, dict):
+        return info
+    if isinstance(info, str):
+        try:
+            parsed = json.loads(info)
+        except json.JSONDecodeError:
+            return {"raw": info}
+        return parsed if isinstance(parsed, dict) else {"raw": info}
+    return {} if info is None else {"raw": info}
 
 
 def main():
@@ -64,6 +78,14 @@ def main():
     parser.add_argument("--size", type=int, default=-1, help="Number of examples (-1 for all)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for shuffling")
     parser.add_argument("--output", required=True, help="Output JSONL file path")
+    parser.add_argument(
+        "--agent-name",
+        default="verifiers_agent",
+        help=(
+            "Agent instance name written into agent_ref. Rollout collection routes on this, "
+            "so it must match the config instance name when that differs from the server name."
+        ),
+    )
     args = parser.parse_args()
 
     env_args = json.loads(args.env_args)
@@ -89,7 +111,7 @@ def main():
                 },
                 "agent_ref": {
                     "type": "responses_api_agents",
-                    "name": "verifiers_agent",
+                    "name": args.agent_name,
                 },
                 "question": row["prompt"][-1]["content"] if row["prompt"] else "",
                 "answer": row.get("answer", ""),
