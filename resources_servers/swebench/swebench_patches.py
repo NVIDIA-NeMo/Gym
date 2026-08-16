@@ -16,6 +16,8 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
+from typing import Any, Dict
+
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
 from swebench.harness.run_evaluation import *
 
@@ -304,3 +306,10 @@ fi
         )
 
     return data
+
+
+def patch_resources_request(resources: Dict[str, Any], instance_id: str) -> None:
+    # Chrome is OOM-killed before Karma can connect for preactjs__preact-
+    # {2896,4316,4436}; reserve enough memory for its two-browser runner.
+    if instance_id in {"preactjs__preact-2896", "preactjs__preact-4316", "preactjs__preact-4436"}:
+        resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)

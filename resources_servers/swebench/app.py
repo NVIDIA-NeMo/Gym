@@ -40,7 +40,11 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
-from resources_servers.swebench.swebench_patches import patch_for_swebench_multilingual_golden_patch_pass, run_instance
+from resources_servers.swebench.swebench_patches import (
+    patch_for_swebench_multilingual_golden_patch_pass,
+    patch_resources_request,
+    run_instance,
+)
 
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -159,7 +163,7 @@ class DockerContainer(BaseModel):
     async def copy(self, src: Path, dest: Path) -> None:
         if "eval.sh" in str(src):
             data = src.read_text()
-            src.write_text(patch_for_swebench_multilingual_golden_patch_pass(data))
+            src.write_text(patch_for_swebench_multilingual_golden_patch_pass(data, self.instance_id))
 
         await self._inner_container.upload(local_path=src, remote_path=str(dest))
 
@@ -195,10 +199,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         resources = dict(self.config.sandbox_config.get("resources", {}))
 
-        # Chrome is OOM-killed before Karma can connect for preactjs__preact-
-        # {2896,4316,4436}; reserve enough memory for its two-browser runner.
-        if test_spec.instance_id in {"preactjs__preact-2896", "preactjs__preact-4316", "preactjs__preact-4436"}:
-            resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)
+        patch_resources_request(resources, test_spec.instance_id)
 
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
