@@ -278,14 +278,6 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
     # axios__axios-4738 needs more than 10s for cold dependency and process startup.
     eval_sh = eval_sh.replace("timeout 10s", "timeout 120s")
 
-    # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
-    # requires Cargo 1.85 while its image provides Cargo 1.81.
-    if instance_id == "tokio-rs__tokio-4384":
-        eval_sh = eval_sh.replace(
-            "RUSTFLAGS=-Awarnings cargo test",
-            "cargo update -p getrandom@0.4.3 --precise 0.4.2 && cargo update -p proptest@1.11.0 --precise 1.5.0 && RUSTFLAGS=-Awarnings cargo test",
-        )
-
     # Preact's Chrome tests use a 2s Mocha timeout, which is too short
     if "preactjs__preact" in instance_id:
         eval_sh = eval_sh.replace(
@@ -306,7 +298,7 @@ def patch_swebench_multilingual_resources_request(resources: Dict[str, Any], ins
         resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)
 
 
-async def patch_swebench_multilingual_sandbox_upload(repo: str, sandbox: AsyncSandbox) -> None:
+async def patch_swebench_multilingual_sandbox_upload(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:
     if MAP_REPO_TO_EXT.get(repo) == "java":
         base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
         settings_xml_path = base_path / "settings.xml"
@@ -329,6 +321,13 @@ fi""")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
         await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
+
+    # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
+    # requires Cargo 1.85 while its image provides Cargo 1.81.
+    if instance_id == "tokio-rs__tokio-4384":
+        await sandbox.exec(
+            "cargo update -p getrandom@0.4.3 --precise 0.4.2 && cargo update -p proptest@1.11.0 --precise 1.5.0"
+        )
 
 
 def patch_swebench_multilingual_log_parsing(stdout: str, stderr: str, instance_id: str) -> Optional[str]:

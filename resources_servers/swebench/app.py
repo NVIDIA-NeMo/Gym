@@ -217,7 +217,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
-        await patch_swebench_multilingual_sandbox_upload(test_spec.repo, eval_sandbox)
+        await patch_swebench_multilingual_sandbox_upload(test_spec.repo, test_spec.instance_id, eval_sandbox)
 
         return eval_sandbox
 
