@@ -29,7 +29,7 @@ VLLM_PREFILL_ARGS=(
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-    --max-num-batched-tokens 33920
+    --max-num-batched-tokens 16960
     --max-num-seqs 1024
     --data-parallel-size-local 1
     --tensor-parallel-size 4
