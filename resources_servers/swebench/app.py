@@ -176,6 +176,21 @@ fi
             # Run Maven tests without the daemon which causes issues with gson tests.
             data = data.replace("mvnd test", "mvn test")
 
+            # apache__druid-16875 never reaches its focused tests because the
+            # build-metadata plugin's `git describe` exceeds its 30s timeout.
+            if self.instance_id == "apache__druid-16875":
+                data = data.replace("mvn test", "mvn test -Dgit.commit.id.skip=true")
+
+            # valkey-io__valkey-928 checks the source node immediately after
+            # an asynchronous replica migration. Allow the cluster state to
+            # settle before its role assertion runs.
+            if self.instance_id == "valkey-io__valkey-928":
+                data = data.replace(
+                    "TERM=dumb ./runtest",
+                    "sed -i 's/assert_equal \\[lindex \\[R 3 role\\] 2\\] {}/after 5000; assert_equal [lindex [R 3 role] 2] {}/' "
+                    "tests/unit/cluster/replica-migration.tcl\nTERM=dumb ./runtest",
+                )
+
             # axios__axios-4738 needs more than 10s for cold dependency and process startup.
             data = data.replace("timeout 10s", "timeout 120s")
 
@@ -227,6 +242,13 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        resources = dict(self.config.sandbox_config.get("resources", {}))
+
+        # Chrome is OOM-killed before Karma can connect for preactjs__preact-
+        # {2896,4316,4436}; reserve enough memory for its two-browser runner.
+        if test_spec.instance_id in {"preactjs__preact-2896", "preactjs__preact-4316", "preactjs__preact-4436"}:
+            resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)
+
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
@@ -240,7 +262,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
                 "nemo_gym_agent": self.config.name,
                 "instance_id": test_spec.instance_id[:63],
             },
-            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            resources=SandboxResources.from_mapping(resources),
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
