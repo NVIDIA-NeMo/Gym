@@ -242,9 +242,12 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
 
         # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
+        wd = (await eval_sandbox.exec("pwd")).stdout.strip()
         anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
-        await eval_sandbox.upload(anti_cheat_setup_fpath, "/root/.m2/settings.xml")
-        result = await eval_sandbox.exec("""wd=. bash anti_cheat_setup.sh && rm anti_cheat_setup.sh""")
+        await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
+        result = await eval_sandbox.exec(
+            f"""WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+        )
         assert result.return_code == 0
 
         return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)

@@ -1,9 +1,9 @@
 _T0=$(date +%s 2>/dev/null || echo 0)
-if ! cd {wd} 2>/dev/null; then echo "GIT_CLEANUP skipped reason=no_workdir wd={wd}"; exit 0; fi
-git config --global --add safe.directory {wd} 2>/dev/null
-if ! git rev-parse --git-dir >/dev/null 2>&1; then echo "GIT_CLEANUP skipped reason=not_a_git_repo wd={wd}"; exit 0; fi
+if ! cd $WORKING_DIRECTORY 2>/dev/null; then echo "GIT_CLEANUP skipped reason=no_workdir wd=$WORKING_DIRECTORY"; exit 0; fi
+git config --global --add safe.directory $WORKING_DIRECTORY 2>/dev/null
+if ! git rev-parse --git-dir >/dev/null 2>&1; then echo "GIT_CLEANUP skipped reason=not_a_git_repo wd=$WORKING_DIRECTORY"; exit 0; fi
 _BASE=$(git rev-parse HEAD 2>/dev/null)
-if [ -z "$_BASE" ]; then echo "GIT_CLEANUP skipped reason=no_head wd={wd}"; exit 0; fi
+if [ -z "$_BASE" ]; then echo "GIT_CLEANUP skipped reason=no_head wd=$WORKING_DIRECTORY"; exit 0; fi
 _BEFORE=$(git rev-list --all --count 2>/dev/null || echo '?')
 _LOOSE_B=$(git count-objects -v 2>/dev/null | sed -n 's/^count: //p')
 _PACK_B=$(git count-objects -v 2>/dev/null | sed -n 's/^in-pack: //p')
