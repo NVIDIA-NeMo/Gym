@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: human_eval
+version: 0.1.0
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Python function-completion tasks scored with EvalPlus base and plus tests.
+modality: text
+licensing: MIT
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: seeded
+resources_server: evalplus
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: human_eval
+    type: benchmark
+    jsonl_fpath: benchmarks/human_eval/data/human_eval_benchmark.jsonl
+    prepare_script: benchmarks/human_eval/prepare.py
+    prompt_config: benchmarks/prompts/generic/codegen.yaml
+    num_repeats: 1
+canonical_split: test
+standard_prompt_config: benchmarks/prompts/generic/codegen.yaml
+lifecycle: active

@@ -48,7 +48,7 @@ from nemo_gym.cli.utils import (
     render_component_inspection,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
-from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
+from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
     VerifierReport,
@@ -1414,8 +1414,15 @@ def _inspect_environment(
     )
 
 
-def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
-    return {
+def _catalog_source_path(path: Path) -> str:
+    for index, part in enumerate(path.parts):
+        if part in {"benchmarks", "environments", "resources_servers"}:
+            return Path(*path.parts[index:]).as_posix()
+    return path.as_posix()
+
+
+def _catalog_payload(entry: EnvironmentCatalogEntry, *, full: bool = False) -> Dict[str, object]:
+    payload: Dict[str, object] = {
         "name": entry.name,
         "kind": entry.kind,
         "status": entry.status,
@@ -1427,6 +1434,61 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "licensing": entry.licensing,
         "lifecycle": entry.lifecycle,
     }
+    if not full:
+        return payload
+
+    details = read_environment_details(entry.config_path)
+    payload["domain"] = entry.domain or details["domain"]
+    payload["description"] = entry.description or details["description"]
+    payload["metadata_complete"] = entry.manifest_path is not None
+    payload["source"] = {
+        "config": _catalog_source_path(entry.config_path),
+        "manifest": _catalog_source_path(entry.manifest_path) if entry.manifest_path is not None else None,
+    }
+
+    if entry.manifest_path is None:
+        payload.update(
+            composition={
+                "resources_servers": details["resources_servers"],
+                "agent_server": details["agent"],
+                "model_server": None,
+                "rollout_driver": None,
+                "grading_mode": None,
+            },
+            authors=[],
+            reward=None,
+            determinism=None,
+            datasets=[{"name": name} for name in details["datasets"]],
+            canonical_split=None,
+            standard_prompt_config=None,
+            session_model=None,
+            state=None,
+            sandbox=None,
+            adopted_from=None,
+        )
+        return payload
+
+    manifest = load_manifest(entry.manifest_path)
+    payload.update(
+        composition={
+            "resources_servers": [manifest.resources_server],
+            "agent_server": manifest.agent_server,
+            "model_server": manifest.model_server,
+            "rollout_driver": manifest.rollout_driver,
+            "grading_mode": manifest.grading_mode,
+        },
+        authors=list(manifest.authors),
+        reward=manifest.reward.model_dump(mode="json"),
+        determinism=manifest.determinism.value,
+        datasets=[dataset.model_dump(mode="json", exclude_none=True) for dataset in manifest.datasets],
+        canonical_split=manifest.canonical_split,
+        standard_prompt_config=manifest.standard_prompt_config,
+        session_model=manifest.session_model.value if manifest.session_model is not None else None,
+        state=manifest.state.value if manifest.state is not None else None,
+        sandbox=manifest.sandbox,
+        adopted_from=(manifest.adopted_from.model_dump(mode="json") if manifest.adopted_from is not None else None),
+    )
+    return payload
 
 
 @exit_cleanly_on_config_error
@@ -1464,7 +1526,8 @@ def list_environments() -> None:
         entries = [entry for entry in entries if getattr(entry, attribute) == expected]
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
-        print(json.dumps([_catalog_payload(entry) for entry in entries]))
+        full = global_config_dict.get("catalog_full", False)
+        print(json.dumps([_catalog_payload(entry, full=full) for entry in entries]))
         return
 
     if not entries:

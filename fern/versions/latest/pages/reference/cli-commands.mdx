@@ -170,12 +170,14 @@ List the manifest-first catalog unioned with legacy environment and benchmark co
 | `--status experimental\|no-manifest` | Filter by manifest coverage status. |
 | `--lifecycle active\|deprecated` | Filter by lifecycle. |
 | `--json` | Output catalog entries as JSON. |
+| `--full` | With `--json`, include source paths, composition, datasets, reward semantics, and full manifest metadata. |
 
 ```bash
 gym list environments
 gym list environments calendar        # inspect one environment
 gym list environments --kind benchmark --domain math
 gym list environments --json | jq '.[].name'
+gym list environments --kind benchmark --json --full > catalog.json
 ```
 
 ### `gym list agents`

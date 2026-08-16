@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: flores200
+version: 0.1.0
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: translation
+description: English-to-many translation across FLORES+ devtest language pairs.
+modality: text
+licensing: CC-BY-SA-4.0
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: seeded
+resources_server: wmt_translation
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: flores200
+    type: benchmark
+    jsonl_fpath: benchmarks/flores200/data/flores200_devtest_benchmark.jsonl
+    prepare_script: benchmarks/flores200/prepare.py
+    prompt_config: benchmarks/flores200/prompts/default.yaml
+    num_repeats: 1
+canonical_split: devtest
+standard_prompt_config: benchmarks/flores200/prompts/default.yaml
+lifecycle: active
