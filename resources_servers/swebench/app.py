@@ -40,7 +40,7 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
-from resources_servers.swebench.swebench_patches import run_instance
+from resources_servers.swebench.swebench_patches import patch_for_swebench_multilingual_golden_patch_pass, run_instance
 
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -159,56 +159,7 @@ class DockerContainer(BaseModel):
     async def copy(self, src: Path, dest: Path) -> None:
         if "eval.sh" in str(src):
             data = src.read_text()
-
-            # This init.d is necessary for some Java tests to properly pull from the maven mirror
-            # e.g. apache__lucene and apache__druid
-            #
-            # Lucene's applied Gradle scripts have their own buildscript scopes. Those scopes
-            # are not exposed through the root project's repository handler, so an init script
-            # cannot rewrite them before they resolve. Rewrite Maven Central references in all
-            # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
-            lucene_mirror_setup = """if [ -d gradle ]; then
-  find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
-fi
-./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
-            data = data.replace("./gradlew test", lucene_mirror_setup)
-
-            # Run Maven tests without the daemon which causes issues with gson tests.
-            data = data.replace("mvnd test", "mvn test")
-
-            # apache__druid-16875 never reaches its focused tests because the
-            # build-metadata plugin's `git describe` exceeds its 30s timeout.
-            if self.instance_id == "apache__druid-16875":
-                data = data.replace("mvn test", "mvn test -Dgit.commit.id.skip=true")
-
-            # valkey-io__valkey-928 checks the source node immediately after
-            # an asynchronous replica migration. Allow the cluster state to
-            # settle before its role assertion runs.
-            if self.instance_id == "valkey-io__valkey-928":
-                data = data.replace(
-                    "TERM=dumb ./runtest",
-                    "sed -i 's/assert_equal \\[lindex \\[R 3 role\\] 2\\] {}/after 5000; assert_equal [lindex [R 3 role] 2] {}/' "
-                    "tests/unit/cluster/replica-migration.tcl\nTERM=dumb ./runtest",
-                )
-
-            # axios__axios-4738 needs more than 10s for cold dependency and process startup.
-            data = data.replace("timeout 10s", "timeout 120s")
-
-            # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
-            # requires Cargo 1.85 while its image provides Cargo 1.81.
-            if self.instance_id == "tokio-rs__tokio-4384":
-                data = data.replace(
-                    "RUSTFLAGS=-Awarnings cargo test",
-                    "cargo update -p getrandom@0.4.3 --precise 0.4.2 && cargo update -p proptest@1.11.0 --precise 1.5.0 && RUSTFLAGS=-Awarnings cargo test",
-                )
-
-            # Preact's Chrome tests use a 2s Mocha timeout, which is too short
-            if "preactjs__preact" in self.instance_id:
-                data = data.replace(
-                    "npx karma start karma.conf.js", "npx karma start karma.conf.js --client.mocha.timeout=60000"
-                )
-
-            src.write_text(data)
+            src.write_text(patch_for_swebench_multilingual_golden_patch_pass(data))
 
         await self._inner_container.upload(local_path=src, remote_path=str(dest))
 
