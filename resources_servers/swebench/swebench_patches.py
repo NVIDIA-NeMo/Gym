@@ -278,44 +278,44 @@ def patch_for_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id:
 find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
 fi
 ./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
-    data = data.replace("./gradlew test", lucene_mirror_setup)
+    eval_sh = eval_sh.replace("./gradlew test", lucene_mirror_setup)
 
     # Run Maven tests without the daemon which causes issues with gson tests.
-    data = data.replace("mvnd test", "mvn test")
+    eval_sh = eval_sh.replace("mvnd test", "mvn test")
 
     # apache__druid-16875 never reaches its focused tests because the
     # build-metadata plugin's `git describe` exceeds its 30s timeout.
     if instance_id == "apache__druid-16875":
-        data = data.replace("mvn test", "mvn test -Dgit.commit.id.skip=true")
+        eval_sh = eval_sh.replace("mvn test", "mvn test -Dgit.commit.id.skip=true")
 
     # valkey-io__valkey-928 checks the source node immediately after
     # an asynchronous replica migration. Allow the cluster state to
     # settle before its role assertion runs.
     if instance_id == "valkey-io__valkey-928":
-        data = data.replace(
+        eval_sh = eval_sh.replace(
             "TERM=dumb ./runtest",
             "sed -i 's/assert_equal \\[lindex \\[R 3 role\\] 2\\] {}/after 5000; assert_equal [lindex [R 3 role] 2] {}/' "
             "tests/unit/cluster/replica-migration.tcl\nTERM=dumb ./runtest",
         )
 
     # axios__axios-4738 needs more than 10s for cold dependency and process startup.
-    data = data.replace("timeout 10s", "timeout 120s")
+    eval_sh = eval_sh.replace("timeout 10s", "timeout 120s")
 
     # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
     # requires Cargo 1.85 while its image provides Cargo 1.81.
     if instance_id == "tokio-rs__tokio-4384":
-        data = data.replace(
+        eval_sh = eval_sh.replace(
             "RUSTFLAGS=-Awarnings cargo test",
             "cargo update -p getrandom@0.4.3 --precise 0.4.2 && cargo update -p proptest@1.11.0 --precise 1.5.0 && RUSTFLAGS=-Awarnings cargo test",
         )
 
     # Preact's Chrome tests use a 2s Mocha timeout, which is too short
     if "preactjs__preact" in instance_id:
-        data = data.replace(
+        eval_sh = eval_sh.replace(
             "npx karma start karma.conf.js", "npx karma start karma.conf.js --client.mocha.timeout=60000"
         )
 
-    return data
+    return eval_sh
 
 
 def patch_swebench_multilingual_resources_request(resources: Dict[str, Any], instance_id: str) -> None:
