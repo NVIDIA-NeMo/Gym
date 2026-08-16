@@ -10,3 +10,9 @@ protobuf==5.29.6
 # same NumPy 2.4 runtime used by the parent workspace. Override the transitive
 # archive edge as well as declaring the direct requirement.
 numpy>=2.1,<2.5
+
+# The pinned OSWorld archive still declares ray[default]==2.55.1. This
+# deployment joins the agent to the same Ray 2.56.1 control plane as its
+# parent, so replace the stale transitive archive edge. Keep this exact and
+# role-local: Ray processes in one cluster must not resolve independently.
+ray[default]==2.56.1

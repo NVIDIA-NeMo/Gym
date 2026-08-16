@@ -96,24 +96,31 @@ def test_osworld_agent_dependency_overrides() -> None:
     assert "grpcio-status==1.71.2" in agent_overrides
     assert "protobuf==5.29.6" in agent_overrides
     assert "numpy>=2.1,<2.5" in agent_overrides
+    assert "ray[default]==2.56.1" in agent_overrides
     assert "torch==2.11.0" in public_overrides
     assert "numpy==2.5.1" not in agent_overrides
     assert "opencv-python-headless==5.0.0.93" not in agent_overrides
     assert "numpy>=2.1,<2.5" in requirements
 
 
-def test_server_ray_version_is_owned_by_parent_process() -> None:
+def test_server_ray_overrides_are_limited_to_the_osworld_archive_repair() -> None:
     # global_config.py injects the parent process's exact Ray version into
-    # every server installation. Static overrides must not drag a current
-    # source checkout back to whichever Ray happened to ship in a base image.
-    ray_override = re.compile(r"(?m)^\s*ray(?:\[default\])?\s*[<>=!~]")
+    # every server installation. The OSWorld archive is the sole exception:
+    # its stale exact transitive pin must be replaced to join this deployment's
+    # Ray 2.56.1 control plane. No other managed server may own a static pin.
+    ray_override = re.compile(r"(?m)^\s*ray(?:\[default\])?\s*[<>=!~].*$")
     managed_overrides = [
         *ROOT.glob("responses_api_agents/*/uv-overrides.txt"),
         *ROOT.glob("responses_api_models/*/uv-overrides.txt"),
         *ROOT.glob("resources_servers/*/uv-overrides.txt"),
     ]
     for override_path in managed_overrides:
-        assert ray_override.search(override_path.read_text(encoding="utf-8")) is None
+        match = ray_override.search(override_path.read_text(encoding="utf-8"))
+        if override_path == OSWORLD_AGENT_OVERRIDES:
+            assert match is not None
+            assert match.group(0).strip() == "ray[default]==2.56.1"
+        else:
+            assert match is None
     assert not (ROOT / "responses_api_models/vllm_model/uv-overrides.txt").exists()
 
 
