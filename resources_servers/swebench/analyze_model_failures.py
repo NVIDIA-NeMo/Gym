@@ -25,4 +25,4 @@ for instance_id, total_reward in rewards.items():
     if total_reward == 3:
         continue
 
-    print(f"{instance_id}: {total_reward} / 3")
+    print(f"{instance_id},{total_reward}")
