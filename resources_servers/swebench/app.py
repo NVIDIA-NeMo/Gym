@@ -39,7 +39,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
-    patch_for_swebench_multilingual_golden_patch_pass,
+    patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_resources_request,
     patch_swebench_multilingual_sandbox_upload,
@@ -157,7 +157,7 @@ class DockerContainer(BaseModel):
     async def copy(self, src: Path, dest: Path) -> None:
         if "eval.sh" in str(src):
             data = src.read_text()
-            src.write_text(patch_for_swebench_multilingual_golden_patch_pass(data, self.instance_id))
+            src.write_text(patch_swebench_multilingual_golden_patch_pass(data, self.instance_id))
 
         await self._inner_container.upload(local_path=src, remote_path=str(dest))
 

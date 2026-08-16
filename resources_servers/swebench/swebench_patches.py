@@ -266,7 +266,7 @@ async def run_instance(
 # These patches may or may not be relevant to your specific sandboxing setup.
 
 
-def patch_for_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str) -> str:
+def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str) -> str:
     # This init.d is necessary for some Java tests to properly pull from the maven mirror
     # e.g. apache__lucene and apache__druid
     #
