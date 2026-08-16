@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import importlib.metadata
+import json
 import os
 import shlex
 from os import environ
@@ -38,6 +40,18 @@ from nemo_gym.global_config import (
 
 
 NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME = "NEMO_GYM_ALLOWED_COMPONENT_ROOTS"
+PARENT_RUNTIME_OVERRIDES_FILENAME = ".nemo-gym-parent-runtime-overrides.txt"
+ENVIRONMENT_IDENTITY_FILENAME = ".nemo-gym-environment-identity"
+_ENVIRONMENT_INPUT_FILENAMES = (
+    "requirements.txt",
+    "pyproject.toml",
+    "overrides.txt",
+    "uv-overrides.txt",
+    "uv.toml",
+    "uv-torch-backend.txt",
+    "uv-python-version.txt",
+    "uv-managed-python.txt",
+)
 
 
 def _validate_component_working_dir(
@@ -142,10 +156,50 @@ def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
     return (dir_path / ".venv").absolute()
 
 
+def _server_environment_identity(
+    dir_path: Path,
+    *,
+    python_request: str,
+    head_server_deps: list[str],
+    is_editable_install: bool,
+    nemo_gym_version_spec: str,
+) -> str:
+    """Fingerprint every input that determines a managed server environment."""
+
+    component_dir = dir_path.resolve()
+    input_files: dict[str, str] = {}
+    for filename in _ENVIRONMENT_INPUT_FILENAMES:
+        path = component_dir / filename
+        if path.is_file():
+            input_files[filename] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    parent_project = (component_dir / "../../pyproject.toml").resolve()
+    if parent_project.is_file():
+        input_files["../../pyproject.toml"] = hashlib.sha256(parent_project.read_bytes()).hexdigest()
+
+    payload = {
+        "schema_version": 1,
+        "component_dir": str(component_dir),
+        "head_server_deps": head_server_deps,
+        "input_files": input_files,
+        "is_editable_install": is_editable_install,
+        "nemo_gym_version_spec": nemo_gym_version_spec,
+        "python_request": python_request,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
-    head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
+    head_server_deps = [str(dependency) for dependency in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]]
+    head_server_dep_args = shlex.join(head_server_deps)
 
     venv_path = get_venv_path(dir_path, global_config_dict)
+    parent_runtime_overrides_path = venv_path / PARENT_RUNTIME_OVERRIDES_FILENAME
+    environment_identity_path = venv_path / ENVIRONMENT_IDENTITY_FILENAME
+    parent_runtime_overrides_cmd = (
+        f"printf '%s\\n' {head_server_dep_args} > {shlex.quote(str(parent_runtime_overrides_path))}"
+    )
 
     python_request = str(global_config_dict[PYTHON_VERSION_KEY_NAME])
     python_request_arg = python_request
@@ -163,6 +217,22 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             raise RuntimeError(f"Expected 'true' in {managed_python_path}, got {managed_python!r}")
         python_venv_flags = "--managed-python "
 
+    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
+    nemo_gym_version_spec = _get_nemo_gym_version_spec(is_editable_install)
+    environment_identity = _server_environment_identity(
+        dir_path,
+        python_request=python_request,
+        head_server_deps=head_server_deps,
+        is_editable_install=is_editable_install,
+        nemo_gym_version_spec=nemo_gym_version_spec,
+    )
+    environment_identity_tmp_path = f"{shlex.quote(str(environment_identity_path))}.tmp.$$"
+    clear_environment_identity_cmd = f"rm -f {shlex.quote(str(environment_identity_path))}"
+    commit_environment_identity_cmd = (
+        f"printf '%s\\n' {environment_identity} > {environment_identity_tmp_path} && "
+        f"mv {environment_identity_tmp_path} {shlex.quote(str(environment_identity_path))}"
+    )
+
     # `uv pip --project` has no effect. A server-local uv.toml passed via
     # --config-file is the supported way to keep an enclosing workspace (for
     # example /opt/nemo-rl) from contributing unrelated resolver policy.
@@ -175,7 +245,16 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
     skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
-    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
+    try:
+        recorded_environment_identity = environment_identity_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        recorded_environment_identity = ""
+    should_skip_venv_setup = (
+        bool(skip_venv_if_present)
+        and venv_python_fpath.exists()
+        and venv_activate_fpath.exists()
+        and recorded_environment_identity == environment_identity
+    )
 
     # explicitly set python path if specified. In Google colab, gym env start fails due to uv pip install falls back to system python (/usr) without this and errors.
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
@@ -188,7 +267,13 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # A server is a separate process with its own venv. Allow it to select its
     # Python, dependency metadata, and Torch backend without leaking those
     # choices into sibling server venvs through process-wide UV_* variables.
-    server_uv_flags = uv_config_flag
+    # Parent-sensitive packages such as Ray are both direct requirements and
+    # resolver overrides. A direct requirement alone cannot replace an exact
+    # stale transitive pin in a server dependency, which can either make the
+    # solve impossible or split one Ray cluster across incompatible versions.
+    # Materialize the dynamic authority inside the writable venv rather than
+    # baking the current parent version into every server's source tree.
+    server_uv_flags = f"{uv_config_flag}--overrides {shlex.quote(str(parent_runtime_overrides_path))} "
     overrides_path = dir_path / "uv-overrides.txt"
     if overrides_path.exists():
         server_uv_flags += f"--overrides {shlex.quote(str(overrides_path.resolve()))} "
@@ -199,8 +284,6 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         if torch_backend not in valid_torch_backends:
             raise RuntimeError(f"Invalid Torch backend in {torch_backend_path}: {torch_backend!r}")
         server_uv_flags += f"--torch-backend {torch_backend} "
-
-    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
@@ -213,29 +296,29 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}'-e .' {head_server_dep_args}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
-                version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                version_spec = nemo_gym_version_spec
                 install_cmd = (
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {head_server_dep_args}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
             override_flag = "--override overrides.txt " if has_overrides_txt else ""
             if is_editable_install:
-                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {head_server_dep_args}"""
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
-                version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                version_spec = nemo_gym_version_spec
                 install_cmd = (
                     f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {head_server_dep_args}"""
                 )
         else:
             raise RuntimeError(
@@ -243,7 +326,11 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        env_setup_cmd = (
+            f"{clear_environment_identity_cmd} && {uv_venv_cmd}{prefix_cmd} && "
+            f"{parent_runtime_overrides_cmd} && source {venv_activate_fpath} && "
+            f"{install_cmd}{prefix_cmd} && {commit_environment_identity_cmd}"
+        )
 
     return f"cd {dir_path} && {env_setup_cmd}"
 
