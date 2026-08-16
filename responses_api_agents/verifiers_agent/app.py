@@ -16,6 +16,7 @@ import json
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from itertools import islice
+from os import environ
 from time import time
 from typing import Annotated, Any
 
@@ -30,7 +31,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import POLICY_MODEL_NAME_KEY_NAME
+from nemo_gym.global_config import POLICY_API_KEY_KEY_NAME, POLICY_MODEL_NAME_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.responses_converter import ResponsesConverter
 
@@ -70,6 +71,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
+        environ[POLICY_API_KEY_KEY_NAME] = str(
+            self.server_client.global_config_dict.get(POLICY_API_KEY_KEY_NAME) or ""
+        )
         self._env = vf.load_environment(self.config.verifiers)
         self._tasks = []
         self._task_iter = iter(self._env.taskset)
@@ -124,7 +128,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                     self.config.model_server.name,
                     self.rollout_id_from_run(body),
                 ),
-                api_key_var="NEMO_GYM_API_KEY",
+                api_key_var=POLICY_API_KEY_KEY_NAME,
             ),
             sampling=vf.SamplingConfig.model_validate(sampling),
         )

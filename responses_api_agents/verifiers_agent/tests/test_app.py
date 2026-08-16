@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from os import environ
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import verifiers.v1 as vf
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import POLICY_MODEL_NAME_KEY_NAME
+from nemo_gym.global_config import POLICY_API_KEY_KEY_NAME, POLICY_MODEL_NAME_KEY_NAME
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
@@ -18,7 +19,10 @@ from responses_api_agents.verifiers_agent.app import (
 
 def make_agent() -> VerifiersAgent:
     server_client = MagicMock(spec=ServerClient)
-    server_client.global_config_dict = {POLICY_MODEL_NAME_KEY_NAME: "policy"}
+    server_client.global_config_dict = {
+        POLICY_API_KEY_KEY_NAME: "test-key",
+        POLICY_MODEL_NAME_KEY_NAME: "policy",
+    }
     agent = VerifiersAgent(
         config=VerifiersAgentConfig(
             host="0.0.0.0",
@@ -206,7 +210,8 @@ class TestApp:
         context = agent._env.run_slot.call_args.args[1]
         assert context.sampling.seed == 7
         assert context.client.base_url == "http://model/v1"
-        assert context.client.api_key_var == "NEMO_GYM_API_KEY"
+        assert context.client.api_key_var == POLICY_API_KEY_KEY_NAME
+        assert environ[POLICY_API_KEY_KEY_NAME] == "test-key"
         assert context.model == "policy"
         assert result.model == "policy"
         assert result.tools[0].name == "lookup"
