@@ -168,7 +168,7 @@ class DockerContainer(BaseModel):
             # cannot rewrite them before they resolve. Rewrite Maven Central references in all
             # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
             lucene_mirror_setup = """if [ -d gradle ]; then
-  find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://plugins.gradle.org/m2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
+  find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
 fi
 ./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
             data = data.replace("./gradlew test", lucene_mirror_setup)
@@ -188,8 +188,7 @@ fi
                 )
 
             # Preact's Chrome tests use a 2s Mocha timeout, which is too short
-            # for preactjs__preact-3010 and preactjs__preact-3567 under load.
-            if self.instance_id in {"preactjs__preact-3010", "preactjs__preact-3567"}:
+            if "preactjs__preact" in self.instance_id:
                 data = data.replace(
                     "npx karma start karma.conf.js", "npx karma start karma.conf.js --client.mocha.timeout=60000"
                 )

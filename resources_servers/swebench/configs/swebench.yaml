@@ -21,7 +21,7 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
           OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT: "true"
         resources:
           cpu: 2
-          memory_mib: 8192
+          memory_mib: 16384
           # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
           # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
           disk_gib: 30

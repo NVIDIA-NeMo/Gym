@@ -134,6 +134,20 @@ async def run_instance(
                 break
             else:
                 logger.info(f"Failed to apply patch to container: {git_apply_cmd}")
+
+        # The jqlang__jq-2681 image contains dirty generated lexer files from
+        # a different Flex version. Apply its golden source files only; jq's
+        # evaluation build regenerates lexer.c/.h and parser.c/.h from them.
+        if not applied_patch and instance_id == "jqlang__jq-2681":
+            val = await container.exec_run(
+                f"git apply --include=src/lexer.l --include=src/parser.y {DOCKER_PATCH}",
+                workdir=DOCKER_WORKDIR,
+                user=DOCKER_USER,
+            )
+            if val.exit_code == 0:
+                logger.info(f"{APPLY_PATCH_PASS}: applied source patch before regeneration\n{val.output.decode(UTF8)}")
+                applied_patch = True
+
         if not applied_patch:
             logger.info(f"{APPLY_PATCH_FAIL}:\n{val.output.decode(UTF8)}")
             raise EvaluationError(
