@@ -19,7 +19,11 @@ This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pu
 from typing import Any, Dict
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
+from swebench.harness.constants import MAP_REPO_TO_EXT
 from swebench.harness.run_evaluation import *
+
+from nemo_gym import PARENT_DIR
+from nemo_gym.sandbox import AsyncSandbox
 
 
 # @bxyu-nvidia: We modify the run_instance function to:
@@ -319,3 +323,18 @@ def patch_swebench_multilingual_resources_request(resources: Dict[str, Any], ins
     # {2896,4316,4436}; reserve enough memory for its two-browser runner.
     if instance_id in {"preactjs__preact-2896", "preactjs__preact-4316", "preactjs__preact-4436"}:
         resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)
+
+
+async def patch_swebench_multilingual_sandbox_upload(repo: str, sandbox: AsyncSandbox) -> None:
+    if MAP_REPO_TO_EXT.get(repo) == "java":
+        base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
+        settings_xml_path = base_path / "settings.xml"
+        init_gradle_path = base_path / "init.gradle"
+
+        await sandbox.exec("""mkdir -p /root/.m2 /root/.gradle/init.d""")
+
+        # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
+        await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
+
+        # This init.d is necessary for some Java tests to properly pull from the maven mirror
+        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")

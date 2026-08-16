@@ -22,12 +22,11 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
 from pydantic import BaseModel
-from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
+from swebench.harness.constants import END_TEST_OUTPUT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
 from docker.models.containers import ExecResult
-from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -43,6 +42,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
     patch_for_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_resources_request,
+    patch_swebench_multilingual_sandbox_upload,
     run_instance,
 )
 
@@ -221,23 +221,9 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
-        if MAP_REPO_TO_EXT.get(test_spec.repo) == "java":
-            await self._apply_sandbox_patches(eval_sandbox)
+        await patch_swebench_multilingual_sandbox_upload(test_spec.repo, eval_sandbox)
 
         return eval_sandbox
-
-    async def _apply_sandbox_patches(self, sandbox: AsyncSandbox) -> None:
-        base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
-        settings_xml_path = base_path / "settings.xml"
-        init_gradle_path = base_path / "init.gradle"
-
-        await sandbox.exec("""mkdir -p /root/.m2 /root/.gradle/init.d""")
-
-        # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
-
-        # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
 
     def _make_test_spec(self, body: SWEBenchVerifyRequest) -> TestSpec:
         return make_test_spec(
