@@ -213,10 +213,18 @@ trap cleanup_server EXIT INT TERM
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
 
+    # @bxyu-nvidia: Put the Gym servers on a separate node than the PREFILL_HEAD which is also running the vllm-router
+    # This helps relieve so much network traffic on one node.
+    if [[ -v 'nodes[1]' ]]; then
+        EVAL_NODE=\${nodes[1]}
+    else
+        EVAL_NODE=\${nodes[0]}
+    fi
+
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     eval_status=0
     PREFILL_HEAD="\$PREFILL_HEAD" \
-    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$PREFILL_HEAD" --gpus=0 \
+    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
         --container-mounts=$MOUNTS \

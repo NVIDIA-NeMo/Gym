@@ -867,15 +867,15 @@ class RolloutCollectionHelper(BaseModel):
 
                 time_taken_s = time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
-                rollouts_per_min = len(results) / time_taken_s / 60
-                print_str = f"Finished {len(results)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
+                rollouts_per_min = len(results) / (time_taken_s / 60)
+                print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
 
                 top_left = counts_left.most_common()
                 top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
                 print_str += f"""Examples left:
 {top_left_str}
 """
-                for agent_name in agent_name_to_metrics:
+                for agent_name in sorted(agent_name_to_metrics):
                     metrics = agent_name_to_metrics[agent_name]
                     avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
                     print_str += f"""Found {agent_name_to_counts[agent_name]} rollouts for `{agent_name}`.
