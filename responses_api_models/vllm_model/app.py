@@ -214,6 +214,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
     endpoint_check_interval_s: float = 10.0
+
+    session_affinity_header: Optional[str] = Field(
+        default=None,
+        description="Header used to forward the NeMo Gym session ID to an upstream router.",
+    )
+
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -1506,6 +1512,13 @@ class VLLMModel(SimpleResponsesAPIModel):
             digest = hashlib.sha256(session_id.encode("utf-8")).digest()
             client_idx = int.from_bytes(digest[:8], byteorder="big") % len(self._clients)
             client = self._clients[client_idx]
+            if self.config.session_affinity_header is not None:
+                client = client.model_copy(
+                    update={
+                        "default_headers": client.default_headers
+                        | {self.config.session_affinity_header: session_id}
+                    }
+                )
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
 
