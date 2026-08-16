@@ -19,7 +19,7 @@ This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pu
 from typing import Any, Dict
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
-from swebench.harness.constants import MAP_REPO_TO_EXT
+from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import *
 
 from nemo_gym import PARENT_DIR
@@ -338,3 +338,16 @@ async def patch_swebench_multilingual_sandbox_upload(repo: str, sandbox: AsyncSa
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
         await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
+
+
+def patch_swebench_multilingual_log_parsing(stdout: str, stderr: str, instance_id: str) -> Optional[str]:
+    test_output = None
+
+    # For RuboCop tests in SWE Multilingual specifically, there is an issue with the logs parsing if the stdout and stderr returned is not interleaved.
+    # We interleave the stderr inside the start and end tags in the stdout here instead. See `get_logs_eval`
+    if "rubocop" in instance_id and START_TEST_OUTPUT in stderr:
+        start, middle_end = stderr.split(START_TEST_OUTPUT)
+        middle, end = middle_end.split(END_TEST_OUTPUT)
+        test_output = start + START_TEST_OUTPUT + stdout + middle + END_TEST_OUTPUT + end
+
+    return test_output

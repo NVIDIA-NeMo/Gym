@@ -22,7 +22,6 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
 from pydantic import BaseModel
-from swebench.harness.constants import END_TEST_OUTPUT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
@@ -41,6 +40,7 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
     patch_for_swebench_multilingual_golden_patch_pass,
+    patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_resources_request,
     patch_swebench_multilingual_sandbox_upload,
     run_instance,
@@ -145,14 +145,8 @@ class DockerContainer(BaseModel):
             stdout = res.stdout or ""
             stderr = res.stderr or ""
 
-            # For RuboCop tests in SWE Multilingual specifically, there is an issue with the logs parsing if the stdout and stderr returned is not interleaved.
-            # We interleave the stderr inside the start and end tags in the stdout here instead. See `get_logs_eval`
-            if "rubocop" in self.instance_id and START_TEST_OUTPUT in stderr:
-                start, middle_end = stderr.split(START_TEST_OUTPUT)
-                middle, end = middle_end.split(END_TEST_OUTPUT)
-                test_output = start + START_TEST_OUTPUT + stdout + middle + END_TEST_OUTPUT + end
-            else:
-                test_output = stdout + stderr
+            maybe_test_output = patch_swebench_multilingual_log_parsing(stdout, stderr, self.instance_id)
+            test_output = maybe_test_output or (stdout + stderr)
         except TimeoutError:
             # Gym Sandbox API will throw a timeout error on actual timeout.
             timed_out = True
