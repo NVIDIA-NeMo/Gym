@@ -252,10 +252,16 @@ async def run_instance(
         }
 
 
+########################################
+# START SWE Bench Multilingual instance patches
+########################################
+
 # @bxyu-nvidia: These are the patches to the `eval.sh` produced by SWE Bench that needed to be done in order for the golden patches to pass
 # Each patch here is not intended to help the model, they are literally making the test cases runnable.
 # Most of these are specific to Nvidia's OpenSandbox server. A lot of these aren't issues when run on bare metal AWS EC2 instances.
 # These patches may or may not be relevant to your specific sandboxing setup.
+
+
 def patch_for_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str) -> str:
     # This init.d is necessary for some Java tests to properly pull from the maven mirror
     # e.g. apache__lucene and apache__druid
@@ -308,7 +314,7 @@ fi
     return data
 
 
-def patch_resources_request(resources: Dict[str, Any], instance_id: str) -> None:
+def patch_swebench_multilingual_resources_request(resources: Dict[str, Any], instance_id: str) -> None:
     # Chrome is OOM-killed before Karma can connect for preactjs__preact-
     # {2896,4316,4436}; reserve enough memory for its two-browser runner.
     if instance_id in {"preactjs__preact-2896", "preactjs__preact-4316", "preactjs__preact-4436"}:
