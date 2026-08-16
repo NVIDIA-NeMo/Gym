@@ -18,6 +18,7 @@ from os import environ
 from pathlib import Path
 from subprocess import Popen
 from sys import stderr, stdout
+from typing import IO, Any
 
 from omegaconf import DictConfig
 
@@ -100,14 +101,18 @@ def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
         return ""
 
 
+def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
+    """Return the server venv path for the configured venv root."""
+    root_venv_path = Path(global_config_dict[UV_VENV_DIR_KEY_NAME])
+    if root_venv_path.resolve() != PARENT_DIR.resolve():
+        return Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
+    return (dir_path / ".venv").absolute()
+
+
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
-    root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
-    if Path(root_venv_path).resolve() != PARENT_DIR.resolve():
-        venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
-    else:
-        venv_path = (dir_path / ".venv").absolute()
+    venv_path = get_venv_path(dir_path, global_config_dict)
 
     uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv_path}"
 
@@ -175,9 +180,17 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
 
 def run_command(
-    command: str, working_dir_path: Path, server_name: str = "", project_root: Path | None = None
+    command: str,
+    working_dir_path: Path,
+    server_name: str = "",
+    project_root: Path | None = None,
+    *,
+    global_config_dict: DictConfig | None = None,
+    stdout_target: IO[Any] | None = None,
+    stderr_target: IO[Any] | None = None,
 ) -> Popen:
-    global_config_dict = get_global_config_dict()
+    if global_config_dict is None:
+        global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
@@ -202,8 +215,8 @@ def run_command(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
 
-    redirect_stdout = stdout
-    redirect_stderr = stderr
+    redirect_stdout = stdout if stdout_target is None else stdout_target
+    redirect_stderr = stderr if stderr_target is None else stderr_target
     return Popen(
         command,
         executable="/bin/bash",

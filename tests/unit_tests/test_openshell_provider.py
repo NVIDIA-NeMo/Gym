@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import base64
+import builtins
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ from nemo_gym.sandbox.providers.registry import get_provider_class
 pytestmark = pytest.mark.sandbox
 
 
-pytest.importorskip("openshell", reason="openshell optional sandbox dependency is not installed")
+pytest.importorskip("openshell", reason="openshell optional dependency is not installed")
 
 import grpc  # noqa: E402  (grpcio ships with the openshell SDK)
 from openshell import SandboxError, SandboxRef, SandboxStatusRef  # noqa: E402
@@ -207,6 +208,26 @@ def _make_handle(
 
 def test_registry_resolves_openshell() -> None:
     assert get_provider_class("openshell") is OpenShellProvider
+
+
+def test_missing_openshell_dependency_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(
+        name: str,
+        globals_: dict[str, Any] | None = None,
+        locals_: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        if name == "openshell" or name.startswith("openshell."):
+            raise ModuleNotFoundError(name)
+        return real_import(name, globals_, locals_, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ModuleNotFoundError, match=r"nemo-gym\[openshell\]"):
+        openshell_provider._require_openshell()
 
 
 def test_provider_call_shapes_bind_against_installed_sdk() -> None:

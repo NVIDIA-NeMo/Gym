@@ -1,0 +1,96 @@
+# Finance Agent v2 (FABv2): Vals's finance-agent-v2 tools wired into Gym.
+# Run together with a model config (openai_model.yaml or vllm_model.yaml).
+#
+# The public FABv2 release ships no grader, so we score the dataset's `rubric`
+# criteria with our own per-criterion judge: each criterion is graded on its own
+# (1 = the answer asserts it, 0 = it does not) over judge_required_successes
+# parsed verdicts, decided by majority vote. Reward is Vals's Partial Credit —
+# the severity-weighted pass fraction, forced to 0.0 when any must_pass
+# criterion fails — with rubric_all_pass and the unweighted rubric_fraction
+# reported alongside. The judge model and prompt are ours, not Vals's private
+# grader, so treat comparisons against their published numbers as approximate.
+finance_agent_v2_resources_server:
+  resources_servers:
+    finance_agent_v2:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Vals finance-agent-v2 tools (web/EDGAR/price/calculator) for financial research questions
+      value: Run the official Vals FABv2 agent tools at scale in NeMo Gym
+      # A null key registers that tool as unavailable rather than failing startup.
+      tavily_api_key: ${oc.select:tavily_api_key,${oc.env:TAVILY_API_KEY,null}}                # web_search (Tavily)
+      sec_api_key: ${oc.select:sec_api_key,${oc.env:SEC_API_KEY,null}}                         # edgar_search (sec-api.io)
+      pricing_data_api_key: ${oc.select:pricing_data_api_key,${oc.env:TIINGO_API_KEY,null}}    # price_history (Tiingo)
+      retrieval_model_server:
+        type: responses_api_models
+        name: policy_model
+      retrieval_responses_create_params:
+        input: []
+      retrieval_max_output_tokens: 8192
+      retrieval_system_prompt_fpath: prompt_templates/finance_agent_v2_retrieval.yaml
+      judge_model_server:
+        type: responses_api_models
+        name: search_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 8192
+        reasoning:
+          effort: high
+      rubric_judge_prompt_template_fpath: prompt_templates/finance_agent_v2_rubric_judge.yaml
+      judge_call_timeout: 60.0
+      # 3 parsed verdicts per criterion decide it by majority; up to 10 calls to
+      # get them (API errors and unparseable replies are retried). A criterion
+      # that never reaches 3 is left unresolved and flags the whole question.
+      judge_required_successes: 3
+      judge_max_attempts: 10
+      judge_max_concurrency: 4
+      # Soft budget: on overrun tools return an error asking the model to submit.
+      max_rollout_time_seconds: 1200
+      max_end_date: "2026-03-01"
+
+      # Caches raw upstream responses, so a hit is byte-identical to a live call.
+      # null cache_dir falls back to ~/.cache/nemo_gym/finance_agent_v2.
+      use_cache: true
+      cache_dir: ${oc.select:finance_agent_v2_cache_dir,${oc.env:FINANCE_AGENT_V2_CACHE_DIR,null}}
+
+# Kept separate from the policy model: if each policy graded itself, scores
+# across models would not be comparable. Pin this for any cross-model claim.
+search_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:search_judge_model_base_url,https://api.openai.com/v1}
+      # A visible sentinel rather than an empty string, but note what it does NOT
+      # do: nothing validates it, so an unset key reaches the judge and comes back
+      # as a 401 on the first /verify, after a full rollout has already been paid
+      # for. It stays a sentinel (not `null`, which openai_api_key: str would reject
+      # at parse time) so `gym env resolve` and dry runs still work on a clean
+      # checkout. Set search_judge_model_api_key in env.yaml before a real run.
+      openai_api_key: ${oc.select:search_judge_model_api_key,unset}
+      openai_model: ${oc.select:search_judge_model_name,gpt-5-mini}
+
+# Uses responses_api_agents/finance_agent_v2, not the v1 finance_agent loop:
+# upstream's v1 and v2 hooks have diverged (nudge text, turn-vs-time bound,
+# abort on retry exhaustion), and the v1 loop is on the training path so it is
+# left untouched. See that component's README for the full comparison.
+finance_agent_v2:
+  responses_api_agents:
+    finance_agent_v2:
+      entrypoint: app.py
+      # Upstream v2 bounds the run by time, not turns; max_steps stays a
+      # belt-and-braces cap so a looping model cannot burn the full hour.
+      max_steps: 50
+      truncate_on_overflow: true
+      tool_call_timeout: 300
+      resources_server:
+        type: resources_servers
+        name: finance_agent_v2_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/finance_agent_v2/data/example.jsonl
+        # First 5 questions of the public 27Q set, from vals-ai/finance-agent-v2.
+        license: MIT

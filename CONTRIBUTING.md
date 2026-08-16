@@ -1,4 +1,4 @@
-# Contributing To NeMo-Gym
+# Contributing to NeMo Gym
 
 Welcome! We are excited to have you contribute to NeMo Gym. Whether you are adding new training environments, integrating RL frameworks, improving documentation, or fixing bugs, your contributions help advance RL training.
 
@@ -28,6 +28,20 @@ Refer to the [RL Framework Integration Guide](https://docs.nvidia.com/nemo/gym/l
 
 **Not sure where to start?** Refer to our [open issues](https://github.com/NVIDIA-NeMo/Gym/issues) or create a new issue to discuss your idea.
 
+## Use of AI and LLM Tools
+
+We encourage contributors to use AI coding assistants (Cursor, Claude, Codex, OpenCode, and similar)
+where they genuinely help, but AI assistance does not replace human understanding, judgment, and
+accountability.
+
+**Guiding principle:** Prefer contributions where your review and ownership clearly outweigh the
+maintainer review burden. You are responsible for every line of code you submit, regardless of
+whether you or an AI tool wrote it.
+
+Refer to [`AGENTS.md`](./AGENTS.md) for the quality bar (shared by humans and coding agents), and to
+[Use of AI and LLM Tools](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup#use-of-ai-and-llm-tools)
+for how maintainers handle low-effort submissions.
+
 ## Licensing of Contributions
 
 NeMo Gym is licensed under the **Apache License, Version 2.0** (see [`LICENSE`](./LICENSE)).
@@ -54,14 +68,14 @@ submitting a contribution, you agree that:
 
 ## Development Setup
 
-For complete development setup, CI/CD requirements, commit signing, and troubleshooting, refer to the [Development Setup Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup.html).
+For complete development setup, CI/CD requirements, DCO sign-off, and troubleshooting, refer to the [Development Setup Guide](https://docs.nvidia.com/nemo/gym/latest/contribute/development-setup.html).
 
-**Quick start:**
+**Quick Start:**
 
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync --extra dev
 pre-commit install
 ```

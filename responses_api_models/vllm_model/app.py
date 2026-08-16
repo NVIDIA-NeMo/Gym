@@ -1092,8 +1092,10 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
-            # There is probably a better way to select the endpoint for this request. But this will do for now.
-            client_idx = len(self._session_id_to_client) % len(self._clients)
+            # Uvicorn workers do not share this cache. A stable assignment keeps
+            # every turn in a session on the same vLLM endpoint across workers.
+            digest = hashlib.sha256(session_id.encode("utf-8")).digest()
+            client_idx = int.from_bytes(digest[:8], byteorder="big") % len(self._clients)
             client = self._clients[client_idx]
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]

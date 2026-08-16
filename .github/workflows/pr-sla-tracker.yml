@@ -39,7 +39,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
 
       - name: Refresh SLA labels and dashboard
         env:
