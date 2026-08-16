@@ -312,6 +312,13 @@ async def patch_swebench_multilingual_sandbox_upload(repo: str, sandbox: AsyncSa
         settings_xml_path = base_path / "settings.xml"
         init_gradle_path = base_path / "init.gradle"
 
+        # This init.d is necessary for some Java tests to properly pull from the maven mirror
+        # e.g. apache__lucene and apache__druid
+        #
+        # Lucene's applied Gradle scripts have their own buildscript scopes. Those scopes
+        # are not exposed through the root project's repository handler, so an init script
+        # cannot rewrite them before they resolve. Rewrite Maven Central references in all
+        # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
         await sandbox.exec("""mkdir -p /root/.m2 ~/.gradle/init.d \
         && if [ -d gradle ]; then
 find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
