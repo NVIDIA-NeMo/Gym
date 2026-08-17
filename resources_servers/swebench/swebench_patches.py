@@ -275,6 +275,23 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
     if instance_id == "apache__druid-16875":
         eval_sh = eval_sh.replace("mvn test", "mvn test -Dgit.commit.id.skip=true")
 
+    # apache__lucene-12626's Gradle wrapper uses a 10s network timeout, which
+    # is too short for the initial distribution download in OpenSandbox.
+    if instance_id == "apache__lucene-12626":
+        eval_sh = eval_sh.replace(
+            "./gradlew",
+            "sed -i '/^networkTimeout=/d' gradle/wrapper/gradle-wrapper.properties && "
+            "echo 'networkTimeout=120000' >> gradle/wrapper/gradle-wrapper.properties\n./gradlew",
+        )
+
+    # These projects resolve Gradle plugins through Plugin Portal. Load the
+    # uploaded mirror script explicitly because the sandbox Gradle process does
+    # not auto-discover init.d under /root.
+    if instance_id in {"apache__lucene-13494", "reactivex__rxjava-7597"}:
+        eval_sh = eval_sh.replace(
+            "./gradlew", "./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle"
+        )
+
     # axios__axios-4738 needs more than 10s for cold dependency and process startup.
     eval_sh = eval_sh.replace("timeout 10s", "timeout 120s")
 
@@ -282,6 +299,16 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
     if "preactjs__preact" in instance_id:
         eval_sh = eval_sh.replace(
             "npx karma start karma.conf.js", "npx karma start karma.conf.js --client.mocha.timeout=60000"
+        )
+
+    # valkey-io__valkey-928 checks the source node immediately after an
+    # asynchronous replica migration. Let the cluster state settle before the
+    # test's role assertion.
+    if instance_id == "valkey-io__valkey-928":
+        eval_sh = eval_sh.replace(
+            "TERM=dumb ./runtest",
+            "sed -i 's/assert_equal \\[lindex \\[R 3 role\\] 2\\] {}/after 5000; assert_equal [lindex [R 3 role] 2] {}/' "
+            "tests/unit/cluster/replica-migration.tcl\nTERM=dumb ./runtest",
         )
 
     return eval_sh
@@ -320,7 +347,7 @@ fi""")
         await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
+        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
 
     # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
     # requires Cargo 1.85 while its image provides Cargo 1.81.
