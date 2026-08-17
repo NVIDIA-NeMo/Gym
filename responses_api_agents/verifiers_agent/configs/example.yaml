@@ -1,0 +1,28 @@
+verifiers_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: other
+      description: Run a Verifiers V1 taskset and harness in NeMo Gym.
+      value: Train with Verifiers tasks, tools, and scoring in NeMo Gym.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      verifiers:
+        taskset:
+          id: textarena
+          game: Wordle-v0
+        player:
+          harness:
+            id: "null"
+          max_turns: 6
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 8192
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/verifiers_agent/data/example.jsonl
