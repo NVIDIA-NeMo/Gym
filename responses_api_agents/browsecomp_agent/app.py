@@ -15,9 +15,11 @@
 import hashlib
 import json
 import re
+import traceback
 from pathlib import Path
 from typing import List, Optional
 
+import aiohttp
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
@@ -43,8 +45,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_models.vllm_model.app import VLLMConverter
 
@@ -52,6 +56,86 @@ from responses_api_models.vllm_model.app import VLLMConverter
 def _qid(text: str) -> str:
     """Short stable id for a question, for [browsecomp] debug logs."""
     return hashlib.sha256((text or "").encode()).hexdigest()[:10]
+
+
+# --- Progress board (ported from bc_frankie_bash_tool_w_progress_tracking
+# commits 43e59bc / 5099589 / 8cdd075) ---
+# An update_progress tool whose board is OVERWRITTEN on each call (not
+# appended) and persists in the system prompt across context resets. The board
+# is framed as a ledger of SETTLED state (not the live hypothesis): a kimi26
+# A/B showed a hypothesis-anchored board REGRESSED BrowseComp-400 61.2% ->
+# 49.5%; the settled-state slots + post-reset re-derivation rule below are the
+# de-anchoring fixes from that study.
+
+PROGRESS_TOOL = {
+    "type": "function",
+    "name": "update_progress",
+    "description": (
+        "Maintain a ledger of SETTLED state on a durable board pinned to "
+        "the system prompt — the ONLY state that survives a context reset. "
+        "This OVERWRITES the board — pass the complete current state every "
+        "time; it is not appended. Record what is settled: confirmed facts "
+        "(with source), ruled-out candidates (with the constraint each "
+        "fails), and search angles already exhausted — not just your best "
+        "guess. The board is NEVER your final answer: to answer, emit "
+        "'Exact Answer: ...' as a normal assistant message. Board format "
+        "is described in the system prompt; keep it concise."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "board": {
+                "type": "string",
+                "description": (
+                    "The full board text. Replaces the previous board entirely — write the complete, current state."
+                ),
+            }
+        },
+        "required": ["board"],
+    },
+    "strict": False,
+}
+
+PROGRESS_SYSTEM_ADDENDUM = (
+    "\n\n## Progress Board (durable — survives context resets)\n"
+    "This board persists in the system prompt across resets; your conversation "
+    "history does not. Maintain it with `update_progress` (each call replaces "
+    "it). It is a ledger of SETTLED state. Track, concisely:\n"
+    "• Constraints — the conditions the answer must satisfy simultaneously.\n"
+    "• Confirmed facts — grounded findings, each with its source (URL/step).\n"
+    "• Ruled-out candidates — candidate + the constraint that eliminates it.\n"
+    "• Search angles tried — exhausted angles and what they yielded, so you "
+    "don't repeat them.\n"
+    "• Working hypothesis (UNVERIFIED — re-check every constraint before "
+    "committing; do not treat as settled).\n\n"
+    "After a context reset: treat any working hypothesis on the board as a "
+    "guess to re-test from the confirmed facts, NOT a conclusion. If the same "
+    "hypothesis has led for 2+ segments without confirming all constraints, "
+    "switch to a new search angle (consult Search angles tried).\n\n"
+    "You will get a [SYSTEM NOTE] warning just before each context reset as a "
+    "last chance to save state — but do not rely on it alone; update the "
+    "board whenever something is settled or ruled out.\n\n"
+    "### Current board:\n{progress}"
+)
+
+PRE_RESET_BOARD_NUDGE = (
+    "\n\n[SYSTEM NOTE: Your context is about to be RESET — everything except "
+    "{kept} will be discarded. This is "
+    "your last chance to save state: call update_progress NOW with the "
+    "complete board (constraints, confirmed facts with sources, ruled-out "
+    "candidates, search angles tried, working hypothesis). Do this before "
+    "any other action.]"
+)
+
+# Answer-commit marker (line-anchored to avoid matching prose like
+# "candidate answer: ..."). Used both to detect the model writing its final
+# answer into the board instead of committing it (commit guard) and to recover
+# such an answer at return time so the judge can extract it (board-answer
+# fallback).
+_ANSWER_COMMIT_RE = re.compile(
+    r"^\s*(?:exact answer|final answer|answer)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
@@ -79,6 +163,13 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # call to decide context reset, instead of paying for a full generation and
     # discarding it. (ported from gym-gitlab b66e37c6)
     save_model_call_using_vllm_tokenize_endpoint: bool = False
+    # Give the model an update_progress tool: a durable "progress board" pinned
+    # to the system prompt that survives context resets. Each call OVERWRITES
+    # the board. When the context crosses the reset threshold the model gets
+    # ONE warned turn (a save-the-board [SYSTEM NOTE] on its latest tool
+    # result) before the reset fires; without progress the reset fires
+    # immediately as before. (ported from bc_frankie w_progress_tracking)
+    progress: bool = False
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -91,6 +182,23 @@ class BrowsecompAgentVerifyRequest(BaseVerifyRequest):
 
 class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+def _is_infrastructure_failure(exc: BaseException) -> bool:
+    """True when the harness failed, not the sample.
+
+    A 5xx from a sibling Gym server, or a connection/timeout error, means
+    policy_model or the resources server was unreachable. The canonical case is
+    a chain-hop restart: `gym eval run` starts its own FastAPI servers AFTER the
+    Slurm-level vLLM gate has passed, so on resume the agent can be answering
+    while policy_model is still booting.
+
+    4xx stays sample-shaped -- a malformed request is this rollout's own fault
+    and is still scored 0.
+    """
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return exc.status >= 500
+    return isinstance(exc, (aiohttp.ClientConnectionError, TimeoutError))
 
 
 class BrowsecompAgent(SimpleResponsesAPIAgent):
@@ -144,6 +252,26 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        # Thin diagnostic wrapper around the real implementation. A full-400 eval lost 6
+        # samples to a 500 out of THIS endpoint with NO traceback anywhere in the log — not
+        # even the `🚨` marker that exception_handling_middleware prints for ordinary app
+        # exceptions (the malformed-JSON bug printed a full ExceptionGroup). With nothing
+        # logged the cause can only be bounded, never named. Print whatever escapes, then
+        # RE-RAISE unchanged so run()'s containment behaves exactly as before.
+        # Grep the next run for [browsecomp][responses_exc].
+        try:
+            return await self._responses_impl(request, response, body)
+        except Exception as e:
+            print(f"[browsecomp][responses_exc] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
+            traceback.print_exc()
+            raise
+
+    async def _responses_impl(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -160,11 +288,64 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         reset_threshold = self._reset_threshold(self.config)
 
+        # --- Progress board state (ported from bc_frankie w_progress_tracking) ---
+        # The board lives in the system prompt and is re-rendered only at the
+        # initial build and on each context reset — never mid-segment.
+        progress_board = ""
+        reset_armed = False  # over-threshold grants ONE warned board-save turn before the reset fires
+        pre_reset_warning_steps = []
+        progress_sys_idx = None
+        progress_base_system = ""
+
+        def _render_progress_system():
+            """Rebuild the system message with the current board."""
+            board_text = progress_board or (
+                "(empty — start by listing the question's constraints; see the format above)"
+            )
+            body.input[progress_sys_idx] = body.input[progress_sys_idx].model_copy(
+                update={"content": progress_base_system + PROGRESS_SYSTEM_ADDENDUM.format(progress=board_text)}
+            )
+
+        def _pre_reset_kept_desc():
+            if self.config.context_reset_keep_rounds > 0:
+                return "the last %d rounds and your progress board" % self.config.context_reset_keep_rounds
+            return "your progress board"
+
+        if self.config.progress:
+            # bc_frankie parity: active_tools = TOOLS + [PROGRESS_TOOL] (+ BASH_TOOL
+            # last), so update_progress goes BEFORE bash_command in the rendered
+            # prompt. Tool order changes the materialized prompt bytes.
+            tools = list(body.tools)
+            bash_idx = next(
+                (i for i, t in enumerate(tools) if (t["name"] if isinstance(t, dict) else t.name) == "bash_command"),
+                len(tools),
+            )
+            tools.insert(bash_idx, PROGRESS_TOOL)
+            body.tools = tools
+            for i, input_message in enumerate(body.input):
+                if getattr(input_message, "role", None) in ("system", "developer") and isinstance(
+                    getattr(input_message, "content", None), str
+                ):
+                    progress_sys_idx = i
+                    progress_base_system = input_message.content
+                    break
+            if progress_sys_idx is None:
+                body.input = [NeMoGymEasyInputMessage(role="system", content="")] + list(body.input)
+                progress_sys_idx = 0
+            _render_progress_system()
+
         # --- snapshot keys + per-trajectory counters (ported from gym-gitlab fe9845ee) ---
         task_index, attempt = None, None
         if self.config.snap_dir and body.metadata:
             task_index = body.metadata.pop("task_index", None)
             attempt = body.metadata.pop("attempt", None)
+            # num_repeats > 1: rollouts of a task share task_index, so fold the
+            # rollout index into the snapshot dir key (sample_{ti}_r{ri}) or
+            # concurrent rollouts clobber each other's snapshot files. Absent
+            # rollout_index (single-rollout runs) keeps legacy sample_{ti} naming.
+            rollout_index = body.metadata.pop("rollout_index", None)
+            if task_index is not None and rollout_index not in (None, ""):
+                task_index = f"{task_index}_r{rollout_index}"
         reset_count = 0
         reset_steps = []  # step numbers at which a context reset fired (for the trajectory header)
         num_tool_calls = 0
@@ -189,27 +370,55 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     and pre_prompt_tokens > reset_threshold
                     and (max_reset_count is None or reset_count < max_reset_count)
                 ):
-                    reset_count += 1
-                    reset_steps.append(step)
-                    if self.config.snap_dir:
-                        self._save_snapshot(
-                            messages=body.input + new_outputs,
-                            task_index=task_index,
-                            attempt=attempt,
-                            reset_count=reset_count,
-                            is_final=False,
+                    if self.config.progress and not reset_armed:
+                        # The model cannot see the reset coming. Warn it on its
+                        # latest tool result and give it this one turn to save the
+                        # board; the armed reset fires on the next iteration's
+                        # pre-call check. (ported from bc_frankie 8cdd075)
+                        reset_armed = True
+                        pre_reset_warning_steps.append(step)
+                        print(
+                            f"[browsecomp][progress][{qid}] step={step} pre-call tokens={pre_prompt_tokens} > "
+                            f"{reset_threshold} — board-save warning injected; reset fires after this turn",
+                            flush=True,
                         )
-                    # Adaptive shrink: keep the largest number of recent rounds
-                    # whose resulting prompt still fits under the threshold.
-                    chosen = None
-                    for n in range(self.config.context_reset_keep_rounds, -1, -1):
-                        cand = self._extract_last_rounds(new_outputs, n=n)
-                        cand_body = body.model_copy(update={"input": body.input + cand})
-                        if await self._count_prompt_tokens(cand_body) <= reset_threshold:
-                            chosen = cand
-                            break
-                    new_outputs = chosen if chosen is not None else []
-                    continue
+                        if new_outputs and new_outputs[-1].type == "function_call_output":
+                            new_outputs[-1] = new_outputs[-1].model_copy(
+                                update={
+                                    "output": new_outputs[-1].output
+                                    + PRE_RESET_BOARD_NUDGE.format(kept=_pre_reset_kept_desc())
+                                }
+                            )
+                            if full_trajectory:
+                                full_trajectory[-1] = new_outputs[-1]
+                            new_body = body.model_copy(update={"input": body.input + new_outputs})
+                    else:
+                        reset_count += 1
+                        reset_steps.append(step)
+                        reset_armed = False
+                        if self.config.snap_dir:
+                            self._save_snapshot(
+                                messages=body.input + new_outputs,
+                                task_index=task_index,
+                                attempt=attempt,
+                                reset_count=reset_count,
+                                is_final=False,
+                            )
+                        # Rebuild the board into the system prompt BEFORE the shrink
+                        # probes so their token counts include it.
+                        if self.config.progress:
+                            _render_progress_system()
+                        # Adaptive shrink: keep the largest number of recent rounds
+                        # whose resulting prompt still fits under the threshold.
+                        chosen = None
+                        for n in range(self.config.context_reset_keep_rounds, -1, -1):
+                            cand = self._extract_last_rounds(new_outputs, n=n)
+                            cand_body = body.model_copy(update={"input": body.input + cand})
+                            if await self._count_prompt_tokens(cand_body) <= reset_threshold:
+                                chosen = cand
+                                break
+                        new_outputs = chosen if chosen is not None else []
+                        continue
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -231,26 +440,42 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # --- Check context reset threshold (post-call fallback; used when
             # save_model_call_using_vllm_tokenize_endpoint is off) ---
             prompt_tokens = model_response.usage.input_tokens if model_response.usage else 0
+            pre_reset_nudge_due = False
             if (
                 reset_threshold
                 and prompt_tokens > reset_threshold
                 and (max_reset_count is None or reset_count < max_reset_count)
             ):
-                reset_count += 1
-                reset_steps.append(step)
-                if self.config.snap_dir:
-                    self._save_snapshot(
-                        messages=body.input + new_outputs,
-                        task_index=task_index,
-                        attempt=attempt,
-                        reset_count=reset_count,
-                        is_final=False,
+                if self.config.progress and not reset_armed:
+                    # One warned turn: process this completion normally, inject the
+                    # save-the-board warning after its tool results, and reset at
+                    # the end of the NEXT turn. (ported from bc_frankie 8cdd075)
+                    reset_armed = True
+                    pre_reset_nudge_due = True
+                    pre_reset_warning_steps.append(step)
+                    print(
+                        f"[browsecomp][progress][{qid}] step={step} tokens={prompt_tokens} > {reset_threshold} — "
+                        f"board-save warning due; reset fires after next turn",
+                        flush=True,
                     )
-                if self.config.context_reset_keep_rounds > 0:
-                    new_outputs = self._extract_last_rounds(new_outputs)
-                else:
-                    new_outputs = []
-                continue
+                elif not self.config.progress:
+                    reset_count += 1
+                    reset_steps.append(step)
+                    if self.config.snap_dir:
+                        self._save_snapshot(
+                            messages=body.input + new_outputs,
+                            task_index=task_index,
+                            attempt=attempt,
+                            reset_count=reset_count,
+                            is_final=False,
+                        )
+                    if self.config.context_reset_keep_rounds > 0:
+                        new_outputs = self._extract_last_rounds(new_outputs)
+                    else:
+                        new_outputs = []
+                    continue
+                # else: the warned board-save turn is in flight — the armed reset
+                # fires at the end of this iteration, once its tool calls have run.
 
             output = model_response.output
             new_outputs.extend(output)
@@ -272,38 +497,80 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
                 num_tool_calls += 1
-                api_response = await self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path=f"/{output_function_call.name}",
-                    json=json.loads(output_function_call.arguments),
-                    cookies=resources_server_cookies,
-                )
-                # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
-                resources_server_cookies = api_response.cookies
-
-                tool_output = (await api_response.content.read()).decode()
-                # bc_frankie parity: the resources server wraps every tool result in a one-field
-                # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
-                # model then sees a single escaped line instead of raw multi-line text. This was
-                # the last remaining materialized-prompt difference vs the bc_frankie harness.
-                # Unwrap it so the model sees the raw text. Error bodies (different JSON shape)
-                # and non-JSON payloads are left untouched.
+                # The model can emit syntactically invalid JSON for `arguments` (seen on
+                # Inkling-Small: a call truncated mid-object). Parse once, up front, and
+                # treat a failure the same way a >=400 tool response is treated below —
+                # report it back to the model — instead of letting it raise out of this
+                # handler, which 500s the agent and kills the ENTIRE rollout collection
+                # over one bad call.
                 try:
-                    parsed_tool_output = json.loads(tool_output)
-                    if (
-                        isinstance(parsed_tool_output, dict)
-                        and set(parsed_tool_output) == {"results_string"}
-                        and isinstance(parsed_tool_output["results_string"], str)
-                    ):
-                        tool_output = parsed_tool_output["results_string"]
-                except json.JSONDecodeError:
-                    pass
-                if api_response.status >= 400:
+                    tool_args = json.loads(output_function_call.arguments)
+                    tool_args_error = None
+                except json.JSONDecodeError as e:
+                    tool_args = None
+                    tool_args_error = e
+
+                if tool_args_error is not None:
                     print(
                         f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
-                        f"status={api_response.status} body={tool_output[:300]}",
+                        f"status=bad_arguments_json error={tool_args_error}",
                         flush=True,
                     )
+                    tool_output = (
+                        f"Invalid JSON in the arguments of your '{output_function_call.name}' tool "
+                        f"call: {tool_args_error}. Re-issue the call with valid JSON arguments."
+                    )
+                elif self.config.progress and output_function_call.name == "update_progress":
+                    # Board writes are handled by the agent itself — the board is
+                    # per-trajectory agent state, not a resources-server tool.
+                    progress_board = str(tool_args.get("board", ""))
+                    if _ANSWER_COMMIT_RE.search(progress_board):
+                        # Commit guard: the model wrote its final answer into the
+                        # board instead of committing it as a message.
+                        tool_output = (
+                            "Progress board updated, BUT the board is NOT your final "
+                            "answer — the harness does not read answers from the board. "
+                            "To commit your answer, emit 'Exact Answer: ...' as a normal "
+                            "assistant message (no tool call)."
+                        )
+                    else:
+                        tool_output = (
+                            "Progress board updated (%d chars). It persists in the "
+                            "system prompt across context resets." % len(progress_board)
+                        )
+                else:
+                    api_response = await self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path=f"/{output_function_call.name}",
+                        json=tool_args,
+                        cookies=resources_server_cookies,
+                    )
+                    # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
+                    resources_server_cookies = api_response.cookies
+
+                    tool_output = (await api_response.content.read()).decode()
+                    # bc_frankie parity: the resources server wraps every tool result in a one-field
+                    # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
+                    # model then sees a single escaped line instead of raw multi-line text. This was
+                    # the last remaining materialized-prompt difference vs the bc_frankie harness.
+                    # Unwrap it so the model sees the raw text. Error bodies (different JSON shape)
+                    # and non-JSON payloads are left untouched.
+                    try:
+                        parsed_tool_output = json.loads(tool_output)
+                        if (
+                            isinstance(parsed_tool_output, dict)
+                            and set(parsed_tool_output) == {"results_string"}
+                            and isinstance(parsed_tool_output["results_string"], str)
+                        ):
+                            tool_output = parsed_tool_output["results_string"]
+                    except json.JSONDecodeError:
+                        pass
+                    if api_response.status >= 400:
+                        print(
+                            f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
+                            f"status={api_response.status} body={tool_output[:300]}",
+                            flush=True,
+                        )
                 if self.config.nudge_steps:
                     turns_left = self.config.max_steps - step
                     tool_output += "\n\n[%d turns remaining out of %d]" % (turns_left, self.config.max_steps)
@@ -315,6 +582,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
                 full_trajectory.append(tool_response)
+
+            # --- Pre-reset warning: last chance to save the progress board ---
+            if pre_reset_nudge_due and new_outputs and new_outputs[-1].type == "function_call_output":
+                new_outputs[-1] = new_outputs[-1].model_copy(
+                    update={
+                        "output": new_outputs[-1].output + PRE_RESET_BOARD_NUDGE.format(kept=_pre_reset_kept_desc())
+                    }
+                )
+                if full_trajectory:
+                    full_trajectory[-1] = new_outputs[-1]
 
             # --- Nudge the model at milestone steps ---
             if self.config.nudge_steps and all_fn_calls:
@@ -355,10 +632,72 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     if full_trajectory:
                         full_trajectory[-1] = new_outputs[-1]
 
+            # --- Armed reset: fires after the warned board-save turn completes ---
+            # (post-call mode; in tokenize mode the next pre-call check fires it)
+            if (
+                reset_armed
+                and not pre_reset_nudge_due
+                and not self.config.save_model_call_using_vllm_tokenize_endpoint
+            ):
+                reset_count += 1
+                reset_steps.append(step)
+                reset_armed = False
+                if self.config.snap_dir:
+                    self._save_snapshot(
+                        messages=body.input + new_outputs,
+                        task_index=task_index,
+                        attempt=attempt,
+                        reset_count=reset_count,
+                        is_final=False,
+                    )
+                _render_progress_system()
+                if self.config.context_reset_keep_rounds > 0:
+                    new_outputs = self._extract_last_rounds(new_outputs)
+                else:
+                    new_outputs = []
+
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
                 break
+
+        # --- Board-answer fallback (ported from bc_frankie 5099589): if the run
+        # ends without an answer commit in the last content-bearing assistant
+        # message but the board contains one, surface the board's answer line so
+        # the judge can extract it. Appends only — a trajectory that already
+        # commits an answer is unchanged.
+        if self.config.progress and progress_board:
+            last_msg_idx = None
+            last_text = ""
+            for i in range(len(full_trajectory) - 1, -1, -1):
+                item = full_trajectory[i]
+                if getattr(item, "type", None) == "message":
+                    text = "".join(c.text for c in item.content if getattr(c, "type", None) == "output_text")
+                    if text:
+                        last_msg_idx, last_text = i, text
+                        break
+            board_answer_lines = [line for line in progress_board.splitlines() if _ANSWER_COMMIT_RE.match(line)]
+            if board_answer_lines and not _ANSWER_COMMIT_RE.search(last_text):
+                recovered = "[Recovered from progress board] " + board_answer_lines[-1].strip()
+                print(f"[browsecomp][progress][{qid}] recovering board answer into the trajectory", flush=True)
+                if last_msg_idx is not None:
+                    recovered_message = full_trajectory[last_msg_idx]
+                    content = list(recovered_message.content)
+                    for j in range(len(content) - 1, -1, -1):
+                        if getattr(content[j], "type", None) == "output_text":
+                            content[j] = content[j].model_copy(update={"text": content[j].text + "\n\n" + recovered})
+                            break
+                    full_trajectory[last_msg_idx] = recovered_message.model_copy(update={"content": content})
+                else:
+                    full_trajectory.append(
+                        NeMoGymResponseOutputMessage(
+                            id="msg_progress_board_recovery",
+                            content=[NeMoGymResponseOutputText(annotations=[], text=recovered, type="output_text")],
+                            role="assistant",
+                            status="completed",
+                            type="message",
+                        )
+                    )
 
         # --- Final trajectory snapshot (ported from gym-gitlab fe9845ee) ---
         if self.config.snap_dir:
@@ -378,6 +717,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 reset_steps=reset_steps,
                 reset_count=reset_count,
                 num_tool_calls=num_tool_calls,
+                pre_reset_warning_steps=pre_reset_warning_steps,
             )
 
         # Propogate any extra cookies necessary for downstream verification
@@ -390,6 +730,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         # NeMoGymResponse(Response) has extra="allow", so these round-trip to /verify.
         model_response.reset_count = reset_count
         model_response.num_tool_calls = num_tool_calls
+        model_response.pre_reset_warning_steps = pre_reset_warning_steps
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
@@ -402,6 +743,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         qid = _qid(json.dumps([m.model_dump() if hasattr(m, "model_dump") else m for m in rcp_input], default=str))
         print(f"[browsecomp][start][{qid}] question={question_text[:200]!r}", flush=True)
 
+        # Initialised BEFORE the try: the except block reads last_response_json, so binding it
+        # any later means a failure during /seed_session raises UnboundLocalError *inside the
+        # handler*. That escapes containment and makes /run return 500 -- the exact run-killing
+        # path the handler exists to prevent.
+        last_verify_response = None
+        last_response_json = None
         try:
             seed_session_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -412,7 +759,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_session_response)
             cookies = seed_session_response.cookies
 
-            last_verify_response = None
             for attempt in range(self.config.max_run_retries):
                 # Seed snapshot keys so responses() can name per-reset/-final files.
                 # (ported from gym-gitlab fe9845ee)
@@ -420,6 +766,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     body.responses_create_params.metadata = dict(body.responses_create_params.metadata or {})
                     body.responses_create_params.metadata["task_index"] = str(getattr(body, "_ng_task_index", qid))
                     body.responses_create_params.metadata["attempt"] = str(attempt)
+                    # Disambiguate num_repeats>1 rollouts (same _ng_task_index) in snap paths.
+                    rollout_index = getattr(body, "_ng_rollout_index", None)
+                    if rollout_index is not None:
+                        body.responses_create_params.metadata["rollout_index"] = str(rollout_index)
                 response = await self.server_client.post(
                     server_name=self.config.name,
                     url_path=self.url_path_for_run("/v1/responses", body),
@@ -433,6 +783,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 # (Keyed on the last assistant message, matching bc_frankie, NOT the concatenated
                 # output_text — a final think-only turn retries even if an earlier turn had text.)
                 response_json = await get_response_json(response)
+                last_response_json = response_json
                 raw_output_text = self._last_message_text(NeMoGymResponse.model_validate(response_json))
                 cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
                 # Need to get last_verify_response if all attempts are exhausted
@@ -467,8 +818,49 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
             return last_verify_response
         except Exception as e:
-            print(f"[browsecomp][abort][{qid}] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
-            raise
+            infra = _is_infrastructure_failure(e)
+            print(
+                f"[browsecomp][abort][{qid}] error_type={type(e).__name__} "
+                f"class={'infra' if infra else 'sample'} error={str(e)[:300]}",
+                flush=True,
+            )
+            # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
+            # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
+            # and every remaining sample dies with it — that cost two full 8-node allocations,
+            # one dying at 34/400 and one at 167/400, on one bad sample each.
+            #
+            # Score it 0, but carry `agent_error` so the failure stays COUNTABLE in the results
+            # instead of being indistinguishable from a genuine wrong answer. Always check that
+            # count before reading accuracy: silent zeros would have hidden the malformed
+            # tool-arguments bug instead of surfacing it.
+            if last_response_json is None:
+                last_response_json = NeMoGymResponse(
+                    id="resp_agent_error",
+                    created_at=0.0,
+                    model=self.config.model_server.name,
+                    object="response",
+                    output=[],
+                    parallel_tool_calls=False,
+                    tool_choice="none",
+                    tools=[],
+                ).model_dump()
+            # EXCEPT when the HARNESS is what broke. Then nothing about this sample failed, so
+            # scoring it 0 is wrong, and persisting a row is worse: _load_from_cache keys on
+            # (task_index, rollout_index) and would treat it as permanently done. NG_NO_PERSIST_KEY
+            # writes no row at all (nemo_gym/rollout_collection.py), so resume's set-difference
+            # re-dispatches it on the next chain-hop. The 4h cluster cap makes chain-hops
+            # unavoidable on a 1266-sample run, so this path is load-bearing, not a corner case.
+            # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.
+            routing = {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "kill_shaped"} if infra else {}
+            return BrowsecompAgentVerifyResponse.model_validate(
+                body.model_dump()
+                | {
+                    "response": last_response_json,
+                    "reward": 0.0,
+                    "agent_error": f"{type(e).__name__}: {str(e)[:300]}",
+                }
+                | routing
+            )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
@@ -552,7 +944,15 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 f.write(msg.model_dump_json() + "\n")
 
     def _save_trajectory(
-        self, input_messages, full_trajectory, task_index, attempt, reset_steps, reset_count, num_tool_calls
+        self,
+        input_messages,
+        full_trajectory,
+        task_index,
+        attempt,
+        reset_steps,
+        reset_count,
+        num_tool_calls,
+        pre_reset_warning_steps=None,
     ):
         """Save the FULL untrimmed conversation for one sample to
         {snap_dir}/sample_{task_index}/attempt_{attempt}_trajectory.jsonl.
@@ -571,6 +971,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         "reset_count": reset_count,
                         "num_tool_calls": num_tool_calls,
                         "reset_steps": reset_steps,
+                        "pre_reset_warning_steps": pre_reset_warning_steps or [],
                     }
                 )
                 + "\n"

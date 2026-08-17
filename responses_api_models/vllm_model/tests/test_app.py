@@ -523,7 +523,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="<think>I have identified the city as San Francisco based on user input.</think>",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -586,7 +585,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="<think>I'll first think about the user's question.</think><think>Then I will answer.</think>",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -667,7 +665,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="Hello! How can I assist you today?",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -1080,7 +1077,6 @@ class TestApp:
             {
                 "content": "<think>Considering ways to greet the user...</think>Hi, how can I help?",
                 "role": "assistant",
-                "tool_calls": [],
             },
             {
                 "content": [{"text": "What's the weather?", "type": "text"}],
@@ -1379,7 +1375,6 @@ class TestApp:
             {
                 "content": "Order #1234 is shipped and arrives tomorrow.",
                 "role": "assistant",
-                "tool_calls": [],
             },
             {
                 "content": [
@@ -1857,7 +1852,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -1865,7 +1859,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
         ]
@@ -1951,7 +1944,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -1959,7 +1951,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2066,7 +2057,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2074,7 +2064,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2099,7 +2088,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [],
                 "reasoning_content": "None content test",
                 "reasoning": "None content test",
             },
@@ -2315,7 +2303,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2323,7 +2310,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
         ]
@@ -2409,7 +2395,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2417,7 +2402,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2524,7 +2508,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2532,7 +2515,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2557,7 +2539,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [],
                 "reasoning_content": "None content test",
                 "reasoning": "None content test",
             },
@@ -2714,7 +2695,6 @@ class TestVLLMConverter:
                 {
                     "role": "assistant",
                     "content": "assistant content",
-                    "tool_calls": [],
                 },
                 {
                     "role": "system",

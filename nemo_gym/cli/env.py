@@ -17,13 +17,13 @@ import asyncio
 import json
 import os
 import shlex
+import sys
 from glob import glob
-from os import makedirs
-from os.path import exists
 from pathlib import Path
 from shutil import rmtree
 from signal import SIGINT
 from subprocess import Popen, TimeoutExpired
+from tempfile import TemporaryDirectory
 from threading import Thread
 from time import monotonic, sleep, time
 from typing import Dict, List, Optional, Tuple
@@ -37,8 +37,8 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, ROOT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.cli.setup_command import run_command, setup_env_command
+from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
+from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -48,6 +48,15 @@ from nemo_gym.cli.utils import (
     render_component_inspection,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
+from nemo_gym.environment.onboarding import (
+    EnvironmentOnboardingError,
+    VerifierReport,
+    prepare_verifier_run,
+)
+from nemo_gym.environment.publication import finalize_publication
+from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
+from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
@@ -61,7 +70,12 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.registry import discover_environments, read_environment_details
+from nemo_gym.registry import (
+    EnvironmentCatalogEntry,
+    discover_environment_catalog,
+    read_environment_details,
+    resolve_catalog_entry,
+)
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HEAD_SERVER_KEY_NAME,
@@ -505,16 +519,38 @@ Process `{process_name}` stderr:
                 raise RuntimeError(print_str)
 
     def wait_for_dry_run_spinup(self) -> None:
+        """Wait for every dry-run process to finish, and fail if any of them did.
+
+        A dry run builds each server's venv and exits, so unlike poll() a finished process is the
+        expected outcome here and only the exit code separates success from failure.
+        The code has to be checked: uv creates the venv before installing into it, so a failed
+        install still leaves an interpreter and an activate script behind.
+        That venv then satisfies skip_venv_if_present on the next run, and the first symptom is an
+        ImportError from a server long after the install that caused it.
+        """
         sleep_interval = 3
 
-        remaining_processes = list(self._processes.values())
+        failures: List[Tuple[str, int]] = []
+        remaining_processes = list(self._processes.items())
         while remaining_processes:
             for i in reversed(range(len(remaining_processes))):
-                process = remaining_processes[i]
-                if process.poll() is not None:
+                process_name, process = remaining_processes[i]
+                returncode = process.poll()
+                if returncode is not None:
+                    if returncode != 0:
+                        failures.append((process_name, returncode))
                     remaining_processes.pop(i)
 
-            sleep(sleep_interval)
+            if remaining_processes:
+                sleep(sleep_interval)
+
+        if failures:
+            raise RuntimeError(
+                "Dry run failed to set up "
+                + ("1 server" if len(failures) == 1 else f"{len(failures)} servers")
+                + ". Each server's output is above, prefixed with its name:\n"
+                + "\n".join(f"  `{name}` exited with {code}" for name, code in failures)
+            )
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
@@ -839,7 +875,17 @@ def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Pop
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
     prefix = test_config.entrypoint.replace("/", "\\/")
     resolved_dir = test_config.resolved_dir_path
-    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest"""
+    pytest_args = ""
+    junit_dir_value = os.environ.get("GYM_CI_JUNIT_DIR", "").strip()
+    if junit_dir_value:
+        junit_dir = Path(junit_dir_value).expanduser().resolve()
+        junit_dir.mkdir(parents=True, exist_ok=True)
+        entrypoint = test_config.entrypoint.replace("\\", "/").strip("/")
+        report_name = f"{entrypoint.replace('/', '__')}.xml"
+        junit_path = junit_dir / report_name
+        junit_prefix = entrypoint.replace("/", ".")
+        pytest_args = f" --junitxml={shlex.quote(str(junit_path))} --junit-prefix={shlex.quote(junit_prefix)}"
+    command = f"""{setup_env_command(resolved_dir, global_config_dict, prefix)} && pytest{pytest_args}"""
     # Generated server tests import `resources_servers.<name>...`, so the project root (the dir
     # holding the server-type dirs) must be on PYTHONPATH when running from outside a repo checkout.
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
@@ -922,6 +968,12 @@ def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> L
     return sorted(dir_paths, key=str)[shard_index::num_shards]
 
 
+def _delete_server_venv(dir_path: Path, global_config_dict: DictConfig) -> None:
+    venv_path = get_venv_path(dir_path, global_config_dict)
+    print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
+    rmtree(venv_path, ignore_errors=True)
+
+
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
@@ -989,9 +1041,7 @@ def test_all():  # pragma: no cover
             data_validation_failed.append(dir_path)
 
         if test_all_config.delete_venvs_after_each_test:
-            venv_path = _resolve_server_dir(dir_path) / ".venv"
-            print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
-            rmtree(venv_path, ignore_errors=True)
+            _delete_server_venv(_resolve_server_dir(dir_path), global_config_dict)
 
         times_taken.append((time() - start_time, dir_path))
 
@@ -1045,6 +1095,41 @@ Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
         exit(1)
 
 
+class InitEnvironmentConfig(BaseNeMoGymCLIConfig):
+    scaffold_kind: EnvironmentKind
+    scaffold_name: str
+    profile: IntegrationProfile = IntegrationProfile.CUSTOM_GYM_VERIFIER
+    reuse_verifier: Optional[str] = None
+    reward_range: Optional[Tuple[float, float]] = None
+    higher_is_better: Optional[bool] = None
+
+
+def _command_overrides() -> DictConfig:
+    """Parse the already-translated local command flags without resolving Gym runtime config."""
+    return OmegaConf.from_dotlist([token.lstrip("+") for token in sys.argv[1:] if "=" in token])
+
+
+@exit_cleanly_on_config_error
+def init_environment() -> None:
+    """Create a manifest-backed environment or benchmark skeleton."""
+    config = InitEnvironmentConfig.model_validate(_command_overrides())
+    result = scaffold_environment(
+        kind=config.scaffold_kind,
+        name=config.scaffold_name,
+        profile=config.profile,
+        reuse_verifier=config.reuse_verifier,
+        reward_range=config.reward_range,
+        higher_is_better=config.higher_is_better,
+    )
+
+    if result.created:
+        rich.print(f"[green]✓[/green] Created {result.asset_dir}")
+        for path in result.created:
+            print(f"  {path}")
+    else:
+        rich.print(f"[green]✓[/green] {result.asset_dir} is already up to date.")
+
+
 def init_resources_server():  # pragma: no cover
     """
     Initialize a new resources server with template files and directory structure.
@@ -1060,114 +1145,12 @@ def init_resources_server():  # pragma: no cover
 
     dirpath = Path(run_config.entrypoint).resolve()
 
-    if exists(dirpath):
+    if dirpath.exists():
         print(f"Folder already exists: {dirpath}. Exiting init.")
         exit()
 
-    makedirs(dirpath)
-
-    server_type = "resources_servers"
-    server_type_name = dirpath.parts[-1].lower()
-    server_type_title = "".join(x.capitalize() for x in server_type_name.split("_"))
-
-    configs_dirpath = dirpath / "configs"
-    makedirs(configs_dirpath)
-
-    config_fpath = configs_dirpath / f"{server_type_name}.yaml"
-    with open(config_fpath, "w") as f:
-        f.write(f"""# Resources server: owns this environment's task verification (verify()) and reward.
-{server_type_name}_resources_server:          # instance name — how agents/CLI refer to this server
-  {server_type}:                              # server type: resources_servers | responses_api_agents | responses_api_models
-    {server_type_name}:                        # implementation directory under {server_type}/
-      entrypoint: app.py                        # server entry module
-      domain: other                             # task domain; one of: math, coding, agent, knowledge,
-                                                #   instruction_following, long_context, safety, games, translation,
-                                                #   e2e, rlhf, other. Change 'other' to the closest fit.
-      verified: false                           # set true once the benchmark has been baselined and reviewed
-
-# Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
-{server_type_name}_simple_agent:               # this agent instance's name — pass as --agent to gym eval run
-  responses_api_agents:
-    simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
-      entrypoint: app.py
-      resources_server:                         # the resources server this agent interacts with for tools, state and verification
-        type: resources_servers
-        name: {server_type_name}_resources_server
-      model_server:                             # the model that answers; 'policy_model' is resolved from a model config
-        type: responses_api_models
-        name: policy_model
-      datasets:                                 # one block per split: train | validation | example
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/{server_type_name}/data/train.jsonl   # local data file for this split
-        num_repeats: 1                          # times to repeat each example (e.g. for pass@k / mean@k)
-        license: Apache 2.0                     # required for train/validation; must be an allowed license string
-        # to fetch this split from a registry instead, add a source: block (type: gitlab | huggingface)
-      - name: validation
-        type: validation
-        jsonl_fpath: resources_servers/{server_type_name}/data/validation.jsonl
-        num_repeats: 1
-        license: Apache 2.0
-      - name: example                           # 5 rows committed to git for quick smoke tests
-        type: example
-        jsonl_fpath: resources_servers/{server_type_name}/data/example.jsonl
-        num_repeats: 1
-""")
-
-    app_fpath = dirpath / "app.py"
-    with open(ROOT_DIR / "resources/resources_server_template.py") as f:
-        app_template = f.read()
-    app_content = app_template.replace("ExampleMultiStep", server_type_title)
-    with open(app_fpath, "w") as f:
-        f.write(app_content)
-
-    tests_dirpath = dirpath / "tests"
-    makedirs(tests_dirpath)
-
-    tests_fpath = tests_dirpath / "test_app.py"
-    with open(ROOT_DIR / "resources/resources_server_test_template.py") as f:
-        tests_template = f.read()
-    tests_content = tests_template.replace("ExampleMultiStep", server_type_title)
-    tests_content = tests_content.replace("from app", f"from resources_servers.{server_type_name}.app")
-    with open(tests_fpath, "w") as f:
-        f.write(tests_content)
-
-    requirements_fpath = dirpath / "requirements.txt"
-    with open(requirements_fpath, "w") as f:
-        if (PARENT_DIR / "pyproject.toml").exists():
-            # local nemo gym - detected by ../pyproject.toml exists
-            rel_to_gym_root = os.path.relpath(PARENT_DIR, dirpath)
-            f.write(f"-e nemo-gym[dev] @ {rel_to_gym_root}\n")
-        else:
-            # pypi path
-            f.write("nemo-gym[dev]\n")
-
-    readme_fpath = dirpath / "README.md"
-    with open(readme_fpath, "w") as f:
-        f.write("""# Description
-
-Data links: ?
-
-# Licensing information
-Code: ?
-Data: ?
-
-Dependencies
-- nemo_gym: Apache 2.0
-?
-""")
-
-    data_dirpath = dirpath / "data"
-    data_dirpath.mkdir(exist_ok=True)
-
-    data_gitignore_fpath = data_dirpath / ".gitignore"
-    with open(data_gitignore_fpath, "w") as f:
-        f.write("""*train.jsonl
-*validation.jsonl
-*train_prepare.jsonl
-*validation_prepare.jsonl
-*example_prepare.jsonl
-""")
+    checkout_root = PARENT_DIR if (PARENT_DIR / "pyproject.toml").is_file() else None
+    scaffold_resources_server(directory=dirpath, checkout_root=checkout_root)
 
 
 @exit_cleanly_on_config_error
@@ -1193,48 +1176,218 @@ def dump_config():  # pragma: no cover
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
 
 
+class ManifestCommandConfig(BaseNeMoGymCLIConfig):
+    onboarding_name: Optional[str] = None
+    catalog_kind: Optional[EnvironmentKind] = None
+    manifest_path: Optional[Path] = None
+    sync: bool = False
+    update_expected: bool = False
+
+
+_MANIFEST_VALIDATE_KEYS = frozenset({"onboarding_name", "catalog_kind", "manifest_path", "sync", "json", "verbose"})
+_MANIFEST_TEST_KEYS = frozenset({"onboarding_name", "catalog_kind", "update_expected", "json", "verbose"})
+_MANIFEST_PUBLISH_KEYS = frozenset({"onboarding_name", "catalog_kind", "json", "verbose"})
+
+
+def _reject_manifest_command_extras(command_dict: DictConfig, allowed: frozenset[str]) -> None:
+    extras = sorted(set(command_dict) - allowed)
+    if extras:
+        raise ConfigError("Manifest-backed commands do not accept runtime config overrides: " + ", ".join(extras))
+
+
+def _manifest_entry(config: ManifestCommandConfig) -> Optional[EnvironmentCatalogEntry]:
+    if config.onboarding_name is not None and config.manifest_path is not None:
+        raise ConfigError("select a catalog name or --manifest, not both")
+    if config.manifest_path is not None and config.catalog_kind is not None:
+        raise ConfigError("--kind is only valid when selecting a catalog name")
+    if config.onboarding_name is None:
+        return None
+    return resolve_catalog_entry(config.onboarding_name, config.catalog_kind)
+
+
+def _print_validation_report(report: EnvironmentValidationReport, *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(report.to_dict()))
+        return
+    rich.print(
+        f"[green]✓[/green] Manifest: {report.name} {report.version} "
+        f"kind={report.kind} profile={report.declared_profile} inferred={report.inferred_profile}"
+    )
+    print(f"    Profile evidence: {report.profile_evidence}")
+    rich.print("[green]✓[/green] Components:")
+    for component in report.components:
+        print(f"    {component.role}: {component.name} -> {component.implementation} [{component.boundary}]")
+    rich.print("[green]✓[/green] Datasets:")
+    for dataset in report.datasets:
+        rich.print(f"    {dataset.name}: {dataset.rows} rows ({dataset.type})")
+    if report.synchronized_fields:
+        rich.print(f"[green]✓[/green] Synchronized: {', '.join(report.synchronized_fields)}")
+    for warning in report.warnings:
+        rich.print(f"[yellow]Warning:[/yellow] {warning}", file=sys.stderr)
+
+
 @exit_cleanly_on_config_error
-def validate():
-    """Validate a config without starting Ray or any server subprocess.
+def validate() -> None:
+    """Validate a manifest-backed workload or a legacy Gym config without starting services."""
+    command_dict = _command_overrides()
+    command_config = ManifestCommandConfig.model_validate(command_dict)
+    entry = _manifest_entry(command_config)
+    if command_config.manifest_path is not None or entry is not None:
+        _reject_manifest_command_extras(command_dict, _MANIFEST_VALIDATE_KEYS)
+        manifest_path = command_config.manifest_path if entry is None else entry.manifest_path
+        if manifest_path is None:
+            raise ConfigError(
+                f"'{entry.name}' has no manifest; validate its config with --environment or --benchmark."
+            )
+        report = validate_environment(
+            manifest_path,
+            entry.config_path if entry is not None else None,
+            sync=command_config.sync,
+        )
+        _print_validation_report(report, json_output=command_dict.get(JSON_OUTPUT_KEY_NAME, False))
+        return
+    unsupported = [
+        key for key in ("catalog_kind", "sync", "update_expected", "json") if command_dict.get(key) is not None
+    ]
+    if unsupported:
+        raise ConfigError("The following options require a workload name or --manifest: " + ", ".join(unsupported))
 
-    Runs the full config parse — config_paths resolution (missing/malformed), server cross-reference
-    validation, mandatory `???` values, and schema — then exits 0 (valid) or, via
-    `exit_cleanly_on_config_error`, 1 with a clean traceback-free message. No Ray, no servers, so it
-    returns in well under a second instead of after Ray bootstrap.
-
-    No model config is required: a dummy `policy_model` is injected (the `NO_MODEL` parser config, as
-    in `gym list` / `env compose`) so model interpolations (e.g. `${policy_base_url}`) resolve —
-    validation is about config well-formedness, not the model. Pass a model config / `--model-type`
-    as well if you want it validated too.
-
-    Examples:
-
-    ```bash
-    gym env validate --environment <env>
-    gym env validate --benchmark <benchmark>
-    # or by explicit config path(s):
-    gym env validate --config resources_servers/<env>/configs/<env>.yaml
-    ```
-    """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         ),
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
-
     rich.print("[green]✓[/green] Config is valid.")
 
 
-def _inspect_environment(name: str, environments: dict, global_config_dict) -> None:
-    """Render the ``gym list environments <name>`` inspect view for one environment."""
-    entry = environments.get(name)
+@exit_cleanly_on_config_error
+def test_environment_manifest() -> None:
+    """Exercise a manifest-backed workload's verifier fixture without starting services."""
+    command_dict = _command_overrides()
+    command_config = ManifestCommandConfig.model_validate(command_dict)
+    entry = _manifest_entry(command_config)
     if entry is None:
-        exit_unknown_component(name, environments, "environment")
+        raise ConfigError("gym env test requires a catalog name or --resources-server")
+    _reject_manifest_command_extras(command_dict, _MANIFEST_TEST_KEYS)
+    report = _run_manifest_verifier(entry, update_expected=command_config.update_expected)
+    if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
+        print(json.dumps(report.to_dict()))
         return
+    rich.print(
+        f"[green]✓[/green] Verifier: {report.name} ({report.resources_server}) {len(report.cases)} cases passed."
+    )
 
+
+@exit_cleanly_on_config_error
+def publish_environment_manifest() -> None:
+    """Run local publication checks and confirm a workload is cataloged."""
+    command_dict = _command_overrides()
+    command_config = ManifestCommandConfig.model_validate(command_dict)
+    entry = _manifest_entry(command_config)
+    if entry is None:
+        raise ConfigError("gym env publish requires a catalog name")
+    _reject_manifest_command_extras(command_dict, _MANIFEST_PUBLISH_KEYS)
+    if entry.manifest_path is None:
+        raise ConfigError(f"'{entry.name}' has no manifest and cannot be published.")
+
+    validation = validate_environment(entry.manifest_path, entry.config_path)
+    verifier = _run_manifest_verifier(entry, update_expected=False, validation=validation)
+    report = finalize_publication(entry, validation, verifier)
+    if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
+        print(json.dumps(report.to_dict()))
+        return
+    rich.print(
+        f"[green]✓[/green] Publication checks passed for {report.kind} {report.name} {report.version}; "
+        f"catalog status={report.status} ({report.verifier_cases} verifier cases)."
+    )
+
+
+def _run_manifest_verifier(
+    entry: EnvironmentCatalogEntry,
+    *,
+    update_expected: bool,
+    validation: EnvironmentValidationReport | None = None,
+) -> VerifierReport:
+    spec = prepare_verifier_run(entry, validation)
+    setup_config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    server_dir = Path(spec.server_dir)
+    prefix = f"resources_servers/{spec.resources_server}".replace("/", "\\/")
+
+    with TemporaryDirectory(prefix="nemo-gym-verifier-") as temporary_dir:
+        request_path = Path(temporary_dir) / "request.json"
+        result_path = Path(temporary_dir) / "result.json"
+        request_path.write_text(
+            json.dumps({"spec": spec.to_dict(), "update_expected": update_expected}),
+            encoding="utf-8",
+        )
+        python = get_venv_path(server_dir, setup_config) / "bin" / "python"
+        runner = (
+            f"{shlex.quote(str(python))} -m nemo_gym.environment._verifier_runner "
+            f"--request {shlex.quote(str(request_path))} --result {shlex.quote(str(result_path))}"
+        )
+        command = f"{setup_env_command(server_dir, setup_config, prefix)} && {runner}"
+        process = run_command(
+            command,
+            server_dir,
+            server_name=spec.resources_server,
+            project_root=PARENT_DIR if (PARENT_DIR / "pyproject.toml").is_file() else None,
+            global_config_dict=setup_config,
+            stdout_target=sys.stderr,
+            stderr_target=sys.stderr,
+        )
+        return_code = process.wait()
+        if not result_path.is_file():
+            raise EnvironmentOnboardingError(
+                f"Verifier runner exited with code {return_code} without producing a result."
+            )
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise EnvironmentOnboardingError(f"Could not read verifier result: {error}") from error
+        if not isinstance(result, dict) or not result.get("ok"):
+            message = result.get("error") if isinstance(result, dict) else None
+            raise EnvironmentOnboardingError(message or f"Verifier runner failed with code {return_code}.")
+        if return_code != 0:
+            raise EnvironmentOnboardingError(f"Verifier runner exited with code {return_code}.")
+        try:
+            return VerifierReport.from_dict(result["report"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise EnvironmentOnboardingError(f"Verifier runner returned an invalid report: {error}") from error
+
+
+def _inspect_environment(
+    name: str,
+    entries: Tuple[EnvironmentCatalogEntry, ...],
+    global_config_dict: DictConfig,
+) -> None:
+    """Render one entry from the unified environment catalog."""
+    kind = global_config_dict.get("catalog_kind")
+    matching_names = {entry.name: entry for entry in entries}
+    if name not in matching_names:
+        exit_unknown_component(name, matching_names, "environment")
+        return
+    entry = resolve_catalog_entry(name, kind, entries=entries)
     parsed = read_environment_details(entry.config_path)
-    details = {"config": str(entry.config_path.resolve())}
+    details = {"config": str(entry.config_path.resolve()), "status": entry.status}
+    if entry.manifest_path is not None:
+        details["manifest"] = str(entry.manifest_path.resolve())
+    for label, value in (
+        ("version", entry.version),
+        ("profile", entry.integration_profile),
+        ("modality", entry.modality),
+        ("licensing", entry.licensing),
+        ("lifecycle", entry.lifecycle),
+    ):
+        if value:
+            details[label] = value
     if parsed["resources_servers"]:
         details["resources servers"] = ", ".join(parsed["resources_servers"])
     if parsed["agent"]:
@@ -1242,85 +1395,104 @@ def _inspect_environment(name: str, environments: dict, global_config_dict) -> N
     if parsed["datasets"]:
         details["datasets"] = ", ".join(parsed["datasets"])
 
-    description = parsed["description"]
+    description = entry.description or parsed["description"]
     if parsed["value"]:  # surface `value` as a trailing line of the description
         description = f"{description}\nValue: {parsed['value']}" if description else f"Value: {parsed['value']}"
 
     render_component_inspection(
         json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
         name=name,
-        type_noun="environment",
-        domain=parsed["domain"],
+        type_noun=entry.kind,
+        domain=entry.domain or parsed["domain"],
         description=description,
         details=details,
-        usage=f"gym env start --environment {name} --model-type vllm_model",
+        usage=(
+            f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
+            if entry.resources_server_selector
+            else f"gym env start --{entry.kind} {name} --model-type vllm_model"
+        ),
     )
 
 
+def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
+    return {
+        "name": entry.name,
+        "kind": entry.kind,
+        "status": entry.status,
+        "domain": entry.domain,
+        "description": entry.description,
+        "version": entry.version,
+        "integration_profile": entry.integration_profile,
+        "modality": entry.modality,
+        "licensing": entry.licensing,
+        "lifecycle": entry.lifecycle,
+    }
+
+
+@exit_cleanly_on_config_error
 def list_environments() -> None:
-    """List the environments under environments/, or inspect one by name (``gym list environments <name>``).
-    Optionally filtered by a `query` (the `gym search environments` entry point). ``--search-dir`` adds extra
-    roots on top of the cwd and built-ins.
-
-    Examples:
-
-    ```bash
-    gym list environments
-    gym list environments calendar
-    gym list environments --json
-    gym list environments --search-dir /path/to/project
-    ```
-    """
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
+    """List or inspect the manifest and legacy environment/benchmark catalog."""
+    global_config_dict = _command_overrides()
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    environments = discover_environments()
+    discovered = discover_environment_catalog()
+    entries = list(discovered)
 
     name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
     if name:
-        _inspect_environment(name, environments, global_config_dict)
+        _inspect_environment(name, discovered, global_config_dict)
         return
 
-    # `gym search environments <query>` reuses this command, narrowing to fuzzy matches on
-    # name + domain + description.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
-        environments = {
-            name: env
-            for name, env in environments.items()
-            if fuzzy_matches(query, name, env.domain or "", env.description or "")
-        }
+        entries = [
+            entry for entry in entries if fuzzy_matches(query, entry.name, entry.domain or "", entry.description or "")
+        ]
+    for field in ("domain", "catalog_kind", "modality", "licensing", "status", "lifecycle"):
+        expected = global_config_dict.get(field)
+        if expected is None:
+            continue
+        attribute = "kind" if field == "catalog_kind" else field
+        missing = sum(getattr(entry, attribute) is None for entry in entries)
+        if missing:
+            noun = "entry" if missing == 1 else "entries"
+            print(
+                f"Warning: {missing} catalog {noun} {'has' if missing == 1 else 'have'} no "
+                f"{attribute} metadata and could not be matched.",
+                file=sys.stderr,
+            )
+        entries = [entry for entry in entries if getattr(entry, attribute) == expected]
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
-        print(
-            json.dumps(
-                [
-                    {"name": name, "domain": env.domain, "description": env.description}
-                    for name, env in environments.items()
-                ]
-            )
-        )
+        print(json.dumps([_catalog_payload(entry) for entry in entries]))
         return
 
-    if not environments:
+    if not entries:
         print_no_matches("environments", query)
         return
 
+    coverage = sum(entry.manifest_path is not None for entry in discovered)
     title = (
-        f"Environments matching '{query}' ({len(environments)})"
+        f"Catalog entries matching '{query}' ({len(entries)}; manifests {coverage}/{len(discovered)})"
         if query
-        else f"Available environments in NeMo Gym ({len(environments)})"
+        else f"Available environments and benchmarks ({len(entries)}; manifests {coverage}/{len(discovered)})"
     )
     table = Table(title=title)
     table.add_column("Name")
+    table.add_column("Kind")
+    table.add_column("Status")
+    table.add_column("Lifecycle")
     table.add_column("Domain")
     table.add_column("Description")
-    for name, environment in environments.items():
-        table.add_row(name, environment.domain or "", environment.description or "")
+    for entry in entries:
+        table.add_row(
+            entry.name,
+            entry.kind,
+            entry.status,
+            entry.lifecycle or "",
+            entry.domain or "",
+            entry.description or "",
+        )
 
     print_rich_table(table)
 
