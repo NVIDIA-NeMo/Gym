@@ -20,8 +20,6 @@ config_paths:
 # BrowseComp
 # TODO @bxyu-nvidia: need pipeclean (may be very complex)
 # GDPVal-AA-V2
-# TODO @bxyu-nvidia: need internal branch
-# LM Arena proxy (To help text Arena)
 
 ########################################
 # START Secrets
