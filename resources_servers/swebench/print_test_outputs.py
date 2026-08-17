@@ -30,8 +30,11 @@ with open(args.rollout_jsonl) as f_in:
         if row["instance_id"] != args.instance_id:
             continue
 
+        if row["test_output"].strip():
+            to_write = f"Reward: {row['reward']}\n\nTest output:\n{row['test_output']}"
+        else:
+            to_write = f"Reward: {row['reward']}\n\nOpencode stdout:\n{row['opencode_run_stdout']}"
+
         with open(f"temp_{num}.log", "w") as f_out:
-            f_out.write(
-                f"Reward: {row['reward']}\n\nTest output:\n{row['test_output']}\n\nOpencode stdout:\n{row['opencode_run_stdout']}"
-            )
+            f_out.write(to_write)
         num += 1
