@@ -23,10 +23,13 @@ parser.add_argument("--rollout-jsonl", type=str, required=True)
 parser.add_argument("--instance-id", type=str, required=True)
 args = parser.parse_args()
 
-with open(args.rollout_jsonl) as f_in, open("temp.log", "w") as f_out:
+num = 0
+with open(args.rollout_jsonl) as f_in:
     for line in tqdm(f_in):
         row = orjson.loads(line)
         if row["instance_id"] != args.instance_id:
             continue
 
-        f_out.write("-" * 40 + f" Reward: {row['reward']}\nTest output: {row['test_output']}")
+        with open(f"temp_{num}.log", "w") as f_out:
+            f_out.write(f"Reward: {row['reward']}\n\nTest output: {row['test_output']}")
+        num += 1
