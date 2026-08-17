@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -264,6 +265,21 @@ class RewardProfiler:
                     entry[f"ci_low_95/{col}"] = float(ci_low)
                     entry[f"ci_high_95/{col}"] = float(ci_high)
             repeat_metrics.append(entry)
+
+        incomplete_repeats = [entry for entry in repeat_metrics if entry["missing_count"] > 0]
+        if incomplete_repeats:
+            warnings.warn(
+                f"{len(incomplete_repeats)} repeat(s) are missing rollouts for some tasks "
+                f"(e.g. agent={incomplete_repeats[0][AGENT_REF_KEY_NAME]['name']!r}, "
+                f"{ROLLOUT_INDEX_KEY_NAME}={incomplete_repeats[0][ROLLOUT_INDEX_KEY_NAME]}, "
+                f"missing_count={incomplete_repeats[0]['missing_count']}). "
+                "repeat_level_metrics statistics were computed from unequal sample sizes across "
+                "repeats and may not be directly comparable, and agent_level_metrics may be biased "
+                "toward whichever tasks happened to complete. Consider obtaining the missing rollouts "
+                "before drawing conclusions from these metrics.",
+                stacklevel=2,
+            )
+
         return repeat_metrics
 
     def _aggregate_repeat_level_metrics(self, repeat_level_metrics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

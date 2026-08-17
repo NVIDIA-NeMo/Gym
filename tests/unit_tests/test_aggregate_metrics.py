@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -530,6 +531,51 @@ class TestRepeatLevelMetrics:
             assert entry["sem/reward"] == pytest.approx(0.0)
             assert "ci_low_95/reward" not in entry
             assert "ci_high_95/reward" not in entry
+
+
+class TestMissingRolloutWarning:
+    """When some repeats are missing tasks, repeat_level_metrics stats are computed from
+    unequal sample sizes -- RewardProfiler should warn rather than silently produce
+    metrics that look comparable but aren't.
+    """
+
+    def test_warns_when_a_repeat_is_missing_tasks(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5},
+            # task 1, rollout 1 is missing.
+        ]
+        with pytest.warns(UserWarning, match="missing_count"):
+            result = compute_aggregate_metrics(responses)
+
+        by_idx = {e[ROLLOUT_INDEX_KEY_NAME]: e for e in result.repeat_level_metrics}
+        assert by_idx[1]["missing_count"] == 1
+
+    def test_no_warning_when_all_repeats_complete(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: r, "reward": float(t + r)}
+            for t in range(3)
+            for r in range(2)
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = compute_aggregate_metrics(responses)
+
+        assert not any("missing_count" in str(w.message) for w in caught)
+        assert all(entry["missing_count"] == 0 for entry in result.repeat_level_metrics)
+
+    def test_no_warning_for_single_repeat(self) -> None:
+        """A single rollout_index never produces repeat_level_metrics at all, so there's
+        nothing to warn about even though every task is trivially "complete" for it.
+        """
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = compute_aggregate_metrics(responses)
+
+        assert not any("missing_count" in str(w.message) for w in caught)
+        assert result.repeat_level_metrics == []
 
 
 class TestAggregateRepeatLevelMetrics:
