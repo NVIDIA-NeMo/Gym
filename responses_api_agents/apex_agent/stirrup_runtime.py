@@ -20,9 +20,10 @@ MCP_ROOT = Path("/app/mcp_servers")
 GATEWAY_URL = "http://127.0.0.1:8080"
 MCP_URL = f"{GATEWAY_URL}/mcp/"
 MCP_TOOL_TIMEOUT_SECONDS = 60
+TOOL_OUTPUT_TOKEN_BUDGET = 24_000
+TOOL_OUTPUT_ESTIMATED_CHARACTERS_PER_TOKEN = 4
 TOOL_OUTPUT_HEAD_CHARACTERS = 20_000
 TOOL_OUTPUT_TAIL_CHARACTERS = 5_000
-TOOL_OUTPUT_CHARACTER_LIMIT = TOOL_OUTPUT_HEAD_CHARACTERS + TOOL_OUTPUT_TAIL_CHARACTERS
 
 _STANDARD_SERVERS: dict[str, tuple[str, str, str]] = {
     "pdfs": ("pdfs", "pdf_server", "APP_PDF_ROOT"),
@@ -50,10 +51,14 @@ Use todo_write to plan and track the work. Before a completed finish submission 
 
 
 def truncate_tool_text(text: str) -> str:
-    """Apply the benchmark's 20k-head/5k-tail tool-output excerpt policy."""
-    if len(text) <= TOOL_OUTPUT_CHARACTER_LIMIT:
+    """Apply the 24k-token budget and 20k-head/5k-tail excerpt policy."""
+    estimated_tokens = (
+        len(text) + TOOL_OUTPUT_ESTIMATED_CHARACTERS_PER_TOKEN - 1
+    ) // TOOL_OUTPUT_ESTIMATED_CHARACTERS_PER_TOKEN
+    if estimated_tokens <= TOOL_OUTPUT_TOKEN_BUDGET:
         return text
-    removed = len(text) - TOOL_OUTPUT_CHARACTER_LIMIT
+    excerpt_characters = TOOL_OUTPUT_HEAD_CHARACTERS + TOOL_OUTPUT_TAIL_CHARACTERS
+    removed = len(text) - excerpt_characters
     marker = f"\n\n[... {removed} characters truncated ...]\n\n"
     return text[:TOOL_OUTPUT_HEAD_CHARACTERS] + marker + text[-TOOL_OUTPUT_TAIL_CHARACTERS:]
 
@@ -401,9 +406,10 @@ async def run_stirrup_rollout(config: dict[str, Any]) -> dict[str, Any]:
                         result.content = truncate_tool_text(content)
                     elif isinstance(content, list):
                         total_text = "\n".join(block for block in content if isinstance(block, str))
-                        if len(total_text) > TOOL_OUTPUT_CHARACTER_LIMIT:
+                        truncated_text = truncate_tool_text(total_text)
+                        if truncated_text != total_text:
                             non_text = [block for block in content if not isinstance(block, str)]
-                            result.content = [truncate_tool_text(total_text), *non_text]
+                            result.content = [truncated_text, *non_text]
                     return result
 
                 self.catalog[public_name] = Tool(

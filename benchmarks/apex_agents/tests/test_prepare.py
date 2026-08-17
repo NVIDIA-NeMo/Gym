@@ -3,7 +3,7 @@
 
 import json
 
-from benchmarks.apex_agents.prepare import convert_task, prefetch_worlds
+from benchmarks.apex_agents.prepare import EXCLUDED_WORLD_IDS, convert_task, prefetch_worlds, prepare_rows
 
 
 def test_convert_task_keeps_gold_in_verifier_metadata() -> None:
@@ -44,7 +44,14 @@ def test_convert_task_keeps_gold_in_verifier_metadata() -> None:
 def test_prefetch_worlds_downloads_each_unique_world_once(monkeypatch, tmp_path) -> None:
     worlds_path = tmp_path / "worlds.json"
     worlds_path.write_text(
-        json.dumps([{"world_id": "world-b"}, {"world_id": "world-a"}, {"world_id": "world-a"}]),
+        json.dumps(
+            [
+                {"world_id": "world-b"},
+                {"world_id": "world-a"},
+                {"world_id": "world-a"},
+                *({"world_id": world_id} for world_id in EXCLUDED_WORLD_IDS),
+            ]
+        ),
         encoding="utf-8",
     )
     calls = []
@@ -69,3 +76,28 @@ def test_prefetch_worlds_downloads_each_unique_world_once(monkeypatch, tmp_path)
             "token": "hf_test_token",
         },
     ]
+
+
+def test_prepare_rows_excludes_external_dependency_worlds_before_limit(tmp_path) -> None:
+    excluded_world_id = next(iter(EXCLUDED_WORLD_IDS))
+    tasks_path = tmp_path / "tasks.json"
+    worlds_path = tmp_path / "worlds.json"
+    output = tmp_path / "output.jsonl"
+    tasks_path.write_text(
+        json.dumps(
+            [
+                {"task_id": "excluded", "world_id": excluded_world_id, "prompt": "skip", "rubric": []},
+                {"task_id": "included", "world_id": "world-kept", "prompt": "keep", "rubric": []},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    worlds_path.write_text(
+        json.dumps([{"world_id": excluded_world_id}, {"world_id": "world-kept"}]),
+        encoding="utf-8",
+    )
+
+    count = prepare_rows(tasks_path, worlds_path, output, limit=1)
+
+    assert count == 1
+    assert json.loads(output.read_text(encoding="utf-8"))["task_id"] == "included"

@@ -16,6 +16,14 @@ from nemo_gym.global_config import get_hf_token
 OUTPUT_FPATH = Path("benchmarks/apex_agents/data/apex_agents_benchmark.jsonl")
 WORLD_CACHE_DIR = Path("benchmarks/apex_agents/data/world_cache")
 DATASET_REPO = "mercor/apex-agents"
+EXCLUDED_WORLD_IDS = frozenset(
+    {
+        # Investment Banking Worlds 244 and 246 require external EDGAR/FMP data
+        # that is not included in the public offline world artifacts.
+        "world_43a921f91f0f4d2c85d8bd2774f9e681",
+        "world_5970ed13783a463181bdf38337f0cad1",
+    }
+)
 SERVICE_MAP = {
     "FMP": "fmp",
     "Edgar SEC": "edgar",
@@ -99,7 +107,11 @@ def convert_task(task: dict[str, Any], world: dict[str, Any]) -> dict[str, Any]:
 def prepare_rows(tasks_path: Path, worlds_path: Path, output: Path, *, limit: int | None = None) -> int:
     tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
     worlds = {world["world_id"]: world for world in json.loads(worlds_path.read_text(encoding="utf-8"))}
-    rows = [convert_task(task, worlds.get(task["world_id"], {})) for task in tasks]
+    rows = [
+        convert_task(task, worlds.get(task["world_id"], {}))
+        for task in tasks
+        if task["world_id"] not in EXCLUDED_WORLD_IDS
+    ]
     if limit is not None:
         rows = rows[:limit]
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +127,7 @@ def prefetch_worlds(worlds_path: Path, *, cache_dir: Path, hf_token: str | None 
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     worlds = json.loads(worlds_path.read_text(encoding="utf-8"))
-    world_ids = sorted({world["world_id"] for world in worlds})
+    world_ids = sorted({world["world_id"] for world in worlds} - EXCLUDED_WORLD_IDS)
     for world_id in world_ids:
         kwargs: dict[str, Any] = {
             "repo_id": DATASET_REPO,
