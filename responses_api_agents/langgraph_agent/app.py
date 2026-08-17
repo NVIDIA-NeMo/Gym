@@ -25,6 +25,12 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
+def response_output_items(policy_outputs: list[Any]) -> list[Any]:
+    """Return only items that are valid members of a Responses API output."""
+    input_roles = {"user", "system", "developer"}
+    return [item for item in policy_outputs if getattr(item, "role", None) not in input_roles]
+
+
 class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     resources_server: ResourcesServerRef

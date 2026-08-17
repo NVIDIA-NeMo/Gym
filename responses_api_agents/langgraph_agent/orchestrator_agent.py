@@ -24,7 +24,7 @@ Graph: decompose -> dispatch (loop per subtask) -> synthesize -> END
 import re
 from typing import Annotated, List, TypedDict
 
-from app import LangGraphAgentAdapter, LangGraphAgentConfig
+from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
@@ -101,7 +101,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
 
     async def _call_model(self, state, prompt):
         input_messages = [NeMoGymEasyInputMessage(role="user", content=prompt)]
-        request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
+        request_body = state["request_body"].model_copy(update={"input": input_messages})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
@@ -220,7 +220,7 @@ class OrchestratorAgent(LangGraphAgentAdapter):
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["policy_outputs"]
+        return response_output_items(final_state["policy_outputs"])
 
     async def run(self, request: Request, body: OrchestratorRunRequest) -> OrchestratorVerifyResponse:
         cookies = request.cookies
