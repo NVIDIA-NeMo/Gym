@@ -25,6 +25,8 @@ class TestRewardProfile:
             for key in list(row):
                 if key.startswith("histogram"):
                     row[key] = None
+                elif key.startswith("ci_low_95") or key.startswith("ci_high_95"):
+                    row.pop(key)
                 elif key in {
                     "_ng_task_index",
                     "expected_num_rollouts",
@@ -166,7 +168,7 @@ class TestRewardProfile:
             },
         ]
 
-        actual_group_level_metrics, actual_agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+        actual_group_level_metrics, actual_agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
 
         self._clean_metrics(actual_group_level_metrics)
         self._clean_metrics(actual_agent_level_metrics)
@@ -373,7 +375,7 @@ class TestRewardProfile:
             },
         ]
 
-        group_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+        group_level_metrics, _, __ = RewardProfiler().profile_from_data(rows, results)
         row = RewardProfiler().prepare_for_serialization(group_level_metrics)[0]
 
         assert row["_ng_task_index"] == 0
@@ -415,7 +417,7 @@ class TestRewardProfile:
         results = [self._result(0, 0, reward=0.0, total_tokens=5), self._result(0, 1), self._result(1, 0)]
 
         profiler = RewardProfiler()
-        group_level_metrics, _ = profiler.profile_from_data(rows, results, allow_partial_rollouts=True)
+        group_level_metrics, _, __ = profiler.profile_from_data(rows, results, allow_partial_rollouts=True)
         profile_rows = profiler.prepare_for_serialization(group_level_metrics)
         summary = profiler.profile_completion_summary(rows, results)
 
@@ -477,7 +479,7 @@ class TestRewardProfile:
             {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}, "second_col": 2},
         ]
 
-        actual_group_level_metrics, actual_agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+        actual_group_level_metrics, actual_agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
 
         self._clean_metrics(actual_group_level_metrics)
         self._clean_metrics(actual_agent_level_metrics)

@@ -473,7 +473,7 @@ class TestRepeatLevelMetrics:
             assert entry[ROLLOUT_INDEX_KEY_NAME] == i
             assert entry["sample_count"] == 4
             assert entry["missing_count"] == 0
-            for stat in ("mean", "median", "std", "sem", "ci_lower", "ci_upper", "min", "max", "p25", "p75"):
+            for stat in ("mean", "median", "std", "sem", "ci_low_95", "ci_high_95", "min", "max", "p25", "p75"):
                 assert f"{stat}/reward" in entry, f"{stat}/reward missing from repeat entry"
 
     def test_known_values(self) -> None:
@@ -497,7 +497,7 @@ class TestRepeatLevelMetrics:
         large = _make_verify_responses(tasks=20, rollouts_per_task=2)
 
         def ci_width(metrics):
-            return metrics[0]["ci_upper/reward"] - metrics[0]["ci_lower/reward"]
+            return metrics[0]["ci_high_95/reward"] - metrics[0]["ci_low_95/reward"]
 
         assert ci_width(compute_aggregate_metrics(small).repeat_level_metrics) > ci_width(
             compute_aggregate_metrics(large).repeat_level_metrics
@@ -527,8 +527,8 @@ class TestRepeatLevelMetrics:
         result = compute_aggregate_metrics(responses)
         for entry in result.repeat_level_metrics:
             assert "sem/reward" not in entry
-            assert "ci_lower/reward" not in entry
-            assert "ci_upper/reward" not in entry
+            assert "ci_low_95/reward" not in entry
+            assert "ci_high_95/reward" not in entry
 
 
 class TestAddAvgSampleStdDev:

@@ -50,9 +50,6 @@ def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
     return row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]
 
 
-# Two-tailed t critical values for 95% CI indexed by degrees of freedom.
-
-
 class RewardProfiler:
     def _index_by_rollout_key(self, rows: List[Dict[str, Any]], name: str) -> Dict[Tuple[int, int], Dict[str, Any]]:
         indexed: Dict[Tuple[int, int], Dict[str, Any]] = {}
@@ -214,18 +211,29 @@ class RewardProfiler:
         ]
 
     def _compute_repeat_level_metrics(self, df: DataFrame) -> List[Dict[str, Any]]:
-        """Per-rollout-index summary stats across all tasks."""
-        rollout_indices = sorted(df[ROLLOUT_INDEX_KEY_NAME].unique())
+        """Per-agent, per-rollout-index summary stats across all tasks.
 
-        total_tasks = int(df[TASK_INDEX_KEY_NAME].nunique())
+        Only produced for agents that have more than one rollout index — agents with a
+        single rollout contribute nothing to a repeat-level comparison and are skipped.
+        If no agent qualifies, returns an empty list.
+        """
         skip_cols = {"agent_name", TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME}
         numeric_cols = [c for c in df.columns if c not in skip_cols]
 
+        rollout_counts_by_agent = df.groupby("agent_name")[ROLLOUT_INDEX_KEY_NAME].nunique()
+        multi_rollout_agents = set(rollout_counts_by_agent[rollout_counts_by_agent > 1].index)
+        if not multi_rollout_agents:
+            return []
+
+        df = df[df["agent_name"].isin(multi_rollout_agents)]
+        total_tasks_by_agent = df.groupby("agent_name")[TASK_INDEX_KEY_NAME].nunique()
+
         repeat_metrics = []
-        for rollout_idx in rollout_indices:
-            group = df[df[ROLLOUT_INDEX_KEY_NAME] == rollout_idx]
+        for (agent_name, rollout_idx), group in df.groupby(["agent_name", ROLLOUT_INDEX_KEY_NAME]):
             present_tasks = int(group[TASK_INDEX_KEY_NAME].nunique())
+            total_tasks = int(total_tasks_by_agent[agent_name])
             entry: Dict[str, Any] = {
+                AGENT_REF_KEY_NAME: {"name": agent_name},
                 ROLLOUT_INDEX_KEY_NAME: int(rollout_idx),
                 "sample_count": present_tasks,
                 "missing_count": total_tasks - present_tasks,
@@ -238,12 +246,12 @@ class RewardProfiler:
                 mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
                 sem = std / n**0.5
-                entry[f"sem/{col}"] = sem
                 entry.update(
                     {
                         f"mean/{col}": mean,
                         f"median/{col}": float(col_data.median()),
                         f"std/{col}": std,
+                        f"sem/{col}": sem,
                         f"min/{col}": float(col_data.min()),
                         f"max/{col}": float(col_data.max()),
                         f"p25/{col}": float(col_data.quantile(0.25)),

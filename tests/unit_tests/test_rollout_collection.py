@@ -854,9 +854,160 @@ class TestRolloutCollection:
                 },
                 "key_metrics": {"mean/abc usage": 1.0},
                 "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
+                "repeat_level_metrics": actual_aggregate_metrics[0]["repeat_level_metrics"],
             }
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
+
+        # num_repeats=2 -> repeat_level_metrics has one entry per rollout_index (0 and 1),
+        # each aggregating the "abc usage" metric across all 3 tasks at that repeat.
+        repeat_level_metrics = actual_aggregate_metrics[0]["repeat_level_metrics"]
+        assert len(repeat_level_metrics) == 2
+        rollout_indices = {entry[ROLLOUT_INDEX_KEY_NAME] for entry in repeat_level_metrics}
+        assert rollout_indices == {0, 1}
+        for entry in repeat_level_metrics:
+            assert entry["sample_count"] == 3
+            assert entry["missing_count"] == 0
+            assert entry["mean/abc usage"] == pytest.approx(1.0)
+            assert entry["std/abc usage"] == pytest.approx(0.0)
+
+    async def test_run_from_config_repeat_level_metrics_e2e(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """End-to-end: full run_from_config pipeline -> aggregate metrics JSON on disk carries
+        variability statistics (mean/std/sem/CI) per rollout_index when num_repeats >= 2, computed
+        from a per-task reward that varies by both task and rollout so the stats aren't degenerate.
+        """
+        clear_captures = MagicMock()
+        merge_capture = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
+
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(4)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            num_repeats=3,
+        )
+
+        # Deterministic per-(task, rollout) reward so we can hand-verify mean/std below:
+        # rollout 0 rewards across the 4 tasks: 0, 1, 2, 3 (mean=1.5)
+        # rollout 1 rewards across the 4 tasks: 1, 2, 3, 4 (mean=2.5)
+        # rollout 2 rewards across the 4 tasks: 2, 3, 4, 5 (mean=3.5)
+        def reward_for(task_idx: int, rollout_idx: int) -> float:
+            return float(task_idx + rollout_idx)
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    task_idx = example[TASK_INDEX_KEY_NAME]
+                    rollout_idx = example[ROLLOUT_INDEX_KEY_NAME]
+                    future.set_result((example, {"response": {}, "reward": reward_for(task_idx, rollout_idx)}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
+                agg = compute_aggregate_metrics(stripped)
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_bytes(
+                    orjson.dumps(
+                        [{"agent_ref": {"name": "my agent name"}, **agg.model_dump()}], option=orjson.OPT_INDENT_2
+                    )
+                )
+                return metrics_fpath
+
+        await TestRolloutCollectionHelper().run_from_config(config)
+
+        aggregate_metrics_fpath = tmp_path / "output_aggregate_metrics.json"
+        actual_aggregate_metrics = json.loads(aggregate_metrics_fpath.read_text())
+        assert len(actual_aggregate_metrics) == 1
+
+        repeat_level_metrics = actual_aggregate_metrics[0]["repeat_level_metrics"]
+        assert len(repeat_level_metrics) == 3
+        by_rollout_idx = {entry[ROLLOUT_INDEX_KEY_NAME]: entry for entry in repeat_level_metrics}
+        assert set(by_rollout_idx) == {0, 1, 2}
+
+        for rollout_idx, expected_mean in ((0, 1.5), (1, 2.5), (2, 3.5)):
+            entry = by_rollout_idx[rollout_idx]
+            assert entry["sample_count"] == 4
+            assert entry["missing_count"] == 0
+            assert entry["mean/reward"] == pytest.approx(expected_mean)
+            # rewards at each repeat are 4 consecutive integers -> population-style sample std
+            # (ddof=1) of [n, n+1, n+2, n+3] is sqrt(20/12*... ) == std of [0,1,2,3] == ~1.29099
+            assert entry["std/reward"] == pytest.approx(1.2909944, rel=1e-4)
+            assert entry["min/reward"] == pytest.approx(expected_mean - 1.5)
+            assert entry["max/reward"] == pytest.approx(expected_mean + 1.5)
+            # 4 samples -> sem and 95% CI are emitted
+            assert entry["sem/reward"] == pytest.approx(entry["std/reward"] / (4**0.5))
+            assert entry["ci_low_95/reward"] < entry["mean/reward"] < entry["ci_high_95/reward"]
+
+        # Repeats differ (task+rollout reward), so the cross-repeat means themselves vary --
+        # a real regression in the grouping (e.g. averaging over rollout_index instead of by it)
+        # would collapse these to a single repeated value.
+        means = [by_rollout_idx[i]["mean/reward"] for i in range(3)]
+        assert means == sorted(means)
+        assert len(set(means)) == 3
+
+    async def test_run_from_config_repeat_level_metrics_absent_for_single_repeat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """With num_repeats=1 there is nothing to compare across repeats, so the aggregate metrics
+        JSON on disk should carry an empty repeat_level_metrics list rather than a single-entry one.
+        """
+        clear_captures = MagicMock()
+        merge_capture = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
+
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+            for i in range(4)
+        ]
+        input_jsonl_fpath.write_text("\n".join(samples) + "\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            num_repeats=1,
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {}, "reward": 1.0}))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                stripped = [{k: v for k, v in r.items() if k not in ("responses_create_params",)} for r in results]
+                agg = compute_aggregate_metrics(stripped)
+                metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+                metrics_fpath.write_bytes(
+                    orjson.dumps(
+                        [{"agent_ref": {"name": "my agent name"}, **agg.model_dump()}], option=orjson.OPT_INDENT_2
+                    )
+                )
+                return metrics_fpath
+
+        await TestRolloutCollectionHelper().run_from_config(config)
+
+        aggregate_metrics_fpath = tmp_path / "output_aggregate_metrics.json"
+        actual_aggregate_metrics = json.loads(aggregate_metrics_fpath.read_text())
+        assert actual_aggregate_metrics[0]["repeat_level_metrics"] == []
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
