@@ -21,6 +21,7 @@ All tests skip gracefully when PyMuPDF (``fitz``) isn't installed.
 from __future__ import annotations
 
 import base64
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -47,6 +48,16 @@ def _is_png_image_block(block: dict) -> bool:
 
 
 class TestPdfRasterization:
+    def test_dependency_validation_checks_exact_imports(self) -> None:
+        from resources_servers.gdpval.media_conversion import validate_images_and_text_dependencies
+
+        with patch(
+            "resources_servers.gdpval.media_conversion.importlib.import_module",
+            side_effect=[MagicMock(), ImportError("cryptography missing")],
+        ):
+            with pytest.raises(RuntimeError, match="pdfminer.high_level"):
+                validate_images_and_text_dependencies()
+
     def test_pdf_bytes_to_image_blocks_one_per_page(self) -> None:
         from resources_servers.gdpval.media_conversion import pdf_bytes_to_image_blocks
 
