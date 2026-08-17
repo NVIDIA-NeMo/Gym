@@ -430,8 +430,9 @@ class RewardProfiler:
         self,
         group_level_metrics: List[Dict[str, Any]],
         agent_level_metrics: List[Dict[str, Any]],
+        repeat_level_metrics: List[Dict[str, Any]],
         base_output_fpath: Path,
-    ) -> Tuple[Path, Path]:
+    ) -> Tuple[Path, Path, Path]:
         reward_profiling_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_reward_profiling").with_suffix(
             ".jsonl"
         )
@@ -444,7 +445,12 @@ class RewardProfiler:
         )
         agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
 
-        return reward_profiling_fpath, agent_level_metrics_fpath
+        repeat_level_metrics_fpath = base_output_fpath.with_stem(
+            base_output_fpath.stem + "_repeat_level_metrics"
+        ).with_suffix(".json")
+        repeat_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(repeat_level_metrics)))
+
+        return reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath
 
 
 def compute_pass_majority_metrics(

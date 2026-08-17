@@ -14,6 +14,9 @@
 # limitations under the License.
 
 
+from pathlib import Path
+
+import orjson
 import pytest
 
 from nemo_gym.reward_profile import RewardProfiler
@@ -566,3 +569,85 @@ class TestRewardProfile:
             }
         ]
         assert expected_agent_level_metrics == actual_agent_level_metrics
+
+
+class TestWriteToDisk:
+    def test_writes_three_files(self, tmp_path: Path) -> None:
+        group_level_metrics = [{"_ng_task_index": 0, "mean/reward": 1.0}]
+        agent_level_metrics = [{"agent_ref": {"name": "agent"}, "mean/reward": 1.0}]
+        repeat_level_metrics = [
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 0, "mean/reward": 1.0},
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 1, "mean/reward": 1.0},
+        ]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = RewardProfiler().write_to_disk(
+            group_level_metrics, agent_level_metrics, repeat_level_metrics, base_output_fpath
+        )
+
+        assert reward_profiling_fpath == tmp_path / "rollouts_reward_profiling.jsonl"
+        assert agent_level_metrics_fpath == tmp_path / "rollouts_agent_metrics.json"
+        assert repeat_level_metrics_fpath == tmp_path / "rollouts_repeat_level_metrics.json"
+        assert reward_profiling_fpath.exists()
+        assert agent_level_metrics_fpath.exists()
+        assert repeat_level_metrics_fpath.exists()
+
+    def test_reward_profiling_file_is_jsonl(self, tmp_path: Path) -> None:
+        group_level_metrics = [
+            {"_ng_task_index": 0, "mean/reward": 1.0},
+            {"_ng_task_index": 1, "mean/reward": 0.0},
+        ]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        reward_profiling_fpath, _, _ = RewardProfiler().write_to_disk(group_level_metrics, [], [], base_output_fpath)
+
+        lines = reward_profiling_fpath.read_text().splitlines()
+        assert len(lines) == 2
+        assert [orjson.loads(line) for line in lines] == group_level_metrics
+
+    def test_agent_level_metrics_file_is_json_array(self, tmp_path: Path) -> None:
+        agent_level_metrics = [{"agent_ref": {"name": "agent"}, "mean/reward": 1.0}]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        _, agent_level_metrics_fpath, _ = RewardProfiler().write_to_disk(
+            [], agent_level_metrics, [], base_output_fpath
+        )
+
+        assert orjson.loads(agent_level_metrics_fpath.read_bytes()) == agent_level_metrics
+
+    def test_repeat_level_metrics_file_is_json_array(self, tmp_path: Path) -> None:
+        repeat_level_metrics = [
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 0, "mean/reward": 0.5},
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 1, "mean/reward": 0.7},
+        ]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        _, _, repeat_level_metrics_fpath = RewardProfiler().write_to_disk(
+            [], [], repeat_level_metrics, base_output_fpath
+        )
+
+        assert orjson.loads(repeat_level_metrics_fpath.read_bytes()) == repeat_level_metrics
+
+    def test_repeat_level_metrics_file_empty_list_when_single_repeat(self, tmp_path: Path) -> None:
+        """repeat_level_metrics is [] when there's only one rollout_index -- the file should
+        still be written, just containing an empty JSON array.
+        """
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        _, _, repeat_level_metrics_fpath = RewardProfiler().write_to_disk([], [], [], base_output_fpath)
+
+        assert repeat_level_metrics_fpath.exists()
+        assert orjson.loads(repeat_level_metrics_fpath.read_bytes()) == []
+
+    def test_histograms_stripped_from_repeat_level_metrics_file(self, tmp_path: Path) -> None:
+        repeat_level_metrics = [
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 0, "mean/reward": 1.0, "histogram/reward": "x"}
+        ]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        _, _, repeat_level_metrics_fpath = RewardProfiler().write_to_disk(
+            [], [], repeat_level_metrics, base_output_fpath
+        )
+
+        written = orjson.loads(repeat_level_metrics_fpath.read_bytes())
+        assert "histogram/reward" not in written[0]
