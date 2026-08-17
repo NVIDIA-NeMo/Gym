@@ -4585,6 +4585,34 @@ def _make_top_logprobs_model(
 
 
 class TestTopLogprobsHandling:
+    def test_tokenize_endpoint_forwards_exact_prefix_without_sampling(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        captured_kwargs: dict[str, Any] = {}
+
+        async def mock_create_tokenize(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {"tokens": [10, 11, 12]}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        client = TestClient(app)
+        response = client.post(
+            "/tokenize",
+            json={
+                "input": "hi",
+                "required_prefix_token_ids": [10, 11],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"tokens": [10, 11, 12]}
+        assert captured_kwargs["required_prefix_token_ids"] == [10, 11]
+        assert "logprobs" not in captured_kwargs
+        assert "return_token_ids" not in captured_kwargs
+
     """With logprobs=True, vLLM treats top_logprobs=null as "no logprobs" but a missing
     field as its default (0, the chosen token's logprob). A null commonly appears in
     replayed rollout JSONL and empties the captured token ids, zeroing the training loss
