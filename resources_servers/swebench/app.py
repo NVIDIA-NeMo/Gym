@@ -15,6 +15,7 @@
 
 import sys
 from pathlib import Path
+from shutil import rmtree
 from time import time
 from traceback import format_exc
 from typing import Any, Dict, Optional, Tuple
@@ -50,6 +51,8 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
+
+    clear_swebench_debug_logs: bool = True
 
 
 class SWEBenchInstanceRequest(BaseModel):
@@ -324,6 +327,12 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             rewrite_reports=False,
         )
         patch_verification_time_taken = time() - start_time
+
+        log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
+        if self.config.clear_swebench_debug_logs:
+            rmtree(str(log_dir), ignore_errors=True)
+            log_dir = ""
+
         return SWEBenchVerifyResponse(
             **body.model_dump(),
             # run_instance returns "completed"; the response field is "evaluation_completed".
@@ -333,7 +342,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,
-            log_dir=str(Path(__file__).parent / "logs/run_evaluation" / run_id),
+            log_dir=str(log_dir),
         )
 
 

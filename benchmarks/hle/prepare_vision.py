@@ -13,30 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-from collections import Counter
+"""Prepare the vision (multimodal) variant of HLE.
 
-from pydantic import BaseModel
+Thin wrapper around ``benchmarks.hle.prepare.prepare`` with ``include_vision=True``.
+The full HLE split (text + image questions) is downloaded and every row is fully
+materialized (image questions carry an ``input_image`` block), written to
+``benchmarks/hle/data/hle_benchmark_vision.jsonl``.
+"""
 
-from nemo_gym.global_config import get_global_config_dict
+from pathlib import Path
+
+from benchmarks.hle.prepare import prepare as _prepare_hle
 
 
-class PrintAggregateResultsConfig(BaseModel):
-    jsonl_fpath: str
+def prepare() -> Path:
+    """Prepare the HLE vision dataset. Returns the written JSONL path."""
+    return _prepare_hle(include_vision=True)
 
 
 if __name__ == "__main__":
-    global_config_dict = get_global_config_dict()
-    config = PrintAggregateResultsConfig.model_validate(global_config_dict)
-
-    metrics = Counter()
-    num_rows = 0
-    with open(config.jsonl_fpath) as f:
-        for row in f:
-            result = json.loads(row)
-            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float))})
-            num_rows += 1
-
-    avg_metrics = {k: v / num_rows for k, v in metrics.items()}
-
-    print(json.dumps(avg_metrics, indent=4))
+    prepare()
