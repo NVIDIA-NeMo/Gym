@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from nemo_gym.visual_history import (
+from nemo_gym.context_history import (
     ContextGuardConfig,
     ContextMeasurements,
     HistoryController,
@@ -10,8 +10,8 @@ from nemo_gym.visual_history import (
     RecencyHistoryPolicyConfig,
     SemanticHistory,
     TurnChunkedHistoryController,
-    VisualHistoryConfig,
-    VisualRecencyHistoryPolicy,
+    ContextHistoryConfig,
+    RecencyHistoryPolicy,
     assert_identity_shadow_matches,
     build_guard_outcome_records,
     build_history_policy,
@@ -129,7 +129,7 @@ def test_recency_protects_initial_images_and_keeps_latest_three_groups():
     history.append_items([_observation("repeat A", "data:image/png;base64,A")], turn_id=4)
     history.append_items([_observation("latest E", "data:image/png;base64,E")], turn_id=5)
 
-    policy = VisualRecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=3))
+    policy = RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=3))
     plan = policy.plan(history, decision_turn=6)
     view = materialize_history_view(history, plan)
 
@@ -168,7 +168,7 @@ def test_recency_policy_is_deterministic_and_does_not_mutate_history():
         history.append_items([_observation(f"turn {turn}", image)], turn_id=turn)
     original_events = history.events
 
-    policy = VisualRecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=2))
+    policy = RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=2))
     first = policy.plan(history, decision_turn=5)
     second = policy.plan(history, decision_turn=5)
 
@@ -187,7 +187,7 @@ def test_pending_observation_counts_toward_recency_window():
         conditions_action_turn=3,
     )
 
-    policy = VisualRecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1))
+    policy = RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1))
     view = materialize_history_view(history, policy.plan(history, decision_turn=3))
 
     assert _image_urls(view.items) == ["A", "C"]
@@ -217,7 +217,7 @@ def test_descriptor_append_compatibility_breaks_when_recency_rewrites_view():
     history.append_items([_observation("third", "C")], turn_id=2)
     compacted = materialize_history_view(
         history,
-        VisualRecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)).plan(
+        RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)).plan(
             history, decision_turn=2
         ),
     )
@@ -362,7 +362,7 @@ def test_identity_shadow_mismatch_has_bounded_diagnostics():
 
 def test_shadow_configuration_rejects_non_identity_policy():
     try:
-        VisualHistoryConfig.model_validate(
+        ContextHistoryConfig.model_validate(
             {
                 "enabled": True,
                 "shadow_only": True,
@@ -407,7 +407,7 @@ def test_recency_controller_keeps_boundary_pending_until_acknowledged():
     history.append_items([_observation("later B", "B")], turn_id=1)
     controller = HistoryController(
         history,
-        VisualRecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)),
+        RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)),
     )
 
     first = controller.prepare(applies_to_step=1)
@@ -443,7 +443,7 @@ def test_pending_boundary_rejects_changed_retry_view():
     history.append_items([_observation("later B", "B")], turn_id=1)
     controller = HistoryController(
         history,
-        VisualRecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)),
+        RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)),
     )
     first = controller.prepare(applies_to_step=1)
     controller.acknowledge(first)
@@ -603,7 +603,7 @@ def test_image_guard_closes_chunk_before_pending_observation_action():
     )
     controller = TurnChunkedHistoryController(
         history,
-        VisualRecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=0)),
+        RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=0)),
         actions_per_chunk=4,
         history_groups=0,
     )
@@ -660,7 +660,7 @@ def test_hundred_turn_chunked_recency_stays_bounded_and_accounts_for_every_actio
     )
     controller = TurnChunkedHistoryController(
         history,
-        VisualRecencyHistoryPolicy(
+        RecencyHistoryPolicy(
             RecencyHistoryPolicyConfig(
                 protect_initial_context=True,
                 keep_last_image_groups=3,

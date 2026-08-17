@@ -17,7 +17,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInput,
 )
-from nemo_gym.visual_history import (
+from nemo_gym.context_history import (
     ContextMeasurements,
     FinalizedChunkRecord,
     GenerationContract,
@@ -34,7 +34,7 @@ from nemo_gym.visual_history import (
     TransformationLineageDeltaRecord,
     TurnChunkedHistoryController,
     UnitLineageRecord,
-    VisualHistoryConfig,
+    ContextHistoryConfig,
     assert_identity_shadow_matches,
     build_guard_outcome_records,
     build_history_policy,
@@ -191,7 +191,7 @@ def build_generation_contract(
     *,
     body: NeMoGymResponseCreateParamsNonStreaming,
     model_server: BaseModel | Mapping[str, Any],
-    visual_history: VisualHistoryConfig,
+    context_history: ContextHistoryConfig,
 ) -> GenerationContract:
     """Build Gym's immutable, server-visible generation evidence identity."""
 
@@ -224,7 +224,7 @@ def build_generation_contract(
         ),
         "compaction_policy_id": stable_id(
             "compaction-policy",
-            visual_history.model_dump(mode="json"),
+            context_history.model_dump(mode="json"),
         ),
     }
     return GenerationContract(
@@ -266,14 +266,14 @@ class ContextCompactionSession:
     def __init__(
         self,
         *,
-        config: VisualHistoryConfig,
+        config: ContextHistoryConfig,
         rollout_id: str,
         generation_contract: GenerationContract,
         initial_context: Sequence[Any],
         seed_observations: Sequence[Any] = (),
     ):
         if not config.enabled:
-            raise ValueError("ContextCompactionSession requires visual_history.enabled")
+            raise ValueError("ContextCompactionSession requires context_history.enabled")
         self.config = config
         self.rollout_id = rollout_id
         self.generation_contract = generation_contract

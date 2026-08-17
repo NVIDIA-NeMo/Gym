@@ -185,17 +185,12 @@ class ContextHistoryConfig(BaseModel):
     guards: ContextGuardConfig = Field(default_factory=ContextGuardConfig)
 
     @model_validator(mode="after")
-    def validate_shadow_policy(self) -> "VisualHistoryConfig":
+    def validate_shadow_policy(self) -> "ContextHistoryConfig":
         if self.enabled and self.shadow_only and self.policy.type != "identity":
             raise ValueError("shadow_only context history requires the identity policy")
         if self.enabled and self.shadow_only and self.schedule.type != "rolling_recency":
             raise ValueError("shadow_only context history requires the rolling_recency schedule")
         return self
-
-
-# Backward-compatible name used by Rohit's current agent configuration. The
-# controller and policy contract are semantic and are not restricted to images.
-VisualHistoryConfig = ContextHistoryConfig
 
 
 def _source_media_metadata(
@@ -1364,7 +1359,7 @@ class IdentityHistoryPolicy:
         return HistoryViewPlan(keep=keep, artifacts=(), decision=decision)
 
 
-class VisualRecencyHistoryPolicy:
+class RecencyHistoryPolicy:
     name = "recency"
     version = "1"
 
@@ -1519,7 +1514,7 @@ def build_history_policy(config: HistoryPolicyConfig) -> HistoryPolicy:
             if isinstance(config.config, RecencyHistoryPolicyConfig)
             else RecencyHistoryPolicyConfig.model_validate(config.config)
         )
-        return VisualRecencyHistoryPolicy(recency_config)
+        return RecencyHistoryPolicy(recency_config)
 
     factory = _CUSTOM_HISTORY_POLICY_FACTORIES.get(config.type)
     if factory is None:
