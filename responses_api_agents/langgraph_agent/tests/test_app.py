@@ -25,9 +25,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseUsage,
 )
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.langgraph_agent.app import response_output_items
+from responses_api_agents.langgraph_agent.app import aggregate_response_usage, response_output_items
 from responses_api_agents.langgraph_agent.orchestrator_agent import (
     OrchestratorAgent,
     OrchestratorAgentConfig,
@@ -81,9 +82,24 @@ def _make_config():
     )
 
 
-def _mock_model_response(text: str = "The answer is <answer>42</answer>."):
+def _usage(input_tokens: int, output_tokens: int, reasoning_tokens: int, cached_tokens: int = 0) -> dict:
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": cached_tokens, "audio_tokens": input_tokens % 3},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {
+            "reasoning_tokens": reasoning_tokens,
+            "accepted_prediction_tokens": output_tokens % 5,
+        },
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _mock_model_response(text: str = "The answer is <answer>42</answer>.", usage: dict | None = None):
     payload = deepcopy(MOCK_RESPONSE)
     payload["output"][0]["content"][0]["text"] = text
+    if usage is not None:
+        payload["usage"] = usage
     mock = AsyncMock()
     mock.json.return_value = payload
     mock.read.return_value = json.dumps(payload)
@@ -94,6 +110,23 @@ def _mock_model_response(text: str = "The answer is <answer>42</answer>."):
 
 
 class TestReflectionAgent:
+    def test_aggregate_response_usage_sums_reasoning_and_provider_details(self) -> None:
+        usage = aggregate_response_usage(
+            [
+                NeMoGymResponseUsage.model_validate(_usage(10, 20, 7, cached_tokens=2)),
+                NeMoGymResponseUsage.model_validate(_usage(11, 21, 8, cached_tokens=3)),
+            ]
+        )
+
+        assert usage is not None
+        assert usage.input_tokens == 21
+        assert usage.input_tokens_details.cached_tokens == 5
+        assert usage.input_tokens_details.audio_tokens == 3
+        assert usage.output_tokens == 41
+        assert usage.output_tokens_details.reasoning_tokens == 15
+        assert usage.output_tokens_details.accepted_prediction_tokens == 1
+        assert usage.total_tokens == 62
+
     def test_response_output_items_drop_internal_input_messages(self) -> None:
         user_prompt = NeMoGymEasyInputMessage(role="user", content="internal prompt")
         assistant_message = NeMoGymResponseOutputMessage(
@@ -129,9 +162,9 @@ class TestReflectionAgent:
         agent = ReflectionAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
         client = TestClient(agent.setup_webserver())
         agent.server_client.post.side_effect = [
-            _mock_model_response("initial draft"),
-            _mock_model_response("specific critique"),
-            _mock_model_response("revised <answer>42</answer>"),
+            _mock_model_response("initial draft", _usage(10, 20, 7, cached_tokens=1)),
+            _mock_model_response("specific critique", _usage(11, 21, 8, cached_tokens=2)),
+            _mock_model_response("revised <answer>42</answer>", _usage(12, 22, 9, cached_tokens=3)),
         ]
 
         res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "What is 6 * 7?"}]})
@@ -148,6 +181,12 @@ class TestReflectionAgent:
             "initial draft",
             "specific critique",
         ]
+        usage = res.json()["usage"]
+        assert usage["input_tokens"] == 33
+        assert usage["input_tokens_details"]["cached_tokens"] == 6
+        assert usage["output_tokens"] == 63
+        assert usage["output_tokens_details"]["reasoning_tokens"] == 24
+        assert usage["total_tokens"] == 96
 
 
 @pytest.mark.parametrize(
@@ -212,3 +251,33 @@ async def test_rewoo_falls_back_to_solve_when_plan_has_no_steps() -> None:
         "I can solve this directly.",
         "<answer>42</answer>",
     ]
+
+
+async def test_parallel_thinking_aggregates_each_path_and_final_call_usage() -> None:
+    config = ParallelThinkingAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        resources_server=ResourcesServerRef(type="resources_servers", name=""),
+        model_server=ModelServerRef(type="responses_api_models", name="test_model"),
+        num_parallel_paths=2,
+    )
+    agent = ParallelThinkingAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    agent.server_client.post.side_effect = [
+        _mock_model_response("path one", _usage(10, 20, 7, cached_tokens=1)),
+        _mock_model_response("path two", _usage(11, 21, 8, cached_tokens=2)),
+        _mock_model_response("<answer>42</answer>", _usage(12, 22, 9, cached_tokens=3)),
+    ]
+
+    client = TestClient(agent.setup_webserver())
+    res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "What is 6 * 7?"}]})
+
+    assert res.status_code == 200
+    assert agent.server_client.post.call_count == 3
+    usage = res.json()["usage"]
+    assert usage["input_tokens"] == 33
+    assert usage["input_tokens_details"]["cached_tokens"] == 6
+    assert usage["output_tokens"] == 63
+    assert usage["output_tokens_details"]["reasoning_tokens"] == 24
+    assert usage["total_tokens"] == 96
