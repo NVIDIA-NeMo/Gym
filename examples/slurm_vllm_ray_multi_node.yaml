@@ -7,7 +7,7 @@ compute:
     node_pools:
       compute:
         partition: batch
-        nodes: 1
+        nodes: 2
         ntasks_per_node: 1
         gpus_per_node: 8
 
@@ -15,13 +15,14 @@ services:
   vllm_model:
     container: vllm/vllm-openai:v0.9.0
     type: vllm
-    model: Qwen/Qwen2.5-7B-Instruct
+    model: Qwen/Qwen2.5-72B-Instruct
     trust_remote_code: true
-    tensor_parallel_size: 2
-    number_of_instances: 4       # 4 engine replicas, total 8 GPUs
+    tensor_parallel_size: 2      # 8 instances x TP2 = 16 GPUs total, spans both nodes (2 x 8 GPUs)
+    number_of_instances: 8       # needs the ray backend since the footprint exceeds one node
     distributed_backend:
-      type: vllm_service         # vLLM native --data-parallel-size, single node only. For multi-node,
-                                  # use distributed_backend: {type: ray} - see slurm_vllm_ray_multi_node.yaml
+      type: ray                  # vLLM's Ray core executor (--distributed-executor-backend ray).
+                                  # Not the ray.serve library - just lets vLLM's instances span nodes.
+                                  # A separate ray_serve backend may be added later.
     port: 8000
     health_check:
       timeout_seconds: 1200

@@ -21,6 +21,7 @@ from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
+    _build_vllm_ray_command,
     _node_totals,
     _render_directives,
     _render_pool_directives,
@@ -196,6 +197,50 @@ def test_build_vllm_command_pipeline_parallel():
 def test_build_vllm_command_pipeline_parallel_1_omits_flag(vllm_service):
     cmd = _build_vllm_command(vllm_service)
     assert "--pipeline-parallel-size" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_ray_command
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_ray_command_uses_ray_distributed_executor(vllm_service):
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "--distributed-executor-backend ray" in cmd
+    assert "vllm serve" in cmd
+
+
+def test_build_vllm_ray_command_wraps_in_symmetric_run(vllm_service):
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 2" in cmd
+    assert '--address "$RAY_HEAD_NODE_IP"' in cmd
+
+
+def test_build_vllm_ray_command_multi_instance_adds_dp_backend():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+        distributed_backend={"type": "ray"},
+    )
+    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    assert "--data-parallel-size 4" in cmd
+    assert "--data-parallel-backend ray" in cmd
+
+
+def test_build_vllm_ray_command_single_instance_omits_dp_backend(vllm_service):
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "--data-parallel-backend" not in cmd
+
+
+def test_build_vllm_ray_command_not_ray_serve_library():
+    # Sanity check the plan constraint: this must not shell out to `serve` / ray.serve.
+    service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model")
+    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    assert "ray.serve" not in cmd
+    assert "serve.run" not in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +742,7 @@ def _multi_node_config():
                     "container": "vllm:latest",
                     "model": "org/model",
                     "tensor_parallel_size": 8,
+                    "distributed_backend": {"type": "ray"},
                 }
             },
             "compute": {
@@ -765,6 +811,29 @@ def test_build_sbatch_script_single_node_pool_omits_node_flags_from_srun(bench_d
     driver_line = next(line for line in script.splitlines() if "python:3.12" in line)
     assert "--nodes=" not in vllm_line
     assert "--nodes=" not in driver_line
+
+
+# ---------------------------------------------------------------------------
+# build_sbatch_script — ray prelude
+# ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_ray_backend_adds_head_node_prelude(bench_dir):
+    config = _multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "scontrol show hostnames" in script
+    assert "RAY_HEAD_NODE_IP" in script
+    assert "ray symmetric-run" in script
+
+
+def test_build_sbatch_script_vllm_service_backend_omits_ray_prelude(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "scontrol show hostnames" not in script
+    assert "ray symmetric-run" not in script
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,8 @@ _SCRIPT_TEMPLATE = """\
 #!/bin/bash
 {directives}
 
+{ray_prelude}
+
 {service_commands}
 
 {health_checks}
@@ -46,6 +48,18 @@ _SCRIPT_TEMPLATE = """\
 
 {driver_command}
 """
+
+
+# Resolves the Ray head node from Slurm's node list, mirroring scripts/sbatch_base.sh.
+# Runs once in the main sbatch shell (before any srun step) so $SLURM_JOB_NODELIST is available.
+_RAY_PRELUDE = """\
+# Resolve Ray head node IP for multi-node vLLM services (distributed_backend: ray).
+nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+nodes_array=($nodes)
+head_node_hostname=${nodes_array[0]}
+head_node_ip=$(getent hosts "$head_node_hostname" | awk '{print $1}')
+RAY_HEAD_NODE_IP="$head_node_ip:6379"
+echo "Ray head node IP address: $RAY_HEAD_NODE_IP\""""
 
 
 def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benchmark_name: str) -> str:
@@ -132,6 +146,26 @@ def _build_vllm_command(service: VllmServiceConfig) -> str:
     return cmd
 
 
+def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str:
+    # Uses vLLM's own Ray *core* executor to span nodes (--distributed-executor-backend ray).
+    # This is not the ray.serve library - no Serve deployment/ingress/HTTP proxy is involved.
+    inner_cmd = _build_vllm_command(service) + " --distributed-executor-backend ray"
+    if service.number_of_instances > 1:
+        inner_cmd += " --data-parallel-backend ray"
+    # ray symmetric-run starts/joins a Ray cluster across every task and runs the entrypoint
+    # only on the elected head node, mirroring scripts/sbatch_base.sh.
+    return (
+        "bash -lc '\n"
+        "    ray symmetric-run \\\n"
+        '        --address "$RAY_HEAD_NODE_IP" \\\n'
+        f"        --min-nodes {total_nodes} \\\n"
+        "        --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \\\n"
+        "        --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \\\n"
+        f"        -- {inner_cmd}\n"
+        "'"
+    )
+
+
 def _build_ray_command(_service: RayServiceConfig) -> str:
     return "ray start --head"
 
@@ -140,6 +174,18 @@ _BUILDERS = {
     VllmServiceConfig: _build_vllm_command,
     RayServiceConfig: _build_ray_command,
 }
+
+
+def _uses_ray_distributed_backend(service: VllmServiceConfig | RayServiceConfig) -> bool:
+    return isinstance(service, VllmServiceConfig) and (
+        service.distributed_backend is not None and service.distributed_backend.type == "ray"
+    )
+
+
+def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
+    if _uses_ray_distributed_backend(service):
+        return _build_vllm_ray_command(service, total_nodes)
+    return _BUILDERS[type(service)](service)
 
 
 def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
@@ -160,11 +206,13 @@ def build_sbatch_script(
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
 
+    ray_prelude = _RAY_PRELUDE if any(_uses_ray_distributed_backend(s) for s in config.services.values()) else ""
+
     service_commands = "\n\n".join(
         _render_service_command(
             name,
             service.container,
-            _BUILDERS[type(service)](service),
+            _build_service_command(service, total_nodes),
             service.env or None,
             service.mounts or None,
             nodes=total_nodes if is_multi_node else None,
@@ -209,6 +257,7 @@ def build_sbatch_script(
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,
+        ray_prelude=ray_prelude,
         service_commands=service_commands,
         health_checks=health_checks,
         prepare_command=prepare_command,

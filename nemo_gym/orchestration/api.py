@@ -49,14 +49,24 @@ class BaseModelServiceConfig(BaseServiceConfig):
 
 
 class VllmServiceDistributedBackend(_StrictModel):
-    """Use vLLM's native data-parallel multi-instance (--data-parallel-size N)."""
+    """Use vLLM's native data-parallel multi-instance (--data-parallel-size N). Single node only."""
 
     type: Literal["vllm_service"] = "vllm_service"
 
 
-# Future backends: add Annotated[RayServeDistributedBackend, Tag("ray_serve")], etc.
+class RayDistributedBackend(_StrictModel):
+    """Use vLLM's Ray executor (--distributed-executor-backend ray) so a single vLLM service can
+    span multiple physical Slurm nodes. This does not use the ray.serve library.
+
+    Named "ray" for now; a separate "ray_serve" backend (using the actual ray.serve library) may
+    be added later.
+    """
+
+    type: Literal["ray"] = "ray"
+
+
 DistributedBackendConfig = Annotated[
-    Annotated[VllmServiceDistributedBackend, Tag("vllm_service")],
+    Annotated[VllmServiceDistributedBackend, Tag("vllm_service")] | Annotated[RayDistributedBackend, Tag("ray")],
     Discriminator("type"),
 ]
 
@@ -83,8 +93,6 @@ class VllmServiceConfig(BaseModelServiceConfig):
                 f"distributed_backend must be set when number_of_instances > 1 (got {self.number_of_instances}). "
                 "Use: distributed_backend: {type: vllm_service}"
             )
-        if self.number_of_instances == 1 and self.distributed_backend is not None:
-            raise ValueError("distributed_backend should not be set when number_of_instances == 1")
         return self
 
     @model_validator(mode="after")
@@ -183,6 +191,10 @@ class SubmitConfig(_StrictModel):
             raise ValueError(f"Multiple compute resources are not supported yet ({', '.join(sorted(compute_names))}).")
 
         sole_compute = next(iter(compute_names))
+        compute = self.compute[sole_compute]
+        is_multi_node = (
+            isinstance(compute, SlurmComputeConfig) and sum(p.nodes for p in compute.node_pools.values()) > 1
+        )
 
         for service_name, service in self.services.items():
             if service.placement is None:
@@ -191,6 +203,17 @@ class SubmitConfig(_StrictModel):
                 raise ValueError(
                     f"Service '{service_name}' placement '{service.placement}' does not match any compute resource "
                     f"({', '.join(sorted(compute_names))})."
+                )
+
+            if (
+                is_multi_node
+                and isinstance(service, VllmServiceConfig)
+                and (service.distributed_backend is None or service.distributed_backend.type != "ray")
+            ):
+                raise ValueError(
+                    f"Service '{service_name}' is placed on compute '{sole_compute}', which spans multiple nodes "
+                    f"({sum(p.nodes for p in compute.node_pools.values())} total). vLLM services on multi-node "
+                    "compute must use distributed_backend: {type: ray}."
                 )
 
         if self.driver.policy_model is not None:

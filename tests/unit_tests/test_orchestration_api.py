@@ -124,13 +124,49 @@ def test_multi_instance_without_backend_raises():
         SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 4}}))
 
 
-def test_single_instance_with_backend_raises():
-    with pytest.raises(ValidationError, match="should not be set"):
-        SubmitConfig.model_validate(
-            _config(services={"svc": {**SERVICE, "distributed_backend": {"type": "vllm_service"}}})
-        )
-
-
 def test_number_of_instances_zero_raises():
     with pytest.raises(ValidationError):
         SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 0}}))
+
+
+# ---------------------------------------------------------------------------
+# ray distributed_backend (multi-node)
+# ---------------------------------------------------------------------------
+
+COMPUTE_MULTI_NODE = {
+    "cluster": {
+        "type": "slurm",
+        "account": "my-account",
+        "hostname": "foo",
+        "node_pools": {"compute": {"partition": "batch", "nodes": 2, "gpus_per_node": 4}},
+    }
+}
+
+
+def test_ray_backend_with_single_instance_accepted():
+    # ray is valid even with number_of_instances == 1: it's needed to span nodes for
+    # a single instance's tensor/pipeline-parallel footprint, not just for data-parallel replicas.
+    config = SubmitConfig.model_validate(
+        _config(services={"svc": {**SERVICE, "distributed_backend": {"type": "ray"}}})
+    )
+    assert config.services["svc"].distributed_backend.type == "ray"
+
+
+def test_vllm_service_backend_on_multi_node_compute_raises():
+    with pytest.raises(ValidationError, match="must use distributed_backend"):
+        SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}, compute=COMPUTE_MULTI_NODE))
+
+
+def test_vllm_service_no_backend_on_multi_node_compute_raises():
+    with pytest.raises(ValidationError, match="must use distributed_backend"):
+        SubmitConfig.model_validate(_config(compute=COMPUTE_MULTI_NODE))
+
+
+def test_ray_backend_on_multi_node_compute_accepted():
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": {**SERVICE, "distributed_backend": {"type": "ray"}}},
+            compute=COMPUTE_MULTI_NODE,
+        )
+    )
+    assert config.services["svc"].distributed_backend.type == "ray"
