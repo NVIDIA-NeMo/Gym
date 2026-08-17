@@ -13,12 +13,6 @@ config_paths:
 # SWE Bench Multilingual
 # SWE Bench Pro
 # Terminal Bench 2.1
-# TODO @bxyu-nvidia: need clarification from arajfer and config update in gym
-# HLE w/o tool
-# TODO @bxyu-nvidia: need test efficiency
-# BrowseComp
-# TODO @bxyu-nvidia: need pipeclean (may be very complex)
-# GDPVal-AA-V2
 
 ########################################
 # START Secrets
