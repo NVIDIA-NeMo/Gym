@@ -217,8 +217,9 @@ class RewardProfiler:
         single rollout contribute nothing to a repeat-level comparison and are skipped.
         If no agent qualifies, returns an empty list.
         """
-        skip_cols = {"agent_name", TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME}
-        numeric_cols = [c for c in df.columns if c not in skip_cols]
+        numeric_cols = df.select_dtypes(include="number").columns.difference(
+            [TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME]
+        )
 
         rollout_counts_by_agent = df.groupby("agent_name")[ROLLOUT_INDEX_KEY_NAME].nunique()
         multi_rollout_agents = set(rollout_counts_by_agent[rollout_counts_by_agent > 1].index)
@@ -264,6 +265,48 @@ class RewardProfiler:
                     entry[f"ci_high_95/{col}"] = float(ci_high)
             repeat_metrics.append(entry)
         return repeat_metrics
+
+    def _aggregate_repeat_level_metrics(self, repeat_level_metrics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Aggregate per-repeat estimates (e.g. mean/reward) across repeats, per agent.
+
+        Treats each repeat's stat as one observation and reports the mean and median across
+        repeats, plus the standard error of that mean -- how much the repeat-level estimates
+        themselves vary from repeat to repeat, as distinct from the intra-repeat spread already
+        captured by std/sem/CI in `_compute_repeat_level_metrics`.
+        """
+        if not repeat_level_metrics:
+            return []
+
+        df = DataFrame.from_records(repeat_level_metrics)
+        df["agent_name"] = df[AGENT_REF_KEY_NAME].apply(lambda ref: ref["name"])
+        numeric_cols = df.select_dtypes(include="number").columns.difference([ROLLOUT_INDEX_KEY_NAME])
+
+        aggregated_metrics = []
+        for agent_name, group in df.groupby("agent_name"):
+            entry: Dict[str, Any] = {AGENT_REF_KEY_NAME: {"name": agent_name}}
+            for col in numeric_cols:
+                col_data = group[col].dropna()
+                n = len(col_data)
+                if n == 0:
+                    continue
+                std = float(col_data.std(ddof=1)) if n > 1 else 0.0
+                entry[f"mean/{col}"] = float(col_data.mean())
+                entry[f"median/{col}"] = float(col_data.median())
+                entry[f"se/{col}"] = std / n**0.5
+            aggregated_metrics.append(entry)
+        return aggregated_metrics
+
+    def _append_repeat_level_aggregates_to_agent_level_metrics(
+        self, agent_level_metrics: List[Dict[str, Any]], repeat_level_metrics: List[Dict[str, Any]]
+    ) -> None:
+        repeat_level_aggregates_by_agent = {
+            entry[AGENT_REF_KEY_NAME]["name"]: entry
+            for entry in self._aggregate_repeat_level_metrics(repeat_level_metrics)
+        }
+        for agent_metrics in agent_level_metrics:
+            aggregate = repeat_level_aggregates_by_agent.get(agent_metrics[AGENT_REF_KEY_NAME]["name"])
+            if aggregate is not None:
+                agent_metrics.update({k: v for k, v in aggregate.items() if k != AGENT_REF_KEY_NAME})
 
     def profile_from_data(
         self,
@@ -336,6 +379,7 @@ class RewardProfiler:
             agent_metrics[AGENT_REF_KEY_NAME] = {"name": agent_metrics.pop("agent_name")}
 
         repeat_level_metrics = self._compute_repeat_level_metrics(df)
+        self._append_repeat_level_aggregates_to_agent_level_metrics(agent_level_metrics, repeat_level_metrics)
 
         return group_level_metrics, agent_level_metrics, repeat_level_metrics
 

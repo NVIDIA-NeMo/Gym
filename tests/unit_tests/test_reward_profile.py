@@ -264,30 +264,42 @@ class TestRewardProfile:
         ]
         assert expected_group_level_metrics == actual_group_level_metrics
 
-        expected_agent_level_metrics = [
-            {
-                "agent_ref": {"name": "my_agent"},
-                "mean/bool": 0.5,
-                "mean/reward": 0.5,
-                "mean/abc usage": 1.0,
-                "max/bool": True,
-                "max/reward": 1,
-                "max/abc usage": 1,
-                "min/bool": False,
-                "min/reward": 0,
-                "min/abc usage": 1,
-                "median/bool": 0.5,
-                "median/reward": 0.5,
-                "median/abc usage": 1.0,
-                "std/bool": 0.5477225575051661,
-                "std/reward": 0.5477225575051661,
-                "std/abc usage": 0.0,
-                "histogram/bool": None,
-                "histogram/reward": None,
-                "histogram/abc usage": None,
-            }
-        ]
-        assert expected_agent_level_metrics == actual_agent_level_metrics
+        # profile_from_data also merges in cross-repeat aggregates (mean/median/se of each
+        # per-repeat estimate, e.g. "mean/mean/reward") since there are 2 rollout_indices here.
+        # Check those separately below rather than pinning the full exploded key set.
+        assert len(actual_agent_level_metrics) == 1
+        actual_agent_metrics = actual_agent_level_metrics[0]
+        expected_agent_level_metrics = {
+            "agent_ref": {"name": "my_agent"},
+            "mean/bool": 0.5,
+            "mean/reward": 0.5,
+            "mean/abc usage": 1.0,
+            "max/bool": True,
+            "max/reward": 1,
+            "max/abc usage": 1,
+            "min/bool": False,
+            "min/reward": 0,
+            "min/abc usage": 1,
+            "median/bool": 0.5,
+            "median/reward": 0.5,
+            "median/abc usage": 1.0,
+            "std/bool": 0.5477225575051661,
+            "std/reward": 0.5477225575051661,
+            "std/abc usage": 0.0,
+            "histogram/bool": None,
+            "histogram/reward": None,
+            "histogram/abc usage": None,
+        }
+        assert expected_agent_level_metrics == {k: actual_agent_metrics[k] for k in expected_agent_level_metrics}
+
+        # rollout_index 0 always has reward=0/bool=1 across all 3 tasks, rollout_index 1 always
+        # has reward=1/bool=0 -- so the per-repeat mean is constant within each repeat but differs
+        # by 1.0 between the two repeats, giving a cross-repeat mean of 0.5 and se of 0.5.
+        assert actual_agent_metrics["mean/mean/reward"] == pytest.approx(0.5)
+        assert actual_agent_metrics["median/mean/reward"] == pytest.approx(0.5)
+        assert actual_agent_metrics["se/mean/reward"] == pytest.approx(0.5)
+        assert actual_agent_metrics["mean/mean/abc usage"] == pytest.approx(1.0)
+        assert actual_agent_metrics["se/mean/abc usage"] == pytest.approx(0.0)
 
     def test_profile_from_data_series(self) -> None:
         rows = [

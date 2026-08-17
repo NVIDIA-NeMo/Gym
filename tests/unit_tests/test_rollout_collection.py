@@ -842,22 +842,17 @@ class TestRolloutCollection:
 
         aggregate_metrics_fpath = tmp_path / "output_aggregate_metrics.json"
         actual_aggregate_metrics = json.loads(aggregate_metrics_fpath.read_text())
-        expected_aggregate_metrics = [
-            {
-                "agent_ref": {"name": "my agent name"},
-                "agent_metrics": {
-                    "mean/abc usage": 1.0,
-                    "max/abc usage": 1,
-                    "min/abc usage": 1,
-                    "median/abc usage": 1.0,
-                    "std/abc usage": 0.0,
-                },
-                "key_metrics": {"mean/abc usage": 1.0},
-                "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
-                "repeat_level_metrics": actual_aggregate_metrics[0]["repeat_level_metrics"],
-            }
-        ]
-        assert expected_aggregate_metrics == actual_aggregate_metrics
+        assert len(actual_aggregate_metrics) == 1
+        assert actual_aggregate_metrics[0]["agent_ref"] == {"name": "my agent name"}
+
+        # Base per-rollout stats are unaffected by the repeat-level aggregation merged in below.
+        agent_metrics = actual_aggregate_metrics[0]["agent_metrics"]
+        assert agent_metrics["mean/abc usage"] == pytest.approx(1.0)
+        assert agent_metrics["max/abc usage"] == 1
+        assert agent_metrics["min/abc usage"] == 1
+        assert agent_metrics["median/abc usage"] == pytest.approx(1.0)
+        assert agent_metrics["std/abc usage"] == pytest.approx(0.0)
+        assert actual_aggregate_metrics[0]["key_metrics"]["mean/abc usage"] == pytest.approx(1.0)
 
         # num_repeats=2 -> repeat_level_metrics has one entry per rollout_index (0 and 1),
         # each aggregating the "abc usage" metric across all 3 tasks at that repeat.
@@ -870,6 +865,13 @@ class TestRolloutCollection:
             assert entry["missing_count"] == 0
             assert entry["mean/abc usage"] == pytest.approx(1.0)
             assert entry["std/abc usage"] == pytest.approx(0.0)
+
+        # Cross-repeat aggregates (mean/median/se of the per-repeat "mean/abc usage" estimate)
+        # are merged into agent_metrics -- both repeats agree exactly (constant "abc usage"=1),
+        # so the cross-repeat mean/median equal 1.0 and the SE across repeats is 0.
+        assert agent_metrics["mean/mean/abc usage"] == pytest.approx(1.0)
+        assert agent_metrics["median/mean/abc usage"] == pytest.approx(1.0)
+        assert agent_metrics["se/mean/abc usage"] == pytest.approx(0.0)
 
     async def test_run_from_config_repeat_level_metrics_e2e(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
