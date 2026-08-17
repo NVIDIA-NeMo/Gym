@@ -58,6 +58,8 @@ small NVIDIA integration patch:
 | `model_base_url` / `model_api_key` / `model_name` | policy model OpenClaw runs against |
 | `judge_model` / `judge_base_url` / `judge_api_key` | judge for hybrid / `llm_judge` tasks |
 | `max_tokens`, `context_window`, `max_concurrent`, `timeout_multiplier` | run tuning |
+| `max_turns` | optional hard cap on agent model calls per task. Gym starts a per-task streaming proxy, points `MODEL_BASE_URL` at it, and rejects calls past the budget with HTTP 429 `session_budget_exhausted`. Unset means no cap |
+| `turn_reminder_position` / `turn_reminder_trigger` | where budget reminders land (`system_message`, `user_message`) and how often (`threshold` at 80%/95%, `per_turn`, or `auto` — per-turn for budgets too small for a threshold warning to be actionable) |
 
 > **Model wiring:** OpenClaw must point at a **streaming-capable** endpoint directly — *not* a Gym
 > model server, which is non-streaming (`stream: Literal[False]`) and would 422 OpenClaw's streamed

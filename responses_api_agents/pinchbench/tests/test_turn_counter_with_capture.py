@@ -26,6 +26,7 @@ from aiohttp import ClientSession, web
 
 from responses_api_agents.pinchbench.tests.test_app import make_agent
 
+
 ROLLOUT = "12-0"
 
 
@@ -104,12 +105,15 @@ async def test_run_in_sandbox_wires_proxy_to_capture_upstream(tmp_path, monkeypa
 
     class FakeProxy:
         base_url = "http://127.0.0.1:5555/v1"
+        max_turns = 5
+        turns_used = 0
 
         async def stop(self):
             started["stopped"] = True
 
-    async def fake_maybe_start(upstream_base_url: str):
+    async def fake_maybe_start(upstream_base_url: str, label: str = "-"):
         started["upstream"] = upstream_base_url
+        started["label"] = label
         return FakeProxy()
 
     class FakeSandbox:
@@ -127,8 +131,7 @@ async def test_run_in_sandbox_wires_proxy_to_capture_upstream(tmp_path, monkeypa
             # Minimal gzip tar so extractall succeeds.
             import tarfile
 
-            with tarfile.open(dest, "w:gz") as tf:
-                pass
+            tarfile.open(dest, "w:gz").close()
 
         async def stop(self):
             return None
@@ -140,6 +143,7 @@ async def test_run_in_sandbox_wires_proxy_to_capture_upstream(tmp_path, monkeypa
 
     assert started["upstream"] == f"http://model:8000/ng-rollout/{ROLLOUT}/v1"
     assert started["env_url"] == "http://127.0.0.1:5555/v1"
+    assert started["label"] == "task_x"  # log lines must name the task they capped
     assert started.get("stopped") is True
 
 
@@ -168,8 +172,7 @@ async def test_without_max_turns_sandbox_gets_capture_url_directly(tmp_path, mon
             import tarfile
 
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with tarfile.open(dest, "w:gz") as tf:
-                pass
+            tarfile.open(dest, "w:gz").close()
 
         async def stop(self):
             return None

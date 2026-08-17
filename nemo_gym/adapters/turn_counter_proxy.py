@@ -14,20 +14,24 @@
 """Minimal streaming turn-counter proxy (PinchBench PoC).
 
 Sits between an external harness (OpenClaw) and a streaming-capable model
-endpoint. Counts each POST as one agent turn; injects threshold budget
-reminders into the request ``messages``; rejects with 429 once ``max_turns``
-is exceeded.
+endpoint. Counts each POST as one agent turn; injects budget reminders into
+the request ``messages``; rejects with 429 once ``max_turns`` is exceeded.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 from aiohttp import ClientSession, web
+
+
+logger = logging.getLogger(__name__)
 
 _HOP_BY_HOP = {
     "connection",
@@ -44,14 +48,35 @@ _HOP_BY_HOP = {
 
 _WARN_THRESHOLD = 0.80
 _URGENT_THRESHOLD = 0.95
+# A reminder is only useful if the agent still has turns left to act on it. Below this
+# many turns after the proportional warn point, `auto` switches to per-turn reminders.
+_MIN_ACTIONABLE_LEAD = 2
+
+_PER_TURN_TEMPLATE = "ENVIRONMENT REMINDER: You have {remaining} turn(s) left to complete the task."
 
 Position = Literal["system_message", "user_message"]
+Trigger = Literal["threshold", "per_turn", "auto"]
 
 
 class _Severity(str, Enum):
     URGENT = "urgent"
     WARN = "warn"
     NON_ACTIONABLE = "non_actionable"
+
+
+def resolve_reminder_trigger(trigger: Trigger, max_turns: int) -> Literal["threshold", "per_turn"]:
+    """Pick the reminder cadence, resolving ``auto`` against the size of the budget.
+
+    Proportional thresholds are meaningless for a small budget: at ``max_turns=4`` the
+    80% warn point is turn 4, the last call the agent is allowed to make, so it can no
+    longer act on the warning. Such budgets get a reminder on every turn instead.
+    """
+    if trigger not in ("threshold", "per_turn", "auto"):
+        raise ValueError(f"invalid trigger: {trigger!r}")
+    if trigger != "auto":
+        return trigger
+    first_warn_turn = math.ceil(_WARN_THRESHOLD * max_turns)
+    return "threshold" if max_turns - first_warn_turn >= _MIN_ACTIONABLE_LEAD else "per_turn"
 
 
 def _threshold_severity(n: int, max_turns: int) -> _Severity:
@@ -100,21 +125,27 @@ def inject_turn_reminder(
     n: int,
     max_turns: int,
     position: Position = "system_message",
+    trigger: Trigger = "auto",
 ) -> dict[str, Any]:
-    """Mutate (and return) a chat-completions body with a threshold turn reminder when due."""
+    """Mutate (and return) a chat-completions body with a turn reminder when one is due."""
     if position not in ("system_message", "user_message"):
         raise ValueError(f"invalid position: {position!r}")
+    cadence = resolve_reminder_trigger(trigger, max_turns)
 
     messages = body.get("messages")
     if not isinstance(messages, list):
         return body
 
     severity = _threshold_severity(n, max_turns)
-    if severity is _Severity.NON_ACTIONABLE:
-        return body
-
     remaining = max_turns - n
-    text = _threshold_message_body(n, max_turns, remaining, severity)
+    if cadence == "threshold":
+        if severity is _Severity.NON_ACTIONABLE:
+            return body
+        text = _threshold_message_body(n, max_turns, remaining, severity)
+    elif severity is _Severity.URGENT:
+        text = _threshold_message_body(n, max_turns, remaining, severity)
+    else:
+        text = _PER_TURN_TEMPLATE.format(remaining=remaining)
     notice = f"[SYSTEM] {text}" if position == "system_message" else text
 
     if position == "system_message":
@@ -130,6 +161,8 @@ class TurnCounterProxy:
 
     base_url: str
     port: int
+    max_turns: int
+    label: str
     _runner: web.AppRunner
     _site: web.TCPSite
     _session: ClientSession
@@ -151,8 +184,10 @@ async def start_turn_counter_proxy(
     api_key: str,
     max_turns: int,
     position: Position = "system_message",
+    trigger: Trigger = "auto",
     host: str = "127.0.0.1",
     advertise_host: str | None = None,
+    label: str = "-",
 ) -> TurnCounterProxy:
     """Start a per-task proxy that enforces ``max_turns`` on POSTs.
 
@@ -163,7 +198,8 @@ async def start_turn_counter_proxy(
     """
     if max_turns < 1:
         raise ValueError(f"max_turns must be >= 1, got {max_turns}")
-    inject_turn_reminder({"messages": []}, n=1, max_turns=max_turns, position=position)
+    inject_turn_reminder({"messages": []}, n=1, max_turns=max_turns, position=position, trigger=trigger)
+    cadence = resolve_reminder_trigger(trigger, max_turns)
 
     upstream = urlparse(upstream_base_url.rstrip("/"))
     if not upstream.scheme or not upstream.netloc:
@@ -183,6 +219,7 @@ async def start_turn_counter_proxy(
         state["turns_used"] += 1
         n = state["turns_used"]
         if n > max_turns:
+            logger.warning("turn_counter %s: REJECTED turn %d (max_turns=%d exceeded)", label, n, max_turns)
             return web.json_response(
                 {
                     "error": {
@@ -193,6 +230,8 @@ async def start_turn_counter_proxy(
                 },
                 status=429,
             )
+
+        logger.info("turn_counter %s: turn %d/%d", label, n, max_turns)
 
         req_path = request.path
         if advertise_path and (req_path == advertise_path or req_path.startswith(advertise_path + "/")):
@@ -214,7 +253,7 @@ async def start_turn_counter_proxy(
             payload = None
 
         if isinstance(payload, dict):
-            inject_turn_reminder(payload, n=n, max_turns=max_turns, position=position)
+            inject_turn_reminder(payload, n=n, max_turns=max_turns, position=position, trigger=cadence)
             body = json.dumps(payload).encode()
             headers = {k: v for k, v in headers.items() if k.lower() != "content-length"}
         else:
@@ -250,9 +289,30 @@ async def start_turn_counter_proxy(
 
     adv = advertise_host or host
     base_url = f"http://{adv}:{port}{advertise_path}"
+
+    # A silently unreachable proxy would leave the harness talking to the model
+    # directly with no budget at all, so prove the listener answers before use.
+    async with session.get(f"http://{host}:{port}/health") as probe:
+        if probe.status != 200:
+            await site.stop()
+            await runner.cleanup()
+            await session.close()
+            raise RuntimeError(f"turn-counter proxy health check failed with HTTP {probe.status}")
+
+    logger.info(
+        "turn_counter %s: enforcing max_turns=%d (reminders=%s/%s) via %s -> %s",
+        label,
+        max_turns,
+        cadence,
+        position,
+        base_url,
+        upstream_full_base,
+    )
     return TurnCounterProxy(
         base_url=base_url,
         port=port,
+        max_turns=max_turns,
+        label=label,
         _runner=runner,
         _site=site,
         _session=session,

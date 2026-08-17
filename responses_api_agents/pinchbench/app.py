@@ -38,6 +38,7 @@ See README.md for design + findings (skill patch, gateway, parity).
 import asyncio
 import glob
 import json
+import logging
 import shutil
 import tarfile
 import textwrap
@@ -48,6 +49,7 @@ from typing import Any, Literal, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict, model_validator
 
+from nemo_gym.adapters.turn_counter_proxy import TurnCounterProxy, start_turn_counter_proxy
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -67,9 +69,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.adapters.turn_counter_proxy import TurnCounterProxy, start_turn_counter_proxy
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_utils import apply_rollout_prefix
+
+
+logger = logging.getLogger(__name__)
 
 
 class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
@@ -120,6 +124,9 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     # (apptainer host net: 127.0.0.1).
     max_turns: Optional[int] = None
     turn_reminder_position: Literal["system_message", "user_message"] = "system_message"
+    # Reminder cadence. `auto` uses proportional 80%/95% thresholds for budgets large
+    # enough for a warning to be actionable, and reminds on every turn for small ones.
+    turn_reminder_trigger: Literal["threshold", "per_turn", "auto"] = "auto"
     # Optional OpenClaw provider request timeout in seconds. None keeps OpenClaw's 120s default.
     openclaw_provider_timeout_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
@@ -273,7 +280,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             metadata={"task_id": task_id},
         )
 
-    async def _maybe_start_turn_proxy(self, upstream_base_url: str) -> Optional[TurnCounterProxy]:
+    async def _maybe_start_turn_proxy(self, upstream_base_url: str, label: str = "-") -> Optional[TurnCounterProxy]:
         if self.config.max_turns is None:
             return None
         return await start_turn_counter_proxy(
@@ -281,12 +288,14 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             api_key=self.config.model_api_key,
             max_turns=self.config.max_turns,
             position=self.config.turn_reminder_position,
+            trigger=self.config.turn_reminder_trigger,
+            label=label,
         )
 
     async def _run_in_sandbox(self, task_id: str, out_dir: Path, rollout_id: Optional[str] = None) -> None:
         """Run one PinchBench task and pull its /out archive back."""
         upstream = self._rollout_scoped_model_base_url(rollout_id)
-        proxy = await self._maybe_start_turn_proxy(upstream)
+        proxy = await self._maybe_start_turn_proxy(upstream, label=task_id)
         model_base_url = proxy.base_url if proxy is not None else upstream
         try:
             provider = self.config.sandbox_provider or {}
@@ -311,6 +320,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 tf.extractall(out_dir)  # noqa: S202 -- trusted, in-sandbox-produced archive
         finally:
             if proxy is not None:
+                logger.info(
+                    "turn_counter %s: task finished after %d/%d turns", task_id, proxy.turns_used, proxy.max_turns
+                )
                 await proxy.stop()
 
     def _write_direct_exec_wrapper(self, staging_dir: Path) -> Path:
