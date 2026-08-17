@@ -55,14 +55,17 @@ cleanup_sandboxes() {
     trap - EXIT INT TERM
     set +e
 
-    export OPENSANDBOX_DOMAIN="\${OPENSANDBOX_DOMAIN:-\$(awk '/^sandbox:/{s=1} s && /domain:/{print \$2; exit}' env.yaml)}"
-    export OPENSANDBOX_PROTOCOL="\${OPENSANDBOX_PROTOCOL:-\$(awk '/^sandbox:/{s=1} s && /protocol:/{print \$2; exit}' env.yaml)}"
-    export OPENSANDBOX_API_KEY="\${OPENSANDBOX_API_KEY:-\$(awk '/^sandbox:/{s=1} s && /api_key:/{print \$2; exit}' env.yaml)}"
+    opensandbox_domain="\$(awk '/^sandbox:/{s=1} s && /domain:/{print \$2; exit}' env.yaml)"
+    opensandbox_protocol="\$(awk '/^sandbox:/{s=1} s && /protocol:/{print \$2; exit}' env.yaml)"
 
-    python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py \
-        --run-id "\$SLURM_JOB_ID" \
-        --user "\$NEMO_GYM_USER" \
-        --reap
+    awk '/^sandbox:/{s=1} s && /api_key:/{print \$2; exit}' env.yaml \
+        | python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py \
+            --domain "\$opensandbox_domain" \
+            --protocol "\${opensandbox_protocol:-http}" \
+            --api-key-stdin \
+            --run-id "\$SLURM_JOB_ID" \
+            --user "\$NEMO_GYM_USER" \
+            --reap
     cleanup_status=\$?
     if (( cleanup_status != 0 )); then
         echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
