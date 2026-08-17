@@ -9,6 +9,7 @@ import asyncio
 import re
 import sys
 import urllib.parse
+from collections.abc import Mapping
 from typing import Any
 
 import aiohttp
@@ -134,34 +135,74 @@ async def cleanup_sandboxes(
 
 
 def main(argv: list[str] | None = None) -> int:
+    from nemo_gym.cli.main import COMMANDS, _extra_roots_from_search_dir, _merge_config_paths
+
+    # The sbatch forwards the same config selectors to eval prepare and run.
+    config_flags = COMMANDS["eval prepare"].flags
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--domain", required=True)
-    parser.add_argument("--protocol", choices=("http", "https"), default="http")
-    parser.add_argument("--api-key-stdin", action="store_true", required=True, help="Read the API key from stdin.")
+    for flag in config_flags:
+        flag.register(parser)
+    parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--user", required=True)
     parser.add_argument("--reap", action="store_true", help="Delete exact matches; otherwise only audit them.")
-    args = parser.parse_args(argv)
+    args, overrides = parser.parse_known_args(argv)
 
-    access_key = sys.stdin.read().strip()
-    for name, value in (("domain", args.domain), ("run-id", args.run_id), ("user", args.user)):
+    unknown_flags = [token for token in overrides if token.startswith("-")]
+    if unknown_flags:
+        parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}")
+    for name, value in (("run-id", args.run_id), ("user", args.user)):
         if not value.strip():
             parser.error(f"--{name} must not be empty")
-    if not access_key:
-        parser.error("--api-key-stdin did not provide an API key")
+
+    from nemo_gym.config_types import ConfigError
+    from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
+    from nemo_gym.sandbox.config import resolve_provider_config
 
     try:
+        with _extra_roots_from_search_dir(args.search_dir):
+            translated = [token for flag in config_flags for token in flag.translate_to_hydra(args)]
+            config_args = _merge_config_paths(translated + overrides)
+            if args.verbose:
+                config_args = ["+verbose=true", *config_args]
+
+            original_argv = sys.argv
+            try:
+                # Gym's resolver consumes Hydra overrides from sys.argv.
+                sys.argv = [original_argv[0], *config_args]
+                global_config = get_global_config_dict(
+                    global_config_dict_parser_config=GlobalConfigDictParserConfig(offline=True)
+                )
+            finally:
+                sys.argv = original_argv
+
+        opensandbox = resolve_provider_config("sandbox", global_config).get("opensandbox")
+        if not isinstance(opensandbox, Mapping):
+            raise ValueError("Gym config 'sandbox' must select the OpenSandbox provider")
+        connection = opensandbox.get("connection")
+        if not isinstance(connection, Mapping):
+            raise ValueError("Gym config 'sandbox.opensandbox.connection' is required")
+
+        domain = connection.get("domain")
+        access_key = connection.get("api_key")
+        protocol = connection.get("protocol") or "http"
+        for path, value in (("domain", domain), ("api_key", access_key)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Gym config 'sandbox.opensandbox.connection.{path}' is required")
+        if not isinstance(protocol, str) or protocol.strip() not in {"http", "https"}:
+            raise ValueError("Gym config 'sandbox.opensandbox.connection.protocol' must be http or https")
+
         return asyncio.run(
             cleanup_sandboxes(
-                domain=args.domain,
-                protocol=args.protocol,
-                access_key=access_key,
+                domain=domain.strip(),
+                protocol=protocol.strip(),
+                access_key=access_key.strip(),
                 run_id=args.run_id,
                 user=args.user,
                 reap=args.reap,
             )
         )
-    except (aiohttp.ClientError, OSError, ValueError) as error:
+    except (aiohttp.ClientError, ConfigError, OSError, TypeError, ValueError) as error:
         print(f"OpenSandbox cleanup failed: {error}", file=sys.stderr)
         return 1
 
