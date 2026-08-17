@@ -113,6 +113,29 @@ export UCX_RNDV_THRESH=0
 
 source "$VLLM_CONFIG"
 
+# Observed Super VL full-rack no-MTP throughput winner (TP4, 5P+11D).
+VLLM_OPTIMAL_ARGS=(
+    --tensor-parallel-size 4
+    --data-parallel-backend mp
+    --distributed-executor-backend mp
+    --dtype bfloat16
+    --kv-cache-dtype auto
+    --max-num-seqs 512
+    --trust-remote-code
+    --max-model-len 97257
+    --max-num-batched-tokens 32768
+    --block-size 128
+    --enable-prefix-caching
+    --language-model-only
+    --async-scheduling
+    --enable-expert-parallel
+    --mamba-ssm-cache-dtype float32
+    --mamba-cache-mode align
+    --revision db2e4b63a1658dff80b6978ba4ffccda5cc8d166
+    --seed 0
+    --served-model-name "$MODEL"
+)
+
 this_node_hostname=\$(hostname)
 # Split nodes here by index
 if (( SLURM_PROCID == 0 )); then
@@ -120,7 +143,7 @@ if (( SLURM_PROCID == 0 )); then
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" "\${VLLM_OPTIMAL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $PREFILL_SERVER_PORT \
         --data-parallel-size $NUM_PREFILL_NODES \
@@ -135,12 +158,13 @@ if (( SLURM_PROCID == 0 )); then
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
     vllm-router \
-        --policy consistent_hash \
+        --policy round_robin \
         --vllm-pd-disaggregation \
         --prefill http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
         --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
         --host \$PREFILL_HEAD \
         --port $ROUTER_SERVER_PORT \
+        --max-concurrent-requests 8192 \
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
         --log-level error
@@ -148,7 +172,7 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" "\${VLLM_OPTIMAL_ARGS[@]}" \
         --headless \
         --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-start-rank \$SLURM_PROCID \
@@ -159,7 +183,7 @@ elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" "\${VLLM_OPTIMAL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $DECODE_SERVER_PORT \
         --data-parallel-size $NUM_DECODE_NODES \
@@ -171,7 +195,7 @@ else
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" "\${VLLM_OPTIMAL_ARGS[@]}" \
         --headless \
         --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
