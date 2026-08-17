@@ -40,6 +40,7 @@ import socket
 import statistics
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -170,6 +171,10 @@ def _tool_response(name: str, arguments: dict, step_idx: int) -> dict:
 
 async def drive_episode(post: PostFn) -> float:
     row = _load_task_row()
+    # The same body is reused by any transparent transport retry, allowing the
+    # stateful server to return the original committed reset instead of opening
+    # a second episode after a lost response.
+    row["_ng_reset_request_id"] = uuid.uuid4().hex
     reset = await post("/reset", row)
     try:
         info = reset["info"]
@@ -186,6 +191,7 @@ async def drive_episode(post: PostFn) -> float:
                 {
                     "responses_create_params": row["responses_create_params"],
                     "response": _tool_response(action["name"], action["arguments"], step_idx),
+                    "_ng_step_request_id": uuid.uuid4().hex,
                 },
             )
             reward = float(step["reward"])

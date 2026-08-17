@@ -31,6 +31,8 @@ openair_congestion:
       # Reclaim a backend slot left behind by a hard client/process crash
       # after one hour without reset/step activity.
       session_ttl_s: 3600.0
+      # A malformed model turn advances as noop and adds this surcharge; it
+      # does not end the episode early.
       protocol_violation_penalty: -1.0
       # dataset_replay knobs — flip `backend: dataset_replay` and point
       # dataset_path at recorded KPI-snapshot JSONL. Task rows must

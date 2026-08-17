@@ -106,8 +106,10 @@ TOOLS: list[dict[str, Any]] = [
     _func(
         "set_prb_cap",
         "Cap the maximum PRBs allocated per scheduling round to a single UE. "
-        "Used to throttle a hog UE that is starving the rest of the "
-        "cell.",
+        "Synthetic replay accepts caps at or above ceil(273 / active UEs); "
+        "it also requires other observed UEs to absorb all displaced "
+        "throughput. Otherwise a new cap fails closed, and a persistent cap "
+        "is suspended for that transition.",
         {
             "cell_id": _CELL_ID_PROP,
             "target": {
@@ -125,7 +127,10 @@ TOOLS: list[dict[str, Any]] = [
                 "type": "integer",
                 "minimum": 0,
                 "maximum": PRB_MAX,
-                "description": "Hard cap on PRBs per slot for this target.",
+                "description": (
+                    "Hard cap on PRBs per slot. Replay requires at least "
+                    "ceil(273 / active UEs) and full reassignment headroom."
+                ),
             },
         },
         ["cell_id", "target", "target_id", "max_prb"],
@@ -180,16 +185,18 @@ TOOLS: list[dict[str, Any]] = [
     ),
     _func(
         "set_admission_policy",
-        "Tighten or loosen RRC admission. Lowering the accept_threshold "
-        "admits fewer UEs in synthetic replay. Slice reservations are not "
-        "modeled, so slice_reservation must be empty.",
+        "Configure RRC admission. Synthetic replay accepts only a "
+        "topology-neutral 100% threshold with an empty slice_reservation; "
+        "traffic shedding fails closed until denied-demand is modeled.",
         {
             "cell_id": _CELL_ID_PROP,
             "accept_threshold_pct": {
                 "type": "number",
-                "minimum": 0.0,
+                "minimum": 100.0,
                 "maximum": 100.0,
-                "description": "RRC accept threshold as a percentage of cell load.",
+                "description": (
+                    "RRC accept threshold as a percentage of cell load. Synthetic replay currently accepts only 100%."
+                ),
             },
             "slice_reservation": {
                 "type": "object",

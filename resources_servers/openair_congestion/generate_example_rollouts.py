@@ -3,8 +3,8 @@
 
 """Regenerate the five committed replay rollouts without a model service.
 
-These examples exercise the real FastAPI ``/reset``/``/step``/``/close``
-surface with the deterministic scripted-relief policy used by ``client.py``.
+These examples exercise the resource server's real ``reset``/``step``/``close``
+contract with the deterministic scripted-relief policy used by ``client.py``.
 They prove contribution wiring and reward provenance; they are explicitly not
 evidence of SFT or GRPO policy quality.
 """
@@ -19,8 +19,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-import httpx
-
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.openair_congestion.app import (
     OpenAirCongestionEnv,
@@ -80,87 +79,79 @@ async def _generate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         agent_max_steps=EVIDENCE_MAX_STEPS,
     )
     env = OpenAirCongestionEnv(config=config, server_client=MagicMock(spec=ServerClient))
-    transport = httpx.ASGITransport(app=env.setup_webserver())
     generated: list[dict[str, Any]] = []
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://example") as client:
-        for task_index, source_row in enumerate(rows):
-            # Keep the checked-in receipt compact while still showing one
-            # intervention followed by persistent synthetic state transitions.
-            row = {
-                **source_row,
-                "max_steps": min(
-                    int(source_row.get("max_steps", EVIDENCE_MAX_STEPS)),
-                    EVIDENCE_MAX_STEPS,
-                ),
+    for task_index, source_row in enumerate(rows):
+        session_id = f"example-generator-{task_index}"
+        # Keep the checked-in receipt compact while still showing one
+        # intervention followed by persistent synthetic state transitions.
+        row = {
+            **source_row,
+            "max_steps": min(
+                int(source_row.get("max_steps", EVIDENCE_MAX_STEPS)),
+                EVIDENCE_MAX_STEPS,
+            ),
+        }
+        observation, _ = await env.reset(row, session_id=session_id)
+        trajectory: list[dict[str, Any]] = []
+        episode_return = 0.0
+        terminated = truncated = False
+        last_response: dict[str, Any] | None = None
+        last_info: dict[str, Any] = {}
+
+        try:
+            for step_idx in range(int(row.get("max_steps", 16))):
+                action = choose_action(observation, step_idx)
+                last_response = _tool_response(action["name"], action["arguments"], step_idx)
+                step_tuple = await env.step(
+                    NeMoGymResponse.model_validate(last_response),
+                    {"_ng_step_request_id": f"example-{task_index}-{step_idx}"},
+                    session_id=session_id,
+                )
+                next_observation, raw_reward, raw_terminated, raw_truncated, raw_info = step_tuple
+                reward = float(raw_reward)
+                assert math.isfinite(reward)
+                episode_return += reward
+                last_info = {key: value for key, value in raw_info.items() if key != "_ng_lifecycle_generation"}
+                trajectory.append(
+                    {
+                        "step": step_idx,
+                        "observation": observation,
+                        "action": action,
+                        "reward": reward,
+                        "next_observation": next_observation,
+                        "terminated": bool(raw_terminated),
+                        "truncated": bool(raw_truncated),
+                        **{key: last_info.get(key) for key in _STEP_INFO_KEYS},
+                    }
+                )
+                observation = next_observation
+                terminated = bool(raw_terminated)
+                truncated = bool(raw_truncated)
+                if terminated or truncated:
+                    break
+        finally:
+            await env.explicit_close(session_id)
+
+        if last_response is None or not (terminated or truncated):
+            raise RuntimeError(f"example row {task_index} did not complete a bounded episode")
+
+        final_info = {key: last_info.get(key) for key in _STEP_INFO_KEYS}
+        generated.append(
+            {
+                **row,
+                "response": last_response,
+                "reward": episode_return,
+                "terminated": terminated,
+                "truncated": truncated,
+                "info": final_info,
+                "trajectory": trajectory,
+                "example_policy": "deterministic_scripted_relief_v1",
+                "evidence_scope": "resource_server_wiring_not_model_quality",
+                "_ng_task_index": task_index,
+                "_ng_rollout_index": 0,
             }
-            reset_response = await client.post("/reset", json=row)
-            reset_response.raise_for_status()
-            reset = reset_response.json()
-            observation = reset["observation"]
-            trajectory: list[dict[str, Any]] = []
-            episode_return = 0.0
-            terminated = truncated = False
-            last_response: dict[str, Any] | None = None
-            last_info: dict[str, Any] = {}
-
-            try:
-                for step_idx in range(int(row.get("max_steps", 16))):
-                    action = choose_action(observation, step_idx)
-                    last_response = _tool_response(action["name"], action["arguments"], step_idx)
-                    step_response = await client.post(
-                        "/step",
-                        json={
-                            "responses_create_params": row["responses_create_params"],
-                            "response": last_response,
-                        },
-                    )
-                    step_response.raise_for_status()
-                    step = step_response.json()
-                    reward = float(step["reward"])
-                    assert math.isfinite(reward)
-                    episode_return += reward
-                    last_info = step.get("info") or {}
-                    trajectory.append(
-                        {
-                            "step": step_idx,
-                            "observation": observation,
-                            "action": action,
-                            "reward": reward,
-                            "next_observation": step["observation"],
-                            "terminated": bool(step["terminated"]),
-                            "truncated": bool(step["truncated"]),
-                            **{key: last_info.get(key) for key in _STEP_INFO_KEYS},
-                        }
-                    )
-                    observation = step["observation"]
-                    terminated = bool(step["terminated"])
-                    truncated = bool(step["truncated"])
-                    if terminated or truncated:
-                        break
-            finally:
-                close_response = await client.post("/close", json={})
-                close_response.raise_for_status()
-
-            if last_response is None or not (terminated or truncated):
-                raise RuntimeError(f"example row {task_index} did not complete a bounded episode")
-
-            final_info = {key: last_info.get(key) for key in _STEP_INFO_KEYS}
-            generated.append(
-                {
-                    **row,
-                    "response": last_response,
-                    "reward": episode_return,
-                    "terminated": terminated,
-                    "truncated": truncated,
-                    "info": final_info,
-                    "trajectory": trajectory,
-                    "example_policy": "deterministic_scripted_relief_v1",
-                    "evidence_scope": "resource_server_wiring_not_model_quality",
-                    "_ng_task_index": task_index,
-                    "_ng_rollout_index": 0,
-                }
-            )
+        )
 
     return generated
 

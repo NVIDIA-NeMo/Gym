@@ -15,6 +15,7 @@
 
 """Agent for GymnasiumServer resources servers (resources_servers.gymnasium) which implements the Gymnasium API."""
 
+import asyncio
 import logging
 import uuid
 
@@ -39,6 +40,34 @@ from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
 
 _LOGGER = logging.getLogger(__name__)
+
+# These are the model-output item types that the shared Responses-to-Chat
+# converter can replay on a later turn. Responses-only hosted/client tool calls
+# remain in rollout evidence, but replaying them would make a chat-backed model
+# fail before it can recover from the environment's protocol rejection.
+_CHAT_REPLAY_SAFE_MODEL_OUTPUT_TYPES = frozenset({"message", "reasoning", "function_call"})
+
+
+async def _finish_despite_cancellation(operation):
+    """Finish an accepted cleanup operation before propagating cancellation."""
+
+    task = asyncio.ensure_future(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancellation:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        try:
+            task.result()
+        except BaseException:
+            pass
+        raise cancellation
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -84,11 +113,17 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         # issued by the resource server during the rollout.
         env_cookies = dict(request.cookies)
         model_url_path = self.url_path_for_run("/v1/responses", body)
+        reset_body = body.model_dump()
+        # ServerClient may transparently retry a POST after the server has
+        # committed it but before the response cookie arrives. Keep one
+        # idempotency key for that whole transport call so stateful resources
+        # servers can recover the original cookie-scoped episode.
+        reset_body["_ng_reset_request_id"] = uuid.uuid4().hex
 
         reset_resp = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/reset",
-            json=body.model_dump(),
+            json=reset_body,
             cookies=env_cookies,
         )
         await raise_for_status(reset_resp)
@@ -109,7 +144,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             if supports_explicit_close:
                 # Preserve the original model/transport/cancellation failure.
                 try:
-                    await self._close_environment(env_cookies)
+                    await _finish_despite_cancellation(self._close_environment(env_cookies))
                 except Exception:
                     _LOGGER.exception("Failed to close Gymnasium environment after rollout error")
             raise
@@ -117,7 +152,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         if not supports_explicit_close:
             return result
         try:
-            await self._close_environment(env_cookies)
+            await _finish_despite_cancellation(self._close_environment(env_cookies))
         except Exception as exc:
             _LOGGER.exception("Completed Gymnasium rollout, but environment cleanup failed")
             result = result.model_copy(
@@ -162,7 +197,8 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 NeMoGymEasyInputMessage(role="user", content=reset_data.observation)
             ]
 
-        new_outputs = []
+        rollout_outputs = []
+        model_context_outputs = []
         total_reward = 0.0
         usage = None
         model_server_cookies = None
@@ -171,7 +207,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         finished = False
 
         for _ in range(self.config.max_steps):
-            new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
+            new_body = base_body.model_copy(update={"input": base_body.input + model_context_outputs})
 
             model_resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
@@ -184,7 +220,15 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             model_server_cookies = model_resp.cookies
             last_model_response = model_response
 
-            new_outputs.extend(model_response.output)
+            turn_outputs = list(model_response.output)
+            rollout_outputs.extend(turn_outputs)
+            context_safe_turn_outputs = [
+                item for item in turn_outputs if getattr(item, "type", None) in _CHAT_REPLAY_SAFE_MODEL_OUTPUT_TYPES
+            ]
+            model_context_outputs.extend(context_safe_turn_outputs)
+            replayed_function_call_ids = {
+                item.call_id for item in context_safe_turn_outputs if getattr(item, "type", None) == "function_call"
+            }
 
             usage = accumulate_response_usage(usage, model_response.usage)
 
@@ -197,32 +241,40 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 json=step_body,
                 cookies=env_cookies,
             )
+            # A stateful resource server may rotate its session cookie on the
+            # step response.  Keep that ownership token even when the response
+            # body is malformed so the error cleanup closes the right session.
+            if step_resp.cookies:
+                env_cookies.update(step_resp.cookies)
             await raise_for_status(step_resp)
             step_data = EnvStepResponse.model_validate(await get_response_json(step_resp))
             total_reward += step_data.reward
-            if step_resp.cookies:
-                env_cookies.update(step_resp.cookies)
 
+            for tool_output in (step_data.info or {}).get("tool_outputs", []):
+                output_item = NeMoGymFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=tool_output["call_id"],
+                    output=tool_output["output"],
+                )
+                rollout_outputs.append(output_item)
+                if output_item.call_id in replayed_function_call_ids:
+                    model_context_outputs.append(output_item)
+
+            if step_data.observation:
+                observation_item = NeMoGymEasyInputMessage(role="user", content=step_data.observation)
+                rollout_outputs.append(observation_item)
+                model_context_outputs.append(observation_item)
+
+            # Preserve the complete scored transition, including the terminal
+            # tool result and after-observation, before ending the rollout.
             if step_data.terminated or step_data.truncated:
                 finished = True
                 break
 
-            for tool_output in (step_data.info or {}).get("tool_outputs", []):
-                new_outputs.append(
-                    NeMoGymFunctionCallOutput(
-                        type="function_call_output",
-                        call_id=tool_output["call_id"],
-                        output=tool_output["output"],
-                    )
-                )
-
-            if step_data.observation:
-                new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
-
         if not finished:
             step_data = step_data.model_copy(update={"truncated": True})
 
-        last_model_response.output = new_outputs
+        last_model_response.output = rollout_outputs
         last_model_response.usage = usage
 
         return GymnasiumRunResponse(

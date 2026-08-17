@@ -88,3 +88,36 @@ async def test_drive_episode_preserves_completed_return_when_close_fails():
 
     assert await drive_episode(post) == pytest.approx(-0.25)
     assert calls == ["/reset", "/step", "/close"]
+
+
+@pytest.mark.asyncio
+async def test_drive_episode_stamps_transport_retry_ids():
+    payloads: dict[str, list[dict]] = {"/reset": [], "/step": []}
+
+    async def post(path: str, payload: dict) -> dict:
+        if path in payloads:
+            payloads[path].append(payload)
+        if path == "/reset":
+            return {
+                "observation": "- Cell 0: p99=50%; Jain fairness 1.00",
+                "info": {"episode_id": "episode-1", "seed": 7, "scenario_id": "test"},
+            }
+        if path == "/step":
+            return {
+                "observation": "- Cell 0: p99=50%; Jain fairness 1.00",
+                "reward": -0.25,
+                "terminated": True,
+                "truncated": False,
+                "info": {"guardrail_accepted": True},
+            }
+        if path == "/close":
+            return {"ok": True, "already_closed": False, "summary": {}}
+        raise AssertionError(path)
+
+    await drive_episode(post)
+
+    reset_id = payloads["/reset"][0]["_ng_reset_request_id"]
+    step_id = payloads["/step"][0]["_ng_step_request_id"]
+    assert isinstance(reset_id, str) and reset_id
+    assert isinstance(step_id, str) and step_id
+    assert reset_id != step_id

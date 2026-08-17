@@ -45,6 +45,62 @@ def _make_backend(**overrides) -> DatasetReplayBackend:
     return DatasetReplayBackend(**kwargs)
 
 
+def _canonical_recorded_row(step: int) -> dict:
+    """A hand-derived row whose optional derived KPIs match the v1 contract."""
+
+    return {
+        "episode_id": "derived_contract",
+        "step": step,
+        "t_s": float(step * 5),
+        "kpi_source_mode": "recorded",
+        "cells": [
+            {
+                "cell_id": 0,
+                "prb_util_dl_p50": 0.4,
+                "prb_util_dl_p99": 0.48,
+                "prb_util_ul_p50": 0.16,
+                "sched_latency_ms_p99": 14.6,
+                "rrc_connected_ues": 2,
+                "prach_collision_rate": 0.0,
+                "fairness_jain": 1.0,
+                "sla_violations_last_window": 0,
+                "ues": [
+                    {
+                        "ue_id": 0,
+                        "offered_mbps": 10.0,
+                        "delivered_mbps": 10.0,
+                        "bler": 0.05,
+                        "sinr_db": 10.0,
+                        "mcs_mean": 18.0,
+                        "buffer_occupancy_kb": 0.0,
+                        "pdb_violations": 0,
+                    },
+                    {
+                        "ue_id": 1,
+                        "offered_mbps": 20.0,
+                        "delivered_mbps": 10.0,
+                        "bler": 0.05,
+                        "sinr_db": 5.0,
+                        "mcs_mean": 12.0,
+                        "buffer_occupancy_kb": 500.0,
+                        "pdb_violations": 0,
+                    },
+                ],
+            }
+        ],
+        "global": {
+            "n_cells": 1,
+            "n_ues_total": 2,
+            "difficulty": 0.5,
+            "tier": "replay",
+        },
+    }
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+
 class TestSnapshotLoader:
     def test_fixture_parses_into_two_valid_episodes(self):
         episodes = load_provided_dataset(SNAPSHOT_FIXTURE)
@@ -74,14 +130,86 @@ class TestSnapshotLoader:
         assert 0.0 <= cell.fairness_jain <= 1.0
         assert cell.sla_violations_last_window == 1
 
-    def test_provided_fields_pass_through_unchanged(self):
-        # lab_run_b row 0 cell 0 provides the full KPI set; no synthesis.
+    def test_explicit_derived_fields_match_canonical_recomputation(self):
+        # lab_run_b row 0 cell 0 provides a full, contract-consistent KPI set.
         obs = load_provided_dataset(SNAPSHOT_FIXTURE)["lab_run_b"].observations[0]
         cell = obs.cells[0]
-        assert cell.prb_util_dl_p99 == pytest.approx(0.52)
-        assert cell.fairness_jain == pytest.approx(0.93)
-        assert cell.ues[0].mcs_mean == pytest.approx(20.0)
+        assert cell.prb_util_dl_p99 == pytest.approx(0.48)
+        assert cell.fairness_jain == pytest.approx(0.993103448275862)
+        assert cell.ues[0].mcs_mean == pytest.approx(24.0)
         assert obs.global_.difficulty == pytest.approx(0.7)
+
+    @pytest.mark.parametrize(
+        ("container", "field", "bad_value"),
+        [
+            ("cell", "prb_util_dl_p99", 0.49),
+            ("cell", "prb_util_ul_p50", 0.17),
+            ("cell", "sched_latency_ms_p99", 15.0),
+            ("cell", "prach_collision_rate", 0.1),
+            ("cell", "fairness_jain", 0.8),
+            ("cell", "sla_violations_last_window", 1),
+            ("ue", "mcs_mean", 17.0),
+            ("ue", "buffer_occupancy_kb", 1.0),
+            ("ue", "pdb_violations", 1),
+        ],
+    )
+    def test_conflicting_explicit_derived_kpi_fails_with_source_provenance(
+        self,
+        tmp_path,
+        container,
+        field,
+        bad_value,
+    ):
+        rows = [_canonical_recorded_row(0), _canonical_recorded_row(1)]
+        target = rows[1]["cells"][0]
+        if container == "ue":
+            target = target["ues"][0]
+        target[field] = bad_value
+        path = tmp_path / "conflicting_derived.jsonl"
+        _write_jsonl(path, rows)
+
+        with pytest.raises(ValueError, match=r"conflicting_derived\.jsonl:2") as exc_info:
+            load_provided_dataset(path)
+
+        message = str(exc_info.value)
+        assert field in message
+        assert "canonical derived value" in message
+
+    def test_near_equal_explicit_float_is_normalized_to_canonical_value(self, tmp_path):
+        rows = [_canonical_recorded_row(0), _canonical_recorded_row(1)]
+        rows[1]["cells"][0]["prb_util_dl_p99"] = 0.4800005
+        path = tmp_path / "near_equal_derived.jsonl"
+        _write_jsonl(path, rows)
+
+        obs = load_provided_dataset(path)["derived_contract"].observations[1]
+
+        assert obs.cells[0].prb_util_dl_p99 == 0.48
+
+    @pytest.mark.parametrize(
+        ("container", "field", "bad_value"),
+        [
+            ("cell", "fairness_jain", 0.0),
+            ("cell", "sla_violations_last_window", 20),
+            ("ue", "buffer_occupancy_kb", 10_000.0),
+        ],
+    )
+    def test_fake_reward_scored_derived_kpi_cannot_reach_reward_step(
+        self,
+        tmp_path,
+        container,
+        field,
+        bad_value,
+    ):
+        rows = [_canonical_recorded_row(0), _canonical_recorded_row(1)]
+        target = rows[1]["cells"][0]
+        if container == "ue":
+            target = target["ues"][0]
+        target[field] = bad_value
+        path = tmp_path / f"fake_reward_{field}.jsonl"
+        _write_jsonl(path, rows)
+
+        with pytest.raises(ValueError, match=rf"{field}.*canonical derived value"):
+            DatasetReplayBackend(dataset_path=str(path))
 
     def test_malformed_row_fails_fast_with_line_number(self, tmp_path):
         bad = tmp_path / "bad.jsonl"
@@ -99,6 +227,56 @@ class TestSnapshotLoader:
         bad.write_text(json.dumps(row) + "\n")
         with pytest.raises(ValueError, match="prb_util_dl_p50"):
             load_provided_dataset(bad)
+
+    @pytest.mark.parametrize("source_mode", ["measured", "recorded"])
+    @pytest.mark.parametrize(
+        ("container", "field"),
+        [
+            ("cell", "prb_util_dl_p50"),
+            ("cell", "rrc_connected_ues"),
+            ("ue", "delivered_mbps"),
+            ("ue", "bler"),
+            ("ue", "sinr_db"),
+        ],
+    )
+    def test_measured_and_recorded_rows_require_each_raw_exporter_field(
+        self,
+        tmp_path,
+        source_mode,
+        container,
+        field,
+    ):
+        path = tmp_path / f"{source_mode}_missing_{field}.jsonl"
+        rows = []
+        for step in range(2):
+            ue = {
+                "delivered_mbps": 1.0,
+                "bler": 0.1,
+                "sinr_db": 10.0,
+            }
+            cell = {
+                "cell_id": 2,
+                "prb_util_dl_p50": 0.5,
+                "rrc_connected_ues": 1,
+                "ues": [ue],
+            }
+            if step == 1:
+                (cell if container == "cell" else ue).pop(field)
+            rows.append(
+                {
+                    "episode_id": "e",
+                    "step": step,
+                    "kpi_source_mode": source_mode,
+                    "cells": [cell],
+                }
+            )
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        with pytest.raises(ValueError, match=rf"{source_mode}_missing_{field}\.jsonl:2") as exc_info:
+            load_provided_dataset(path)
+        message = str(exc_info.value)
+        assert field in message
+        assert "raw-exporter" in message
 
     def test_single_row_episode_is_rejected(self, tmp_path):
         # One observation cannot form a (prev, curr) reward pair.
@@ -153,6 +331,16 @@ class TestSnapshotLoader:
         with pytest.raises(ValueError, match=message):
             load_provided_dataset(bad)
 
+    def test_recorded_timestamps_must_not_decrease_with_explicit_steps(self, tmp_path):
+        bad = tmp_path / "bad_timestamps.jsonl"
+        rows = [_canonical_recorded_row(step) for step in range(2)]
+        for row, timestamp in zip(rows, [5.0, 4.0], strict=True):
+            row["t_s"] = timestamp
+        _write_jsonl(bad, rows)
+
+        with pytest.raises(ValueError, match=r"bad_timestamps\.jsonl:2.*t_s must be nondecreasing"):
+            load_provided_dataset(bad)
+
     @pytest.mark.parametrize(
         ("container", "field", "value"),
         [
@@ -181,7 +369,7 @@ class TestSnapshotLoader:
             }
             cell = {
                 "prb_util_dl_p50": 0.5,
-                "fairness_jain": 0.9,
+                "fairness_jain": 1.0,
                 "ues": [ue],
             }
             if step == 1:
@@ -259,6 +447,32 @@ class TestSnapshotLoader:
             load_provided_dataset(path)
         assert "unknown tool" in str(exc_info.value)
 
+    @pytest.mark.parametrize(
+        "recorded_action",
+        [
+            {"name": "set_scheduler_policy", "arguments": {"cell_id": 0}},
+            {
+                "name": "set_scheduler_policy",
+                "arguments": {"cell_id": 0, "policy": "RR", "unexpected": True},
+            },
+            {"name": "set_scheduler_policy", "arguments": {"cell_id": 0, "policy": "invalid"}},
+            {"name": "set_scheduler_policy", "arguments": {"cell_id": 999, "policy": "RR"}},
+        ],
+    )
+    def test_recorded_action_must_satisfy_canonical_tool_schema(
+        self,
+        tmp_path,
+        recorded_action,
+    ):
+        rows = [json.loads(line) for line in SNAPSHOT_FIXTURE.open() if line.strip()][:2]
+        rows[0]["recorded_action"] = recorded_action
+        path = tmp_path / "recorded_action_schema.jsonl"
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        with pytest.raises(ValueError, match=r"recorded_action_schema\.jsonl:1") as exc_info:
+            load_provided_dataset(path)
+        assert "recorded_action" in str(exc_info.value)
+
 
 class TestDatasetReplayBackend:
     @pytest.mark.parametrize("capacity", [0.0, -1.0, math.nan, math.inf, -math.inf])
@@ -329,6 +543,23 @@ class TestDatasetReplayBackend:
         summary = backend.close(meta.episode_id)
         assert summary == {"ok": True, "n_steps": 3}
 
+    def test_guardrail_uses_recorded_observation_time(self):
+        backend = _make_backend()
+        _, meta = backend.reset({"scenario_id": "lab_run_a"})
+        action = ToolCall(
+            name="set_scheduler_policy",
+            arguments={"cell_id": 0, "policy": "RR"},
+        )
+
+        _, _, _, first_info = backend.step(meta.episode_id, action)
+        _, _, _, second_info = backend.step(meta.episode_id, action)
+
+        assert first_info["guardrail_accepted"] is True
+        # Recorded observations are five seconds apart, outside the default
+        # two-second identical-action window.
+        assert second_info["guardrail_accepted"] is True
+        backend.close(meta.episode_id)
+
     def test_recorded_action_is_inert_diagnostic_metadata(self, tmp_path):
         rows = [json.loads(line) for line in SNAPSHOT_FIXTURE.open() if line.strip()][:3]
         recorded_action = {
@@ -348,6 +579,55 @@ class TestDatasetReplayBackend:
 
         _, _, _, info = backend.step(meta.episode_id, NOOP)
         assert info["recorded_action"] is None
+        backend.close(meta.episode_id)
+
+    def test_guardrail_uses_observed_non_contiguous_cell_ids(self, tmp_path):
+        path = tmp_path / "non_contiguous_cells.jsonl"
+        rows = [
+            {
+                "episode_id": "e",
+                "step": step,
+                "cells": [
+                    {
+                        "cell_id": 2,
+                        "prb_util_dl_p50": 0.5,
+                        "ues": [
+                            {
+                                "ue_id": 0,
+                                "delivered_mbps": 1.0,
+                                "bler": 0.1,
+                                "sinr_db": 10.0,
+                            }
+                        ],
+                    }
+                ],
+            }
+            for step in range(2)
+        ]
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        backend = _make_backend(dataset_path=str(path))
+
+        _, meta = backend.reset({"scenario_id": "e"})
+        _, _, _, info = backend.step(
+            meta.episode_id,
+            ToolCall(
+                name="set_scheduler_policy",
+                arguments={"cell_id": 2, "policy": "RR"},
+            ),
+        )
+        assert info["guardrail_accepted"] is True
+        backend.close(meta.episode_id)
+
+        _, meta = backend.reset({"scenario_id": "e"})
+        _, _, _, info = backend.step(
+            meta.episode_id,
+            ToolCall(
+                name="set_scheduler_policy",
+                arguments={"cell_id": 0, "policy": "RR"},
+            ),
+        )
+        assert info["guardrail_accepted"] is False
+        assert "valid ids=[2]" in info["rejection_reason"]
         backend.close(meta.episode_id)
 
     def test_reward_exception_leaves_episode_state_unchanged(self, monkeypatch):

@@ -21,10 +21,11 @@ dataset file instead. Same reset/step/close contract, so switching is
 config-only (``backend: dataset_replay``).
 
 The accepted format is JSONL with one nested ``cells[]`` / ``ues[]`` KPI
-snapshot per timestep. Missing optional KPI fields are synthesized with the
-same heuristics the live env uses (``openair_congestion/env.py``), so a sparse
-dataset still yields the stable observation contract used by diagnostics and
-conversion tooling.
+snapshot per timestep. Every KPI labeled ``derived`` is recomputed with the
+canonical provenance formula; an explicitly supplied derived value is accepted
+only when it matches that result. Sparse rows still yield the stable observation
+contract used by diagnostics and conversion tooling. Measured and recorded rows
+must supply every KPI labeled ``raw_exporter`` by the provenance contract.
 
 Actions are pass-through: the data is pre-recorded, so
 ``step()`` advances a pointer and does not mutate KPIs. The guardrail still
@@ -44,6 +45,9 @@ from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Any, NoReturn, Optional
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JSONSchemaValidationError
+
 # Load the backend contract before the colocated domain imports so an
 # incomplete checkout fails with the backend's targeted diagnostic.
 from resources_servers.openair_congestion.backends import Backend
@@ -60,12 +64,20 @@ from openair_congestion.schemas import (
     Observation,
     ToolCall,
 )
-from openair_congestion.tools import MAX_CELLS, MAX_UES
+from openair_congestion.tools import MAX_CELLS, MAX_UES, TOOL_SCHEMA_BY_NAME
 
 
 # Stamped into step() info["dynamics_mode"] so trainers can tell recorded-data
 # rollouts apart from ReplayEnv's synthetic action-effect model.
 DATASET_DYNAMICS_MODE = "provided_data_passthrough_v1"
+
+_RAW_EXPORTER_SOURCE_MODES = frozenset({"measured", "recorded"})
+_RAW_EXPORTER_CELL_FIELDS = ("prb_util_dl_p50", "rrc_connected_ues")
+_RAW_EXPORTER_UE_FIELDS = ("delivered_mbps", "bler", "sinr_db")
+_DERIVED_FLOAT_ABS_TOLERANCE = 1e-6
+_RECORDED_ACTION_VALIDATORS = {
+    name: Draft202012Validator(spec["function"]["parameters"]) for name, spec in TOOL_SCHEMA_BY_NAME.items()
+}
 
 # --- KPI-snapshot rows -> Observation ----------------------------------------
 #
@@ -131,14 +143,83 @@ def _integer(
     return result
 
 
-def _parse_ue(raw: dict[str, Any], ue_idx: int) -> dict[str, Any]:
-    """Parse one UE record; synthesize any missing optional field.
+def _derived_number(
+    raw: dict[str, Any],
+    key: str,
+    expected: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    """Return a canonical derived float, rejecting conflicting supplied data."""
 
-    ``delivered_mbps`` is required; everything else falls back to the env's
-    defaults (sinr=10.0, bler=0.0) or derivation heuristics.
+    if raw.get(key) is not None:
+        supplied = _num(raw, key, expected, minimum=minimum, maximum=maximum)
+        if not math.isclose(
+            supplied,
+            expected,
+            rel_tol=0.0,
+            abs_tol=_DERIVED_FLOAT_ABS_TOLERANCE,
+        ):
+            raise ValueError(f"{key} supplied value {raw[key]!r} does not match canonical derived value {expected!r}")
+    return float(expected)
+
+
+def _derived_integer(
+    raw: dict[str, Any],
+    key: str,
+    expected: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Return a canonical derived integer, rejecting conflicting supplied data."""
+
+    if raw.get(key) is not None:
+        supplied = _integer(raw, key, expected, minimum=minimum, maximum=maximum)
+        if supplied != expected:
+            raise ValueError(f"{key} supplied value {raw[key]!r} does not match canonical derived value {expected!r}")
+    return int(expected)
+
+
+def _require_raw_exporter_fields(
+    raw: dict[str, Any],
+    fields: tuple[str, ...],
+    *,
+    record: str,
+    source_mode: str | None,
+) -> None:
+    if source_mode not in _RAW_EXPORTER_SOURCE_MODES:
+        return
+    missing = [field for field in fields if raw.get(field) is None]
+    if missing:
+        raise ValueError(
+            f"{record} with kpi_source_mode={source_mode!r} is missing "
+            f"raw-exporter field(s) {missing}; measured/recorded rows must "
+            "supply these KPIs explicitly"
+        )
+
+
+def _parse_ue(
+    raw: dict[str, Any],
+    ue_idx: int,
+    *,
+    source_mode: str | None = None,
+) -> dict[str, Any]:
+    """Parse one UE record, applying source-mode-aware required fields.
+
+    ``delivered_mbps`` is always required. Measured and recorded sources also
+    require ``sinr_db`` and ``bler``; other sources may use conservative
+    fallbacks and derivation heuristics.
     """
     if not isinstance(raw, dict):
         raise TypeError(f"dataset UE record #{ue_idx} must be an object, got {type(raw).__name__}")
+    _require_raw_exporter_fields(
+        raw,
+        _RAW_EXPORTER_UE_FIELDS,
+        record=f"dataset UE record #{ue_idx}",
+        source_mode=source_mode,
+    )
     if "delivered_mbps" not in raw:
         raise ValueError(
             f"dataset UE record #{ue_idx} is missing required field 'delivered_mbps'; got keys {sorted(raw)}"
@@ -149,20 +230,23 @@ def _parse_ue(raw: dict[str, Any], ue_idx: int) -> dict[str, Any]:
     bler = _num(raw, "bler", 0.0, minimum=0.0, maximum=1.0)
     # env.py heuristics: mcs from SINR, backlog from offered - delivered,
     # PDB violation when backlog exceeds 500 kB.
-    mcs_mean = _num(
+    expected_mcs_mean = max(0.0, min(27.0, (max(sinr, -10.0) + 5.0) * 1.2))
+    mcs_mean = _derived_number(
         raw,
         "mcs_mean",
-        max(0.0, min(27.0, (max(sinr, -10.0) + 5.0) * 1.2)),
+        expected_mcs_mean,
         minimum=0.0,
         maximum=27.0,
     )
-    buffer_kb = _num(
+    expected_buffer_kb = max(0.0, (offered - delivered) * 50.0)
+    buffer_kb = _derived_number(
         raw,
         "buffer_occupancy_kb",
-        max(0.0, (offered - delivered) * 50.0),
+        expected_buffer_kb,
         minimum=0.0,
     )
-    pdb = _integer(raw, "pdb_violations", 1 if buffer_kb > 500.0 else 0, minimum=0)
+    expected_pdb = 1 if buffer_kb > 500.0 else 0
+    pdb = _derived_integer(raw, "pdb_violations", expected_pdb, minimum=0)
     return {
         "ue_id": _integer(raw, "ue_id", ue_idx, minimum=0, maximum=MAX_UES - 1),
         "offered_mbps": offered,
@@ -183,14 +267,26 @@ def _parse_ue(raw: dict[str, Any], ue_idx: int) -> dict[str, Any]:
     }
 
 
-def _parse_cell(raw: dict[str, Any], cell_idx: int) -> dict[str, Any]:
-    """Parse one cell record; synthesize any missing optional field.
+def _parse_cell(
+    raw: dict[str, Any],
+    cell_idx: int,
+    *,
+    source_mode: str | None = None,
+) -> dict[str, Any]:
+    """Parse one cell record, applying source-mode-aware required fields.
 
-    ``prb_util_dl_p50`` and a non-empty ``ues`` list are required; everything
-    else falls back to the env's derivation heuristics.
+    ``prb_util_dl_p50`` and a non-empty ``ues`` list are always required.
+    Measured and recorded sources also require ``rrc_connected_ues``; other
+    sources may use the env's derivation heuristics.
     """
     if not isinstance(raw, dict):
         raise TypeError(f"dataset cell record #{cell_idx} must be an object, got {type(raw).__name__}")
+    _require_raw_exporter_fields(
+        raw,
+        _RAW_EXPORTER_CELL_FIELDS,
+        record=f"dataset cell record #{cell_idx}",
+        source_mode=source_mode,
+    )
     if "prb_util_dl_p50" not in raw:
         raise ValueError(
             f"dataset cell record #{cell_idx} is missing required field 'prb_util_dl_p50'; got keys {sorted(raw)}"
@@ -198,40 +294,55 @@ def _parse_cell(raw: dict[str, Any], cell_idx: int) -> dict[str, Any]:
     ues_raw = raw.get("ues") or []
     if not ues_raw:
         raise ValueError(f"dataset cell record #{cell_idx} has no 'ues' entries")
-    ues = [_parse_ue(ue, i) for i, ue in enumerate(ues_raw)]
+    ues = [_parse_ue(ue, i, source_mode=source_mode) for i, ue in enumerate(ues_raw)]
 
     p50 = _num(raw, "prb_util_dl_p50", 0.0, minimum=0.0, maximum=1.0)
     # Heuristics mirror env.py exactly (see schemas.KPI_PROVENANCE_V1 notes).
-    p99 = _num(
+    expected_p99 = max(p50, min(1.0, p50 * 1.15 + 0.02))
+    p99 = _derived_number(
         raw,
         "prb_util_dl_p99",
-        max(p50, min(1.0, p50 * 1.15 + 0.02)),
+        expected_p99,
         minimum=0.0,
         maximum=1.0,
     )
-    if p99 < p50:
-        raise ValueError(f"prb_util_dl_p99 must be >= prb_util_dl_p50 (got {p99} < {p50})")
-    ul_p50 = _num(raw, "prb_util_ul_p50", min(1.0, p50 * 0.4), minimum=0.0, maximum=1.0)
-    sched_latency = _num(raw, "sched_latency_ms_p99", 5.0 + 20.0 * p99, minimum=0.0)
+    expected_ul_p50 = min(1.0, p50 * 0.4)
+    ul_p50 = _derived_number(
+        raw,
+        "prb_util_ul_p50",
+        expected_ul_p50,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    expected_sched_latency = 5.0 + 20.0 * p99
+    sched_latency = _derived_number(
+        raw,
+        "sched_latency_ms_p99",
+        expected_sched_latency,
+        minimum=0.0,
+    )
     n_ues = _integer(raw, "rrc_connected_ues", len(ues), minimum=0, maximum=MAX_UES)
-    prach = _num(
+    expected_prach = 0.0 if n_ues < 8 else min(0.5, 0.01 * (n_ues - 8) ** 2)
+    prach = _derived_number(
         raw,
         "prach_collision_rate",
-        0.0 if n_ues < 8 else min(0.5, 0.01 * (n_ues - 8) ** 2),
+        expected_prach,
         minimum=0.0,
         maximum=1.0,
     )
-    fairness = _num(
+    expected_fairness = _jain([u["delivered_mbps"] for u in ues])
+    fairness = _derived_number(
         raw,
         "fairness_jain",
-        _jain([u["delivered_mbps"] for u in ues]),
+        expected_fairness,
         minimum=0.0,
         maximum=1.0,
     )
-    sla = _integer(
+    expected_sla = sum(1 for u in ues if u["pdb_violations"] > 0)
+    sla = _derived_integer(
         raw,
         "sla_violations_last_window",
-        sum(1 for u in ues if u["pdb_violations"] > 0),
+        expected_sla,
         minimum=0,
     )
     return {
@@ -262,7 +373,9 @@ def row_to_observation(
     cells_raw = row.get("cells") or []
     if not cells_raw:
         raise ValueError(f"dataset row has no 'cells' entries; got keys {sorted(row)}")
-    cells = [_parse_cell(c, i) for i, c in enumerate(cells_raw)]
+    source_mode = str(row.get("kpi_source_mode", "replay"))
+    normalized_source_mode = source_mode.strip().lower()
+    cells = [_parse_cell(c, i, source_mode=normalized_source_mode) for i, c in enumerate(cells_raw)]
 
     global_raw = row.get("global") or {}
     if not isinstance(global_raw, dict):
@@ -287,7 +400,7 @@ def row_to_observation(
         },
         # Default 'replay' keeps provenance conservative (synthetic). Recorded
         # or measured rows should label kpi_source_mode explicitly.
-        "kpi_source_mode": str(row.get("kpi_source_mode", "replay")),
+        "kpi_source_mode": source_mode,
     }
     return Observation.model_validate(payload)
 
@@ -316,6 +429,17 @@ def _strict_json_loads(raw: str) -> Any:
         parse_constant=_reject_json_constant,
         object_pairs_hook=_reject_duplicate_json_keys,
     )
+
+
+def _validate_recorded_action(raw: Any) -> ToolCall:
+    action = ToolCall.model_validate(raw)
+    try:
+        _RECORDED_ACTION_VALIDATORS[action.name].validate(action.arguments)
+    except JSONSchemaValidationError as exc:
+        raise ValueError(
+            f"recorded_action {action.name!r} arguments violate its canonical tool schema: {exc.message}"
+        ) from exc
+    return action
 
 
 def _rows_from_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -424,10 +548,14 @@ def load_provided_dataset(path: str | Path) -> dict[str, EpisodeSource]:
                 # key[:56] keeps 'src_' + key within the schema's episode_id
                 # max_length=64 for long run names.
                 observation = row_to_observation(row, step_idx=step_idx, episode_id=f"src_{key[:56]}")
+                if obs_list and observation.t_s < obs_list[-1].t_s:
+                    raise ValueError(
+                        f"t_s must be nondecreasing within an episode; got {observation.t_s} after {obs_list[-1].t_s}"
+                    )
                 obs_list.append(observation)
                 raw_recorded_action = row.get("recorded_action")
                 recorded_actions.append(
-                    None if raw_recorded_action is None else ToolCall.model_validate(raw_recorded_action)
+                    None if raw_recorded_action is None else _validate_recorded_action(raw_recorded_action)
                 )
             # ValueError covers pydantic ValidationError (a subclass) and
             # float('bad'); TypeError covers structurally wrong scalar types
@@ -637,7 +765,7 @@ class DatasetReplayBackend(Backend):
                 raise RuntimeError(f"episode {episode_id!r} is closed")
 
             prev_obs = episode.trajectory[episode.step_idx]
-            logical_now_s = float(episode.step_idx)
+            logical_now_s = float(prev_obs.t_s)
 
             # Same guardrail as ReplayEnv.step, fed from the observation
             # itself (a recorded dataset has no scenario fingerprint).
@@ -645,6 +773,7 @@ class DatasetReplayBackend(Backend):
                 tool_call,
                 history=episode.history,
                 n_cells=max(1, prev_obs.global_.n_cells),
+                cell_ids={cell.cell_id for cell in prev_obs.cells},
                 n_ues=max(1, prev_obs.global_.n_ues_total),
                 ue_ids_by_cell={cell.cell_id: {ue.ue_id for ue in cell.ues} for cell in prev_obs.cells},
                 now_s=logical_now_s,
