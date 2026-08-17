@@ -355,6 +355,143 @@ b: 2
             == global_config_dict
         )
 
+    def _mock_config_paths_env(self, monkeypatch: MonkeyPatch, config_paths: list[str]) -> None:
+        """Scaffolding shared by the sibling-ordering tests: stub .env.yaml, hydra and
+        the loader so only the config_paths merge order is under test."""
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        # Explicitly handle any local .env.yaml files. Either read or don't read.
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        # Override the hydra main wrapper call. At runtime, this will use sys.argv.
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": config_paths})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        # Override OmegaConf.load to avoid file reads.
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+    def test_get_global_config_dict_config_paths_later_sibling_wins(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Two configs passed by the caller, neither referencing the other: the later
+        entry overrides the earlier one, which is how an override config is layered on
+        top of a base config."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "base.yaml").write_text("""a: base
+b: base
+        """)
+        (tmp_path / "override.yaml").write_text("""a: override
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"],
+                "a": "override",
+                "b": "base",
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_outer_beats_inner_across_siblings(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Nesting and sibling order applied together. ``override.yaml`` is listed after
+        ``base.yaml`` so it wins on ``a``; ``base.yaml`` pulls in ``inner.yaml``, so it
+        wins on ``b`` despite ``inner.yaml`` being merged as part of the same list."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "base.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/inner.yaml
+
+a: base
+b: base
+        """)
+        (tmp_path / "inner.yaml").write_text("""b: inner
+c: inner
+        """)
+        (tmp_path / "override.yaml").write_text("""a: override
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/base.yaml",
+                    f"{tmp_path}/override.yaml",
+                    f"{tmp_path}/inner.yaml",
+                ],
+                "a": "override",
+                "b": "base",
+                "c": "inner",
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_outer_beats_inner_two_levels_deep(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Precedence follows nesting depth rather than position, at every level:
+        outer overrides middle, which overrides inner."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "outer.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/middle.yaml
+
+a: outer
+        """)
+        (tmp_path / "middle.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/inner.yaml
+
+a: middle
+b: middle
+        """)
+        (tmp_path / "inner.yaml").write_text("""a: inner
+b: inner
+c: inner
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/outer.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/outer.yaml",
+                    f"{tmp_path}/middle.yaml",
+                    f"{tmp_path}/inner.yaml",
+                ],
+                "a": "outer",
+                "b": "middle",
+                "c": "inner",
+            }
+            == global_config_dict
+        )
+
     def test_get_global_config_dict_server_host_port_defaults(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
