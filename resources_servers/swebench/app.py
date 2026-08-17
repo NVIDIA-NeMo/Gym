@@ -50,6 +50,7 @@ from resources_servers.swebench.swebench_patches import (
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
+    apply_anti_cheating: bool = True
 
     evaluation_timeout: Optional[int] = None
 
@@ -241,15 +242,16 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         # For now, the activation is put on the harness side.
         # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
 
-        # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
-        wd = (await eval_sandbox.exec("pwd")).stdout.strip()
-        anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
-        await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
-        result = await eval_sandbox.exec(
-            f"""WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
-        )
-        if result.return_code != 0:
-            print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
+        if self.config.apply_anti_cheating:
+            # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
+            wd = (await eval_sandbox.exec("pwd")).stdout.strip()
+            anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
+            await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
+            result = await eval_sandbox.exec(
+                f"""WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+            )
+            if result.return_code != 0:
+                print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
 Stdout:
 {result.stdout}
 Stderr:
