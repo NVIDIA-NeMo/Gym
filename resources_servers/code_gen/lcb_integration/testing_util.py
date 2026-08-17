@@ -104,6 +104,12 @@ class MockStdinWithBuffer:
     def readlines(self, *args):
         return self.inputs.split("\n")
 
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._stringio)
+
     def __getattr__(self, name):
         # Delegate other attributes to StringIO
         return getattr(self._stringio, name)

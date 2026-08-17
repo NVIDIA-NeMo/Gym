@@ -76,7 +76,7 @@ def _require_openshell() -> None:
     except ModuleNotFoundError as e:
         raise ModuleNotFoundError(
             "The openshell SDK is required for the openshell sandbox provider. Install "
-            "nemo-gym[sandbox] in the runtime image before using env.sandbox.provider.name=openshell."
+            "nemo-gym[openshell] in the runtime image before using env.sandbox.provider.name=openshell."
         ) from e
 
 

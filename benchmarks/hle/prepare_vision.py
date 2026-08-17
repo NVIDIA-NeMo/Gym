@@ -12,21 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.server_utils import ServerClient
 
-from app import ExampleMultiStepResourcesServer, ExampleMultiStepResourcesServerConfig
+"""Prepare the vision (multimodal) variant of HLE.
 
-from unittest.mock import MagicMock
+Thin wrapper around ``benchmarks.hle.prepare.prepare`` with ``include_vision=True``.
+The full HLE split (text + image questions) is downloaded and every row is fully
+materialized (image questions carry an ``input_image`` block), written to
+``benchmarks/hle/data/hle_benchmark_vision.jsonl``.
+"""
+
+from pathlib import Path
+
+from benchmarks.hle.prepare import prepare as _prepare_hle
 
 
-class TestApp:
-    def test_sanity(self) -> None:
-        config = ExampleMultiStepResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-        )
-        ExampleMultiStepResourcesServer(
-            config=config, server_client=MagicMock(spec=ServerClient)
-        )
+def prepare() -> Path:
+    """Prepare the HLE vision dataset. Returns the written JSONL path."""
+    return _prepare_hle(include_vision=True)
+
+
+if __name__ == "__main__":
+    prepare()
