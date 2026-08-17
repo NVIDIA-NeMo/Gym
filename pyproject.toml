@@ -84,9 +84,10 @@ dependencies = [
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
     # We specifically upper bound this OpenAI dependency since the version bumps so frequently.
-    # Updated Wed Feb 17, 2026 with openai<=2.7.2
+    # Raised from 2.7.2 to 2.24.0 so the hermes_agent pin (hermes-agent==... requires openai==2.24.0)
+    # co-resolves; 2.24.0 has been smoke-tested against the gym unit suite.
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=2.7.2",
+    "openai<=2.24.0",
 
     # Anthropic: We leverage the Anthropic Messages schemas (request/response Python types) for the
     # /v1/messages <-> Responses mapping in nemo_gym/anthropic_converter.py. Types only — we never
