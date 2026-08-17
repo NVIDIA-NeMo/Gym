@@ -5,8 +5,6 @@ VLLM_COMMON_ARGS=(
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
     --data-parallel-backend mp
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
     --max-model-len 262144
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
@@ -23,15 +21,27 @@ VLLM_COMMON_ARGS=(
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
-    --max-num-batched-tokens 33920
-    --max-num-seqs 256
     --max-cudagraph-capture-size 256
     --limit-mm-per-prompt '{"image":4,"video":1}'
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+    --max-num-batched-tokens 33920
+    --max-num-seqs 512
+    --data-parallel-size-local 1
+    --tensor-parallel-size 4
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    --max-num-batched-tokens 33920
+    --max-num-seqs 512
+    --data-parallel-size-local 1
+    --tensor-parallel-size 4
 )
+
+if [[ "${QWEN_ENABLE_MTP:-0}" == "1" ]]; then
+    # NIXL requires the producer and consumer to expose matching KV-cache layouts.
+    VLLM_PREFILL_ARGS+=(--speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}')
+    VLLM_DECODE_ARGS+=(--speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}')
+fi
