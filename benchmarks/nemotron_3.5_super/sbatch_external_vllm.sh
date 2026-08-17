@@ -10,6 +10,7 @@ MODEL_REVISION=$MODEL_REVISION
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+VLLM_ROUTER_BINARY=$VLLM_ROUTER_BINARY
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -174,7 +175,7 @@ if (( SLURM_PROCID == 0 )); then
         node_idx=\$(( $NUM_PREFILL_NODES + i ))
         router_args+=(--decode "http://\${nodes[node_idx]}:$DECODE_SERVER_PORT")
     done
-    vllm-router "\${router_args[@]}"
+    "$VLLM_ROUTER_BINARY" "\${router_args[@]}"
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
