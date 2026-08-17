@@ -56,7 +56,7 @@ from resources_servers.openair_congestion.backends import Backend, select_backen
 
 # isort: split
 from openair_congestion.render import to_policy_text
-from openair_congestion.schemas import ToolCall
+from openair_congestion.schemas import AgentAux, LastActionEcho, ToolCall
 from openair_congestion.tools import TOOL_SCHEMA_BY_NAME
 
 
@@ -138,9 +138,8 @@ class OpenAirCongestionResourcesServerConfig(BaseResourcesServerConfig):
     # A hard client/process crash cannot send /close. Expired cookie-scoped
     # sessions are reclaimed before a later reset attempts to allocate a slot.
     session_ttl_s: float = Field(default=3600.0, gt=0.0)
-    # Terminal penalty for violating the exactly-one-tool-call protocol. It
-    # must be finite and negative so refusal or malformed output cannot evade
-    # congestion cost and outscore a valid noop merely by not advancing time.
+    # Surcharge added to a noop transition when the model violates the
+    # exactly-one-tool-call protocol. It must be finite and negative.
     protocol_violation_penalty: float = -1.0
 
     @field_validator("pool_size", "max_steps_default", "agent_max_steps", mode="before")
@@ -161,7 +160,7 @@ class OpenAirCongestionResourcesServerConfig(BaseResourcesServerConfig):
 # Returned when a model turn contains no tool call.
 _NO_TOOL_CALL_MSG = (
     "No tool call detected. Issue exactly one tool call per turn from the "
-    "configured action space (use `noop` to stand pat). Telemetry unchanged."
+    "configured action space (use `noop` to stand pat). Applied penalized noop."
 )
 
 
@@ -308,8 +307,8 @@ class OpenAirCongestionEnv(GymnasiumServer):
                     "contract": contract,
                     "cumulative_reward": 0.0,
                     "n_steps": 0,
-                    # agent_steps counts model turns, n_steps env steps; a turn with
-                    # no tool call consumes a turn without advancing the env.
+                    # Structural protocol violations consume both counters
+                    # because they advance through a noop backend transition.
                     "agent_steps": 0,
                     "last_activity_monotonic": time.monotonic(),
                     # Cap at the agent's turn budget so the server truncates no later
@@ -388,11 +387,10 @@ class OpenAirCongestionEnv(GymnasiumServer):
 
         calls = [item for item in action.output if getattr(item, "type", None) == "function_call"]
 
-        # Protocol failures terminate and release the episode. They must not
-        # exploit the negative congestion objective by avoiding an env step.
+        # Protocol failures advance the same backend with noop plus a negative
+        # surcharge, so malformed output cannot end a costly episode early.
         if not calls:
             return await self._standard_protocol_violation(
-                session_id=session_id,
                 state=state,
                 error="no_tool_call",
                 message=_NO_TOOL_CALL_MSG,
@@ -400,9 +398,8 @@ class OpenAirCongestionEnv(GymnasiumServer):
             )
 
         if len(calls) != 1:
-            message = "Exactly one tool call is required; the episode was terminated."
+            message = "Exactly one tool call is required; applied penalized noop."
             return await self._standard_protocol_violation(
-                session_id=session_id,
                 state=state,
                 error="multiple_tool_calls",
                 message=message,
@@ -413,10 +410,9 @@ class OpenAirCongestionEnv(GymnasiumServer):
         tool_outputs: list[dict[str, Any]] = []
 
         # Normalise to the env's ToolCall. Unknown tool names, malformed JSON,
-        # and structurally invalid arguments terminate with the configured
-        # protocol penalty; the backend is not stepped. Numeric/enum/runtime
-        # bounds deliberately remain guardrail decisions so they receive the
-        # standard auditable rejection reward without ending the episode.
+        # and structurally invalid arguments receive a penalized noop fallback.
+        # Numeric/enum/runtime bounds deliberately remain guardrail decisions
+        # so they receive the standard auditable rejection reward.
         try:
             raw_args = _strict_json_object(call.arguments) if (call.arguments or "").strip() else {}
             tool_call = ToolCall(name=call.name, arguments=raw_args)
@@ -424,10 +420,9 @@ class OpenAirCongestionEnv(GymnasiumServer):
         except (ValueError, JSONSchemaValidationError) as exc:
             tool_outputs.insert(0, self.tool_output(call, {"accepted": False, "error": str(exc)}))
             return await self._standard_protocol_violation(
-                session_id=session_id,
                 state=state,
                 error="invalid_tool_call",
-                message="Invalid tool call rejected; the episode was terminated.",
+                message="Invalid tool call rejected; applied penalized noop.",
                 tool_outputs=tool_outputs,
             )
 
@@ -486,24 +481,50 @@ class OpenAirCongestionEnv(GymnasiumServer):
     async def _standard_protocol_violation(
         self,
         *,
-        session_id: Optional[str],
         state: dict[str, Any],
         error: str,
         message: str,
         tool_outputs: list[dict[str, Any]],
-    ) -> tuple[None, float, bool, bool, dict[str, Any]]:
-        """Penalize one invalid model turn and eagerly release its episode."""
+    ) -> tuple[Optional[str], float, bool, bool, dict[str, Any]]:
+        """Advance one invalid model turn as noop plus a negative surcharge."""
 
         penalty = float(self.config.protocol_violation_penalty)
-        cumulative_reward = float(state["cumulative_reward"]) + penalty
-        episode_id = state["episode_id"]
-        release = await self._release_session(session_id)
+        next_obs, base_reward, done, step_info = await asyncio.to_thread(
+            self.backend.step,
+            state["episode_id"],
+            ToolCall(name="noop", arguments={}),
+        )
+        step_info.update(state["contract"])
+
+        reward = float(base_reward) + penalty
+        state["cumulative_reward"] += reward
+        state["n_steps"] += 1
+        step_idx = step_info.get("step_idx", state["n_steps"])
+
+        reward_terms = dict(step_info.get("reward_terms") or {})
+        reward_terms["protocol_violation"] = penalty
+        reward_terms["total"] = reward
+        step_info["reward_terms"] = reward_terms
+
+        next_obs = next_obs.model_copy(
+            update={
+                "agent_aux": AgentAux(
+                    last_action=LastActionEcho(name="noop", arguments={}),
+                    last_reward=reward,
+                    last_rejection=message,
+                    step_idx=step_idx,
+                )
+            }
+        )
+        terminated = bool(done)
+        truncated = (not terminated) and state["agent_steps"] >= state["max_agent_steps"]
         return (
-            None,
-            penalty,
-            True,
-            False,
+            to_policy_text(next_obs),
+            reward,
+            terminated,
+            truncated,
             {
+                **step_info,
                 **state["contract"],
                 "error": error,
                 "message": message,
@@ -511,14 +532,12 @@ class OpenAirCongestionEnv(GymnasiumServer):
                 "protocol_rejection": True,
                 "guardrail_accepted": False,
                 "rejection_reason": message,
+                "applied_fallback_action": {"name": "noop", "arguments": {}},
                 "tool_outputs": tool_outputs,
-                "episode_id": episode_id,
+                "step_idx": step_idx,
+                "episode_id": state["episode_id"],
                 "n_steps": state["n_steps"],
-                "cumulative_reward": cumulative_reward,
-                "training_eligible": False,
-                "rollout_usable": False,
-                "training_usable": False,
-                "release": release,
+                "cumulative_reward": state["cumulative_reward"],
             },
         )
 

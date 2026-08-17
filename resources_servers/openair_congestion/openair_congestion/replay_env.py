@@ -42,7 +42,7 @@ LOG = logging.getLogger("openair_congestion.replay_env")
 
 # --- Synthetic dynamics ----------------------------------------------------
 
-ACTION_EFFECT_VERSION = "synthetic_action_effect_v5_conditioned_tradeoffs"
+ACTION_EFFECT_VERSION = "synthetic_action_effect_v6_shared_capacity"
 
 
 @dataclass
@@ -348,9 +348,14 @@ def _synthetic_replay_guardrail(
     return result
 
 
-def _clamp_observation_payload(data: dict[str, Any]) -> dict[str, Any]:
-    """Clamp mutated observation fields back into the Pydantic schema bounds."""
+def _clamp_observation_payload(
+    data: dict[str, Any],
+    *,
+    cell_capacity_mbps: float,
+) -> dict[str, Any]:
+    """Clamp fields and enforce the synthetic per-cell throughput capacity."""
 
+    capacity = max(1e-6, float(cell_capacity_mbps))
     for cell in data.get("cells", []):
         cell["prb_util_dl_p50"] = _clip(float(cell.get("prb_util_dl_p50", 0.0)), 0.0, 1.0)
         cell["prb_util_dl_p99"] = _clip(float(cell.get("prb_util_dl_p99", 0.0)), 0.0, 1.0)
@@ -367,9 +372,9 @@ def _clamp_observation_payload(data: dict[str, Any]) -> dict[str, Any]:
             1.0,
         )
         cell["fairness_jain"] = _clip(float(cell.get("fairness_jain", 1.0)), 0.0, 1.0)
+        ues = cell.get("ues", [])
         sla_count = 0
-
-        for ue in cell.get("ues", []):
+        for ue in ues:
             ue["offered_mbps"] = max(0.0, float(ue.get("offered_mbps", 0.0)))
             ue["delivered_mbps"] = _clip(
                 float(ue.get("delivered_mbps", 0.0)),
@@ -386,6 +391,23 @@ def _clamp_observation_payload(data: dict[str, Any]) -> dict[str, Any]:
             ue["pdb_violations"] = 1 if ue["buffer_occupancy_kb"] > 500.0 else 0
             sla_count += int(ue["pdb_violations"])
             ue["5qi"] = int(max(1, min(127, round(float(ue.get("5qi", 9))))))
+
+        delivered_total = sum(float(ue["delivered_mbps"]) for ue in ues)
+        if delivered_total > capacity + 1e-12:
+            scale = capacity / delivered_total
+            delivered_values: list[float] = []
+            sla_count = 0
+            for ue in ues:
+                ue["delivered_mbps"] = float(ue["delivered_mbps"]) * scale
+                delivered = float(ue["delivered_mbps"])
+                delivered_values.append(delivered)
+                ue["buffer_occupancy_kb"] = max(
+                    0.0,
+                    (float(ue["offered_mbps"]) - delivered) * 50.0,
+                )
+                ue["pdb_violations"] = 1 if ue["buffer_occupancy_kb"] > 500.0 else 0
+                sla_count += int(ue["pdb_violations"])
+            cell["fairness_jain"] = _jain_fairness(delivered_values)
         cell["sla_violations_last_window"] = sla_count
 
     return data
@@ -664,7 +686,12 @@ def apply_action_effect(
         cell_capacity_mbps=cell_capacity_mbps,
     )
     _apply_admission_setpoints(data, state)
-    obs = Observation.model_validate(_clamp_observation_payload(data))
+    obs = Observation.model_validate(
+        _clamp_observation_payload(
+            data,
+            cell_capacity_mbps=cell_capacity_mbps,
+        )
+    )
     return obs
 
 
@@ -800,6 +827,12 @@ def build_trajectory(
             snapshot=snap,
             episode=placeholder,
             t_s=float(t),
+        )
+        obs = Observation.model_validate(
+            _clamp_observation_payload(
+                obs.model_dump(by_alias=True),
+                cell_capacity_mbps=fingerprint.cell_capacity_mbps,
+            )
         )
         obs_list.append(obs)
 

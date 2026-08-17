@@ -45,14 +45,16 @@ containing current cell and UE KPIs. The policy must return exactly one call:
 | `noop` | none | Keep current setpoints for one step. |
 
 The authoritative schemas live in `openair_congestion/tools.py`. Missing,
-malformed, unknown, or multiple calls violate the protocol: the episode ends
-with the finite `protocol_violation_penalty`. A well-formed unsafe call is
-rejected by the guardrail and scored as a rejected transition.
+malformed, unknown, or multiple calls advance as `noop` and add the finite
+`protocol_violation_penalty`. A well-formed unsafe call is rejected by the
+guardrail and scored as a rejected transition.
 
 Accepted replay actions are persistent absolute setpoints. Supported setpoint
 changes can alter later synthetic KPIs; reapplying the same setpoint is
 idempotent. Empty slice reservations are accepted, but non-empty reservations
-are rejected because the bundled topology does not model slices.
+are rejected because the bundled topology does not model slices. Synthetic
+delivered throughput is capped at each cell's configured capacity; when scaling
+is needed, delivery-derived buffer, PDB, fairness, and SLA fields are recomputed.
 
 Difficulty, regime, and scenario labels remain evaluator metadata. They are
 not rendered into the policy's KPI message.
@@ -68,8 +70,9 @@ rejected by the guardrail,
 - each weighted reward term; and
 - the scalar total used by evaluation or training.
 
-Protocol violations do not produce a backend transition; they receive the
-configured finite penalty instead.
+Protocol violations produce the same backend transition as `noop` plus the
+configured negative surcharge, so malformed output cannot end a costly episode
+early or outscore the equivalent valid `noop` trajectory.
 
 The terms cover changes in SLA violations, delivered throughput, and Jain
 fairness; current SLA, PRB, access, fairness, and buffer pressure; optional

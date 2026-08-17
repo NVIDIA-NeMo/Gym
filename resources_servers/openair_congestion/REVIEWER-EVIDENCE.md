@@ -32,8 +32,8 @@ These files are review scope, not evidence of upstream acceptance.
 
 | Area | Checked behavior | Evidence |
 |---|---|---|
-| Protocol and guardrail | Exactly one known, schema-valid tool call is required; topology and safety bounds are authoritative server-side. | `tests/test_app.py`, `tests/test_guardrail.py` |
-| Causal replay | The eight-tool surface has deterministic replay semantics; focused tests cover representative parameter-sensitive effects and persistent-setpoint idempotency. | `tests/test_replay_action_semantics.py`, `tests/test_reward_correctness.py` |
+| Protocol and guardrail | Exactly one known, schema-valid tool call is required; malformed turns advance as `noop` plus a negative surcharge, while topology and safety bounds remain authoritative server-side. | `tests/test_app.py`, `tests/test_guardrail.py` |
+| Causal replay | The eight-tool surface has deterministic replay semantics; focused tests cover representative parameter-sensitive effects, persistent-setpoint idempotency, and the per-cell throughput-capacity invariant. | `tests/test_replay_action_semantics.py`, `tests/test_reward_correctness.py` |
 | Programmatic verifier | Reward measurements and terms are computed from before/action/after state without an LLM judge; ordering and rejection costs are tested. | `openair_congestion/rewards.py`, `tests/test_reward_correctness.py`, `tests/test_reward_profiles.py` |
 | Transactionality and lifecycle | A failed step does not partially commit; transport retries are deduplicated; close, truncation, protocol failure, and lease reclamation preserve state ownership. | `tests/test_replay_lifecycle.py`, `tests/test_app.py` |
 | Model input | KPI messages omit evaluator-only difficulty, regime, and scenario labels. | `tests/test_render.py`, `tests/test_example_artifacts.py` |

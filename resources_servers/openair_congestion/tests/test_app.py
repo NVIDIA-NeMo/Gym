@@ -167,7 +167,7 @@ class TestReset:
         assert "5G RAN telemetry" in obs  # render.to_user_text output
         assert info["seed"] == 7001
         assert info["scenario_id"] == "prb_exhaustion"
-        assert info["dynamics_mode"] == "synthetic_action_effect_v5_conditioned_tradeoffs"
+        assert info["dynamics_mode"] == "synthetic_action_effect_v6_shared_capacity"
         assert info["causal_action_effects"] is True
         assert info["training_usable"] is True
         assert info["supports_explicit_close"] is True
@@ -489,34 +489,60 @@ class TestStep:
             ),
         ],
     )
-    async def test_protocol_violation_is_penalized_below_noop_and_releases_slot(self, action, expected_error):
+    async def test_protocol_violation_applies_penalized_noop_transition(self, action, expected_error):
         noop_env = _make_env(pool_size=1, protocol_violation_penalty=-1.0)
         await noop_env.reset(dict(_TASK_METADATA), session_id="noop")
-        _, noop_reward, _, _, _ = await noop_env.step(_tool_response("noop", {}), {}, session_id="noop")
+        _, noop_reward, noop_term, noop_trunc, _ = await noop_env.step(
+            _tool_response("noop", {}), {}, session_id="noop"
+        )
         await noop_env.explicit_close("noop")
 
         env = _make_env(pool_size=1, protocol_violation_penalty=-1.0)
         await env.reset(dict(_TASK_METADATA), session_id="sid")
         obs, reward, term, trunc, info = await env.step(action, {}, session_id="sid")
 
-        assert obs is None
-        assert reward == pytest.approx(-1.0)
+        assert obs is not None
+        assert reward == pytest.approx(noop_reward - 1.0)
         assert reward < noop_reward
-        assert term is True and trunc is False
+        assert (term, trunc) == (noop_term, noop_trunc) == (False, False)
         assert info["error"] == expected_error
         assert info["protocol_violation"] is True
         assert info["protocol_rejection"] is True
+        assert info["applied_fallback_action"] == {"name": "noop", "arguments": {}}
         assert info["rejection_reason"]
+        assert info["n_steps"] == 1
+        assert info["cumulative_reward"] == pytest.approx(reward)
+        assert info["reward_terms"]["protocol_violation"] == pytest.approx(-1.0)
+        assert info["reward_terms"]["total"] == pytest.approx(reward)
         assert info["backend"] == "replay"
         assert info["action_affects_observation"] is True
         assert info["reward_profile"] == "openair_v1"
         assert info["reward_weights"]
         assert info["observation_render"] == "openair_natural_language_v1"
-        assert "sid" not in env.session_state
+        assert "sid" in env.session_state
+        await env.explicit_close("sid")
 
-        # The violation closes the only backend slot immediately.
-        _, reset_info = await env.reset(dict(_TASK_METADATA, seed=7002), session_id="next")
-        assert reset_info["episode_id"]
+    @pytest.mark.asyncio
+    async def test_protocol_violation_cannot_beat_complete_noop_episode(self):
+        async def episode_return(first_action: NeMoGymResponse) -> float:
+            env = _make_env(protocol_violation_penalty=-1.0, agent_max_steps=4)
+            await env.reset(dict(_TASK_METADATA, max_steps=4), session_id="sid")
+            total = 0.0
+            action = first_action
+            while True:
+                _, reward, term, trunc, _ = await env.step(action, {}, session_id="sid")
+                total += reward
+                if term or trunc:
+                    break
+                action = _tool_response("noop", {})
+            await env.explicit_close("sid")
+            return total
+
+        noop_total = await episode_return(_tool_response("noop", {}))
+        invalid_total = await episode_return(_text_response("I cannot choose an action."))
+
+        assert invalid_total == pytest.approx(noop_total - 1.0)
+        assert invalid_total < noop_total
 
     @pytest.mark.asyncio
     async def test_reward_accumulates_per_step_like_blackjack(self):

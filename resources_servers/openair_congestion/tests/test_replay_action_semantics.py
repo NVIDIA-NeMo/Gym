@@ -122,6 +122,50 @@ def test_synthetic_replay_never_delivers_more_than_offered():
             assert ue.delivered_mbps <= ue.offered_mbps
 
 
+def test_synthetic_replay_trajectory_respects_per_cell_capacity():
+    observations, fingerprint = build_trajectory(
+        seed=928,
+        difficulty=1.0,
+        regime_mix={"qos_competition": 1.0},
+        tier="replay",
+        n_steps=2,
+    )
+
+    for observation in observations:
+        for cell in observation.cells:
+            assert sum(float(ue.delivered_mbps) for ue in cell.ues) <= (fingerprint.cell_capacity_mbps + 1e-9)
+
+
+def test_action_effect_caps_shared_cell_capacity_and_recomputes_derived_kpis():
+    env = ReplayEnv(pool_size=1, max_steps_default=4)
+    first_obs, meta = _reset(env)
+    base_next = env._episodes[meta.episode_id].trajectory[1]
+
+    adjusted = apply_action_effect(
+        prev_obs=first_obs,
+        base_next_obs=base_next,
+        action=ToolCall(
+            name="set_scheduler_policy",
+            arguments={"cell_id": 0, "policy": "MaxCI"},
+        ),
+        state=ReplayActionState(),
+        cell_capacity_mbps=1.0,
+    )
+    env.close(meta.episode_id)
+
+    for cell in adjusted.cells:
+        delivered = [float(ue.delivered_mbps) for ue in cell.ues]
+        assert sum(delivered) <= 1.0 + 1e-9
+        squared = sum(value * value for value in delivered)
+        expected_fairness = 1.0 if squared <= 1e-12 else sum(delivered) ** 2 / (len(delivered) * squared)
+        assert cell.fairness_jain == pytest.approx(expected_fairness)
+        assert cell.rrc_connected_ues == len(cell.ues)
+        assert cell.sla_violations_last_window == sum(int(ue.pdb_violations) for ue in cell.ues)
+        for ue in cell.ues:
+            assert ue.buffer_occupancy_kb == pytest.approx((ue.offered_mbps - ue.delivered_mbps) * 50.0)
+            assert ue.pdb_violations == int(ue.buffer_occupancy_kb > 500.0)
+
+
 def test_scheduler_policies_expose_real_tradeoffs():
     noop = _run_one(ToolCall(name="noop", arguments={}))
     rr = _run_one(
@@ -180,7 +224,13 @@ def test_max_ul_power_is_not_an_unconditional_relief_action():
     high_interference_noop = _run_one(ToolCall(name="noop", arguments={}), regime_mix=high_interference)
     high_interference_high_power = _run_one(high_power, regime_mix=high_interference)
 
-    assert _cell_delivery(low_interference_high_power.observation) > _cell_delivery(low_interference_noop.observation)
+    low_noop_cell = next(cell for cell in low_interference_noop.observation.cells if cell.cell_id == 0)
+    low_high_cell = next(cell for cell in low_interference_high_power.observation.cells if cell.cell_id == 0)
+    assert _cell_delivery(low_interference_high_power.observation) == pytest.approx(
+        _cell_delivery(low_interference_noop.observation)
+    )
+    assert sum(ue.sinr_db for ue in low_high_cell.ues) > sum(ue.sinr_db for ue in low_noop_cell.ues)
+    assert sum(ue.bler for ue in low_high_cell.ues) < sum(ue.bler for ue in low_noop_cell.ues)
     assert _cell_delivery(high_interference_high_power.observation) < _cell_delivery(
         high_interference_noop.observation
     )

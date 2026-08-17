@@ -152,12 +152,14 @@ The default `replay` path exposes eight tools:
 | `noop` | Keep current setpoints for one step |
 
 The policy must emit exactly one function call. Missing, malformed, unknown,
-or multiple calls terminate the episode with a finite protocol penalty. A
+or multiple calls advance as `noop` and add the finite protocol penalty. A
 well-formed unsafe call is rejected by the guardrail and scored as a rejected
 transition.
 
 Accepted replay controls are persistent setpoints. Supported setpoint changes
 can alter later synthetic KPIs; applying the same setpoint again is idempotent.
+Synthetic delivered throughput is capped per cell, with delivery-derived KPI
+fields recomputed if scaling is required.
 
 <Warning>
 The tool names describe network controls, but the bundled backend applies
@@ -180,13 +182,14 @@ For each `step()`, the server:
 6. returns the next observation and termination state.
 
 A failed reward computation does not partially advance an episode. Normal
-completion, truncation, protocol failure, and explicit close release the
-session. Inactive sessions left by a hard client crash are reclaimed after
-the configured lease.
+completion, truncation, and explicit close release the session. A protocol
+failure advances as a penalized `noop` and otherwise keeps the episode active.
+Inactive sessions left by a hard client crash are reclaimed after the
+configured lease.
 
 Every successful backend step contains the `openair_v1` reward version, raw
-measurements, weighted terms, and scalar total. Protocol violations instead
-receive the configured fixed penalty. The terms cover SLA violations,
+measurements, weighted terms, and scalar total. Protocol violations add the
+configured negative surcharge to a `noop` step. The terms cover SLA violations,
 throughput, Jain fairness, PRB/access/fairness/buffer pressure, action
 magnitude, and rejected actions.
 
