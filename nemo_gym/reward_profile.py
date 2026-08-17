@@ -51,39 +51,6 @@ def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
 
 
 # Two-tailed t critical values for 95% CI indexed by degrees of freedom.
-_T95_CRIT: Dict[int, float] = {
-    1: 12.706,
-    2: 4.303,
-    3: 3.182,
-    4: 2.776,
-    5: 2.571,
-    6: 2.447,
-    7: 2.365,
-    8: 2.306,
-    9: 2.262,
-    10: 2.228,
-    15: 2.131,
-    20: 2.086,
-    25: 2.060,
-    30: 2.042,
-    40: 2.021,
-    60: 2.000,
-    120: 1.980,
-}
-
-
-def _t_crit_95(df: int) -> float:
-    """Two-tailed t critical value for a 95% CI at the given degrees of freedom."""
-    if df <= 0:
-        return float("nan")
-    if df in _T95_CRIT:
-        return _T95_CRIT[df]
-    keys = sorted(_T95_CRIT)
-    for i in range(len(keys) - 1):
-        lo, hi = keys[i], keys[i + 1]
-        if lo < df < hi:
-            return _T95_CRIT[lo] + (_T95_CRIT[hi] - _T95_CRIT[lo]) * (df - lo) / (hi - lo)
-    return 1.960  # df >= 120, approximates z
 
 
 class RewardProfiler:
@@ -204,7 +171,6 @@ class RewardProfiler:
         return Histogram(data)
 
     def confidence_interval(self, df: DataFrame) -> Tuple[Series, Series]:
-        # to do - make sure this test is correct
         ci_low, ci_high = stats.t.interval(
             confidence=0.95,
             df=df.count() - 1,  # degrees of freedom per column
@@ -248,10 +214,8 @@ class RewardProfiler:
         ]
 
     def _compute_repeat_level_metrics(self, df: DataFrame) -> List[Dict[str, Any]]:
-        """Per-rollout-index summary stats across all tasks. Returns [] when num_repeats < 2."""
+        """Per-rollout-index summary stats across all tasks."""
         rollout_indices = sorted(df[ROLLOUT_INDEX_KEY_NAME].unique())
-        if len(rollout_indices) < 2:
-            return []
 
         total_tasks = int(df[TASK_INDEX_KEY_NAME].nunique())
         skip_cols = {"agent_name", TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME}
@@ -273,6 +237,8 @@ class RewardProfiler:
                     continue
                 mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
+                sem = std / n**0.5
+                entry[f"sem/{col}"] = sem
                 entry.update(
                     {
                         f"mean/{col}": mean,
@@ -285,11 +251,9 @@ class RewardProfiler:
                     }
                 )
                 if n > 1:
-                    sem = std / n**0.5
-                    t = _t_crit_95(n - 1)
-                    entry[f"sem/{col}"] = sem
-                    entry[f"ci_lower/{col}"] = mean - t * sem
-                    entry[f"ci_upper/{col}"] = mean + t * sem
+                    ci_low, ci_high = stats.t.interval(0.95, df=n - 1, loc=mean, scale=sem)
+                    entry[f"ci_low_95/{col}"] = float(ci_low)
+                    entry[f"ci_high_95/{col}"] = float(ci_high)
             repeat_metrics.append(entry)
         return repeat_metrics
 
