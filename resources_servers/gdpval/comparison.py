@@ -42,6 +42,19 @@ from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS, merge_c
 LOGGER = logging.getLogger(__name__)
 
 
+def _ignore_files() -> frozenset[str]:
+    """Run-state names that must never be judged as a submission.
+
+    Owned by the agent that writes them rather than copied into each judging
+    path. Imported lazily: ``stirrup_agent/__init__`` eagerly imports Ray and
+    FastAPI, and ``multistage_elo`` imports this module at module scope.
+    ``sys.modules`` caches it, so repeat calls are a dict lookup.
+    """
+    from responses_api_agents.stirrup_agent.file_reader import IGNORE_FILES
+
+    return IGNORE_FILES
+
+
 JUDGE_PROMPT = (
     "Given a task description and reference files, select which of two submission file(s) "
     "better completed the task. "
@@ -61,16 +74,6 @@ SUBMISSION_A_OPEN = "<SUBMISSION_A_START>\n"
 SUBMISSION_A_CLOSE = "\n<SUBMISSION_A_END>\n\n"
 SUBMISSION_B_OPEN = "<SUBMISSION_B_START>\n"
 SUBMISSION_B_CLOSE = "\n<SUBMISSION_B_END>\n\n"
-
-IGNORE_FILES = {
-    "finish_params.json",
-    "history.json",
-    "history.pkl",
-    "metadata.json",
-    "inprogress_history.json",
-    "log.txt",
-    "reference_files",
-}
 
 REQUEST_MAX_ATTEMPTS = 5
 REQUEST_INITIAL_BACKOFF_SECONDS = 5.0
@@ -404,7 +407,7 @@ def build_file_section(
 ) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
-    Skips files in ``IGNORE_FILES``. Extracts zips into per-call tempdirs
+    Skips run-state files (see :func:`_ignore_files`). Extracts zips into per-call tempdirs
     (the dirs are appended to ``clean_up_list`` for the caller to ``rmtree``).
     Returns a list of content block dicts suitable for OpenAI messages.
 
@@ -433,9 +436,11 @@ def build_file_section(
                     clean_up_list.append(extract_dir)
                     extracted_dirs.append(extract_dir)
 
+    ignore_files = _ignore_files()
+
     def _emit(directory: str, file_name: str) -> None:
         nonlocal no_files
-        if file_name in IGNORE_FILES:
+        if file_name in ignore_files:
             return
         section.append({"type": "text", "text": f"\n{file_name}:\n"})
         if media_mode == "images_and_text":
