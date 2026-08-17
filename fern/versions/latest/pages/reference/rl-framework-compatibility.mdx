@@ -1,6 +1,6 @@
 ---
 title: "RL Framework Compatibility"
-description: "NeMo Gym compatibility with RL training frameworks (NeMo RL, TRL, Unsloth)"
+description: "NeMo Gym compatibility with RL training frameworks (NeMo RL, Unsloth, VeRL)"
 position: 2
 ---
 Reference for NeMo Gym version compatibility with supported training frameworks.
@@ -27,8 +27,7 @@ Match the container to your **model recipe**, not only your NeMo Gym version. Fo
 | v0.1.1 | [`nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano`](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl/tags?version=v0.4.0) | [Nemotron 3 Nano](/model-recipes/nemotron-3-nano) |
 
 <Note>
-[NeMo RL GRPO](/tutorials/training-tutorials/nemo-rl-grpo) for the NeMo RL training tutorial.
-
+See [NeMo RL GRPO](/tutorials/training-tutorials/nemo-rl-grpo) for the NeMo RL training tutorial.
 </Note>
 
 ---
@@ -38,8 +37,7 @@ Match the container to your **model recipe**, not only your NeMo Gym version. Fo
 The NeMo Gym integration with Unsloth is tested on `unsloth==2026.1.4` and `unsloth_zoo==2026.1.4`. Other versions are not guaranteed to work.
 
 <Note>
-[Unsloth](/tutorials/training-tutorials/unsloth) for the Unsloth training tutorial.
-
+See [Unsloth](/tutorials/training-tutorials/unsloth) for the Unsloth training tutorial.
 </Note>
 
 ---
@@ -49,6 +47,5 @@ The NeMo Gym integration with Unsloth is tested on `unsloth==2026.1.4` and `unsl
 NeMo Gym 0.2.1+ is compatible with verl pinned to the commit in [`REQUIRED_VERL.txt`](https://github.com/verl-project/verl-recipe/blob/main/nemo_gym/REQUIRED_VERL.txt), tested on the `verlai/verl:vllm017.latest` container (vLLM 0.17.0). Other versions are not guaranteed to work.
 
 <Note>
-[Training with VeRL](/tutorials/training-tutorials/verl) for the verl training tutorial.
-
+See [Training with VeRL](/tutorials/training-tutorials/verl) for the VeRL training tutorial.
 </Note>
