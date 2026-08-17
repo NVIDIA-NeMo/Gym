@@ -6,6 +6,7 @@ set -euo pipefail
 NUM_PREFILL_NODES=$NUM_PREFILL_NODES
 NUM_DECODE_NODES=$NUM_DECODE_NODES
 MODEL=$MODEL
+MODEL_REVISION=$MODEL_REVISION
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
@@ -132,7 +133,7 @@ VLLM_OPTIMAL_ARGS=(
     --enable-expert-parallel
     --mamba-ssm-cache-dtype float32
     --mamba-cache-mode align
-    --revision db2e4b63a1658dff80b6978ba4ffccda5cc8d166
+    --revision "$MODEL_REVISION"
     --seed 0
     --served-model-name "$MODEL"
 )
