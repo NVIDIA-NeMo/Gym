@@ -6,7 +6,6 @@
 
 import argparse
 import asyncio
-import os
 import re
 import sys
 import urllib.parse
@@ -136,26 +135,20 @@ async def cleanup_sandboxes(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--domain", default=os.environ.get("OPENSANDBOX_DOMAIN"))
-    parser.add_argument(
-        "--protocol",
-        choices=("http", "https"),
-        default=(os.environ.get("OPENSANDBOX_PROTOCOL") or "http").strip(),
-    )
-    parser.add_argument("--run-id", default=os.environ.get("NEMO_GYM_RUN_ID") or os.environ.get("SLURM_JOB_ID"))
-    parser.add_argument(
-        "--user",
-        default=os.environ.get("NEMO_GYM_USER") or os.environ.get("SLURM_JOB_USER") or os.environ.get("USER"),
-    )
+    parser.add_argument("--domain", required=True)
+    parser.add_argument("--protocol", choices=("http", "https"), default="http")
+    parser.add_argument("--api-key-stdin", action="store_true", required=True, help="Read the API key from stdin.")
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--user", required=True)
     parser.add_argument("--reap", action="store_true", help="Delete exact matches; otherwise only audit them.")
     args = parser.parse_args(argv)
 
-    access_key = (os.environ.get("OPENSANDBOX_API_KEY") or "").strip()
+    access_key = sys.stdin.read().strip()
     for name, value in (("domain", args.domain), ("run-id", args.run_id), ("user", args.user)):
-        if not value or not value.strip():
-            parser.error(f"--{name} or its environment fallback is required")
+        if not value.strip():
+            parser.error(f"--{name} must not be empty")
     if not access_key:
-        parser.error("OPENSANDBOX_API_KEY is required")
+        parser.error("--api-key-stdin did not provide an API key")
 
     try:
         return asyncio.run(
