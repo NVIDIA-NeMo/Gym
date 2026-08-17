@@ -63,8 +63,7 @@ def main() -> None:
     # `reinstall` has no `gym` equivalent (`gym install` was dropped); point users at the uv command it runs.
     if key == "reinstall":
         print(
-            f"⚠  `{alias}` is deprecated and will be removed in a future release; "
-            f"run `uv sync --extra dev --group docs` instead.",
+            f"⚠  `{alias}` is deprecated and will be removed in a future release; run `uv sync --extra dev` instead.",
             file=sys.stderr,
         )
         dispatch("nemo_gym.cli.general:reinstall", sys.argv[1:])

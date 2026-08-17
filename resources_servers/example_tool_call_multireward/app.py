@@ -38,12 +38,13 @@ reaches a trainer depends on the training framework's NeMo Gym integration.
 import json
 from typing import Any, Dict, List
 
-from pydantic import Field
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
+    BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseVerifyRequest,
-    BaseVerifyResponse,
     SimpleResourcesServer,
 )
 
@@ -52,19 +53,24 @@ class ToolCallMultiRewardResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
+class GetWeatherRequest(BaseModel):
+    city: str
+
+
+class GetWeatherResponse(BaseModel):
+    city: str
+    weather_description: str
+
+
 class ToolCallMultiRewardVerifyRequest(BaseVerifyRequest):
     # The single tool call the model is expected to make, e.g.
     # {"name": "get_weather", "arguments": {"city": "San Francisco"}}.
     expected_call: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolCallMultiRewardVerifyResponse(BaseVerifyResponse):
+class ToolCallMultiRewardVerifyResponse(BaseMultiRewardVerifyResponse):
     # Per-component scores are also surfaced as top-level fields so the aggregate
     # metrics endpoint profiles each one in addition to the combined reward.
-    # Decoupled per-component rewards (name -> score). How these reach a trainer
-    # depends on the training framework's NeMo Gym integration. Defined here (not on
-    # BaseVerifyResponse) so other environments' verify responses are unchanged.
-    reward_components: Dict[str, float] | None = None
     correctness: float = 0.0
     schema_valid: float = 0.0
     format: float = 0.0
@@ -73,6 +79,14 @@ class ToolCallMultiRewardVerifyResponse(BaseVerifyResponse):
 
 class ToolCallMultiRewardResourcesServer(SimpleResourcesServer):
     config: ToolCallMultiRewardResourcesServerConfig
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/get_weather")(self.get_weather)
+        return app
+
+    async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
+        return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is sunny.")
 
     @staticmethod
     def _parse_arguments(arguments: Any) -> tuple[Dict[str, Any], bool]:

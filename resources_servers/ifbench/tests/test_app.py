@@ -21,6 +21,7 @@ from resources_servers.ifbench.app import (
     IFBenchResourcesServer,
     IFBenchResourcesServerConfig,
     IFBenchVerifyRequest,
+    _loose_response_variants,
 )
 
 
@@ -186,6 +187,62 @@ class TestApp:
         result = asyncio.run(self._create_server().verify(req))
         assert result.reward == 0.0
         assert result.follow_instruction_list == [False]
+
+    def test_loose_variants_helper(self):
+        """_loose_response_variants strips markdown asterisks and trims first/last lines."""
+        variants = _loose_response_variants("intro\n*body*\noutro")
+        assert variants[0] == "intro\n*body*\noutro"  # raw response is first
+        assert "intro\nbody\noutro" in variants  # asterisks removed
+        assert "*body*\noutro" in variants  # first line removed
+        assert "intro\n*body*" in variants  # last line removed
+        assert "*body*" in variants  # first and last removed
+        assert len(variants) == 8
+
+    def test_loose_accuracy_rescues_strict_failure(self):
+        """Loose scoring passes when a variant satisfies the instruction though strict fails."""
+        # Raw response has 5 numbers (strict fail for N=2); dropping the filler first
+        # line leaves exactly 2 numbers, so the loose variant passes.
+        req = self._create_request(
+            instruction_ids=["count:numbers"],
+            prompt="Include exactly 2 numbers.",
+            kwargs=[{"N": 2}],
+            response_content="Reference values: 100 200 300\nThe answer is 42 and 7.",
+        )
+        result = asyncio.run(self._create_server().verify(req))
+        assert result.follow_instruction_list == [False]
+        assert result.reward == 0.0
+        assert result.follow_all_instructions is False
+        assert result.follow_instruction_list_loose == [True]
+        assert result.reward_loose == 1.0
+        assert result.follow_all_instructions_loose is True
+
+    def test_loose_fraction_partial(self):
+        """Loose fraction grading: one instruction rescued by loose, one fails in every variant."""
+        req = self._create_request(
+            instruction_ids=["count:numbers", "count:numbers"],
+            prompt="Include some numbers.",
+            kwargs=[{"N": 2}, {"N": 99}],
+            response_content="Reference values: 100 200 300\nThe answer is 42 and 7.",
+        )
+        result = asyncio.run(self._create_server().verify(req))
+        assert result.follow_instruction_list == [False, False]
+        assert result.reward == 0.0
+        assert result.follow_instruction_list_loose == [True, False]
+        assert result.reward_loose == 0.5
+        assert result.follow_all_instructions_loose is False
+
+    def test_empty_response_loose_all_fail(self):
+        """An empty response fails all instructions under loose scoring too."""
+        req = self._create_request(
+            instruction_ids=["count:numbers", "words:start_verb"],
+            prompt="Start with a verb and include 3 numbers.",
+            kwargs=[{"N": 3}, {}],
+            response_content="   ",
+        )
+        result = asyncio.run(self._create_server().verify(req))
+        assert result.follow_instruction_list_loose == [False, False]
+        assert result.reward_loose == 0.0
+        assert result.follow_all_instructions_loose is False
 
     def test_response_fields_preserved(self):
         """Verify response must echo back the original request fields."""

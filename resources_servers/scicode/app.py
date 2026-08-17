@@ -19,16 +19,16 @@ Runs the agent's accumulated per-sub-step Python solutions against each sub-step
 (targets loaded from test_data.h5) and returns a binary reward: 1.0 iff every sub-step passes.
 Per-sub-step counts are also returned so sub-step accuracy can be computed downstream.
 
-Designed to execute each sub-step via a Ray subprocess worker (instead of a Docker sandbox).
+Each sub-step is executed in a subprocess in this server's own process (instead of a
+Docker sandbox), so the subprocess inherits this server's interpreter and dependencies.
 """
 
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import ray
 from pydantic import ConfigDict
-from scicode_integration.runner import build_test_program, run_substep_remote, sanitize_test
+from scicode_integration.runner import build_test_program, run_substep, sanitize_test
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -72,6 +72,10 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     num_steps_passed: int = 0
     num_steps_total: int = 0
     problem_accuracy: bool = False
+    # Per-rollout sub-step pass fraction. As a numeric verify-response field it
+    # gets the full generic statistics (mean/std/min/max/median) from the
+    # RewardProfiler, which the aggregate-only pooled scalar cannot provide.
+    subtask_accuracy: float = 0.0
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
@@ -124,8 +128,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
             program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
             async with self._semaphore:
-                future = run_substep_remote.remote(program, self.config.timeout_secs)
-                result = await loop.run_in_executor(None, ray.get, future)
+                result = await loop.run_in_executor(None, run_substep, program, self.config.timeout_secs)
             return bool(result["passed"])
 
         step_results = list(await asyncio.gather(*[_run_substep(i) for i in scored]))
@@ -139,6 +142,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             num_steps_passed=num_passed,
             num_steps_total=len(scored),
             problem_accuracy=all_passed,
+            subtask_accuracy=num_passed / len(scored),
         )
 
 

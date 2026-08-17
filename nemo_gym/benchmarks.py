@@ -14,18 +14,18 @@
 # limitations under the License.
 """Benchmark discovery and preparation utilities."""
 
-import re
 import sys
-from copy import deepcopy
+from glob import glob
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import yaml
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import InterpolationKeyError
 from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import BenchmarkDatasetConfig
+from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
@@ -34,47 +34,12 @@ from nemo_gym.global_config import (
 )
 
 
-BENCHMARKS_DIR = PARENT_DIR / "benchmarks"
-
-# Fills unset `???`/`${...}` values during listing: they reference runtime-only values (API keys,
-# endpoints) not needed to identify a benchmark, so a placeholder lets the config still resolve.
-_UNSET_VALUE_PLACEHOLDER = "__unset_for_listing__"
-
-
-def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfig) -> DictConfig:
-    """`parse_no_environment` for *listing*: fill unset `???` values and undefined `${...}` interpolations
-    with a placeholder so a benchmark referencing runtime-only values can still be identified. Never mutates
-    the caller's config; errors other than those two propagate.
-
-    `???` is filled anywhere; `${...}` only where parse forces resolution (top-level and server sections),
-    not inside arbitrary non-server nested dicts — fine for listing, whose interpolations live in servers.
-    """
-    working = deepcopy(initial_config_dict)  # never mutate the caller's config
-    parser = GlobalConfigDictParser()
-
-    # Fill all `???` leaves in one pass. The loop below only adds placeholder keys, so no new `???` appear.
-    for path in parser.collect_missing_value_paths(working):
-        OmegaConf.update(working, path, _UNSET_VALUE_PLACEHOLDER)
-
-    # OmegaConf reports undefined `${...}` keys only one at a time (as InterpolationKeyError), so loop:
-    # inject a placeholder for each reported key and retry until it resolves.
-    injected: set[str] = set()
-    while True:
-        try:
-            return parser.parse_no_environment(initial_global_config_dict=working)
-        except InterpolationKeyError as e:
-            # The missing key name is only in the message text — omegaconf never stores it on an attribute
-            # (`e.key`/`e.full_key` point at the containing node), so a regex is the only way to read it.
-            match = re.search(r"Interpolation key '([^']+)'", str(e))
-            key = match.group(1) if match else None
-            if not key or key in injected:
-                raise  # can't identify/clear the missing key; let the caller decide (warn + skip)
-            injected.add(key)
-            working = OmegaConf.merge(DictConfig({key: _UNSET_VALUE_PLACEHOLDER}), working)
+BENCHMARKS_SUBDIR = "benchmarks"
+BENCHMARKS_DIR = PARENT_DIR / BENCHMARKS_SUBDIR
 
 
 class BenchmarkConfig(BaseModel):
-    name: str
+    name: str  # this is a dataset name, not the config name (they are usually the same)
     path: Path
     agent_name: str
     num_repeats: int
@@ -136,11 +101,55 @@ class BenchmarkConfig(BaseModel):
         )
 
 
-def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, BenchmarkConfig]:
-    benchmarks_dict = dict()
-    for config_path in config_paths:
-        config_path = Path(config_path)
+def _benchmark_config_name(rel_config_path: Path) -> str:
+    """The name of the benchmark config, given its path relative to ``benchmarks/``, sans ``.yaml``.
 
+    This is the identity we key benchmarks by, so a listed benchmark is always a valid ``--benchmark`` argument.
+    """
+    rel = rel_config_path.with_suffix("")
+    parts = rel.parts
+    if len(parts) == 2 and parts[1] == "config":
+        return parts[0]
+    return rel.as_posix()
+
+
+def _is_benchmark_config(config_path: Path) -> bool:
+    """True if the config declares a `type: benchmark` dataset anywhere in its structure.
+
+    A raw single-file parse (no `config_paths`/interpolation resolution), so it's format-agnostic and can't
+    fail on includes. An unparseable file is kept (returns True) so the resolve step surfaces a diagnostic.
+    """
+
+    def declares(node: object) -> bool:
+        if isinstance(node, dict):
+            return node.get("type") == "benchmark" or any(declares(v) for v in node.values())
+        if isinstance(node, list):
+            return any(declares(v) for v in node)
+        return False
+
+    try:
+        return declares(yaml.safe_load(config_path.read_text(errors="ignore")))
+    except yaml.YAMLError:
+        return True
+
+
+def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
+    """Sorted config paths under one dir that declare a benchmark, discovered by content.
+
+    A config is a benchmark iff it declares a `type: benchmark` dataset, regardless of filename, so we scan
+    every yaml. :func:`_is_benchmark_config` is a cheap prefilter (pay the resolve cost only on real
+    candidates) that also catches non-`config.yaml` names like tau2's `configs/*.yaml`. Empty if dir missing.
+    """
+    if not benchmarks_dir.is_dir():
+        return []
+    config_paths = [benchmarks_dir / p for p in glob("**/*.yaml", root_dir=benchmarks_dir, recursive=True)]
+    return sorted(p for p in config_paths if _is_benchmark_config(p))
+
+
+def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConfig]:
+    """Map benchmark name -> :class:`BenchmarkConfig` for every benchmark config under one dir."""
+    benchmarks_dict = dict()
+    for config_path in _benchmark_config_paths(benchmarks_dir):
         try:
             # Listing has no runtime context, so tolerate unset runtime-only values.
             maybe_bc = BenchmarkConfig.from_config_path(config_path, strict=False)
@@ -156,9 +165,18 @@ def _load_benchmarks_from_config_paths(config_paths: List[Path]) -> Dict[str, Be
         if not maybe_bc:
             continue
 
-        benchmarks_dict[maybe_bc.name] = maybe_bc
+        benchmarks_dict[_benchmark_config_name(config_path.relative_to(benchmarks_dir))] = maybe_bc
 
     return benchmarks_dict
+
+
+def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
+    """Map benchmark name -> :class:`BenchmarkConfig` for every discoverable benchmark config.
+
+    Scans the ``benchmarks/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots` root
+    (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user benchmarks shadow same-named built-ins.
+    """
+    return discover_components(BENCHMARKS_SUBDIR, _discover_benchmarks_in_dir)
 
 
 # Backward-compatibility shims (CLI refactor): these symbols moved to `nemo_gym.cli.eval`.

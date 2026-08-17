@@ -14,15 +14,15 @@
 """
 Prepare the anyterminal_agent input dataset from Terminal Bench tasks.
 
-    python prepare.py                                 # download tasks + build dataset (SIFs skipped by default)
-    python prepare.py --limit 5                       # first 5 tasks (smoke test)
-    python prepare.py --task-name gpt2-codegolf       # single task
-    python prepare.py --build-sif                     # also build SIFs (requires apptainer)
-    python prepare.py --build-sif --sif-dir PATH      # build SIFs into a custom directory
+    python prepare.py                                              # download tasks + build dataset
+    python prepare.py --limit 5                                    # first 5 tasks (smoke test)
+    python prepare.py --task-name gpt2-codegolf                    # single task
+    python prepare.py --build-image                                # build Apptainer SIFs
+    python prepare.py --build-image --image-dir PATH               # build images into a custom directory
 
 Prerequisites:
   - Harbor CLI on PATH (for dataset download).
-  - `apptainer` on PATH for SIF builds (skip with --no-build-sif).
+  - `apptainer` on PATH for image builds (skip with --no-build-image).
 
 Schema anyterminal_agent expects: each row has the task prompt in
 `responses_create_params.input` (as a user message) and `responses_create_params.metadata`
@@ -32,6 +32,7 @@ with `instance_id`, `task_name`, `docker_image`, and `task_dir`
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -155,7 +156,7 @@ def _to_gym_row(task_dir: Path, task_cfg: dict) -> dict:
                 "instance_id": f"terminal_bench::{task_name}",
                 "task_name": task_name,
                 "docker_image": task_cfg.get("docker_image", "ubuntu:22.04"),
-                "task_dir": str(task_dir.resolve()),
+                "task_dir": os.path.abspath(task_dir),
                 "agent_timeout_sec": str(task_cfg["agent_timeout_sec"])
                 if task_cfg.get("agent_timeout_sec") is not None
                 else None,
@@ -230,12 +231,12 @@ def build_dataset(
     return ids
 
 
-def _build_one_sif(task_name: str, docker_image: str, sif_dir: Path, force: bool) -> tuple[str, bool, str]:
-    sif_path = sif_dir / f"{task_name}.sif"
-    if sif_path.exists() and not force:
+def _build_one_image(task_name: str, docker_image: str, image_dir: Path, force: bool) -> tuple[str, bool, str]:
+    img_path = image_dir / f"{task_name}.sif"
+    if img_path.exists() and not force:
         return task_name, True, "exists"
     proc = subprocess.run(
-        ["apptainer", "build", "--force", str(sif_path), f"docker://{docker_image}"],
+        ["apptainer", "build", "--force", str(img_path), f"docker://{docker_image}"],
         capture_output=True,
         text=True,
         errors="replace",
@@ -245,21 +246,21 @@ def _build_one_sif(task_name: str, docker_image: str, sif_dir: Path, force: bool
     return task_name, True, "built"
 
 
-def build_images(task_rows: list[dict], sif_dir: Path, jobs: int, force: bool) -> None:
+def build_images(task_rows: list[dict], image_dir: Path, jobs: int, force: bool) -> None:
     from shutil import which
 
     if not which("apptainer"):
-        sys.exit("`apptainer` not found on PATH. Install it or omit --sif-dir to skip SIF builds.")
-    sif_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Building {len(task_rows)} SIF(s) into {sif_dir} with {jobs} worker(s)...", flush=True)
+        sys.exit("`apptainer` not found on PATH. Install it or omit --build-image to skip image builds.")
+    image_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Building {len(task_rows)} sif(s) into {image_dir} with {jobs} worker(s)...", flush=True)
     failures: list[str] = []
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = {
             pool.submit(
-                _build_one_sif,
+                _build_one_image,
                 r["responses_create_params"]["metadata"]["task_name"],
                 r["responses_create_params"]["metadata"]["docker_image"],
-                sif_dir,
+                image_dir,
                 force,
             ): r
             for r in task_rows
@@ -270,11 +271,11 @@ def build_images(task_rows: list[dict], sif_dir: Path, jobs: int, force: bool) -
             if not ok:
                 failures.append(name)
     if failures:
-        print(f"\n{len(failures)} SIF build(s) failed:", flush=True)
+        print(f"\n{len(failures)} image build(s) failed:", flush=True)
         for name in failures:
             print(f"  - {name}", flush=True)
         sys.exit(1)
-    print(f"All SIFs ready. Use: tb_sif_dir='{sif_dir}'", flush=True)
+    print(f"All images ready. Use: container_formatter='{image_dir}/{{task_name}}.sif'", flush=True)
 
 
 def main() -> None:
@@ -292,10 +293,10 @@ def main() -> None:
     )
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--task-name", nargs="+", default=None, metavar="TASK")
-    p.add_argument("--sif-dir", type=Path, default=_THIS_DIR / "data" / "sifs")
-    p.add_argument("--build-sif", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--image-dir", type=Path, default=_THIS_DIR / "data" / "images")
+    p.add_argument("--build-image", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--jobs", type=int, default=4)
-    p.add_argument("--force", action="store_true", help="Rebuild SIFs that already exist")
+    p.add_argument("--force", action="store_true", help="Rebuild images that already exist")
     args = p.parse_args()
 
     # Download tasks via the Harbor CLI
@@ -304,10 +305,10 @@ def main() -> None:
     # Build the dataset JSONL
     build_dataset(args.output, args.tasks_cache, args.dataset_name, args.limit, args.task_name)
 
-    # Build the SIFs
-    if args.build_sif:
+    # Build the container images
+    if args.build_image:
         task_rows = [json.loads(line) for line in args.output.read_text().splitlines() if line.strip()]
-        build_images(task_rows, args.sif_dir, args.jobs, args.force)
+        build_images(task_rows, args.image_dir, args.jobs, args.force)
 
 
 if __name__ == "__main__":
