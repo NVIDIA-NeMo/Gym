@@ -67,15 +67,27 @@ class ApptainerCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
 
 
-def _require_apptainer() -> str:
+def _require_apptainer(bin_path: str | None = None) -> str:
     """Return the apptainer binary path or hard-error if it is not installed."""
-    path = shutil.which("apptainer")
-    if path is None:
-        raise RuntimeError(
-            "The 'apptainer' binary is required for the apptainer sandbox provider. "
-            "Install Apptainer before using env.sandbox.provider.name=apptainer."
-        )
-    return path
+    if bin_path:
+        path = Path(bin_path) / "apptainer"
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    else:
+        path = shutil.which("apptainer")
+        if path is not None:
+            return path
+    raise RuntimeError(
+        "The 'apptainer' binary is required for the apptainer sandbox provider. "
+        "Install Apptainer before using env.sandbox.provider.name=apptainer."
+    )
+
+
+def _apptainer_subprocess_env(bin_path: str | None) -> dict[str, str]:
+    env = os.environ.copy()
+    if bin_path:
+        env["PATH"] = f"{bin_path}:{env.get('PATH', '')}"
+    return env
 
 
 @dataclass(frozen=True)
@@ -273,11 +285,13 @@ class ApptainerProvider:
         exec: ApptainerExecConfig | Mapping[str, Any] | None = None,
         create: ApptainerCreateConfig | Mapping[str, Any] | None = None,
         probe: ApptainerProbeConfig | Mapping[str, Any] | None = None,
+        bin_path: str | None = None,
     ) -> None:
         self._exec_config = _coerce_config(exec, ApptainerExecConfig)
         self._create_config = _coerce_config(create, ApptainerCreateConfig)
         self._probe = _coerce_config(probe, ApptainerProbeConfig)
-        self._binary = _require_apptainer()
+        self._binary = _require_apptainer(bin_path)
+        self._subprocess_env = _apptainer_subprocess_env(bin_path)
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
 
     async def _run(
@@ -313,6 +327,7 @@ class ApptainerProvider:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env=self._subprocess_env,
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
@@ -343,6 +358,7 @@ class ApptainerProvider:
                 stdout=out_f,
                 stderr=err_f,
                 start_new_session=True,
+                env=self._subprocess_env,
             )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
