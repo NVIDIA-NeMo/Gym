@@ -470,11 +470,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 top_logprobs=0,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
-                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                # For prompt and generation token IDs
-                # return_token_ids=True,
-                # For prompt token IDs
-                # prompt_logprobs=0,
+                return_token_ids=True,
             )
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
@@ -744,48 +740,32 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
             log_probs = logprobs_block["content"]
             generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
-
-            """
-            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            """
-            # Looks like `"token_id:151667"`
             generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
 
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            #
-            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
-            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
-            # `prompt_str`) can be built with different chat template settings than
-            # the actual generation request.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
+            # Fast path: use the IDs from the original generation request so the
+            # prompt does not need to be rendered and tokenized a second time.
+            prompt_token_ids = chat_completion_dict.pop("prompt_token_ids", None)
 
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-            """
-            END
-            """
+            # Older vLLM versions may accept return_token_ids without returning
+            # prompt_token_ids. Preserve /tokenize as a compatibility fallback.
+            if prompt_token_ids is None:
+                tokenize_body_dict = {
+                    key: body_dict[key]
+                    for key in ("model", "messages", "tools", "chat_template_kwargs")
+                    if key in body_dict
+                }
+                tokenize_response = await client.create_tokenize(**tokenize_body_dict)
+                prompt_token_ids = tokenize_response["tokens"]
 
-            message_dict = choice_dict["message"]
-            message_dict.update(
-                dict(
-                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
-                    generation_token_ids=generation_token_ids,
-                    generation_log_probs=generation_log_probs,
-                )
+            choice_dict["message"].update(
+                prompt_token_ids=prompt_token_ids,
+                generation_token_ids=generation_token_ids,
+                generation_log_probs=generation_log_probs,
             )
 
-            # Clean the duplicated information
+            # Remove vLLM-specific duplicate fields before validating the response.
             choice_dict.pop("logprobs")
-            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            # chat_completion_dict.pop("prompt_token_ids")
-            # choice_dict.pop("token_ids")
+            choice_dict.pop("token_ids", None)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 

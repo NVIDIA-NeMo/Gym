@@ -4597,6 +4597,7 @@ class TestTopLogprobsHandling:
         assert result["top_logprobs"] == 0
         assert result["logprobs"] is True
         assert result["return_tokens_as_token_ids"] is True
+        assert result["return_token_ids"] is True
 
         # Inbound non-zero value must also be overridden, not inherited.
         result = model._preprocess_chat_completion_create_params(
@@ -4661,6 +4662,43 @@ class TestTopLogprobsHandling:
             ],
         }
 
+    @mark.parametrize("prompt_token_ids", [[10, 20, 30], []])
+    def test_capture_path_uses_native_prompt_token_ids(self, prompt_token_ids: list[int]) -> None:
+        """Native prompt IDs, including an empty list, must bypass /tokenize."""
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        captured_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            response = self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                }
+            )
+            response["prompt_token_ids"] = prompt_token_ids
+            response["choices"][0]["token_ids"] = [123]
+            return response
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert captured_kwargs["return_token_ids"] is True
+        assert response.json()["choices"][0]["message"]["prompt_token_ids"] == prompt_token_ids
+        assert "prompt_token_ids" not in response.json()
+        assert "token_ids" not in response.json()["choices"][0]
+        mock_client.create_tokenize.assert_not_called()
+
     def test_capture_path_succeeds_with_inbound_null_top_logprobs(self) -> None:
         """End-to-end regression: a request with top_logprobs=null no longer empties capture;
         token ids and logprobs come back populated (and coerced to int)."""
@@ -4668,6 +4706,7 @@ class TestTopLogprobsHandling:
         app = model.setup_webserver()
 
         captured_kwargs: dict[str, Any] = {}
+        captured_tokenize_kwargs: dict[str, Any] = {}
 
         async def mock_create_chat_completion(**kwargs):
             captured_kwargs.update(kwargs)
@@ -4681,6 +4720,7 @@ class TestTopLogprobsHandling:
             )
 
         async def mock_create_tokenize(**kwargs):
+            captured_tokenize_kwargs.update(kwargs)
             return {"tokens": [10, 20, 30]}
 
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
@@ -4691,17 +4731,91 @@ class TestTopLogprobsHandling:
         client = TestClient(app)
         response = client.post(
             "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "hi"}], "top_logprobs": None},
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "description": "Look something up",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "metadata": {"chat_template_kwargs": '{"enable_thinking": false}'},
+                "top_logprobs": None,
+            },
         )
         assert response.status_code == 200
 
         # The request forwarded to vLLM had top_logprobs pinned to 0, not the inbound null.
         assert captured_kwargs["top_logprobs"] == 0
+        assert captured_kwargs["return_token_ids"] is True
+        assert captured_tokenize_kwargs == {
+            key: captured_kwargs[key] for key in ("model", "messages", "tools", "chat_template_kwargs")
+        }
 
         message = response.json()["choices"][0]["message"]
         assert message["generation_token_ids"] == [123, 456]
         assert message["generation_log_probs"] == [-0.1, -0.2]
         assert message["prompt_token_ids"] == [10, 20, 30]
+
+    def test_capture_path_falls_back_for_null_prompt_token_ids(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            response = self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                }
+            )
+            response["prompt_token_ids"] = None
+            return response
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [10, 20]})
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["prompt_token_ids"] == [10, 20]
+        mock_client.create_tokenize.assert_awaited_once()
+
+    def test_capture_path_propagates_tokenize_failure(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        tokenize_error = RuntimeError("tokenize failed")
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                }
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=tokenize_error)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="tokenize failed") as exc_info:
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        assert exc_info.value is tokenize_error
 
     def test_capture_path_preserves_routed_experts(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
