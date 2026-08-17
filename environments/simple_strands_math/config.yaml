@@ -48,7 +48,7 @@ simple_strands_math_agent:
         huggingface_identifier:
           repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
           artifact_fpath: validation.jsonl
-        license: Apache 2.0
+        license: Creative Commons Attribution 4.0 International
       - name: example
         type: example
         jsonl_fpath: environments/simple_strands_math/data/example.jsonl
