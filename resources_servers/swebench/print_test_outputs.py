@@ -29,4 +29,4 @@ with open(args.rollout_jsonl) as f_in, open("temp.log", "w") as f_out:
         if row["instance_id"] != args.instance_id:
             continue
 
-        f_out.write("-" * 40 + f"\nReward: {row['reward']}\nTest output: {row['test_output']}")
+        f_out.write("-" * 40 + f" Reward: {row['reward']}\nTest output: {row['test_output']}")
