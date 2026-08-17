@@ -63,7 +63,7 @@ row = {
         )
         / 4
     ),
-    "SciCode": v("scicode_benchmark_agent", "mean/reward"),
+    "SciCode": v("scicode_benchmark_agent", "subtask_accuracy"),
     "AA-LCR": v("aalcr_benchmark_simple_agent", "mean/reward"),
     "AA-Omniscience (OmniIndex)": v("omniscience_omniscience_simple_agent", "mean/reward"),
     "GPQA Diamond": v("gpqa_mcqa_simple_agent", "mean/reward"),
