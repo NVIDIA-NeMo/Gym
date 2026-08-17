@@ -303,14 +303,28 @@ class GlobalConfigDictParser(BaseModel):
 
     def load_extra_config_paths(self, config_paths: List[str]) -> Tuple[List[str], List[DictConfig]]:
         """
-        Returns the new total config_paths and the extra configs
+        Returns the new total config_paths and the extra configs, ordered for merging.
+
+        Two rules decide precedence, and they are independent:
+
+        - A config named in another config's ``config_paths`` is *inner*. The config
+          that pulled it in overrides it, however deep the nesting goes.
+        - Configs at the same level are siblings, in the order they were listed. A
+          later sibling overrides an earlier one.
+
+        The returned configs are ordered so that a left-to-right ``OmegaConf.merge``
+        produces both rules: deepest level first, and within a level, listed order.
         """
         config_paths = config_paths.copy()
+        # Nesting level per entry in config_paths, parallel to it: 0 for the entries
+        # the caller passed, +1 for each config pulled in by another config.
+        depths: List[int] = [0] * len(config_paths)
 
         extra_configs: List[DictConfig] = []
         duplicate_config_paths: List[str] = []
         # Just a careful note here that we explicitly mutate config_paths as it is being appended to
-        for config_path in config_paths:
+        for index, config_path in enumerate(config_paths):
+            depth = depths[index]
             original_entry = config_path
             config_path = Path(config_path)
             # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root (see _resolve_under_cwd_or_install).
@@ -333,6 +347,7 @@ Check the path is spelled correctly and is relative to your working directory, a
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
+                    depths.append(depth + 1)
                 else:
                     duplicate_config_paths.append(new_config_path)
             extra_configs.append(extra_config)
@@ -343,6 +358,13 @@ Check the path is spelled correctly and is relative to your working directory, a
 In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
 {duplicate_config_paths_str}""")
+
+        # Deepest level first, so an outer config merges after -- and therefore
+        # overrides -- anything it pulled in. The sort is stable, so configs at the
+        # same level keep the order they were listed in and a later sibling still
+        # overrides an earlier one.
+        merge_order = sorted(range(len(extra_configs)), key=lambda i: -depths[i])
+        extra_configs = [extra_configs[i] for i in merge_order]
 
         return config_paths, extra_configs
 
@@ -650,10 +672,9 @@ Pass each config with --config (it builds the list for you), e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml"""
             ) from e
 
+        # Returned in merge order: inner configs first, so the config that pulled them
+        # in overrides them; siblings in listed order, so a later one overrides earlier.
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
-
-        # Reverse here so the "inner" configs (appended to the list) are ovreridden by the outer configs.
-        extra_configs.reverse()
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
