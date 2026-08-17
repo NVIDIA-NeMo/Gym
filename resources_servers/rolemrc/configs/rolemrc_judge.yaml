@@ -1,0 +1,44 @@
+rolemrc_judge:
+  resources_servers:
+    rolemrc:
+      entrypoint: app.py
+      domain: rlhf
+      verified: false
+      description: RoleMRC role-play MRC scored by a 5-aspect LLM-as-judge (knowledge range, style, nested/multi-turn instruction, instruction priority).
+      value: Improve role-play instruction following under knowledge-range and instruction-priority constraints.
+      mode: judge
+      # The judge defaults to the policy model. Point this at a dedicated,
+      # stronger judge server for less self-grading bias.
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        top_p: 1.0
+        max_output_tokens: 1024
+      judge_endpoint_max_concurrency: 64
+
+rolemrc_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: rolemrc_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/rolemrc/data/example_judge.jsonl
+        license: Creative Commons Attribution 4.0 International
+      # Build with `python resources_servers/rolemrc/prepare_rolemrc.py`.
+      - name: test
+        type: validation
+        jsonl_fpath: resources_servers/rolemrc/data/test_judge.jsonl
+        huggingface_identifier:
+          repo_id: Junrulu/RoleMRC
+          artifact_fpath: roleMRC_test.jsonl
+        license: Creative Commons Attribution 4.0 International

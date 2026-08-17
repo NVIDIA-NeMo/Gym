@@ -47,6 +47,17 @@ stirrup_agent:
       # Mutually exclusive with execute_only.
       judge_only: false
 
+      # Task re-run mode: when true, the per-task deliverable cache is the source
+      # of truth for whether a task already finished with a valid output. Tasks
+      # with a valid cached deliverable skip the (expensive) rollout (re-scored
+      # from cache in full mode, returned as-is in execute_only); tasks without
+      # one are rolled out again, and a fresh rollout that still yields nothing
+      # valid is routed as a retryable 'incomplete' failure so a `--resume` run
+      # re-dispatches just those tasks. Requires persist_deliverables_dir; works
+      # with both full rollout+judge and execute_only; mutually exclusive with
+      # judge_only.
+      rerun_incomplete: false
+
       # Resources server reference (scores deliverables via /verify).
       resources_server:
         type: resources_servers

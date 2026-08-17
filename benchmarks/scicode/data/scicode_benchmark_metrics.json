@@ -5,7 +5,7 @@
     "prepare_script": "benchmarks/scicode/prepare.py",
     "prompt_config": null,
     "num_repeats": 3,
-    "Number of examples": 240,
+    "Number of examples": 195,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -14,7 +14,7 @@
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
-        "Total # non-null values": 240,
+        "Total # non-null values": 195,
         "Average": 2.0,
         "Min": 2.0,
         "Max": 2.0,
@@ -35,19 +35,19 @@
         "Standard deviation": 0.0
     },
     "problem_id": {
-        "unique_count": 80,
-        "total_count": 240
+        "unique_count": 65,
+        "total_count": 195
     },
     "problem_name": {
-        "unique_count": 80,
-        "total_count": 240
+        "unique_count": 65,
+        "total_count": 195
     },
     "required_dependencies": {
-        "unique_count": 40,
-        "total_count": 240
+        "unique_count": 34,
+        "total_count": 195
     },
     "uuid": {
-        "unique_count": 80,
-        "total_count": 240
+        "unique_count": 65,
+        "total_count": 195
     }
 }

@@ -31,7 +31,7 @@ Rather than using decord, we use decord2 which is compatible with MacOS.
 git clone https://github.com/open-compass/VLMEvalKit
 cd VLMEvalKit
 
-uv venv --python 3.12 --seed
+uv venv --python 3.13.14 --seed
 source .venv/bin/activate
 uv pip install '-e .' rouge
 

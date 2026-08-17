@@ -65,7 +65,7 @@ Server code: Apache 2.0 (NVIDIA)
 
 Data: Apache 2.0 (derived from [TIGER-Lab/StructEval](https://huggingface.co/datasets/TIGER-Lab/StructEval), originally MIT License)
 
-Evaluation logic adapted from [StructEval](https://github.com/TIGER-Lab/StructEval) (Apache 2.0, TIGER-Lab)
+Evaluation logic adapted from [StructEval](https://tiger-ai-lab.github.io/StructEval/) (Apache 2.0, TIGER-Lab)
 
 Dependencies:
 - nemo_gym: Apache 2.0

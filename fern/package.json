@@ -9,6 +9,6 @@
     "generate:library": "npx -y fern-api@latest docs md generate"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

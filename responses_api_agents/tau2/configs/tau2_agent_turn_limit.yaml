@@ -1,0 +1,37 @@
+tau2_agent_turn_limit:
+  responses_api_agents:
+    tau2:
+      entrypoint: app.py
+      domain: agent
+      description: Tau2 benchmark integration with a 10-agent-step limit
+      value: Evaluate multi-turn agentic capability with user simulation and a turn limit.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      user_model_server:
+        type: responses_api_models
+        name: policy_model
+      num_workers: 1
+      user_llm_args: {}
+      max_steps: 200
+      # Requires Tau2 PR #7 (jk/kbhardwaj/turn-counter ->
+      # bxyu/nemo_gym_stable): https://github.com/bxyu-nvidia/tau2-bench/pull/7
+      # Each valid generated assistant message uses one agent step, whether it
+      # contains text or one or more tool calls. Tau2's fixed initial greeting,
+      # user messages, and environment tool results do not count. Leave this
+      # unset/null for unlimited steps and no reminders, as in tau2_agent.yaml.
+      max_agent_steps: 10
+      # With a limit set, append "ENVIRONMENT REMINDER: You have N turns left to
+      # complete the task." to every Nth non-tool user message sent to the agent.
+      # Agent-requested tool results receive the reminder on every return; when
+      # several results are returned together, only the final result is modified.
+      # Reminders appear only in SimulationRun.agent_messages; the canonical
+      # SimulationRun.messages transcript stays reminder-free. A value of 1
+      # reminds every user turn.
+      turns_remaining_interval: 1
+      debug: false
+      print_step_counts: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/tau2/data/example.jsonl

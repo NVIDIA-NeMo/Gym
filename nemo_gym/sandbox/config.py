@@ -28,10 +28,24 @@ block lives in its own provider config file, so swapping providers is swapping a
 
 An inline single-key mapping (``{provider_name: {...}}``) is also accepted for
 keeping everything in one file.
+
+A block may also carry a reserved ``default_metadata`` key. Its entries are merged
+into the sandbox's ``SandboxSpec.metadata`` as defaults (the agent's own
+``sandbox_spec.metadata`` overrides them), so provider-identifying tags live with
+the provider rather than the agent config::
+
+    sandbox:
+      opensandbox: { connection: { ... } }
+      default_metadata: { sandbox-api: opensandbox-sdk }
 """
 
 from collections.abc import Mapping
 from typing import Any
+
+
+# Reserved keys inside a sandbox block that are not the provider config.
+SANDBOX_BLOCK_DEFAULT_METADATA_KEY = "default_metadata"
+SANDBOX_BLOCK_RESERVED_KEYS = frozenset({SANDBOX_BLOCK_DEFAULT_METADATA_KEY})
 
 
 def _to_plain_dict(value: Any) -> Any:
@@ -49,6 +63,11 @@ def _to_plain_dict(value: Any) -> Any:
     return value
 
 
+def _provider_keys(block: Mapping[str, Any]) -> list[str]:
+    """Return the provider keys in a block (everything but reserved keys)."""
+    return [key for key in block if key not in SANDBOX_BLOCK_RESERVED_KEYS]
+
+
 def _candidate_sandbox_names(named_configs: Mapping[str, Any] | None) -> list[str]:
     """List top-level config keys that look like named sandbox provider blocks."""
     if not named_configs:
@@ -56,9 +75,36 @@ def _candidate_sandbox_names(named_configs: Mapping[str, Any] | None) -> list[st
     candidates: list[str] = []
     for key, value in named_configs.items():
         plain = _to_plain_dict(value)
-        if isinstance(plain, Mapping) and len(plain) == 1:
+        if isinstance(plain, Mapping) and len(_provider_keys(plain)) == 1:
             candidates.append(str(key))
     return sorted(candidates)
+
+
+def _resolve_block(
+    sandbox_provider: str | Mapping[str, Any],
+    named_configs: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], str]:
+    """Resolve a ``sandbox_provider`` reference or inline mapping to a plain block."""
+    if isinstance(sandbox_provider, str):
+        name = sandbox_provider
+        if not name:
+            raise ValueError("Sandbox provider reference must be a non-empty string")
+        block = named_configs.get(name) if named_configs is not None else None
+        if block is None:
+            available = ", ".join(repr(n) for n in _candidate_sandbox_names(named_configs)) or "(none)"
+            raise ValueError(
+                f"Sandbox provider reference {name!r} is not defined in the merged config. "
+                f"Define a top-level '{name}:' block (e.g. via "
+                f"nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml) and include it in "
+                f"your config_paths. Available sandbox configs: {available}"
+            )
+        return _to_plain_dict(block), f"reference {name!r}"
+    if isinstance(sandbox_provider, Mapping):
+        return _to_plain_dict(sandbox_provider), "inline sandbox_provider config"
+    raise TypeError(
+        "sandbox_provider must be a name reference (str) or a single-key provider mapping, "
+        f"got {type(sandbox_provider).__name__}"
+    )
 
 
 def resolve_provider_config(
@@ -77,41 +123,46 @@ def resolve_provider_config(
 
     Returns:
         A plain ``{provider_name: provider_kwargs}`` dict suitable for
-        :func:`nemo_gym.sandbox.create_provider`.
+        :func:`nemo_gym.sandbox.create_provider`. Reserved keys such as
+        ``default_metadata`` are excluded; read them with
+        :func:`resolve_provider_metadata`.
 
     Raises:
         TypeError: If ``sandbox_provider`` is neither a string nor a mapping.
-        ValueError: If a named reference cannot be found, or if the resolved block
-            is not a single-key provider mapping.
+        ValueError: If a named reference cannot be found, or if the block does not
+            hold exactly one provider key.
     """
-    if isinstance(sandbox_provider, str):
-        name = sandbox_provider
-        if not name:
-            raise ValueError("Sandbox provider reference must be a non-empty string")
-        block = named_configs.get(name) if named_configs is not None else None
-        if block is None:
-            available = ", ".join(repr(n) for n in _candidate_sandbox_names(named_configs)) or "(none)"
-            raise ValueError(
-                f"Sandbox provider reference {name!r} is not defined in the merged config. "
-                f"Define a top-level '{name}:' block (e.g. via "
-                f"nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml) and include it in "
-                f"your config_paths. Available sandbox configs: {available}"
-            )
-        block = _to_plain_dict(block)
-        source = f"reference {name!r}"
-    elif isinstance(sandbox_provider, Mapping):
-        block = _to_plain_dict(sandbox_provider)
-        source = "inline sandbox_provider config"
-    else:
-        raise TypeError(
-            "sandbox_provider must be a name reference (str) or a single-key provider mapping, "
-            f"got {type(sandbox_provider).__name__}"
-        )
+    block, source = _resolve_block(sandbox_provider, named_configs)
+    if not isinstance(block, Mapping):
+        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
 
-    if not isinstance(block, Mapping) or len(block) != 1:
+    provider_keys = _provider_keys(block)
+    if len(provider_keys) != 1:
         raise ValueError(
-            f"Sandbox provider config from {source} must be a single-key mapping "
-            f"{{provider_name: config}}, got: {block!r}"
+            f"Sandbox provider config from {source} must have exactly one provider key "
+            f"{{provider_name: config}}, got keys: {provider_keys!r}"
         )
 
-    return dict(block)
+    return {provider_keys[0]: block[provider_keys[0]]}
+
+
+def resolve_provider_metadata(
+    sandbox_provider: str | Mapping[str, Any],
+    named_configs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a sandbox block's ``default_metadata``.
+
+    These are provider-contributed defaults to merge into ``SandboxSpec.metadata``.
+    Returns an empty dict when the block has no ``default_metadata`` key. See
+    :func:`resolve_provider_config` for argument semantics.
+    """
+    block, source = _resolve_block(sandbox_provider, named_configs)
+    if not isinstance(block, Mapping):
+        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
+
+    metadata = block.get(SANDBOX_BLOCK_DEFAULT_METADATA_KEY) or {}
+    if not isinstance(metadata, Mapping):
+        raise ValueError(
+            f"Sandbox '{SANDBOX_BLOCK_DEFAULT_METADATA_KEY}' from {source} must be a mapping, got: {metadata!r}"
+        )
+    return dict(metadata)

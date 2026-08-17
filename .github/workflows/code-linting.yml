@@ -25,12 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
 
       - name: Check lint
-        run: |
-          pip install pre-commit==3.6.0
-          pre-commit install
-          pre-commit run --all-files --show-diff-on-failure --color=always
+        run: ./scripts/ci/lint.sh

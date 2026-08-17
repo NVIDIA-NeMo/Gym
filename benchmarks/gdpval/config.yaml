@@ -15,12 +15,26 @@
 # references — each reference is judged separately and the eval model's rating
 # is fit globally, with per-reference + total win stats reported):
 #   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi.deliverables_dir=/gdpval/refs/kimi \
-#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi.elo=1290 \
-#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.gpt5.deliverables_dir=/gdpval/refs/gpt5 \
-#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.gpt5.elo=1320
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.claude_opus_4_8.deliverables_dir=/gdpval/refs/claude_opus_4_8 \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.claude_opus_4_8.elo=1599 \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi_k2_6.deliverables_dir=/gdpval/refs/kimi_k2_6 \
+#   ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi_k2_6.elo=1193
+#
+# Multi-stage adaptive ELO (comparison mode): the driver below runs the staged
+# procedure when enabled and otherwise delegates to the standard collection, so
+# all that's needed to opt in is:
+#   ++multistage.enabled=true \
+#   ++multistage.stages='[{num_tasks: 5}, {num_tasks: 88, num_models: 4}]'
+# See benchmarks/gdpval/README.md for the full recipe.
 
-# Judge model — proxy to NVIDIA inference API for Gemini 3.1 Pro.
+# Rollout-collection driver: routes `gym eval run` through the GDPVal
+# orchestrator, which runs multi-stage ELO when ++multistage.enabled=true and
+# otherwise behaves exactly like the standard single-pass collection.
+rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
+
+# Judge model — proxy to the NVIDIA inference API. A single proxy server fronts
+# every frontier judge (Gemini, GPT, Claude); the panel members below select
+# among them by model id, so one server is enough.
 gdpval_judge_model:
   responses_api_models:
     openai_model:
@@ -51,6 +65,32 @@ gdpval_resources_server:
         type: responses_api_models
         name: gdpval_judge_model
       judge_responses_create_params_overrides: {}
+      # Multi-judge panel (applies to every judge mode — rubric text/visual/
+      # structured and pairwise comparison, including multi-stage ELO): a panel
+      # of frontier judges, one sampled per comparison/scoring call. This is the
+      # default. All three route through the single gdpval_judge_model proxy and
+      # differ only by model id + reasoning knobs; set a per-member model_server
+      # to point at distinct endpoints. To fall back to a single judge, override
+      # ++gdpval_resources_server.resources_servers.gdpval.judge_panel=null
+      # (the lone judge then comes from judge_model_server above).
+      judge_panel:
+        - name: gpt-5.5
+          # Served via NVIDIA inference on the OpenAI /v1/chat/completions route.
+          model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
+          create_params_overrides: { reasoning_effort: medium }
+        - name: gemini-3.1-pro
+          model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
+          create_params_overrides: { extra_body: { reasoning_effort: high } }
+          # Handles audio/video natively — tasks with those files route here.
+          handles_audio_video: true
+        - name: claude-opus-4.8
+          # Served via NVIDIA inference (Bedrock). The proxy exposes it on the
+          # Anthropic /v1/messages route; extra_body.thinking enables reasoning.
+          model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
+          create_params_overrides: { extra_body: { thinking: { type: enabled } } }
+      # Seed for reproducible per-call judge sampling (null = seed only on task
+      # identity, still stable per task).
+      judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
 
 # Stirrup agent paired with the resources server above.
 gdpval_stirrup_agent:
@@ -73,6 +113,18 @@ gdpval_stirrup_agent:
       # deliverables already cached in persist_deliverables_dir via /verify.
       # Mutually exclusive with execute_only.
       judge_only: ${oc.env:JUDGE_ONLY,false}
+      # Task re-run mode. When true, tasks that already FINISHED (a
+      # finish_params.json marker is cached under persist_deliverables_dir) skip
+      # the rollout (already-judged tasks return their cached /verify result,
+      # un-judged finished tasks are scored once; in execute_only the cached
+      # payload is returned as-is); tasks that never finished are rolled out
+      # again. Combine with `--resume` to re-run only the tasks that did not
+      # finish. Under multi-stage ELO (multistage.enabled=true) it additionally
+      # reuses cached judgements, keyed by each stage's reference subset, so a
+      # resumed run skips re-judging (task, references) pairs it already scored.
+      # Requires persist_deliverables_dir; composes with execute_only, judge_only,
+      # and multistage.
+      rerun_incomplete: ${oc.env:RERUN_INCOMPLETE,false}
       resources_server:
         type: resources_servers
         name: gdpval_resources_server
@@ -85,4 +137,4 @@ gdpval_stirrup_agent:
           jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
           prompt_config: null
           prepare_script: benchmarks/gdpval/prepare.py
-          num_repeats: 2
+          num_repeats: 1

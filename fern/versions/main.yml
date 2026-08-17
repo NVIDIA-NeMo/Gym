@@ -28,7 +28,7 @@ navigation:
         title: "Build Verifiers"
         title-source: frontmatter
       - folder: ./latest/pages/evaluation
-        title: "Evaluation"
+        title: "Evaluate"
         title-source: frontmatter
       - section: Tutorials
         contents:
