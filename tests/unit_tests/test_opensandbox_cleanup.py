@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import io
 import os
 import subprocess
 import sys
@@ -11,7 +10,10 @@ from typing import Any
 
 import aiohttp
 import pytest
+from omegaconf import OmegaConf
 
+import nemo_gym.global_config
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.sandbox.providers.opensandbox import cleanup_sandboxes
 
 
@@ -377,74 +379,73 @@ def test_cleanup_rejects_invalid_domain() -> None:
         run_cleanup(domain="file:///tmp/sandboxes", reap=False)
 
 
-@pytest.mark.parametrize("missing", ["--domain", "--api-key-stdin", "--run-id", "--user"])
-def test_cli_requires_config_and_exact_scope_flags_before_network(
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--user", "alice"],
+        ["--run-id", "job-7"],
+        ["--run-id", "", "--user", "alice"],
+        ["--run-id", "job-7", "--user", " "],
+        ["--run-id", "job-7", "--user", "alice", "--unknown"],
+    ],
+)
+def test_cli_requires_exact_scope_before_loading_config(
     monkeypatch: pytest.MonkeyPatch,
-    missing: str,
+    argv: list[str],
 ) -> None:
-    argv = [
-        "--domain",
-        "sandbox.example",
-        "--protocol",
-        "https",
-        "--api-key-stdin",
-        "--run-id",
-        "job-7",
-        "--user",
-        "alice",
-    ]
-    index = argv.index(missing)
-    del argv[index : index + (1 if missing == "--api-key-stdin" else 2)]
-    for name in (
-        "OPENSANDBOX_DOMAIN",
-        "OPENSANDBOX_PROTOCOL",
-        "OPENSANDBOX_API_KEY",
-        "NEMO_GYM_RUN_ID",
-        "NEMO_GYM_USER",
-        "SLURM_JOB_ID",
-        "SLURM_JOB_USER",
-        "USER",
-    ):
-        monkeypatch.setenv(name, "must-not-be-used")
-    monkeypatch.setattr(sys, "stdin", io.StringIO(TEST_ACCESS_KEY))
+    def fail_config(**_kwargs: object) -> object:
+        pytest.fail("config must not be loaded")
 
-    async def fail_cleanup(**_kwargs: object) -> int:
-        pytest.fail("network request must not be made")
-
-    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", fail_cleanup)
+    monkeypatch.setattr(nemo_gym.global_config, "get_global_config_dict", fail_config)
     with pytest.raises(SystemExit, match="2"):
         cleanup_sandboxes.main(argv)
 
 
-def test_cli_rejects_empty_api_key_before_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO(" \n"))
-
-    async def fail_cleanup(**_kwargs: object) -> int:
-        pytest.fail("network request must not be made")
-
-    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", fail_cleanup)
-    with pytest.raises(SystemExit, match="2"):
-        cleanup_sandboxes.main(
-            ["--domain", "sandbox.example", "--api-key-stdin", "--run-id", "job-7", "--user", "alice"]
-        )
-
-
-def test_cli_forwards_arguments_and_return_codes(
+@pytest.mark.parametrize(("configured_protocol", "expected_protocol"), [(None, "http"), ("https", "https")])
+def test_cli_uses_gym_config_and_forwards_return_codes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    configured_protocol: str | None,
+    expected_protocol: str,
 ) -> None:
     calls = []
+    benchmark_config = tmp_path / "benchmarks" / "custom" / "config.yaml"
+    benchmark_config.parent.mkdir(parents=True)
+    benchmark_config.write_text("# fixture\n")
+    connection = {"domain": "sandbox.example", "api_key": TEST_ACCESS_KEY}
+    if configured_protocol:
+        connection["protocol"] = configured_protocol
+
+    def load_config(*, global_config_dict_parser_config: Any) -> object:
+        assert global_config_dict_parser_config.offline is True
+        assert sys.argv[1:] == [
+            "+verbose=true",
+            f"+config_paths=[base.yaml,{benchmark_config}]",
+            "++sandbox.opensandbox.connection.request_timeout_s=10",
+        ]
+        return OmegaConf.create(
+            {"sandbox": {"default_metadata": {"decoy": "value"}, "opensandbox": {"connection": connection}}}
+        )
+
+    monkeypatch.setattr(nemo_gym.global_config, "get_global_config_dict", load_config)
+    monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "original-root")
+    original_argv = ["pytest", "sentinel"]
+    monkeypatch.setattr(sys, "argv", original_argv)
     argv = [
-        "--domain",
-        "sandbox.example",
-        "--protocol",
-        "https",
-        "--api-key-stdin",
+        "--config",
+        "base.yaml",
+        "--benchmark",
+        "custom",
+        "--search-dir",
+        str(tmp_path),
+        "--verbose",
         "--run-id",
         "job-7",
         "--user",
         "alice",
         "--reap",
+        "++sandbox.opensandbox.connection.request_timeout_s=10",
     ]
 
     async def record_cleanup(**kwargs: object) -> int:
@@ -452,12 +453,13 @@ def test_cli_forwards_arguments_and_return_codes(
         return 0
 
     monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", record_cleanup)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{TEST_ACCESS_KEY}\n"))
     assert cleanup_sandboxes.main(argv) == 0
+    assert sys.argv is original_argv
+    assert os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] == "original-root"
     assert calls == [
         {
             "domain": "sandbox.example",
-            "protocol": "https",
+            "protocol": expected_protocol,
             "access_key": TEST_ACCESS_KEY,
             "run_id": "job-7",
             "user": "alice",
@@ -465,25 +467,55 @@ def test_cli_forwards_arguments_and_return_codes(
         }
     ]
 
-    async def failed_cleanup(**kwargs: object) -> int:
-        assert kwargs["protocol"] == "http"
+    async def failed_cleanup(**_kwargs: object) -> int:
         return 1
 
-    default_protocol_argv = argv.copy()
-    protocol_index = default_protocol_argv.index("--protocol")
-    del default_protocol_argv[protocol_index : protocol_index + 2]
-    monkeypatch.setenv("OPENSANDBOX_PROTOCOL", "https")
     monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", failed_cleanup)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(TEST_ACCESS_KEY))
-    assert cleanup_sandboxes.main(default_protocol_argv) == 1
+    assert cleanup_sandboxes.main(argv) == 1
 
     async def raise_cleanup_error(**_kwargs: object) -> int:
         raise OSError("down")
 
     monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", raise_cleanup_error)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(TEST_ACCESS_KEY))
     assert cleanup_sandboxes.main(argv) == 1
     assert "OpenSandbox cleanup failed: down" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("sandbox_config", "message"),
+    [
+        ({"opensandbox": {"connection": {"api_key": TEST_ACCESS_KEY}}}, "connection.domain' is required"),
+        ({"opensandbox": {"connection": {"domain": "sandbox.example"}}}, "connection.api_key' is required"),
+        ({"docker": {}}, "must select the OpenSandbox provider"),
+        ({"opensandbox": {}}, "connection' is required"),
+        (
+            {
+                "opensandbox": {
+                    "connection": {"domain": "sandbox.example", "api_key": TEST_ACCESS_KEY, "protocol": "ftp"}
+                }
+            },
+            "connection.protocol' must be http or https",
+        ),
+    ],
+)
+def test_cli_rejects_invalid_gym_connection_config(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    sandbox_config: dict[str, Any],
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        nemo_gym.global_config,
+        "get_global_config_dict",
+        lambda **_kwargs: OmegaConf.create({"sandbox": sandbox_config}),
+    )
+
+    async def fail_cleanup(**_kwargs: object) -> int:
+        pytest.fail("network request must not be made")
+
+    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", fail_cleanup)
+    assert cleanup_sandboxes.main(["--run-id", "job-7", "--user", "alice"]) == 1
+    assert message in capsys.readouterr().err
 
 
 def test_script_help_runs_by_direct_path() -> None:
@@ -502,7 +534,8 @@ def test_slurm_batch_command_wires_cleanup_epilogue() -> None:
             "bash",
             "-c",
             'sbatch() { printf "%s\\n%s\\n" "$EVAL_COMMAND" "$VLLM_PD_BATCH_COMMAND"; }; '
-            'source "$1" --config benchmark.yaml',
+            'source "$1" --config "benchmark path.yaml" \'++sentinel=$(echo injected)\' '
+            "--run-id attacker --user attacker",
             "bash",
             str(SBATCH_SCRIPT),
         ],
@@ -526,14 +559,22 @@ def test_slurm_batch_command_wires_cleanup_epilogue() -> None:
     assert "trap cleanup_sandboxes EXIT" in render.stdout
     assert "cleanup_sandboxes.py" in render.stdout
     assert "source /opt/Gym_venv/bin/activate" in render.stdout
-    assert '--domain "$opensandbox_domain"' in render.stdout
-    assert '--protocol "${opensandbox_protocol:-http}"' in render.stdout
-    assert "--api-key-stdin" in render.stdout
-    assert "| python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" in render.stdout
-    assert '--run-id "$SLURM_JOB_ID"' in render.stdout
+    assert '--run-id "$NEMO_GYM_RUN_ID"' in render.stdout
     assert '--user "$NEMO_GYM_USER"' in render.stdout
-    assert "export OPENSANDBOX_" not in render.stdout
+    assert "opensandbox_domain" not in render.stdout
+    assert "opensandbox_protocol" not in render.stdout
+    assert "--api-key-stdin" not in render.stdout
+    assert "awk '/^sandbox:/" not in render.stdout
+    assert "OPENSANDBOX_" not in render.stdout
     assert render.stdout.index("trap cleanup_sandboxes EXIT") < render.stdout.index("gym eval prepare")
+
+    cleanup_start = render.stdout.index("python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py")
+    cleanup_end = render.stdout.index("cleanup_status=$?", cleanup_start)
+    cleanup_command = render.stdout[cleanup_start:cleanup_end]
+    assert "--config benchmark\\ path.yaml" in cleanup_command
+    assert "++sentinel=\\$\\(echo\\ injected\\)" in cleanup_command
+    assert cleanup_command.index("--run-id attacker") < cleanup_command.index('--run-id "$NEMO_GYM_RUN_ID"')
+    assert cleanup_command.index("--user attacker") < cleanup_command.index('--user "$NEMO_GYM_USER"')
 
     syntax = subprocess.run(["bash", "-n"], input=render.stdout, check=False, capture_output=True, text=True)
     assert syntax.returncode == 0, syntax.stderr
